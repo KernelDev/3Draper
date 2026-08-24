@@ -3841,4 +3841,80 @@ mod vp_serialize_tests {
         assert_eq!(g.node_count(), 0);
         assert_eq!(g.next_id, 0);
     }
+
+    /// Verify that all example VP graphs in `examples/vp_graphs/` load
+    /// successfully and survive a round-trip (load → save → load).
+    ///
+    /// Run with: `cargo test -p draper-viewer --lib vp_graph_examples_`
+    #[test]
+    fn test_vp_graph_examples_load_and_roundtrip() {
+        // The crate lives in `crates/draper-viewer/`, so the workspace
+        // root is two `..` up. From there, `examples/vp_graphs/` should exist.
+        let examples_dir = {
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            let root = std::path::Path::new(manifest_dir)
+                .parent()  // crates/
+                .and_then(|p| p.parent())  // workspace root
+                .expect("Could not locate workspace root");
+            root.join("examples").join("vp_graphs")
+        };
+
+        if !examples_dir.exists() {
+            // On WASM or stripped builds the examples dir may not be present.
+            eprintln!("[test] examples/vp_graphs/ not found at {:?} — skipping", examples_dir);
+            return;
+        }
+
+        let mut tested = 0usize;
+        let entries = std::fs::read_dir(&examples_dir)
+            .unwrap_or_else(|e| panic!("read_dir({:?}) failed: {}", examples_dir, e));
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = match path.file_name().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            // Pick up only the .vp.json files (skip README.md etc.)
+            if !name.ends_with(".vp.json") { continue; }
+
+            let json = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read({:?}) failed: {}", path, e));
+
+            // 1. Load from JSON
+            let g1 = VpGraph::from_json(&json)
+                .unwrap_or_else(|e| panic!("from_json({:?}) failed: {}", path, e));
+            assert!(g1.node_count() > 0, "{} has 0 nodes", name);
+            assert!(g1.connection_count() > 0, "{} has 0 connections", name);
+            assert!(g1.next_id > 0, "{} has next_id = 0", name);
+
+            // 2. Round-trip: serialize back to JSON and re-parse.
+            let re_json = g1.to_json();
+            let g2 = VpGraph::from_json(&re_json)
+                .unwrap_or_else(|e| panic!("Round-trip from_json({:?}) failed: {}", path, e));
+
+            // Node/connection counts must match exactly.
+            assert_eq!(g1.node_count(), g2.node_count(),
+                "{}: node count changed after round-trip", name);
+            assert_eq!(g1.connection_count(), g2.connection_count(),
+                "{}: connection count changed after round-trip", name);
+            assert_eq!(g1.next_id, g2.next_id,
+                "{}: next_id changed after round-trip", name);
+
+            // 3. Verify each node's type survives round-trip (label() equality).
+            for (i, (a, b)) in g1.nodes.iter().zip(g2.nodes.iter()).enumerate() {
+                let (la, _) = node_type_to_json(&a.node_type);
+                let (lb, _) = node_type_to_json(&b.node_type);
+                assert_eq!(la, lb, "{}: node {} type label mismatch", name, i);
+            }
+
+            tested += 1;
+        }
+
+        // Sanity: the directory must contain at least a handful of test files
+        // (otherwise we silently skipped everything, which would be a bug).
+        assert!(tested >= 5,
+            "Expected ≥5 .vp.json files in examples/vp_graphs/, but only tested {}", tested);
+        eprintln!("[test] Round-trip validated {} example VP graphs", tested);
+    }
 }

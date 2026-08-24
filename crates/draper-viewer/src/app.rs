@@ -6732,6 +6732,123 @@ impl eframe::App for ViewerApp {
                                     self.brepcad_status_msg = "VP: graph cleared".to_string();
                                 }
                                 ui.separator();
+
+                                // ── Save / Load VP graph (native file dialogs) ──
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    if ui.button("📂 Load…").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("VP graph JSON", &["vp.json", "json"])
+                                            .set_title("Load VP graph")
+                                            .pick_file()
+                                        {
+                                            let path_str = path.to_string_lossy().to_string();
+                                            match crate::ui::workspaces::VpGraph::load_from_file(&path_str) {
+                                                Ok(graph) => {
+                                                    let n = graph.node_count();
+                                                    let c = graph.connection_count();
+                                                    self.brepcad_vp_graph = graph;
+                                                    self.brepcad_vp_dirty = true;
+                                                    self.brepcad_status_msg = format!(
+                                                        "VP: loaded {} ({}, {})",
+                                                        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                                        n, c);
+                                                }
+                                                Err(e) => {
+                                                    self.brepcad_status_msg = format!("VP: load error — {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if ui.button("💾 Save…").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("VP graph JSON", &["vp.json", "json"])
+                                            .set_title("Save VP graph")
+                                            .set_file_name("graph.vp.json")
+                                            .save_file()
+                                        {
+                                            let path_str = path.to_string_lossy().to_string();
+                                            match self.brepcad_vp_graph.save_to_file(&path_str) {
+                                                Ok(()) => {
+                                                    self.brepcad_status_msg = format!(
+                                                        "VP: saved → {} ({}, {})",
+                                                        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                                                        self.brepcad_vp_graph.node_count(),
+                                                        self.brepcad_vp_graph.connection_count());
+                                                }
+                                                Err(e) => {
+                                                    self.brepcad_status_msg = format!("VP: save error — {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if ui.button("⬆ Export Selected…").clicked() {
+                                        // Collect selected node IDs (currently: brepcad_vp_selected_node is single)
+                                        let selected_ids: Vec<u64> = match self.brepcad_vp_selected_node {
+                                            Some(id) => vec![id],
+                                            None => self.brepcad_vp_graph.nodes.iter().map(|n| n.id).collect(),
+                                        };
+                                        if selected_ids.is_empty() {
+                                            self.brepcad_status_msg = "VP: nothing to export".to_string();
+                                        } else if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("VP subgraph JSON", &["vp.json", "json"])
+                                            .set_title("Export selected nodes")
+                                            .set_file_name("selection.vp.json")
+                                            .save_file()
+                                        {
+                                            let json = self.brepcad_vp_graph.export_selected(&selected_ids);
+                                            let path_str = path.to_string_lossy().to_string();
+                                            match std::fs::write(&path_str, json) {
+                                                Ok(()) => {
+                                                    self.brepcad_status_msg = format!(
+                                                        "VP: exported {} node(s) → {}",
+                                                        selected_ids.len(),
+                                                        path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                                                }
+                                                Err(e) => {
+                                                    self.brepcad_status_msg = format!("VP: export error — {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if ui.button("⬇ Import…").clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("VP subgraph JSON", &["vp.json", "json"])
+                                            .set_title("Import VP subgraph")
+                                            .pick_file()
+                                        {
+                                            let path_str = path.to_string_lossy().to_string();
+                                            match std::fs::read_to_string(&path_str) {
+                                                Ok(json) => {
+                                                    match self.brepcad_vp_graph.import_from_json(&json) {
+                                                        Ok(new_ids) => {
+                                                            self.brepcad_vp_dirty = true;
+                                                            self.brepcad_status_msg = format!(
+                                                                "VP: imported {} node(s) from {}",
+                                                                new_ids.len(),
+                                                                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+                                                        }
+                                                        Err(e) => {
+                                                            self.brepcad_status_msg = format!("VP: import parse error — {}", e);
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    self.brepcad_status_msg = format!("VP: import read error — {}", e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                #[cfg(target_arch = "wasm32")]
+                                {
+                                    let _ = ui.button("📂 Load… (native only)");
+                                    let _ = ui.button("💾 Save… (native only)");
+                                    let _ = ui.button("⬆ Export Sel… (native only)");
+                                    let _ = ui.button("⬇ Import… (native only)");
+                                }
+
+                                ui.separator();
                                 if ui.button("Bake to Document").clicked() {
                                     // VP graph evaluation: walk connections to evaluate boolean ops.
                                     // For each node, resolve its input solid (from connected source),
@@ -7985,6 +8102,54 @@ impl eframe::App for ViewerApp {
                                 .pick_file()
                             {
                                 self.import_json(&path.to_string_lossy());
+                            }
+                            ui.close_menu();
+                        }
+                        ui.separator();
+                        // ── VP Graph save/load (in main File menu) ──
+                        if ui.button("📂 Load VP Graph…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("VP graph JSON", &["vp.json", "json"])
+                                .set_title("Load VP graph")
+                                .pick_file()
+                            {
+                                let path_str = path.to_string_lossy().to_string();
+                                match crate::ui::workspaces::VpGraph::load_from_file(&path_str) {
+                                    Ok(graph) => {
+                                        let n = graph.node_count();
+                                        let c = graph.connection_count();
+                                        self.brepcad_vp_graph = graph;
+                                        self.brepcad_vp_dirty = true;
+                                        self.brepcad_workspace = crate::ui::Workspace::VisualProgramming;
+                                        self.brepcad_status_msg = format!(
+                                            "VP: loaded graph ({}, {})", n, c);
+                                    }
+                                    Err(e) => {
+                                        self.brepcad_status_msg = format!("VP: load error — {}", e);
+                                    }
+                                }
+                            }
+                            ui.close_menu();
+                        }
+                        if ui.button("💾 Save VP Graph…").clicked() {
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("VP graph JSON", &["vp.json", "json"])
+                                .set_title("Save VP graph")
+                                .set_file_name("graph.vp.json")
+                                .save_file()
+                            {
+                                let path_str = path.to_string_lossy().to_string();
+                                match self.brepcad_vp_graph.save_to_file(&path_str) {
+                                    Ok(()) => {
+                                        self.brepcad_status_msg = format!(
+                                            "VP: saved graph ({}, {})",
+                                            self.brepcad_vp_graph.node_count(),
+                                            self.brepcad_vp_graph.connection_count());
+                                    }
+                                    Err(e) => {
+                                        self.brepcad_status_msg = format!("VP: save error — {}", e);
+                                    }
+                                }
                             }
                             ui.close_menu();
                         }
