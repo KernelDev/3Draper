@@ -689,6 +689,23 @@ impl TriangleMesh {
     /// didn't).  Preserves analytically-set normals (e.g., from plane.normal).
     pub fn fill_missing_face_normals(&mut self) {
         if let Some(ref mut normals) = self.face_normals {
+            // After boolean ops / mesh repair (weld_boundary_edge_vertices,
+            // fill_boundary_gaps), triangles may have grown while face_normals
+            // stayed at the original length. Resize in-place, filling new
+            // slots with the [0,0,1] placeholder so they get recomputed below.
+            if normals.len() < self.triangles.len() {
+                let old_len = normals.len();
+                normals.resize(self.triangles.len(), [0.0, 0.0, 1.0]);
+                log::debug!(
+                    "fill_missing_face_normals: extended face_normals {} → {} to match triangles",
+                    old_len, normals.len()
+                );
+            } else if normals.len() > self.triangles.len() {
+                // Truncate to match — should not happen in normal flow,
+                // but be defensive.
+                normals.truncate(self.triangles.len());
+            }
+
             for (tri_idx, tri) in self.triangles.iter().enumerate() {
                 let n = normals[tri_idx];
                 // Skip if normal is already properly set (not the placeholder)
