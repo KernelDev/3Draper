@@ -14,7 +14,7 @@ use crate::boolean::boolean_subtract;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
     Curve3d, Line, Surface, Plane,
-    Transform, ToleranceContext,
+    Transform, ToleranceContext, NurbsCurve,
 };
 use std::f64::consts::PI;
 
