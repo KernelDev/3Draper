@@ -305,10 +305,9 @@ fn count_ray_face_intersections_sampling(
     let n = 30; // grid resolution
     let mut count = 0u32;
 
-    // Sample the surface on a grid and check for ray crossings
-    // by looking for sign changes of the signed distance to the ray plane
-    let ray_normal = *direction;
-
+    // For each UV cell, build two triangles (p00, p10, p11) and (p00, p11, p01)
+    // and run Möller-Trumbore ray-triangle intersection. This is the standard,
+    // robust approach — no sign-of-cross-product heuristics.
     for i in 0..n {
         for j in 0..n {
             let u0 = u_min + (u_max - u_min) * (i as f64 / n as f64);
@@ -321,34 +320,13 @@ fn count_ray_face_intersections_sampling(
             let p01 = surface.point_at(u0, v1);
             let p11 = surface.point_at(u1, v1);
 
-            // Signed distances from the ray line
-            let d00 = signed_distance_to_ray(&p00, origin, &ray_normal);
-            let d10 = signed_distance_to_ray(&p10, origin, &ray_normal);
-            let d01 = signed_distance_to_ray(&p01, origin, &ray_normal);
-            let d11 = signed_distance_to_ray(&p11, origin, &ray_normal);
-
-            // If there's a sign change, there's likely a ray crossing in this patch
-            let has_sign_change = (d00 > 0.0 && d10 < 0.0)
-                || (d00 > 0.0 && d01 < 0.0)
-                || (d10 > 0.0 && d00 < 0.0)
-                || (d01 > 0.0 && d00 < 0.0)
-                || (d10 > 0.0 && d11 < 0.0)
-                || (d11 > 0.0 && d10 < 0.0)
-                || (d01 > 0.0 && d11 < 0.0)
-                || (d11 > 0.0 && d01 < 0.0);
-
-            if has_sign_change {
-                // Also check that the crossing is in the forward direction of the ray
-                let mid_u = (u0 + u1) / 2.0;
-                let mid_v = (v0 + v1) / 2.0;
-                let mid_p = surface.point_at(mid_u, mid_v);
-                let dx = mid_p.x - origin.x;
-                let dy = mid_p.y - origin.y;
-                let dz = mid_p.z - origin.z;
-                let t = dx * direction.x + dy * direction.y + dz * direction.z;
-                if t > tol {
-                    count += 1;
-                }
+            // Triangle 1: p00 → p10 → p11
+            if moller_trumbore(origin, direction, &p00, &p10, &p11, tol).is_some() {
+                count += 1;
+            }
+            // Triangle 2: p00 → p11 → p01
+            if moller_trumbore(origin, direction, &p00, &p11, &p01, tol).is_some() {
+                count += 1;
             }
         }
     }
@@ -356,28 +334,73 @@ fn count_ray_face_intersections_sampling(
     count
 }
 
-/// Signed distance from a point to the ray line.
-/// The ray is defined as origin + t*direction.
-/// Returns the cross product magnitude projected to determine which side.
-fn signed_distance_to_ray(point: &Point3d, origin: &Point3d, direction: &Direction3d) -> f64 {
-    let dx = point.x - origin.x;
-    let dy = point.y - origin.y;
-    let dz = point.z - origin.z;
-    // Cross product of (point-origin) x direction
-    let cx = dy * direction.z - dz * direction.y;
-    let cy = dz * direction.x - dx * direction.z;
-    let cz = dx * direction.y - dy * direction.x;
-    // Use one component as a sign indicator
-    // We choose the component that's most perpendicular to the direction
-    let dir_abs_x = direction.x.abs();
-    let dir_abs_y = direction.y.abs();
-    let dir_abs_z = direction.z.abs();
-    if dir_abs_x <= dir_abs_y && dir_abs_x <= dir_abs_z {
-        cx // X component is most perpendicular
-    } else if dir_abs_y <= dir_abs_z {
-        cy
+/// Möller-Trumbore ray-triangle intersection.
+///
+/// Returns `Some(t)` (distance along the ray) if the ray intersects the
+/// triangle, with `t > tol` and barycentric coordinates (u, v) in [0, 1]
+/// with u + v ≤ 1. Returns `None` otherwise.
+///
+/// This is the canonical, robust ray-triangle test used in essentially
+/// every modern ray tracer. It does not depend on the sign of any single
+/// cross-product component — it solves a 3×3 linear system to get the
+/// exact barycentric coordinates of the hit point.
+fn moller_trumbore(
+    origin: &Point3d,
+    direction: &Direction3d,
+    v0: &Point3d,
+    v1: &Point3d,
+    v2: &Point3d,
+    tol: f64,
+) -> Option<f64> {
+    let edge1 = (
+        v1.x - v0.x,
+        v1.y - v0.y,
+        v1.z - v0.z,
+    );
+    let edge2 = (
+        v2.x - v0.x,
+        v2.y - v0.y,
+        v2.z - v0.z,
+    );
+    // h = direction × edge2
+    let h = (
+        direction.y * edge2.2 - direction.z * edge2.1,
+        direction.z * edge2.0 - direction.x * edge2.2,
+        direction.x * edge2.1 - direction.y * edge2.0,
+    );
+    // a = edge1 · h
+    let a = edge1.0 * h.0 + edge1.1 * h.1 + edge1.2 * h.2;
+    if a.abs() < 1e-12 {
+        return None; // Ray parallel to triangle
+    }
+    let f = 1.0 / a;
+    let s = (
+        origin.x - v0.x,
+        origin.y - v0.y,
+        origin.z - v0.z,
+    );
+    // u = f * (s · h)
+    let u = f * (s.0 * h.0 + s.1 * h.1 + s.2 * h.2);
+    if u < 0.0 || u > 1.0 {
+        return None;
+    }
+    // q = s × edge1
+    let q = (
+        s.1 * edge1.2 - s.2 * edge1.1,
+        s.2 * edge1.0 - s.0 * edge1.2,
+        s.0 * edge1.1 - s.1 * edge1.0,
+    );
+    // v = f * (direction · q)
+    let v = f * (direction.x * q.0 + direction.y * q.1 + direction.z * q.2);
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    // t = f * (edge2 · q)
+    let t = f * (edge2.0 * q.0 + edge2.1 * q.1 + edge2.2 * q.2);
+    if t > tol {
+        Some(t)
     } else {
-        cz
+        None
     }
 }
 

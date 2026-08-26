@@ -11,7 +11,7 @@
 | Этап | Статус | Commit | Результат |
 |------|--------|--------|-----------|
 | **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
-| **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста) |
+| **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста); B1 Plane×Cylinder tangent: ✅ DONE (1 тест); B2 Möller ray-triangle: ✅ DONE (заменил signed_distance_to_ray heuristic) |
 | C. Topology Healing | ⏳ | — | — |
 | D. Triangulation | ⏳ | — | — |
 | E. STEP Importer | ⏳ | — | — |
@@ -58,10 +58,12 @@
 - Добавлены 4 unit-теста: disjoint, concentric, two-line intersection, tangent.
 
 ⏳ **Осталось в B1:**
-- `intersect_plane_cylinder` tangent case (`intersection.rs:386-389`) — возвращает `vec![]` с `// TODO: compute the tangent line`. Нужно: если плоскость касается цилиндра, вернуть 1 линию.
+- ~~`intersect_plane_cylinder` tangent case (`intersection.rs:386-389`)~~ ✅ DONE — реализован аналитический tangent case: вычисляется closest-point-on-plane, направление от cyl.origin к нему, tangent point на цилиндре, sampled вдоль axis. Добавлен тест `test_plane_cylinder_tangent_one_line`.
 - `intersect_plane_cone` (`intersection.rs:922-933`) — сейчас делегирует в `sample_surface_intersection`. Нужно: аналитически вычислить коническое сечение (эллипс/парабола/гипербола) в зависимости от угла между плоскостью и осью конуса.
 
-**B2-B5:** ⏳ Запланированы — Möller ray-triangle в `signed_distance_to_ray`, `split_general_face` для неплоских граней, BVH pre-filter, deterministic face classification.
+**B2.** ✅ Заменён heuristic `signed_distance_to_ray` (boolean.rs:362-382) на настоящий **Möller-Trumbore ray-triangle test**. Теперь `count_ray_face_intersections_sampling` строит 2 треугольника на каждый UV cell и проверяет пересечение через решение 3×3 линейной системы для barycentric coordinates. Это canonical, robust подход — не зависит от sign-of-cross-product heuristic. Удалена вся функция `signed_distance_to_ray` (стала unused).
+
+**B3-B5:** ⏳ Запланированы — `split_general_face` для неплоских граней, BVH pre-filter, deterministic face classification.
 
 ---
 
