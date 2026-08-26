@@ -14,7 +14,7 @@
 | **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста); B1 Plane×Cylinder tangent: ✅ DONE (1 тест); B2 Möller ray-triangle: ✅ DONE (заменил signed_distance_to_ray heuristic) |
 | **C. Topology Healing** | 🔄 IN PROGRESS | — | C1 stitch_collinear_edges: ✅ DONE (param_range + end_vertex_point обновляются); C2 fix_normal_orientation: ✅ DONE (использует face centroid вместо UV(0,0)) |
 | D. Triangulation | ⏳ | — | — |
-| E. STEP Importer | ⏳ | — | — |
+| E. STEP Importer | 🔄 IN PROGRESS | — | E1 regression tests созданы (33 теста в `crates/draper-testing/tests/step_regression.rs`); synthetic (6/6) и nist_block_with_hole PASS; большие industrial files требуют поштучного запуска |
 | F. Documentation | ⏳ | — | — |
 
 ### Этап A — что сделано
