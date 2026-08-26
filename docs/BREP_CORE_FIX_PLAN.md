@@ -10,8 +10,8 @@
 
 | Этап | Статус | Commit | Результат |
 |------|--------|--------|-----------|
-| **A. Стабилизация** | ✅ DONE | (этот PR) | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
-| B. Boolean Fixes | ⏳ NEXT | — | — |
+| **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
+| **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста) |
 | C. Topology Healing | ⏳ | — | — |
 | D. Triangulation | ⏳ | — | — |
 | E. STEP Importer | ⏳ | — | — |
@@ -43,6 +43,25 @@
 - Восстановлены минимально необходимые `point_in_mesh`, `triangle_normal`, `ray_triangle_intersect` (Möller-Trumbore).
 
 **DoD A:** ✅ `cargo test -p draper-topology --lib`: 158 passed / 0 failed. `cargo test -p draper-mesh --lib`: 253 passed / 0 failed. `cargo check -p draper-viewer --bins`: clean.
+
+---
+
+### Этап B — что сделано
+
+**B1 (частично).** ✅ Реализован аналитический path для `intersect_cylinder_cylinder` (параллельные оси) — `crates/draper-geometry/src/intersection.rs:537-613`. Раньше возвращал `vec![]` с `// TODO: implement the 1 or 2 line cases`. Теперь:
+- Вычисляет перпендикулярное расстояние `perp_dist` между осями.
+- Если `perp_dist > r_sum` или `perp_dist < |r_a - r_b|` → 0 пересечений.
+- Если `perp_dist ≈ 0` (соосные) → 0 пересечений (трактуется как разные радиусы).
+- Иначе вычисляет 2 точки пересечения окружностей в перпендикулярной плоскости через формулу `a_to_chord = (r_a² - r_b² + perp_dist²) / (2·perp_dist)`, `h = √(r_a² - a_to_chord²)`.
+- Каждая точка sweeps вдоль оси цилиндра → 2 линии (или 1 в tangential случае).
+- Добавлен helper `sample_axis_parallel_line(origin, axis, span)`.
+- Добавлены 4 unit-теста: disjoint, concentric, two-line intersection, tangent.
+
+⏳ **Осталось в B1:**
+- `intersect_plane_cylinder` tangent case (`intersection.rs:386-389`) — возвращает `vec![]` с `// TODO: compute the tangent line`. Нужно: если плоскость касается цилиндра, вернуть 1 линию.
+- `intersect_plane_cone` (`intersection.rs:922-933`) — сейчас делегирует в `sample_surface_intersection`. Нужно: аналитически вычислить коническое сечение (эллипс/парабола/гипербола) в зависимости от угла между плоскостью и осью конуса.
+
+**B2-B5:** ⏳ Запланированы — Möller ray-triangle в `signed_distance_to_ray`, `split_general_face` для неплоских граней, BVH pre-filter, deterministic face classification.
 
 ---
 

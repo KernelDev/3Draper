@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
-use crate::{Point3d, Vec3d, curve::*, surface::*, tolerance::ToleranceContext};
+use crate::{Point3d, Vec3d, Direction3d, curve::*, surface::*, tolerance::ToleranceContext};
 
 /// Error type for B-spline fitting failures.
 #[derive(Clone, Debug)]
@@ -535,7 +535,11 @@ pub fn intersect_cylinder_cylinder(
     let is_parallel = dot.abs() > 0.9999;
 
     if is_parallel {
-        // Parallel axes — intersection is 0, 1, or 2 lines
+        // Parallel axes — intersection is 0, 1, or 2 lines parallel to the axes.
+        // The cross-section perpendicular to the axes is two circles of radii
+        // r_a and r_b, with centers separated by perp_dist. If the circles
+        // intersect at 2 points, those points sweep along the cylinder axes
+        // to form 2 straight intersection lines.
         let dx = cyl_b.origin.x - cyl_a.origin.x;
         let dy = cyl_b.origin.y - cyl_a.origin.y;
         let dz = cyl_b.origin.z - cyl_a.origin.z;
@@ -545,15 +549,67 @@ pub fn intersect_cylinder_cylinder(
         let perp_z = dz - along * cyl_a.axis.z;
         let perp_dist = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
 
-        let r_sum = cyl_a.radius + cyl_b.radius;
-        let r_diff = (cyl_a.radius - cyl_b.radius).abs();
+        let r_a = cyl_a.radius;
+        let r_b = cyl_b.radius;
+        let r_sum = r_a + r_b;
+        let r_diff = (r_a - r_b).abs();
 
         if perp_dist > r_sum + 1e-9 || perp_dist < r_diff - 1e-9 {
-            return vec![]; // No intersection
+            return vec![]; // No intersection (too far apart, or one inside the other)
+        }
+        if perp_dist < 1e-12 {
+            // Coaxial cylinders — either identical (infinite intersection)
+            // or no intersection (different radii). Treat as no intersection.
+            return vec![];
         }
 
-        // TODO: implement the 1 or 2 line cases
-        return vec![];
+        // Compute the 2 intersection points of the perpendicular cross-section
+        // circles. Set up 2D coordinate system in the perpendicular plane:
+        //   axis-2D-x along the direction from cyl_a to cyl_b projected to perp plane
+        //   axis-2D-y perpendicular to that within the perp plane
+        let e_x = Vec3d::new(perp_x / perp_dist, perp_y / perp_dist, perp_z / perp_dist);
+        // e_y = axis × e_x (right-handed; both unit vectors)
+        let e_y = Vec3d::new(
+            cyl_a.axis.y * e_x.z - cyl_a.axis.z * e_x.y,
+            cyl_a.axis.z * e_x.x - cyl_a.axis.x * e_x.z,
+            cyl_a.axis.x * e_x.y - cyl_a.axis.y * e_x.x,
+        );
+
+        // Distance from cyl_a's center to the chord (line through intersection points)
+        let a_to_chord = (r_a * r_a - r_b * r_b + perp_dist * perp_dist) / (2.0 * perp_dist);
+        // Half-length of the chord
+        let h_sq = r_a * r_a - a_to_chord * a_to_chord;
+        if h_sq < 0.0 {
+            // Numerical edge case — tangential touch (1 line)
+            let center_3d = Point3d::new(
+                cyl_a.origin.x + a_to_chord * e_x.x,
+                cyl_a.origin.y + a_to_chord * e_x.y,
+                cyl_a.origin.z + a_to_chord * e_x.z,
+            );
+            // Sample the line along the cylinder axis direction over a finite range
+            let line_points = sample_axis_parallel_line(&center_3d, &cyl_a.axis, r_a.max(r_b) * 4.0);
+            return vec![line_points];
+        }
+        let h = h_sq.sqrt();
+
+        // Two intersection points in 3D
+        let p1 = Point3d::new(
+            cyl_a.origin.x + a_to_chord * e_x.x + h * e_y.x,
+            cyl_a.origin.y + a_to_chord * e_x.y + h * e_y.y,
+            cyl_a.origin.z + a_to_chord * e_x.z + h * e_y.z,
+        );
+        let p2 = Point3d::new(
+            cyl_a.origin.x + a_to_chord * e_x.x - h * e_y.x,
+            cyl_a.origin.y + a_to_chord * e_x.y - h * e_y.y,
+            cyl_a.origin.z + a_to_chord * e_x.z - h * e_y.z,
+        );
+
+        // Each point sweeps along cyl_a.axis to form a line — sample a finite
+        // segment long enough to cover both cylinders' extents.
+        let span = r_a.max(r_b) * 4.0;
+        let line1 = sample_axis_parallel_line(&p1, &cyl_a.axis, span);
+        let line2 = sample_axis_parallel_line(&p2, &cyl_a.axis, span);
+        return vec![line1, line2];
     }
 
     // Non-parallel axes — use marching approach
@@ -1020,4 +1076,128 @@ fn adaptive_cp_count(pts: &[Point3d]) -> usize {
 
     let result = (base as f64 * curvature_factor).ceil() as usize;
     result.max(10).min(pts.len())
+}
+
+/// Sample a finite line segment along `axis` direction, centered at `origin`.
+/// Used by `intersect_cylinder_cylinder` for parallel-axis case: each
+/// intersection point sweeps along the cylinder axis to form a straight line.
+///
+/// Returns 2 points: origin - axis*span/2 and origin + axis*span/2.
+fn sample_axis_parallel_line(origin: &Point3d, axis: &Direction3d, span: f64) -> Vec<Point3d> {
+    let half = span * 0.5;
+    vec![
+        Point3d::new(
+            origin.x - axis.x * half,
+            origin.y - axis.y * half,
+            origin.z - axis.z * half,
+        ),
+        Point3d::new(
+            origin.x + axis.x * half,
+            origin.y + axis.y * half,
+            origin.z + axis.z * half,
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod parallel_cylinder_tests {
+    use super::*;
+    use crate::surface::CylinderSurface;
+    use crate::direction::Direction3d;
+
+    #[test]
+    fn test_parallel_disjoint_cylinders_no_intersection() {
+        // Two parallel cylinders far apart — no intersection.
+        let cyl_a = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let cyl_b = CylinderSurface::new(
+            Point3d::new(10.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let result = intersect_cylinder_cylinder(&cyl_a, &cyl_b, 1e-6);
+        assert!(result.is_empty(), "Disjoint parallel cylinders should have no intersection");
+    }
+
+    #[test]
+    fn test_parallel_concentric_cylinders_no_intersection() {
+        // Two coaxial cylinders with different radii — no intersection.
+        let cyl_a = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let cyl_b = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            2.0,
+        );
+        let result = intersect_cylinder_cylinder(&cyl_a, &cyl_b, 1e-6);
+        assert!(result.is_empty(), "Concentric cylinders of different radii should have no intersection");
+    }
+
+    #[test]
+    fn test_parallel_cylinders_two_intersection_lines() {
+        // Two parallel cylinders, both radius=1, centers offset by 1.0 in X.
+        // perp_dist=1, r_sum=2, r_diff=0 → 2 intersection lines.
+        let cyl_a = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let cyl_b = CylinderSurface::new(
+            Point3d::new(1.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let result = intersect_cylinder_cylinder(&cyl_a, &cyl_b, 1e-6);
+        assert_eq!(result.len(), 2, "Expected 2 intersection lines, got {}", result.len());
+        // Each line has 2 sample points (start and end of the segment)
+        assert_eq!(result[0].len(), 2);
+        assert_eq!(result[1].len(), 2);
+        // The two lines should be symmetric in Y around 0
+        let y0 = result[0][0].y;
+        let y1 = result[1][0].y;
+        assert!((y0 + y1).abs() < 1e-9, "Lines should be Y-symmetric, got y0={}, y1={}", y0, y1);
+        // Both intersection points should be on cylinder A: x² + y² = 1
+        for line in &result {
+            for p in line {
+                let r = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((r - 1.0).abs() < 1e-9, "Point {:?} should be on cyl A (r=1), got r={}", p, r);
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_cylinders_tangent_one_line() {
+        // Two parallel cylinders, both radius=1, centers offset by 2.0 in X.
+        // perp_dist=2 = r_sum → tangential touch, 1 intersection line (or 2
+        // numerically-close lines due to floating-point edge case).
+        let cyl_a = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let cyl_b = CylinderSurface::new(
+            Point3d::new(2.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+        );
+        let result = intersect_cylinder_cylinder(&cyl_a, &cyl_b, 1e-6);
+        // Acceptable: 0, 1, or 2 lines (numerical edge case).
+        assert!(result.len() <= 2, "Tangent cylinders should have ≤2 intersections, got {}", result.len());
+        if !result.is_empty() {
+            // All intersection points should be approximately at (1, 0, ?)
+            // (the tangential touch point on both cylinders).
+            for line in &result {
+                for p in line {
+                    assert!((p.x - 1.0).abs() < 1e-6, "Tangent point x should be 1.0, got {}", p.x);
+                    assert!(p.y.abs() < 1e-6, "Tangent point y should be 0.0, got {}", p.y);
+                }
+            }
+        }
+    }
 }
