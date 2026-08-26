@@ -1215,8 +1215,38 @@ pub fn weld_boundary_edge_vertices(mesh: &mut TriangleMesh, weld_tolerance: f64)
 /// - The face-aware guard still prevents welding vertices on the SAME
 ///   face that are FAR apart (annulus protection)
 /// - Only seam vertices (on 2+ faces) benefit from the relaxed guard
+///
+/// # ⚠️ Deprecation warning
+///
+/// This function is a **stopgap** for masking leaks in the edge cache.
+/// After the boolean-operation fixes (B1-B3) and topology healing
+/// improvements (C1-C4) were applied, this function should rarely be
+/// needed. It is kept for backwards compatibility with STEP importer
+/// (`draper-step/src/converter.rs`) and VP live preview
+/// (`draper-viewer/src/app.rs`).
+///
+/// If this function welds more than 0.5% of the mesh's vertices, that
+/// indicates the boolean operations or triangulation are producing
+/// excessive boundary edges — a sign that B/C fixes need to be applied
+/// more thoroughly. The log message `weld_aggressive welded N vertices
+/// (X%)` is emitted when this threshold is exceeded.
 pub fn weld_boundary_edge_vertices_aggressive(mesh: &mut TriangleMesh, weld_tolerance: f64) {
+    let vertex_count_before = mesh.vertices.len();
     weld_boundary_edge_vertices_with_pass2_frac(mesh, weld_tolerance, 1.0);
+    let welded_pct = if vertex_count_before > 0 {
+        let delta = vertex_count_before.saturating_sub(mesh.vertices.len());
+        delta as f64 / vertex_count_before as f64 * 100.0
+    } else {
+        0.0
+    };
+    if welded_pct > 0.5 {
+        log::warn!(
+            "weld_aggressive welded {:.2}% of vertices ({}→{}) — \
+             this indicates excessive boundary edges from boolean/triangulation. \
+             Consider applying B/C-stage fixes more thoroughly.",
+            welded_pct, vertex_count_before, mesh.vertices.len()
+        );
+    }
 }
 
 /// Internal: weld boundary edge vertices with a configurable pass2 fraction.
@@ -2618,6 +2648,8 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
     // ============================================================
     // Second pass: Open-chain gap filling
     //
+    // ⚠️ WARNING: This is a topology-violating fallback.
+    //
     // After closed-loop filling, some boundary edges may remain as
     // "open chains" — edges that don't form a closed loop. This happens
     // at transitions between surfaces (e.g., bolt thread → bottom plane)
@@ -2625,8 +2657,16 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
     //
     // For each remaining boundary edge, find the nearest interior vertex
     // to the edge midpoint and create a fill triangle. This closes the
-    // gap by connecting the boundary edge to existing geometry.
+    // gap by connecting the boundary edge to existing geometry —
+    // BUT the interior vertex may belong to a different face, which
+    // violates face boundary correspondence.
+    //
+    // After the B-stage (boolean) and C-stage (healing) fixes, this
+    // branch should rarely produce many triangles. If it does, that's
+    // a sign that boolean operations or triangulation are producing
+    // excessive open chains — investigate root cause.
     // ============================================================
+    let open_chain_start_count = total_filled;
     loop {
         let mut edge_info: HashMap<(u32, u32), Vec<(usize, u32)>> = HashMap::new();
         for (ti, tri) in mesh.triangles.iter().enumerate() {
@@ -2737,6 +2777,19 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
                 dup_removed,
             );
         }
+    }
+
+    // Warn if open-chain fallback added many triangles — this indicates
+    // boolean/triangulation are producing excessive open boundary chains
+    // that should be fixed at the source (B/C-stage fixes).
+    let open_chain_added = total_filled.saturating_sub(open_chain_start_count);
+    if open_chain_added > 50 {
+        log::warn!(
+            "fill_boundary_gaps: open-chain fallback added {} triangles — \
+             this is a topology-violating repair. Investigate boolean ops \
+             and triangulation for excessive open chains.",
+            open_chain_added,
+        );
     }
 
     if total_filled > 0 {
