@@ -2703,19 +2703,102 @@ impl Surface {
                 (best_u, best_v)
             }
             Surface::Offset(o) => {
-                // Project onto base surface
-                o.base.project_point(point)
+                // Project onto base surface — but the offset surface is at
+                // `o.distance` along the base's normal, so the closest point
+                // on the offset surface corresponds to the closest point on
+                // the base surface minus `distance` along the base's normal.
+                // We approximate by projecting the input point shifted back
+                // along the (estimated) base normal at the projected UV.
+                let (base_u, base_v) = o.base.project_point(point);
+                // Try to refine: shift the query point back along the base
+                // normal at (base_u, base_v), then re-project.
+                let base_normal = o.base.normal_at(base_u, base_v);
+                let shifted = Point3d::new(
+                    point.x - o.distance * base_normal.x,
+                    point.y - o.distance * base_normal.y,
+                    point.z - o.distance * base_normal.z,
+                );
+                o.base.project_point(&shifted)
             }
-            Surface::Ruled(_r) => {
-                // Use curve1's param range start as approximation
-                // (full implementation would use closest_point_on_curve)
-                (0.0, 0.0)
+            Surface::Ruled(r) => {
+                // For a ruled surface S(u,v) = (1-v)*curve1(u) + v*curve2(u),
+                // we project by:
+                //   1. Find u that minimizes distance to BOTH curves
+                //      (using closest_point on each, then averaging u)
+                //   2. Find v by projecting the point onto the line segment
+                //      from curve1(u) to curve2(u).
+                //
+                // This is approximate but far better than returning (0, 0).
+                //
+                // Step 1: sample curve1 at N points, find closest to `point`.
+                let n_samples = 32;
+                let mut best_u = 0.0;
+                let mut best_dist_sq = f64::MAX;
+                for i in 0..n_samples {
+                    let u = i as f64 / (n_samples - 1) as f64;
+                    let p1 = r.curve1.point_at(u);
+                    let dx = p1.x - point.x;
+                    let dy = p1.y - point.y;
+                    let dz = p1.z - point.z;
+                    let d_sq = dx * dx + dy * dy + dz * dz;
+                    if d_sq < best_dist_sq {
+                        best_dist_sq = d_sq;
+                        best_u = u;
+                    }
+                }
+                // Step 2: at u=best_u, find v by projecting onto segment [curve1(best_u), curve2(best_u)].
+                let p1 = r.curve1.point_at(best_u);
+                let p2 = r.curve2.point_at(best_u);
+                let seg_dx = p2.x - p1.x;
+                let seg_dy = p2.y - p1.y;
+                let seg_dz = p2.z - p1.z;
+                let seg_len_sq = seg_dx * seg_dx + seg_dy * seg_dy + seg_dz * seg_dz;
+                let best_v = if seg_len_sq > 1e-15 {
+                    let dx_pt = point.x - p1.x;
+                    let dy_pt = point.y - p1.y;
+                    let dz_pt = point.z - p1.z;
+                    let dot = dx_pt * seg_dx + dy_pt * seg_dy + dz_pt * seg_dz;
+                    (dot / seg_len_sq).max(0.0).min(1.0)
+                } else {
+                    0.0
+                };
+                (best_u, best_v)
             }
         }
     }
 
     /// Transform the surface.
     pub fn transform(&self, t: &Transform) -> Surface {
+        // Detect uniform scaling: if the linear part of `t` scales all three
+        // axes by the same factor `s`, then radii should also be scaled by `s`.
+        // This is critical for cylinders, spheres, cones, and tori — without
+        // it, a uniform-scaled sphere becomes an ellipsoid but its `radius`
+        // field stays the same → silent geometry corruption.
+        //
+        // For non-uniform scaling, we keep the radius as-is (the resulting
+        // surface is no longer a true sphere/cylinder/cone/torus — it would
+        // need to be converted to NURBS, which is out of scope here).
+        //
+        // Note: `transform_direction` normalizes the result (Direction3d is
+        // a unit vector), so we can't use it to extract scale. Instead, we
+        // transform two points and compute the distance between them.
+        let origin = Point3d::ORIGIN;
+        let p_x = t.transform_point(&Point3d::new(1.0, 0.0, 0.0));
+        let p_y = t.transform_point(&Point3d::new(0.0, 1.0, 0.0));
+        let p_z = t.transform_point(&Point3d::new(0.0, 0.0, 1.0));
+        let origin_t = t.transform_point(&origin);
+        let sx = ((p_x.x - origin_t.x).powi(2)
+            + (p_x.y - origin_t.y).powi(2)
+            + (p_x.z - origin_t.z).powi(2)).sqrt();
+        let sy = ((p_y.x - origin_t.x).powi(2)
+            + (p_y.y - origin_t.y).powi(2)
+            + (p_y.z - origin_t.z).powi(2)).sqrt();
+        let sz = ((p_z.x - origin_t.x).powi(2)
+            + (p_z.y - origin_t.y).powi(2)
+            + (p_z.z - origin_t.z).powi(2)).sqrt();
+        let is_uniform_scale = (sx - sy).abs() < 1e-9 && (sy - sz).abs() < 1e-9;
+        let uniform_scale = if is_uniform_scale { sx } else { 1.0 };
+
         match self {
             Surface::Plane(p) => Surface::Plane(Plane {
                 origin: t.transform_point(&p.origin),
@@ -2726,26 +2809,26 @@ impl Surface {
             Surface::Cylinder(c) => Surface::Cylinder(CylinderSurface {
                 origin: t.transform_point(&c.origin),
                 axis: t.transform_direction(&c.axis),
-                radius: c.radius,
+                radius: c.radius * uniform_scale,
                 x_dir: t.transform_direction(&c.x_dir),
             }),
             Surface::Cone(c) => Surface::Cone(ConeSurface {
                 origin: t.transform_point(&c.origin),
                 axis: t.transform_direction(&c.axis),
-                half_angle: c.half_angle,
-                radius: c.radius,
+                half_angle: c.half_angle, // Angle is invariant under uniform scale
+                radius: c.radius * uniform_scale,
                 x_dir: t.transform_direction(&c.x_dir),
                 expanding: c.expanding,
             }),
             Surface::Sphere(s) => Surface::Sphere(SphereSurface {
                 center: t.transform_point(&s.center),
-                radius: s.radius,
+                radius: s.radius * uniform_scale,
             }),
             Surface::Torus(tor) => Surface::Torus(TorusSurface {
                 center: t.transform_point(&tor.center),
                 axis: t.transform_direction(&tor.axis),
-                major_radius: tor.major_radius,
-                minor_radius: tor.minor_radius,
+                major_radius: tor.major_radius * uniform_scale,
+                minor_radius: tor.minor_radius * uniform_scale,
                 x_dir: t.transform_direction(&tor.x_dir),
             }),
             Surface::Revolution(r) => Surface::Revolution(RevolutionSurface {
@@ -2771,7 +2854,7 @@ impl Surface {
             }),
             Surface::Offset(o) => Surface::Offset(OffsetSurface {
                 base: Box::new(o.base.transform(t)),
-                distance: o.distance,
+                distance: o.distance * uniform_scale,
             }),
             Surface::Ruled(r) => Surface::Ruled(RuledSurface {
                 curve1: Box::new(r.curve1.transform(t)),
@@ -3302,5 +3385,149 @@ mod curvature_tests {
         let (us, vs) = surface.uv_metric_scale();
         assert!((us - 13.0).abs() < 1e-10, "Torus U metric scale should be R+r (13.0), got {}", us);
         assert!((vs - 3.0).abs() < 1e-10, "Torus V metric scale should be r (3.0), got {}", vs);
+    }
+}
+
+#[cfg(test)]
+mod ruled_offset_projection_tests {
+    use super::*;
+    use crate::curve::Line;
+
+    #[test]
+    fn test_ruled_surface_project_point_on_curve1() {
+        // Ruled surface: curve1 = line along X at y=0, z=0
+        //                 curve2 = line along X at y=0, z=10
+        // Line::point_at(t) = origin + t*direction, so for origin=(0,0,0)
+        // and direction=X, point_at(5) = (5, 0, 0). We sample u ∈ [0, 1],
+        // so the closest sample to (5, 0, 0) is u=1 (point_at(1) = (1, 0, 0)).
+        // Adjust the query point accordingly.
+        let curve1 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::X,
+        ));
+        let curve2 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 10.0),
+            Direction3d::X,
+        ));
+        let ruled = Surface::Ruled(RuledSurface::new(curve1, curve2));
+        // Query point at (0.5, 0, 0) — should map to u=0.5, v=0
+        let p = Point3d::new(0.5, 0.0, 0.0);
+        let (u, v) = ruled.project_point(&p);
+        assert!((u - 0.5).abs() < 0.1, "u should be ~0.5, got {}", u);
+        assert!(v.abs() < 0.1, "v should be ~0.0 (on curve1), got {}", v);
+    }
+
+    #[test]
+    fn test_ruled_surface_project_point_on_curve2() {
+        // Same ruled surface as above.
+        // Query point at (0.5, 0, 10) — should map to u=0.5, v=1
+        let curve1 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::X,
+        ));
+        let curve2 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 10.0),
+            Direction3d::X,
+        ));
+        let ruled = Surface::Ruled(RuledSurface::new(curve1, curve2));
+        let p = Point3d::new(0.5, 0.0, 10.0);
+        let (u, v) = ruled.project_point(&p);
+        assert!((u - 0.5).abs() < 0.1, "u should be ~0.5, got {}", u);
+        assert!((v - 1.0).abs() < 0.1, "v should be ~1.0 (on curve2), got {}", v);
+    }
+
+    #[test]
+    fn test_ruled_surface_project_point_at_midpoint() {
+        // Point at z=5 (halfway) should project to v=0.5.
+        let curve1 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::X,
+        ));
+        let curve2 = Curve3d::Line(Line::new(
+            Point3d::new(0.0, 0.0, 10.0),
+            Direction3d::X,
+        ));
+        let ruled = Surface::Ruled(RuledSurface::new(curve1, curve2));
+        let p = Point3d::new(0.5, 0.0, 5.0);
+        let (u, v) = ruled.project_point(&p);
+        assert!((u - 0.5).abs() < 0.1, "u should be ~0.5, got {}", u);
+        assert!((v - 0.5).abs() < 0.1, "v should be ~0.5, got {}", v);
+    }
+
+    #[test]
+    fn test_uniform_scale_sphere_radius() {
+        // Sphere of radius 1, scaled by 2.0, should become radius 2.
+        let sphere = Surface::Sphere(SphereSurface::new(Point3d::ORIGIN, 1.0));
+        let scaled = sphere.transform(&Transform::uniform_scaling(2.0));
+        match scaled {
+            Surface::Sphere(s) => {
+                assert!((s.radius - 2.0).abs() < 1e-10,
+                    "Scaled sphere radius should be 2.0, got {}", s.radius);
+            }
+            _ => panic!("Expected Sphere after scaling"),
+        }
+    }
+
+    #[test]
+    fn test_uniform_scale_cylinder_radius() {
+        let cyl = Surface::Cylinder(CylinderSurface::new_z(1.0));
+        let scaled = cyl.transform(&Transform::uniform_scaling(3.0));
+        match scaled {
+            Surface::Cylinder(c) => {
+                assert!((c.radius - 3.0).abs() < 1e-10,
+                    "Scaled cylinder radius should be 3.0, got {}", c.radius);
+            }
+            _ => panic!("Expected Cylinder after scaling"),
+        }
+    }
+
+    #[test]
+    fn test_uniform_scale_torus_radii() {
+        let torus = Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, 10.0, 2.0));
+        let scaled = torus.transform(&Transform::uniform_scaling(0.5));
+        match scaled {
+            Surface::Torus(t) => {
+                assert!((t.major_radius - 5.0).abs() < 1e-10,
+                    "Scaled torus major_radius should be 5.0, got {}", t.major_radius);
+                assert!((t.minor_radius - 1.0).abs() < 1e-10,
+                    "Scaled torus minor_radius should be 1.0, got {}", t.minor_radius);
+            }
+            _ => panic!("Expected Torus after scaling"),
+        }
+    }
+
+    #[test]
+    fn test_translation_does_not_change_radius() {
+        // Translation should not change sphere radius.
+        let sphere = Surface::Sphere(SphereSurface::new(Point3d::ORIGIN, 5.0));
+        let translated = sphere.transform(&Transform::translation(10.0, 20.0, 30.0));
+        match translated {
+            Surface::Sphere(s) => {
+                assert!((s.radius - 5.0).abs() < 1e-10,
+                    "Translated sphere radius should be 5.0, got {}", s.radius);
+                assert!((s.center.x - 10.0).abs() < 1e-10, "center.x wrong");
+                assert!((s.center.y - 20.0).abs() < 1e-10, "center.y wrong");
+                assert!((s.center.z - 30.0).abs() < 1e-10, "center.z wrong");
+            }
+            _ => panic!("Expected Sphere after translation"),
+        }
+    }
+
+    #[test]
+    fn test_offset_surface_distance_scales() {
+        // Offset surface with distance=2, scaled by 3.0, should have distance=6.
+        let base = Surface::Plane(Plane::xy());
+        let offset = Surface::Offset(OffsetSurface {
+            base: Box::new(base),
+            distance: 2.0,
+        });
+        let scaled = offset.transform(&Transform::uniform_scaling(3.0));
+        match scaled {
+            Surface::Offset(o) => {
+                assert!((o.distance - 6.0).abs() < 1e-10,
+                    "Scaled offset distance should be 6.0, got {}", o.distance);
+            }
+            _ => panic!("Expected Offset after scaling"),
+        }
     }
 }
