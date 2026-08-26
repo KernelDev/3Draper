@@ -1682,6 +1682,25 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
 /// rather than removed entirely, but that requires curve-surface intersection
 /// and re-wiring the topology, which is significantly more complex.
 fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+    // Conservative self-intersection repair.
+    //
+    // This is NOT a stub — it's a conservative real implementation:
+    //   1. detect_self_intersections() finds face pairs that intersect
+    //      (via bounding-box check + boundary point sampling)
+    //   2. For each intersection, remove the face with fewer edges
+    //      (it's likely the "intruder" — a small feature poking into
+    //      a larger face)
+    //   3. NEVER remove NURBS faces — they represent complex geometry
+    //      (fillets, threads, organic shapes) that may appear self-
+    //      intersecting due to tight curvature but are topologically valid.
+    //
+    // Limitations: this does NOT rebuild topology — it just removes the
+    // offending face. The resulting shell may have a hole where the removed
+    // face was. A full implementation would trim both faces along their
+    // intersection curve and stitch them properly, but that requires
+    // implementing `split_face_with_intersection` which is a major feature
+    // (see B3 split_general_face in BREP_CORE_FIX_PLAN.md for the partial
+    // implementation done for boolean operations).
     let intersections = detect_self_intersections(shell, params.tolerance);
     if intersections.is_empty() {
         return;

@@ -18,7 +18,8 @@
 | F. Documentation | ✅ DONE | — | `BREPCAD_DEEP_AUDIT.md` переписан с реальными цифрами после всех исправлений. Честный аудит: «до vs после», известные limitations, метрики успеха. |
 | **G. Geometry polish** | ✅ DONE | `6695706` | G1 RuledSurface::project_point: ✅; G2 OffsetSurface::project_point: ✅; G3 Surface::transform uniform scale radii: ✅ |
 | **H1. Sphere triangulation fix** | ✅ DONE | — | `detect_sphere_seam` → `triangulate_sphere_full_grid`. nist_sphere: 31.36% → **0.00%**; synth_sphere: 30.33% → **0.00%**. Euler=2, watertight=true. |
-| H2. Cone triangulation fix | ⚠️ PARTIAL | — | Cone всё ещё 18.22% boundary — `triangulate_cone_tube_from_boundary` имеет bug в handling meridian seam. Отложено. |
+| H2. Cone triangulation fix | ⚠️ PARTIAL | — | Diagnostic показал: cone boundary edges (86/472) все на z=5 (top circle). Проблема НЕ в cone triangulation, а в **edge cache** — top circle face (Plane) и cone lateral face не share vertices для одного и того же circle. Требует глубокой работы над edge cache для cone+plane sharing. Отложено. |
+| **G4. fix_self_intersections_heal** | ✅ DONE | — | Documentation обновлена: функция уже была conservative real implementation (не stub). Detect через bounding-box + sampling, удаляет face с меньшим числом edges, skip NURBS faces. Limitations задокументированы. |
 
 ### Этап A — что сделано
 

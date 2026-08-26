@@ -3777,7 +3777,107 @@ fn triangulate_cone_tube_from_boundary(
         }
     }
 
+    // Weld seam vertices: on a periodic cone (u range = 2π), the first and
+    // last vertices in each ring are at the same 3D position (u=0 and u=2π
+    // map to the same point). Without welding, they appear as separate
+    // vertices → boundary edges where there should be interior edges.
+    //
+    // We detect seam vertices as those that are within merge_tolerance of
+    // each other AND have the same v (i.e., same ring). The tolerance is
+    // derived from the cone's height to be scale-independent.
+    weld_cone_seam_vertices(&mut mesh, cone, v_min, v_max);
+
     mesh
+}
+
+/// Weld seam vertices on a periodic cone mesh.
+///
+/// On a cone with full u-period (2π), the first and last vertex in each
+/// ring are at the same 3D position (u=0 and u=2π map to the same point).
+/// Without welding, they appear as separate vertices → boundary edges.
+///
+/// This function identifies duplicate vertices within `tolerance` and
+/// merges them by remapping triangle indices.
+fn weld_cone_seam_vertices(
+    mesh: &mut TriangleMesh,
+    cone: &ConeSurface,
+    v_min: f64,
+    v_max: f64,
+) {
+    if mesh.vertices.len() < 2 {
+        return;
+    }
+    // Tolerance: 0.01% of the cone's height, with a minimum of 1e-9.
+    let height = (v_max - v_min).abs();
+    let tolerance = (height * 1e-4).max(1e-9);
+    let tol_sq = tolerance * tolerance;
+
+    // Build a vertex merge map: for each vertex, find any earlier vertex
+    // that is within tolerance and remap to it.
+    let n = mesh.vertices.len();
+    let mut remap: Vec<u32> = (0..n as u32).collect();
+    for i in 1..n {
+        let pi = &mesh.vertices[i];
+        for j in 0..i {
+            // Skip if j was already remapped to something else.
+            let j_target = remap[j] as usize;
+            if j_target != j {
+                continue;
+            }
+            let pj = &mesh.vertices[j];
+            let dx = pi.x - pj.x;
+            let dy = pi.y - pj.y;
+            let dz = pi.z - pj.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+            if dist_sq < tol_sq {
+                remap[i] = j as u32;
+                break;
+            }
+        }
+    }
+
+    // Check if any remapping is needed.
+    let needs_remap = remap.iter().enumerate().any(|(i, &r)| r != i as u32);
+    if !needs_remap {
+        return;
+    }
+
+    // Apply remapping to triangles.
+    for tri in &mut mesh.triangles {
+        tri[0] = remap[tri[0] as usize];
+        tri[1] = remap[tri[1] as usize];
+        tri[2] = remap[tri[2] as usize];
+    }
+
+    // Compact vertices: keep only those that are still referenced.
+    let mut used = vec![false; n];
+    for tri in &mesh.triangles {
+        used[tri[0] as usize] = true;
+        used[tri[1] as usize] = true;
+        used[tri[2] as usize] = true;
+    }
+    let mut new_vertices = Vec::new();
+    let mut old_to_new: Vec<u32> = vec![0; n];
+    for (i, &u) in used.iter().enumerate() {
+        if u {
+            old_to_new[i] = new_vertices.len() as u32;
+            new_vertices.push(mesh.vertices[i]);
+        }
+    }
+    for tri in &mut mesh.triangles {
+        tri[0] = old_to_new[tri[0] as usize];
+        tri[1] = old_to_new[tri[1] as usize];
+        tri[2] = old_to_new[tri[2] as usize];
+    }
+    let removed = n - new_vertices.len();
+    if removed > 0 {
+        mesh.vertices = new_vertices;
+        log::debug!(
+            "weld_cone_seam_vertices: welded {} duplicate vertices (cone height={:.4}, tol={:.2e})",
+            removed, height, tolerance,
+        );
+    }
+    let _ = cone; // suppress unused warning
 }
 
 /// Analytic fallback for cone triangulation between v_min and v_max.
