@@ -2219,62 +2219,217 @@ fn find_closest_boundary_point(point: &(f64, f64), boundary: &[(f64, f64)]) -> u
 }
 
 /// Split a general (non-planar) face along an intersection curve.
+///
+/// This is a minimal implementation that handles the common case where
+/// the intersection curve enters and exits the face's boundary at two
+/// distinct points. We:
+///   1. Project the intersection curve to the face's UV domain.
+///   2. Project the face's boundary edges to UV.
+///   3. Find the two boundary points closest to the intersection curve
+///      endpoints (entry and exit).
+///   4. Walk the boundary in two directions from entry to exit, producing
+///      two sub-wires.
+///   5. Build two new faces, each with one sub-wire as outer_wire, plus
+///      a shared edge along the intersection curve.
+///
+/// Limitations: assumes intersection curve has well-defined endpoints
+/// on or near the boundary. If the intersection is a closed loop fully
+/// inside the face (no boundary crossings), we return the face unsplit
+/// with the curve stored as an additional edge for future processing.
 fn split_general_face(
     face: &Face,
     intersection_points: &[Point3d],
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
-    // For non-planar faces (cylinder, sphere, etc.), we CANNOT easily split
-    // the face along the intersection curve because that would require
-    // trimming the parametric surface — a complex operation.
-    //
-    // Previous approach created face_b with only 1 edge (the intersection
-    // curve), which is topologically invalid (unclosed wire) and caused
-    // the triangulation to produce garbage.
-    //
-    // New approach: return the face UNSPLIT. The classification step
-    // (Step 4) will use the face centroid to determine if the ENTIRE face
-    // is inside or outside the other solid, and keep/discard accordingly.
-    //
-    // This is correct for the common case where the intersection curve
-    // divides the face into a "mostly inside" and "mostly outside" region —
-    // the centroid will be on the dominant side.
-    //
-    // For cases where the face is split roughly in half, this may keep or
-    // discard the entire face, but that's a better failure mode than
-    // producing invalid topology.
-    //
-    // The intersection curve is still stored in the face's edges for
-    // potential future use (e.g., creating a proper trimmed surface).
-    let _ = tol;
     if intersection_points.len() < 2 {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
         });
     }
 
-    // Return the face unsplit, but store the intersection curve as an
-    // additional edge (for debugging/future use)
-    let mut face_with_curve = face.clone();
+    let surface = match &face.surface {
+        Some(s) => s,
+        None => {
+            // Can't split a face without a surface — return unsplit.
+            let mut f = face.clone();
+            let int_curve = create_polyline_curve(intersection_points);
+            let int_edge = Edge {
+                id: TopoId::new(),
+                curve: Some(int_curve),
+                param_range: (0.0, 1.0),
+                vertex_start: None,
+                vertex_end: None,
+                start_vertex_point: Some(intersection_points[0]),
+                end_vertex_point: Some(intersection_points[intersection_points.len() - 1]),
+                forward: true,
+                tolerance: tol,
+                degenerate: false,
+                step_entity_id: None,
+            };
+            f.edges.push(int_edge);
+            return Ok(SplitFaceResult { faces: vec![f] });
+        }
+    };
+
+    // Project intersection curve endpoints to the face's UV domain.
+    let int_start = intersection_points[0];
+    let int_end = intersection_points[intersection_points.len() - 1];
+    let (int_uv_start_u, int_uv_start_v) = surface.project_point(&int_start);
+    let (int_uv_end_u, int_uv_end_v) = surface.project_point(&int_end);
+
+    // If the projected endpoints are essentially the same point in UV,
+    // the intersection is a closed loop — we can't split using this
+    // simple algorithm. Return unsplit.
+    let du = int_uv_start_u - int_uv_end_u;
+    let dv = int_uv_start_v - int_uv_end_v;
+    if (du * du + dv * dv).sqrt() < tol {
+        let mut f = face.clone();
+        let int_curve = create_polyline_curve(intersection_points);
+        let int_edge = Edge {
+            id: TopoId::new(),
+            curve: Some(int_curve),
+            param_range: (0.0, 1.0),
+            vertex_start: None,
+            vertex_end: None,
+            start_vertex_point: Some(intersection_points[0]),
+            end_vertex_point: Some(intersection_points[intersection_points.len() - 1]),
+            forward: true,
+            tolerance: tol,
+            degenerate: false,
+            step_entity_id: None,
+        };
+        f.edges.push(int_edge);
+        return Ok(SplitFaceResult { faces: vec![f] });
+    }
+
+    // Collect the face's boundary points (3D + UV).
+    let boundary_3d: Vec<Point3d> = face.edges.iter()
+        .filter_map(|e| e.start_vertex_point)
+        .collect();
+    if boundary_3d.len() < 3 {
+        // Not enough boundary to split.
+        return Ok(SplitFaceResult { faces: vec![face.clone()] });
+    }
+    let boundary_uv: Vec<((f64, f64), usize)> = boundary_3d.iter().enumerate()
+        .map(|(i, p)| {
+            let uv = surface.project_point(p);
+            (uv, i)
+        })
+        .collect();
+
+    // Find the boundary points closest to int_uv_start and int_uv_end.
+    let mut best_start_idx = 0;
+    let mut best_start_dist = f64::MAX;
+    let mut best_end_idx = 0;
+    let mut best_end_dist = f64::MAX;
+    for (i, ((u, v), _)) in boundary_uv.iter().enumerate() {
+        let du_s = u - int_uv_start_u;
+        let dv_s = v - int_uv_start_v;
+        let d_s = du_s * du_s + dv_s * dv_s;
+        if d_s < best_start_dist {
+            best_start_dist = d_s;
+            best_start_idx = i;
+        }
+        let du_e = u - int_uv_end_u;
+        let dv_e = v - int_uv_end_v;
+        let d_e = du_e * du_e + dv_e * dv_e;
+        if d_e < best_end_dist {
+            best_end_dist = d_e;
+            best_end_idx = i;
+        }
+    }
+
+    // If both endpoints map to the same boundary point, we can't split.
+    if best_start_idx == best_end_idx {
+        return Ok(SplitFaceResult { faces: vec![face.clone()] });
+    }
+
+    // Create the shared edge along the intersection curve.
     let int_curve = create_polyline_curve(intersection_points);
-    let int_edge = Edge {
+    let shared_edge = Edge {
         id: TopoId::new(),
-        curve: Some(int_curve),
+        curve: Some(int_curve.clone()),
         param_range: (0.0, 1.0),
         vertex_start: None,
         vertex_end: None,
-        start_vertex_point: Some(intersection_points[0]),
-        end_vertex_point: Some(intersection_points[intersection_points.len() - 1]),
+        start_vertex_point: Some(int_start),
+        end_vertex_point: Some(int_end),
         forward: true,
         tolerance: tol,
         degenerate: false,
         step_entity_id: None,
     };
-    face_with_curve.edges.push(int_edge);
+    let shared_edge_rev = Edge {
+        id: shared_edge.id, // Same ID — both faces reference this edge
+        curve: Some(int_curve),
+        param_range: (0.0, 1.0),
+        vertex_start: None,
+        vertex_end: None,
+        start_vertex_point: Some(int_end),
+        end_vertex_point: Some(int_start),
+        forward: false, // Reversed orientation for the second face
+        tolerance: tol,
+        degenerate: false,
+        step_entity_id: None,
+    };
 
-    Ok(SplitFaceResult {
-        faces: vec![face_with_curve],
-    })
+    // Walk boundary from best_start_idx → best_end_idx → back to start,
+    // producing two sub-wires. The shared edge connects them at the
+    // intersection curve.
+    //
+    // Sub-wire A: boundary[best_start_idx .. best_end_idx] + shared_edge
+    // Sub-wire B: boundary[best_end_idx .. best_start_idx] + shared_edge (reversed)
+    let n = boundary_3d.len();
+
+    // Build sub-wire A: edges from start_idx to end_idx, then shared_edge.
+    let mut wire_a_edges: Vec<Edge> = Vec::new();
+    let mut i = best_start_idx;
+    while i != best_end_idx {
+        let next_i = (i + 1) % n;
+        let p0 = boundary_3d[i];
+        let p1 = boundary_3d[next_i];
+        wire_a_edges.push(Edge::new_line(p0, p1));
+        i = next_i;
+    }
+    // Now i == best_end_idx. Close sub-wire A via the shared edge (end → int_end → int_start → start).
+    // Actually: sub-wire A goes from boundary[best_start_idx] to boundary[best_end_idx] via boundary,
+    // then back to boundary[best_start_idx] via the shared edge (int_start → int_end).
+    // So the shared edge in sub-wire A goes from boundary[best_end_idx] (=int_end) to boundary[best_start_idx] (=int_start).
+    wire_a_edges.push(shared_edge_rev.clone());
+
+    // Build sub-wire B: edges from end_idx to start_idx, then shared_edge (reversed).
+    let mut wire_b_edges: Vec<Edge> = Vec::new();
+    let mut j = best_end_idx;
+    while j != best_start_idx {
+        let next_j = (j + 1) % n;
+        let p0 = boundary_3d[j];
+        let p1 = boundary_3d[next_j];
+        wire_b_edges.push(Edge::new_line(p0, p1));
+        j = next_j;
+    }
+    wire_b_edges.push(shared_edge.clone());
+
+    // Build face A
+    let coedges_a: Vec<CoEdge> = wire_a_edges.iter()
+        .map(|e| CoEdge::new(e.id, true))
+        .collect();
+    let wire_a = Wire::new(coedges_a);
+    let mut face_a = Face::new(surface.clone(), wire_a);
+    face_a.edges = wire_a_edges;
+    face_a.forward = face.forward;
+    face_a.tolerance = face.tolerance;
+
+    // Build face B
+    let coedges_b: Vec<CoEdge> = wire_b_edges.iter()
+        .map(|e| CoEdge::new(e.id, true))
+        .collect();
+    let wire_b = Wire::new(coedges_b);
+    let mut face_b = Face::new(surface.clone(), wire_b);
+    face_b.edges = wire_b_edges;
+    face_b.forward = face.forward;
+    face_b.tolerance = face.tolerance;
+
+    Ok(SplitFaceResult { faces: vec![face_a, face_b] })
 }
 
 /// Create a polyline NURBS curve through a set of points.

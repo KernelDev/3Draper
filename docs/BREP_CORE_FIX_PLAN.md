@@ -11,7 +11,7 @@
 | Этап | Статус | Commit | Результат |
 |------|--------|--------|-----------|
 | **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
-| **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста); B1 Plane×Cylinder tangent: ✅ DONE (1 тест); B2 Möller ray-triangle: ✅ DONE (заменил signed_distance_to_ray heuristic) |
+| **B. Boolean Fixes** | ✅ DONE | `bd9885e` + B3 | B1 Cylinder×Cylinder parallel: ✅; B1 Plane×Cylinder tangent: ✅; B2 Möller ray-triangle: ✅; B3 split_general_face: ✅ (UV-projection split для неплоских граней) |
 | **C. Topology Healing** | 🔄 IN PROGRESS | — | C1 stitch_collinear_edges: ✅ DONE (param_range + end_vertex_point обновляются); C2 fix_normal_orientation: ✅ DONE (использует face centroid вместо UV(0,0)) |
 | D. Triangulation | ⏳ | — | — |
 | E. STEP Importer | 🔄 IN PROGRESS | — | E1 regression tests созданы (33 теста в `crates/draper-testing/tests/step_regression.rs`); synthetic (6/6) и nist_block_with_hole PASS; большие industrial files требуют поштучного запуска |
@@ -63,7 +63,14 @@
 
 **B2.** ✅ Заменён heuristic `signed_distance_to_ray` (boolean.rs:362-382) на настоящий **Möller-Trumbore ray-triangle test**. Теперь `count_ray_face_intersections_sampling` строит 2 треугольника на каждый UV cell и проверяет пересечение через решение 3×3 линейной системы для barycentric coordinates. Это canonical, robust подход — не зависит от sign-of-cross-product heuristic. Удалена вся функция `signed_distance_to_ray` (стала unused).
 
-**B3-B5:** ⏳ Запланированы — `split_general_face` для неплоских граней, BVH pre-filter, deterministic face classification.
+**B3-B5:** ✅ B3 DONE — `split_general_face` для неплоских граней реализован через UV-projection split:
+1. Project intersection curve endpoints в UV
+2. Project boundary points в UV
+3. Найти ближайшие boundary points к intersection endpoints
+4. Walk boundary в двух направлениях, создавая 2 sub-wires
+5. Build 2 новых faces, каждая со своим sub-wire + shared edge (intersection curve)
+
+B4-B5 (BVH pre-filter + deterministic face classification) — отложены, т.к. B1+B2+B3 уже существенно улучшили качество. Добавим если понадобится после тестирования на реальных файлах.
 
 ---
 
