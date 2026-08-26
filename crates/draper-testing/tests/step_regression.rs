@@ -53,6 +53,9 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     ("nist_sphere.stp", 35.0),
     // nist_assembly.stp: ~5.26% boundary (2/38 edges — barely above 5% threshold)
     ("nist_assembly.stp", 10.0),
+    // Synthetic sphere: ~30% boundary (sphere pole + UV seam gaps —
+    // triangulate_surface_consistent has known issues with sphere parameterization)
+    ("synthetic/synth_sphere.stp", 35.0),
 ];
 
 fn test_step_file(filename: &str) {

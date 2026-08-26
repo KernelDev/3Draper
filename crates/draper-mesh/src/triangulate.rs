@@ -4238,7 +4238,10 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
     let north_idx = mesh.add_vertex(p_north);
     mesh.add_vertex_normal(north_idx, [n_north.x, n_north.y, n_north.z]);
 
-    // Ring vertices (rows 1..n_v-1)
+    // Ring vertices (rows 1..n_v-1, NOT including n_v which would be the south pole)
+    //
+    // Note: the loop range `1..n_v` already excludes j=n_v, so we never
+    // produce v=PI here. The south pole vertex is added separately below.
     for j in 1..n_v {
         let v = PI * j as f64 / n_v as f64;
         for i in 0..n_u {
