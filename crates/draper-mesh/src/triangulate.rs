@@ -4005,28 +4005,6 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
         }
     }
 
-    // Detect "seam cone" — a cone face with a boundary that consists of
-    // top/bottom circles + meridian seam edges (the typical case for STEP
-    // cones). Just like sphere seams, this is a topologically full cone
-    // with parameterization seams, and the generic 2D CDT path produces
-    // 18% boundary edges due to apex degeneracy and UV wrap-around.
-    //
-    // Heuristic: if the boundary's u range is close to 2π (full period),
-    // treat as a full cone and use dedicated tube grid.
-    if boundary_uvs.len() >= 4 {
-        let min_u = boundary_uvs.iter().map(|p| p.u).fold(f64::INFINITY, f64::min);
-        let max_u = boundary_uvs.iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
-        let u_span = max_u - min_u;
-        if u_span > 2.0 * PI - 0.1 {
-            // u spans almost the full period — treat as a seam cone.
-            log::info!(
-                "Cone face #{}: seam cone detected (u_span={:.4}≈2π) — using tube grid triangulation",
-                face.id, u_span
-            );
-            return triangulate_cone_tube_from_boundary(cone, params, &boundary_3d, face.forward);
-        }
-    }
-
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
