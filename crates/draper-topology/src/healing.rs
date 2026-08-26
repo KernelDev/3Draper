@@ -881,6 +881,11 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
 
             let n = wire.coedges.len();
             let mut to_remove: Vec<usize> = Vec::new();
+            // Collect (edge_id_i, new_end_point, new_param_range) so we can
+            // extend edge i after removing coedge j. Without this, the merged
+            // edge would still have its original param_range and end_vertex_point,
+            // leaving the wire's end-to-start connectivity broken.
+            let mut edge_extensions: Vec<(TopoId, Point3d, (f64, f64))> = Vec::new();
 
             for i in 0..n {
                 if to_remove.contains(&i) {
@@ -900,7 +905,30 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
 
                 if let (Some(ei), Some(ej)) = (edge_i, edge_j) {
                     if are_edges_collinear(ei, ej, angular_tol, params.tolerance) {
-                        // Merge: remove edge j, extend edge i to cover both
+                        // Merge: remove edge j, extend edge i to cover both.
+                        //
+                        // The merged edge spans from ei.start to ej.end.
+                        // For Line curves this is straightforward: param_range
+                        // is typically (0, length) or (0, 1) — extend to
+                        // (ei.param_range.0, ei.param_range.1 + ej.param_range.1 - ej.param_range.0).
+                        //
+                        // For Circle/NURBS curves, "collinear" merging is
+                        // geometrically incorrect anyway (they're curves,
+                        // not lines), but we still need to extend the param
+                        // range to keep the wire's end-to-start connectivity.
+                        //
+                        // The new end point is ej's end point.
+                        let new_end_point = ej.end_vertex_point
+                            .or(ej.start_vertex_point)
+                            .or(ei.end_vertex_point);
+                        let ej_span = ej.param_range.1 - ej.param_range.0;
+                        let new_param_range = (
+                            ei.param_range.0,
+                            ei.param_range.1 + ej_span,
+                        );
+                        if let Some(end_pt) = new_end_point {
+                            edge_extensions.push((edge_id_i, end_pt, new_param_range));
+                        }
                         to_remove.push(j);
                         stitch_count += 1;
                     }
@@ -917,6 +945,16 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
                 }
                 if wire.coedges.len() > 1 {
                     wire.closed = true;
+                }
+            }
+
+            // Apply edge extensions: update param_range and end_vertex_point
+            // of the surviving edges so that the wire's end-to-start
+            // connectivity is preserved.
+            for (edge_id, new_end, new_range) in edge_extensions {
+                if let Some(edge) = face.edges.iter_mut().find(|e| e.id == edge_id) {
+                    edge.param_range = new_range;
+                    edge.end_vertex_point = Some(new_end);
                 }
             }
         }
@@ -1443,14 +1481,25 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
             None => continue,
         };
 
-        // Sample a point on the face
-        let face_point = surface.point_at(0.0, 0.0);
-
-        // Get the face normal at that point
-        let normal = if face.forward {
-            surface.normal_at(0.0, 0.0)
+        // Sample a representative point on the face.
+        // Using surface.point_at(0, 0) is WRONG for faces whose UV (0,0) is
+        // outside their wire boundary (e.g., a partial arc on a cylinder
+        // whose v_range is [2.0, 5.0] — UV (0,0) is outside the face).
+        // Instead, compute the average of the edge midpoints — this is
+        // guaranteed to be on the face's boundary, which for a simply-
+        // connected face is a reasonable representative point.
+        let (face_point, face_u, face_v) = if let Some((fp, u, v)) = compute_face_representative_point(face, surface) {
+            (fp, u, v)
         } else {
-            surface.normal_at(0.0, 0.0).neg()
+            // Fallback: UV origin
+            (surface.point_at(0.0, 0.0), 0.0, 0.0)
+        };
+
+        // Get the face normal at the representative point
+        let normal = if face.forward {
+            surface.normal_at(face_u, face_v)
+        } else {
+            surface.normal_at(face_u, face_v).neg()
         };
 
         // Vector from centroid to face point
@@ -2486,6 +2535,52 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.faces_merged += source.faces_merged;
     target.tolerances_propagated += source.tolerances_propagated;
     target.messages.extend(source.messages.iter().cloned());
+}
+
+// ============================================================
+// Helper: representative point on a face
+// ============================================================
+
+/// Compute a representative point on a face — guaranteed to be on the
+/// face (not just on the underlying surface).
+///
+/// Returns `(point_3d, u, v)` where (u, v) is a UV coordinate that
+/// projects to a point inside the face's wire boundary. Used by
+/// `fix_normal_orientation` to avoid the bug where UV (0,0) is outside
+/// the face's actual boundary (e.g., a partial cylinder face with
+/// v_range = [2.0, 5.0] — UV (0,0) is outside).
+///
+/// Algorithm:
+/// 1. Sample midpoints of all edges in the face's outer wire.
+/// 2. Average them to get a centroid in 3D.
+/// 3. Project the centroid back to the surface UV space.
+fn compute_face_representative_point(
+    face: &Face,
+    surface: &draper_geometry::Surface,
+) -> Option<(Point3d, f64, f64)> {
+    // Collect edge midpoints
+    let mut sum = Point3d::new(0.0, 0.0, 0.0);
+    let mut count = 0usize;
+    for edge in &face.edges {
+        if let Some(p) = edge.point_at(0.5) {
+            sum.x += p.x;
+            sum.y += p.y;
+            sum.z += p.z;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return None;
+    }
+    let centroid_3d = Point3d::new(
+        sum.x / count as f64,
+        sum.y / count as f64,
+        sum.z / count as f64,
+    );
+    // Project back to surface UV
+    let (u, v) = surface.project_point(&centroid_3d);
+    let p = surface.point_at(u, v);
+    Some((p, u, v))
 }
 
 // ============================================================

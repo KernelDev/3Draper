@@ -12,7 +12,7 @@
 |------|--------|--------|-----------|
 | **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
 | **B. Boolean Fixes** | 🔄 IN PROGRESS | — | B1 Cylinder×Cylinder parallel: ✅ DONE (4 новых теста); B1 Plane×Cylinder tangent: ✅ DONE (1 тест); B2 Möller ray-triangle: ✅ DONE (заменил signed_distance_to_ray heuristic) |
-| C. Topology Healing | ⏳ | — | — |
+| **C. Topology Healing** | 🔄 IN PROGRESS | — | C1 stitch_collinear_edges: ✅ DONE (param_range + end_vertex_point обновляются); C2 fix_normal_orientation: ✅ DONE (использует face centroid вместо UV(0,0)) |
 | D. Triangulation | ⏳ | — | — |
 | E. STEP Importer | ⏳ | — | — |
 | F. Documentation | ⏳ | — | — |
