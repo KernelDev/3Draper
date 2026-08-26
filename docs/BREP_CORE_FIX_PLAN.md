@@ -12,7 +12,7 @@
 |------|--------|--------|-----------|
 | **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
 | **B. Boolean Fixes** | ✅ DONE | `bd9885e` + B3 | B1 Cylinder×Cylinder parallel: ✅; B1 Plane×Cylinder tangent: ✅; B2 Möller ray-triangle: ✅; B3 split_general_face: ✅ (UV-projection split для неплоских граней) |
-| **C. Topology Healing** | 🔄 IN PROGRESS | — | C1 stitch_collinear_edges: ✅ DONE (param_range + end_vertex_point обновляются); C2 fix_normal_orientation: ✅ DONE (использует face centroid вместо UV(0,0)) |
+| **C. Topology Healing** | ✅ DONE | `5b37e72` + C3+C4 | C1 stitch_collinear_edges: ✅; C2 fix_normal_orientation: ✅; C3 merge_faces для NURBS/Sphere/Cone/Torus: ✅; C4 add_coedge в правильную позицию: ✅ |
 | D. Triangulation | ⏳ | — | — |
 | E. STEP Importer | 🔄 IN PROGRESS | — | E1 regression tests созданы (33 теста в `crates/draper-testing/tests/step_regression.rs`); synthetic (6/6) и nist_block_with_hole PASS; большие industrial files требуют поштучного запуска |
 | F. Documentation | ⏳ | — | — |

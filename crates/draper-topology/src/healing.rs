@@ -29,6 +29,7 @@ use crate::entity::*;
 use draper_geometry::{
     CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
+    SphereSurface, ConeSurface, TorusSurface, NurbsSurface,
 };
 
 // ============================================================
@@ -1125,8 +1126,138 @@ fn are_surfaces_compatible(
         (Surface::Cylinder(ca), Surface::Cylinder(cb)) => {
             are_cylinders_compatible(ca, cb, tol, angular_tol)
         }
+        (Surface::Sphere(sa), Surface::Sphere(sb)) => are_spheres_compatible(sa, sb, tol),
+        (Surface::Cone(ca), Surface::Cone(cb)) => are_cones_compatible(ca, cb, tol, angular_tol),
+        (Surface::Torus(ta), Surface::Torus(tb)) => are_tori_compatible(ta, tb, tol, angular_tol),
+        (Surface::Nurbs(na), Surface::Nurbs(nb)) => are_nurbs_compatible(na, nb, tol),
         _ => false,
     }
+}
+
+/// Check whether two spheres are compatible for merging.
+///
+/// Two spheres are compatible if they have the same center (within tol)
+/// and the same radius (within tol).
+fn are_spheres_compatible(a: &SphereSurface, b: &SphereSurface, tol: f64) -> bool {
+    let dx = a.center.x - b.center.x;
+    let dy = a.center.y - b.center.y;
+    let dz = a.center.z - b.center.z;
+    let center_dist = (dx * dx + dy * dy + dz * dz).sqrt();
+    if center_dist > tol {
+        return false;
+    }
+    (a.radius - b.radius).abs() < tol
+}
+
+/// Check whether two cones are compatible for merging.
+///
+/// Two cones are compatible if their axes are parallel (within angular
+/// tolerance), origins match (within tol), radii match (within tol),
+/// and half-angles match (within angular tolerance).
+fn are_cones_compatible(
+    a: &ConeSurface,
+    b: &ConeSurface,
+    tol: f64,
+    angular_tol: f64,
+) -> bool {
+    // Axis must be parallel
+    let dot = a.axis.x * b.axis.x + a.axis.y * b.axis.y + a.axis.z * b.axis.z;
+    let angle = dot.acos().abs();
+    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+        return false;
+    }
+    // Origin must match
+    let dx = a.origin.x - b.origin.x;
+    let dy = a.origin.y - b.origin.y;
+    let dz = a.origin.z - b.origin.z;
+    if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+        return false;
+    }
+    // Radius must match
+    if (a.radius - b.radius).abs() > tol {
+        return false;
+    }
+    // Half-angle must match
+    (a.half_angle - b.half_angle).abs() < angular_tol
+}
+
+/// Check whether two tori are compatible for merging.
+fn are_tori_compatible(
+    a: &TorusSurface,
+    b: &TorusSurface,
+    tol: f64,
+    angular_tol: f64,
+) -> bool {
+    // Axis must be parallel
+    let dot = a.axis.x * b.axis.x + a.axis.y * b.axis.y + a.axis.z * b.axis.z;
+    let angle = dot.acos().abs();
+    if angle > angular_tol && (std::f64::consts::PI - angle).abs() > angular_tol {
+        return false;
+    }
+    // Center must match
+    let dx = a.center.x - b.center.x;
+    let dy = a.center.y - b.center.y;
+    let dz = a.center.z - b.center.z;
+    if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+        return false;
+    }
+    // Radii must match
+    (a.major_radius - b.major_radius).abs() < tol
+        && (a.minor_radius - b.minor_radius).abs() < tol
+}
+
+/// Check whether two NURBS surfaces are compatible for merging.
+///
+/// Two NURBS surfaces are compatible if they have:
+/// - The same degree (u and v)
+/// - The same knot vectors (u and v), within tolerance
+/// - The same control point count (u and v)
+/// - Control points match within `tol` (each control point compared)
+///
+/// This is a strict structural equality check — we do NOT try to detect
+/// geometrically-equivalent NURBS with different parameterizations (that
+/// would require surface fitting, which is out of scope for healing).
+fn are_nurbs_compatible(a: &NurbsSurface, b: &NurbsSurface, tol: f64) -> bool {
+    // Degree must match
+    if a.u_degree != b.u_degree || a.v_degree != b.v_degree {
+        return false;
+    }
+    // Knot vectors must match in length
+    if a.u_knots.len() != b.u_knots.len() || a.v_knots.len() != b.v_knots.len() {
+        return false;
+    }
+    // Control point grid must match in size
+    if a.control_points.len() != b.control_points.len() {
+        return false;
+    }
+    if !a.control_points.is_empty() {
+        if a.control_points[0].len() != b.control_points[0].len() {
+            return false;
+        }
+    }
+    // Knot vectors must match within tol
+    for (ka, kb) in a.u_knots.iter().zip(b.u_knots.iter()) {
+        if (ka - kb).abs() > tol {
+            return false;
+        }
+    }
+    for (ka, kb) in a.v_knots.iter().zip(b.v_knots.iter()) {
+        if (ka - kb).abs() > tol {
+            return false;
+        }
+    }
+    // Each control point must match within tol
+    for (row_a, row_b) in a.control_points.iter().zip(b.control_points.iter()) {
+        for (pa, pb) in row_a.iter().zip(row_b.iter()) {
+            let dx = pa.x - pb.x;
+            let dy = pa.y - pb.y;
+            let dz = pa.z - pb.z;
+            if (dx * dx + dy * dy + dz * dz).sqrt() > tol {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Check whether two planes are compatible for merging.

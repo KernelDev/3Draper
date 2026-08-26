@@ -640,6 +640,12 @@ pub fn heal_dangling_edges(solid: &mut Solid, tolerance: f64) -> usize {
 /// with the target edge).
 ///
 /// Returns `true` if a coedge was added.
+///
+/// The new coedge is inserted at the correct position in the wire's
+/// end-to-start chain — immediately after the coedge whose end vertex
+/// matches the new coedge's start vertex. If no matching position is
+/// found (e.g., wire is empty or has no vertex info), the coedge is
+/// appended at the end as a fallback.
 fn add_coedge_for_edge_in_face(face: &mut Face, edge_id: TopoId, forward: bool) -> bool {
     let mut new_coedge = CoEdge::new(edge_id, forward);
 
@@ -648,8 +654,51 @@ fn add_coedge_for_edge_in_face(face: &mut Face, edge_id: TopoId, forward: bool) 
     // the coedge will have None curve_2d, which is acceptable.)
     new_coedge.curve_2d = None;
 
+    // Look up the edge's start/end vertex points so we can find the
+    // correct insertion position in the wire's end-to-start chain.
+    let (edge_start_pt, edge_end_pt) = face.edges.iter()
+        .find(|e| e.id == edge_id)
+        .map(|e| (e.start_vertex_point, e.end_vertex_point))
+        .unwrap_or((None, None));
+
+    // The new coedge's "start" depends on its orientation:
+    //   forward = true  → starts at edge.start_vertex_point
+    //   forward = false → starts at edge.end_vertex_point
+    let new_coedge_start_pt = if forward { edge_start_pt } else { edge_end_pt };
+
     // Add to the outer wire by default (or inner wire if more appropriate)
     if let Some(ref mut wire) = face.outer_wire {
+        // Find the correct insertion position: after the coedge whose
+        // end vertex matches the new coedge's start vertex.
+        if let Some(start_pt) = new_coedge_start_pt {
+            let mut best_pos: Option<usize> = None;
+            for (i, coedge) in wire.coedges.iter().enumerate() {
+                // Look up this coedge's end vertex point
+                let coedge_end_pt = face.edges.iter()
+                    .find(|e| e.id == coedge.edge)
+                    .and_then(|e| {
+                        if coedge.forward {
+                            e.end_vertex_point
+                        } else {
+                            e.start_vertex_point
+                        }
+                    });
+                if let Some(ep) = coedge_end_pt {
+                    let dx = ep.x - start_pt.x;
+                    let dy = ep.y - start_pt.y;
+                    let dz = ep.z - start_pt.z;
+                    if (dx * dx + dy * dy + dz * dz).sqrt() < 1e-9 {
+                        best_pos = Some(i + 1);
+                        break;
+                    }
+                }
+            }
+            if let Some(pos) = best_pos {
+                wire.coedges.insert(pos.min(wire.coedges.len()), new_coedge);
+                return true;
+            }
+        }
+        // Fallback: append at the end
         wire.coedges.push(new_coedge);
         return true;
     }
