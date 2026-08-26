@@ -746,8 +746,17 @@ mod tests {
     #[test]
     fn test_evaluate_revolve_produces_solid() {
         let mut tree = FeatureTree::new();
+        // Profile must NOT cross the revolve axis (Z). Use a rectangle
+        // translated so its X (radius) coordinates are all positive:
+        // original rectangle = (-5..5, -2.5..2.5); shift by +10 in X
+        // so profile X ∈ [5, 15] — all radii positive.
+        let rect = Polyline2d::rectangle(10.0, 5.0);
+        let shifted_pts: Vec<(f64, f64)> = rect.points.iter()
+            .map(|(x, y)| (*x + 10.0, *y))
+            .collect();
+        let profile = Polyline2d::new(shifted_pts);
         let sketch = tree.add_feature(Feature::new("sketch1", FeatureParams::Sketch {
-            profile: Polyline2d::rectangle(10.0, 5.0),
+            profile,
         }));
         let revolve = tree.add_feature(Feature::new("revolve1", FeatureParams::Revolve {
             sketch,

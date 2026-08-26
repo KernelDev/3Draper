@@ -1019,6 +1019,65 @@ fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point
 /// When `params.parallel` is `true`, faces are triangulated in parallel using
 /// rayon and per-face meshes are merged with pre-computed vertex offsets.
 pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+    triangulate_solid_with_report(solid, params).mesh
+}
+
+/// Result of triangulating a solid — includes a diagnostic report so callers
+/// (UI, tests, exporters) can detect non-watertight results without parsing
+/// log output.
+pub struct TriangulationReport {
+    /// `true` if the resulting mesh has 0 boundary edges and 0 non-manifold
+    /// edges (i.e., it's watertight).
+    pub is_watertight: bool,
+    /// Number of boundary edges in the resulting mesh. Should be 0 for a
+    /// correctly-triangulated closed solid.
+    pub boundary_edge_count: usize,
+    /// Total number of edges in the mesh (used to compute boundary %).
+    pub edge_count: usize,
+    /// Boundary edges as a percentage of total edges: 0% = perfect.
+    pub boundary_pct: f64,
+    /// Number of non-manifold edges (edges shared by >2 triangles).
+    pub non_manifold_edge_count: usize,
+    /// Number of degenerate triangles removed during post-processing.
+    pub degenerate_triangle_count: usize,
+    /// Vertex / Edge / Face counts of the resulting mesh.
+    pub vertex_count: usize,
+    pub triangle_count: usize,
+    /// Euler characteristic of the resulting mesh (V - E + F).
+    /// For a closed genus-0 solid, this should be 2.
+    pub euler_characteristic: i64,
+    /// Merge tolerance used by the vertex dedup step.
+    pub merge_tolerance: f64,
+}
+
+impl TriangulationReport {
+    /// `true` if the triangulation quality is acceptable (≤1% boundary edges).
+    pub fn is_acceptable(&self) -> bool {
+        self.boundary_pct <= 1.0
+    }
+
+    /// Human-readable one-line summary.
+    pub fn summary(&self) -> String {
+        format!(
+            "watertight={}, boundary={}/{} ({:.2}%), non_manifold={}, degenerate={}, V={}, E={}, F={}, χ={}, tol={:.2e}",
+            self.is_watertight,
+            self.boundary_edge_count, self.edge_count, self.boundary_pct,
+            self.non_manifold_edge_count,
+            self.degenerate_triangle_count,
+            self.vertex_count, self.edge_count, self.triangle_count,
+            self.euler_characteristic,
+            self.merge_tolerance,
+        )
+    }
+}
+
+/// Triangulate a solid and return both the mesh and a diagnostic report.
+/// UI callers should use this to surface warnings to the user when the
+/// triangulation is leaky (boundary_pct > 1%).
+pub fn triangulate_solid_with_report(
+    solid: &Solid,
+    params: &TriangulationParams,
+) -> TriangulationResult {
     // Compute adaptive tolerance from the solid's bounding box
     let bbox = solid_bounding_box(solid);
     let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(
@@ -1033,7 +1092,36 @@ pub fn triangulate_solid(solid: &Solid, params: &TriangulationParams) -> Triangl
     // circular at all LODs because their boundary arcs are always sampled
     // with ~50+ points).
     cache.set_chord_tolerance_override(Some(params.max_deviation));
-    triangulate_solid_with_cache(solid, params, &mut cache)
+    let mesh = triangulate_solid_with_cache(solid, params, &mut cache);
+
+    // Build the diagnostic report.
+    let report_w = crate::watertight::validate_watertight(&mesh, false);
+    let merge_tolerance = cache.adaptive_tolerance().merge_tolerance();
+    let report = TriangulationReport {
+        is_watertight: report_w.is_watertight(),
+        boundary_edge_count: report_w.boundary_edge_count,
+        edge_count: report_w.edge_count,
+        boundary_pct: if report_w.edge_count > 0 {
+            report_w.boundary_edge_count as f64 / report_w.edge_count as f64 * 100.0
+        } else {
+            0.0
+        },
+        non_manifold_edge_count: report_w.non_manifold_edge_count,
+        degenerate_triangle_count: report_w.degenerate_triangle_count,
+        vertex_count: report_w.vertex_count,
+        triangle_count: report_w.triangle_count,
+        euler_characteristic: report_w.euler_characteristic,
+        merge_tolerance,
+    };
+    TriangulationResult { mesh, report }
+}
+
+/// Returned by `triangulate_solid_with_report`.
+pub struct TriangulationResult {
+    /// The resulting triangle mesh.
+    pub mesh: TriangleMesh,
+    /// Diagnostic report (watertightness, boundary edges, etc.).
+    pub report: TriangulationReport,
 }
 
 /// Triangulate a solid using a shared edge discretization cache.
