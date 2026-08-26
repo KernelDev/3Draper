@@ -49,13 +49,10 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     ("nist_cube.stp", 10.0),
     // nist_cone.stp: ~18% boundary (cone apex degeneracy + triangulation gaps)
     ("nist_cone.stp", 25.0),
-    // nist_sphere.stp: ~31% boundary (sphere pole degeneracy + UV seam gaps)
-    ("nist_sphere.stp", 35.0),
     // nist_assembly.stp: ~5.26% boundary (2/38 edges — barely above 5% threshold)
     ("nist_assembly.stp", 10.0),
-    // Synthetic sphere: ~30% boundary (sphere pole + UV seam gaps —
-    // triangulate_surface_consistent has known issues with sphere parameterization)
-    ("synthetic/synth_sphere.stp", 35.0),
+    // NOTE: nist_sphere.stp и synthetic/synth_sphere.stp — теперь PASS с 0.00% boundary
+    // после H1 fix (detect_sphere_seam → triangulate_sphere_full_grid).
 ];
 
 fn test_step_file(filename: &str) {

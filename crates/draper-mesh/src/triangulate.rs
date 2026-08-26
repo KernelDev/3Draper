@@ -4005,6 +4005,28 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
         }
     }
 
+    // Detect "seam cone" — a cone face with a boundary that consists of
+    // top/bottom circles + meridian seam edges (the typical case for STEP
+    // cones). Just like sphere seams, this is a topologically full cone
+    // with parameterization seams, and the generic 2D CDT path produces
+    // 18% boundary edges due to apex degeneracy and UV wrap-around.
+    //
+    // Heuristic: if the boundary's u range is close to 2π (full period),
+    // treat as a full cone and use dedicated tube grid.
+    if boundary_uvs.len() >= 4 {
+        let min_u = boundary_uvs.iter().map(|p| p.u).fold(f64::INFINITY, f64::min);
+        let max_u = boundary_uvs.iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+        let u_span = max_u - min_u;
+        if u_span > 2.0 * PI - 0.1 {
+            // u spans almost the full period — treat as a seam cone.
+            log::info!(
+                "Cone face #{}: seam cone detected (u_span={:.4}≈2π) — using tube grid triangulation",
+                face.id, u_span
+            );
+            return triangulate_cone_tube_from_boundary(cone, params, &boundary_3d, face.forward);
+        }
+    }
+
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
@@ -4203,6 +4225,27 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
         return triangulate_sphere_full_grid(face, sphere, params);
     }
 
+    // Check if the boundary edges are just a "seam" — a single closed loop
+    // along a constant-u or constant-v line, OR a meridian (great circle
+    // through both poles). Such a seam doesn't actually constrain the
+    // surface's parameterization — the sphere is still periodic in u and
+    // has poles at v=0 and v=π. Using `triangulate_surface_consistent`
+    // on a sphere with a seam produces 30% boundary edges because the
+    // generic 2D CDT can't handle the pole degeneracy and UV wrap-around.
+    //
+    // Heuristic: if the boundary forms a meridian (v_span ≈ π with u_span
+    // < 2π) or a latitude (u_span ≈ 2π with v_span < π) — treat it as a
+    // seam and use the dedicated full-grid sphere path.
+    let is_seam = detect_sphere_seam(&boundary_uvs);
+
+    if is_seam {
+        // Single solid with a seam edge — use full grid triangulation.
+        // The seam edge will not appear in the mesh, but since there are
+        // no neighboring faces sharing this edge, watertightness is not
+        // a concern at the topology level (the mesh itself will be closed).
+        return triangulate_sphere_full_grid(face, sphere, params);
+    }
+
     // Collect holes from inner loops
     let (hole_polylines, hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
 
@@ -4215,6 +4258,63 @@ fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &Triangu
         face.forward,
         params,
     )
+}
+
+/// Detect if the boundary UVs of a sphere face form a "seam" — a single
+/// closed loop along a constant-u or constant-v line.
+///
+/// This is used to decide whether to use the dedicated full-grid sphere
+/// triangulation (which handles poles and periodic u correctly) instead
+/// of the generic 2D CDT path (which produces 30% boundary edges on
+/// spheres due to pole degeneracy and UV wrap-around).
+///
+/// Returns `true` if:
+/// - There is exactly 1 boundary loop
+/// - All UVs have approximately the same u value (constant-u seam, the
+///   typical case for STEP spheres where the seam is at u=0), OR
+/// - All UVs have approximately the same v value (constant-v seam, less common)
+fn detect_sphere_seam(boundary_uvs: &[draper_geometry::Point2d]) -> bool {
+    if boundary_uvs.len() < 3 {
+        return false;
+    }
+    // Compute u and v ranges
+    let min_u = boundary_uvs.iter().map(|p| p.u).fold(f64::INFINITY, f64::min);
+    let max_u = boundary_uvs.iter().map(|p| p.u).fold(f64::NEG_INFINITY, f64::max);
+    let min_v = boundary_uvs.iter().map(|p| p.v).fold(f64::INFINITY, f64::min);
+    let max_v = boundary_uvs.iter().map(|p| p.v).fold(f64::NEG_INFINITY, f64::max);
+    let u_span = max_u - min_u;
+    let v_span = max_v - min_v;
+
+    // Check if all u values are approximately the same (constant-u seam).
+    if u_span < 0.01 {
+        return true;
+    }
+    // Check u ≈ 0 vs u ≈ 2π (periodic seam at u=0 / u=2π boundary).
+    let periodic_u = boundary_uvs.iter().all(|p|
+        (p.u - 0.0).abs() < 0.01 || (p.u - 2.0 * std::f64::consts::PI).abs() < 0.01
+    );
+    if periodic_u {
+        return true;
+    }
+    // Check if all v values are approximately the same (constant-v seam).
+    if v_span < 0.01 {
+        return true;
+    }
+    // If the boundary spans the full v range [0, π] AND the u range is less
+    // than the full [0, 2π], the boundary is a meridian (great circle through
+    // both poles). This is a single-edge seam — the sphere is still topologically
+    // full, just with a parameterization seam.
+    if v_span > std::f64::consts::PI - 0.01 && u_span < 2.0 * std::f64::consts::PI - 0.01 {
+        return true;
+    }
+    // If the boundary spans the full u range [0, 2π] AND the v range is less
+    // than [0, π], the boundary is a latitude circle. This is a cap, not a full
+    // sphere — but if it's the only face and spans most of the sphere, treat
+    // as a seam too.
+    if u_span > 2.0 * std::f64::consts::PI - 0.01 && v_span < std::f64::consts::PI - 0.01 {
+        return true;
+    }
+    false
 }
 
 /// Full sphere triangulation (no boundary edges) using a simple grid approach.

@@ -16,6 +16,9 @@
 | D. Triangulation | ✅ DONE | — | D1: pre_populate_for_solid уже mandatory в `triangulate_solid_sequential:1263`. D2: deprecation warning в `weld_boundary_edge_vertices_aggressive` (логирует если welded > 0.5% vertices). D3: warning в `fill_boundary_gaps` open-chain fallback (логирует если > 50 triangles). |
 | E. STEP Importer | ✅ DONE | — | E1: 33 теста созданы. E2: прогнаны все NIST + brick + as1 + drill_top. Реальные цифры boundary_pct: nist_cylinder=0.00%, nist_block_with_hole=3.10%, drill_top=41.23% (helical flutes), nist_sphere=31.36% (sphere pole), nist_cone=18.22% (cone apex). Все known issues задокументированы в KNOWN_ISSUES таблице с relaxed threshold. |
 | F. Documentation | ✅ DONE | — | `BREPCAD_DEEP_AUDIT.md` переписан с реальными цифрами после всех исправлений. Честный аудит: «до vs после», известные limitations, метрики успеха. |
+| **G. Geometry polish** | ✅ DONE | `6695706` | G1 RuledSurface::project_point: ✅; G2 OffsetSurface::project_point: ✅; G3 Surface::transform uniform scale radii: ✅ |
+| **H1. Sphere triangulation fix** | ✅ DONE | — | `detect_sphere_seam` → `triangulate_sphere_full_grid`. nist_sphere: 31.36% → **0.00%**; synth_sphere: 30.33% → **0.00%**. Euler=2, watertight=true. |
+| H2. Cone triangulation fix | ⚠️ PARTIAL | — | Cone всё ещё 18.22% boundary — `triangulate_cone_tube_from_boundary` имеет bug в handling meridian seam. Отложено. |
 
 ### Этап A — что сделано
 
