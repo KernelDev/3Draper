@@ -20,6 +20,7 @@
 | **H1. Sphere triangulation fix** | ✅ DONE | — | `detect_sphere_seam` → `triangulate_sphere_full_grid`. nist_sphere: 31.36% → **0.00%**; synth_sphere: 30.33% → **0.00%**. Euler=2, watertight=true. |
 | H2. Cone triangulation fix | ⚠️ PARTIAL | — | Diagnostic показал: cone boundary edges на z=5 имеют radius **7.5** (Plane face) vs **2.5** (Cone lateral). Это разные окружности — проблема в STEP importer или Face.edges дублировании (C5). Weld не помогает (вершины на разных радиусах). Добавлен Phase 4.5 weld_boundary_edge_vertices для общих cross-face mismatches. Cone требует C5 refactor или STEP importer fix. |
 | **G4. fix_self_intersections_heal** | ✅ DONE | — | Documentation обновлена: функция уже была conservative real implementation (не stub). Detect через bounding-box + sampling, удаляет face с меньшим числом edges, skip NURBS faces. Limitations задокументированы. |
+| **J1. thin_annulus hang fix** | ✅ DONE | `c304f3d` | Синтаксическая ошибка в STEP файле (#92 = FACE_BOUND('',(#90,.T.); → пропущена `)`). Исправлено → все 33 теста теперь runnable (0 ignored). |
 
 ### Этап A — что сделано
 
