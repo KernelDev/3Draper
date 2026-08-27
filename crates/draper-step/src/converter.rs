@@ -14895,14 +14895,14 @@ mod diag_tests {
     #[test]
     fn test_3_05_078() { diagnose_file("/home/z/my-project/3Draper/test/3.05.078.stp"); }
     #[test]
-    fn test_zentralstaender() { diagnose_file("/home/z/my-project/test/Zentralstaender.stp"); }
+    fn test_zentralstaender() { diagnose_file("/home/z/my-project/3Draper/test/Zentralstaender.stp"); }
 
     /// Comprehensive surface triangulation diagnostic across ALL test STEP files.
     /// Checks each face for: surface type, boundary edges, triangulation success,
     /// finite vertices, reasonable area, hole handling, and special surface issues.
     #[test]
     fn test_surface_diagnostic() {
-        let test_dir = "/home/z/my-project/3Draper_repo/test/";
+        let test_dir = "/home/z/my-project/3Draper/test/";
         let step_files = [
             "SampleCube.step",
             "3.05.078.stp",
@@ -15355,7 +15355,7 @@ mod diag_tests {
 
     #[test]
     fn test_zentralstaender_face_detail() {
-        let path = "/home/z/my-project/test/Zentralstaender.stp";
+        let path = "/home/z/my-project/3Draper/test/Zentralstaender.stp";
         let content = std::fs::read_to_string(path).unwrap();
         let step = parse_step(&content).unwrap();
         let converter = StepConverter::new(&step);
@@ -15438,7 +15438,7 @@ mod diag_tests {
     /// Examines surface parameters, boundary edges, UV ranges, and apex detection.
     #[test]
     fn test_zentralstaender_cone_detail() {
-        let path = "/home/z/my-project/3Draper_repo/test/Zentralstaender.stp";
+        let path = "/home/z/my-project/3Draper/test/Zentralstaender.stp";
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => { eprintln!("ERROR reading {}: {}", path, e); return; }
@@ -15677,7 +15677,7 @@ mod diag_tests {
     /// non-empty results for all test STEP files.
     #[test]
     fn test_all_files_instance_conversion() {
-        let test_dir = "/home/z/my-project/3Draper_repo/test/";
+        let test_dir = "/home/z/my-project/3Draper/test/";
         let step_files = [
             "brick_thin.stp",
             "brick_thin_hole.stp",
@@ -16249,7 +16249,7 @@ mod step_parser_extension_tests {
     // ─────────────────────────────────────────────────────────────────────
 
     fn load_zentralstaender() -> StepFile {
-        let path = "/home/z/my-project/test/Zentralstaender.stp";
+        let path = "/home/z/my-project/3Draper/test/Zentralstaender.stp";
         let content = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("read {}: {}", path, e));
         parse_step(&content).expect("parse step file")
