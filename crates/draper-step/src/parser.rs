@@ -401,6 +401,21 @@ fn process_line<C: EntityCallback>(
                 *collecting_entity = false;
                 *paren_depth = 0;
                 *in_string = false;
+            } else if line.ends_with(';') && *paren_depth > 0 && !*in_string {
+                // Line ends with ';' but parentheses are unbalanced — this
+                // indicates a syntax error in the STEP file (missing closing
+                // parenthesis). Rather than accumulating all subsequent lines
+                // into the entity buffer (causing O(n²) memory growth and
+                // eventual hang), return an error immediately.
+                return Err(StepParseError::SyntaxError {
+                    line: line_number,
+                    message: format!(
+                        "entity ends with ';' but has unbalanced parentheses (depth={}). \
+                         Likely a missing ')' in this entity: {}",
+                        paren_depth,
+                        entity_buffer.chars().take(200).collect::<String>()
+                    ),
+                });
             }
             return Ok(());
         }
@@ -436,6 +451,17 @@ fn process_line<C: EntityCallback>(
                 *collecting_entity = false;
                 *paren_depth = 0;
                 *in_string = false;
+            } else if line.ends_with(';') && *paren_depth > 0 && !*in_string {
+                // First line of entity ends with ';' but parens unbalanced — syntax error.
+                return Err(StepParseError::SyntaxError {
+                    line: line_number,
+                    message: format!(
+                        "entity ends with ';' but has unbalanced parentheses (depth={}). \
+                         Likely a missing ')' in this entity: {}",
+                        paren_depth,
+                        entity_buffer.chars().take(200).collect::<String>()
+                    ),
+                });
             }
         } else if *collecting_entity {
             // Continuation of a multi-line entity (paren_depth was already 0,
@@ -458,6 +484,17 @@ fn process_line<C: EntityCallback>(
                 *collecting_entity = false;
                 *paren_depth = 0;
                 *in_string = false;
+            } else if line.ends_with(';') && *paren_depth > 0 && !*in_string {
+                // Continuation line ends with ';' but parens still unbalanced — syntax error.
+                return Err(StepParseError::SyntaxError {
+                    line: line_number,
+                    message: format!(
+                        "entity ends with ';' but has unbalanced parentheses (depth={}). \
+                         Likely a missing ')' in this entity: {}",
+                        paren_depth,
+                        entity_buffer.chars().take(200).collect::<String>()
+                    ),
+                });
             }
         }
     }
