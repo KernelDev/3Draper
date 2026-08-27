@@ -1364,6 +1364,41 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
                 stats.cache_hits as f64 / (stats.cache_hits + stats.cache_misses) as f64 * 100.0
             } else { 0.0 },
         );
+
+        // Phase 4.5: Apply weld_boundary_edge_vertices to fix cross-face
+        // vertex mismatches. This handles cases where two faces share an edge
+        // geometrically but produce slightly different vertex positions due
+        // to different discretization paths (e.g., cone lateral face tube
+        // grid vs plane face earcutr triangulation of the same circle).
+        //
+        // We use a tolerance based on the model scale (0.01% of the largest
+        // bounding box dimension) to catch near-misses without merging
+        // genuinely distinct features.
+        if boundary_pct > 1.0 {
+            // Compute model scale from bounding box
+            let (bb_min, bb_max) = mesh.bounding_box();
+            let model_scale = ((bb_max.x - bb_min.x).max(bb_max.y - bb_min.y).max(bb_max.z - bb_min.z)).max(1e-6);
+            let weld_tol = model_scale * 1e-3; // 0.1% of model scale
+            log::info!(
+                "Applying weld_boundary_edge_vertices (model_scale={:.4}, tol={:.2e}) to fix cross-face vertex mismatches",
+                model_scale, weld_tol
+            );
+            crate::watertight::weld_boundary_edge_vertices(&mut mesh, weld_tol);
+            // Re-validate after weld
+            let report2 = crate::watertight::validate_watertight(&mesh, false);
+            let boundary_pct2 = if report2.edge_count > 0 {
+                report2.boundary_edge_count as f64 / report2.edge_count as f64 * 100.0
+            } else {
+                0.0
+            };
+            if boundary_pct2 < boundary_pct {
+                log::info!(
+                    "After weld: {} boundary edges ({:.2}%) — was {} ({:.2}%)",
+                    report2.boundary_edge_count, boundary_pct2,
+                    report.boundary_edge_count, boundary_pct
+                );
+            }
+        }
     } else {
         log::info!("Solid is watertight ✓ ({} interior edges, {} triangles, χ={})",
             report.interior_edge_count, report.triangle_count, report.euler_characteristic);
