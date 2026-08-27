@@ -69,6 +69,8 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     ("as1-oc-214.stp", 30.0),
     // SampleCube.step: 5.26% boundary (1/19 edges — barely above threshold)
     ("SampleCube.step", 10.0),
+    // synthetic/synth_thin_annulus.stp: 9.14% boundary (thin annulus with close radii)
+    ("synthetic/synth_thin_annulus.stp", 15.0),
 ];
 
 fn test_step_file(filename: &str) {
@@ -174,7 +176,6 @@ fn step_regression_synthetic_cone() { test_step_file("synthetic/synth_cone.stp")
 fn step_regression_synthetic_torus() { test_step_file("synthetic/synth_torus.stp"); }
 
 #[test]
-#[ignore = "synth_thin_annulus.stp hangs in triangulation — infinite loop in triangulate_surface_consistent for thin annulus. Needs investigation."]
 fn step_regression_synthetic_thin_annulus() { test_step_file("synthetic/synth_thin_annulus.stp"); }
 
 #[test]

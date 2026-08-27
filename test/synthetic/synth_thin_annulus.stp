@@ -63,7 +63,7 @@ DATA;
 #89 = EDGE_LOOP('',(#87));
 #90 = EDGE_LOOP('',(#88));
 #91 = FACE_OUTER_BOUND('',#89,.T.);
-#92 = FACE_BOUND('',(#90,.T.);
+#92 = FACE_BOUND('',(#90),.T.);
 #93 = ADVANCED_FACE('',(#91,#92),#51,.T.);
 /* Outer cylinder face */
 #94 = ORIENTED_EDGE('',*,*,#70,.F.);
