@@ -21,57 +21,34 @@ const BOUNDARY_PCT_TOLERANCE: f64 = 5.0;
 /// Известные проблемные файлы — для них тест не падает, только warns.
 /// Каждый entry: (filename, expected_max_boundary_pct).
 const KNOWN_ISSUES: &[(&str, f64)] = &[
-    // drill_top.stp: torus + helical flutes, известны 5-15% boundary edges
-    ("drill_top.stp", 50.0),
-    // Zentralstaender.stp: большое industrial CAD, известны 5-15% boundary edges
-    ("Zentralstaender.stp", 50.0),
-    // 3.05.078.stp: complex industrial, known issues
-    ("3.05.078.stp", 50.0),
-    // 8500-02_Vulcan.STEP: huge industrial assembly
-    ("8500-02_Vulcan.STEP", 80.0),
-    // 8394-121_Spit-Fire.STEP: complex industrial
-    ("8394-121_Spit-Fire.STEP", 80.0),
-    // transmission_top.stp: complex topology
-    ("transmission_top.stp", 50.0),
-    // compressor-13920_top.stp: complex industrial
-    ("compressor-13920_top.stp", 50.0),
-    // nested_assembly.stp: assembly with multiple parts
-    ("nested_assembly.stp", 50.0),
-    // gdt_test.stp: GD&T annotations
-    ("gdt_test.stp", 50.0),
-    // brick_thin_round.stp: rounded brick — curved surfaces produce ~16% boundary
-    ("brick_thin_round.stp", 25.0),
-    // nist_complex_surface.stp: complex NURBS surface, ~5% boundary (just over 5% threshold)
-    ("nist_complex_surface.stp", 10.0),
-    // nist_chamfer_block.stp: chamfered block, ~11% boundary (chamfers produce small gaps)
-    ("nist_chamfer_block.stp", 15.0),
-    // nist_cube.stp: ~5.26% boundary (1/19 edges — barely above 5% threshold)
-    ("nist_cube.stp", 10.0),
-    // nist_cone.stp: ~12% boundary (cone bottom circle cross-face mismatch —
-    // improved from 18%→15%→12% after semi_angle sign fix + aggressive weld)
-    ("nist_cone.stp", 20.0),
-    // nist_assembly.stp: ~5.26% boundary (2/38 edges — barely above 5% threshold)
-    ("nist_assembly.stp", 10.0),
-    // NOTE: nist_sphere.stp и synthetic/synth_sphere.stp — теперь PASS с 0.00% boundary
-    // после H1 fix (detect_sphere_seam → triangulate_sphere_full_grid).
-    // synthetic/synth_cone.stp: ~20% boundary (cone apex + cross-face mismatch)
-    ("synthetic/synth_cone.stp", 25.0),
-    // cube_with_void.stp: 80% boundary (8/10 edges — very small solid with topology issues)
-    ("cube_with_void.stp", 90.0),
-    // as1-oc-214_bolt.stp: 30% boundary (helical thread + small features)
-    ("as1-oc-214_bolt.stp", 35.0),
-    // as1-oc-214_nut.stp: 41% boundary (internal thread + small features)
-    ("as1-oc-214_nut.stp", 45.0),
-    // as1-oc-214_rod.stp: 17% boundary (cylinder + end caps)
-    ("as1-oc-214_rod.stp", 20.0),
-    // as1-oc-214_plate.stp: 50% boundary (complex plate with many holes)
-    ("as1-oc-214_plate.stp", 55.0),
-    // as1-oc-214.stp (assembly): 26% boundary (5 solids with complex topology)
-    ("as1-oc-214.stp", 30.0),
-    // SampleCube.step: 5.26% boundary (1/19 edges — barely above threshold)
-    ("SampleCube.step", 10.0),
-    // synthetic/synth_thin_annulus.stp: 9.14% boundary (thin annulus with close radii)
-    ("synthetic/synth_thin_annulus.stp", 15.0),
+    // Industrial files with complex topology — aggressive weld significantly
+    // improved boundary_pct, but some still exceed 5% threshold.
+    ("drill_top.stp", 10.0),           // 3.56% (was 41% before aggressive weld)
+    ("Zentralstaender.stp", 40.0),     // worst solid 36%, overall 0.95%
+    ("3.05.078.stp", 15.0),            // 7.74%
+    ("8500-02_Vulcan.STEP", 80.0),     // large assembly, slow
+    ("8394-121_Spit-Fire.STEP", 20.0), // 5.76%
+    ("transmission_top.stp", 35.0),    // 9.08% overall, worst solid 31%
+    ("compressor-13920_top.stp", 10.0), // 3.74%
+    ("nested_assembly.stp", 10.0),      // 5.26%
+    ("gdt_test.stp", 50.0),             // GD&T annotations
+    // Curved surfaces
+    ("brick_thin_round.stp", 10.0),     // 6.00% (was 16% before aggressive weld)
+    // Barely above 5% threshold
+    ("nist_complex_surface.stp", 10.0), // 5.26%
+    ("nist_chamfer_block.stp", 15.0),   // 11.11%
+    ("nist_cube.stp", 10.0),           // 5.26%
+    ("nist_cone.stp", 20.0),           // 12.44% (was 18% before H2+L1 fixes)
+    ("nist_assembly.stp", 10.0),        // 5.26%
+    ("synthetic/synth_cone.stp", 20.0), // 14.49%
+    ("cube_with_void.stp", 90.0),       // 80% (very small solid)
+    // as1 parts — aggressive weld dramatically improved these
+    ("as1-oc-214_bolt.stp", 10.0),     // 6.50% (was 30%!)
+    ("as1-oc-214_nut.stp", 15.0),      // 11.14% (was 41%!)
+    ("as1-oc-214_plate.stp", 10.0),    // 4.17% (was 50%!)
+    ("as1-oc-214.stp", 30.0),          // 6.58% overall (was 26%!)
+    ("SampleCube.step", 10.0),         // 5.26%
+    ("synthetic/synth_thin_annulus.stp", 15.0), // 9.14%
 ];
 
 fn test_step_file(filename: &str) {
