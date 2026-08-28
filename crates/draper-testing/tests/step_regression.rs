@@ -47,8 +47,8 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     ("nist_chamfer_block.stp", 15.0),
     // nist_cube.stp: ~5.26% boundary (1/19 edges — barely above 5% threshold)
     ("nist_cube.stp", 10.0),
-    // nist_cone.stp: ~15% boundary (cone bottom circle cross-face mismatch —
-    // improved from 18% to 15% after semi_angle sign fix)
+    // nist_cone.stp: ~12% boundary (cone bottom circle cross-face mismatch —
+    // improved from 18%→15%→12% after semi_angle sign fix + aggressive weld)
     ("nist_cone.stp", 20.0),
     // nist_assembly.stp: ~5.26% boundary (2/38 edges — barely above 5% threshold)
     ("nist_assembly.stp", 10.0),

@@ -1378,7 +1378,13 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
             // Compute model scale from bounding box
             let (bb_min, bb_max) = mesh.bounding_box();
             let model_scale = ((bb_max.x - bb_min.x).max(bb_max.y - bb_min.y).max(bb_max.z - bb_min.z)).max(1e-6);
-            let weld_tol = model_scale * 1e-3; // 0.1% of model scale
+            // Use 1% of model scale for weld tolerance — this is aggressive
+            // enough to catch cross-face vertex mismatches (e.g., cone lateral
+            // face vs plane cap face using slightly different angular sampling
+            // for the same circle) while being small enough to not merge
+            // genuinely distinct features (which are typically >5% of model
+            // scale apart).
+            let weld_tol = model_scale * 1e-2; // 1% of model scale
             log::info!(
                 "Applying weld_boundary_edge_vertices (model_scale={:.4}, tol={:.2e}) to fix cross-face vertex mismatches",
                 model_scale, weld_tol
@@ -1397,6 +1403,21 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
                     report2.boundary_edge_count, boundary_pct2,
                     report.boundary_edge_count, boundary_pct
                 );
+            }
+            // If conservative weld didn't fix enough, try aggressive weld
+            // as a last resort. This merges ANY two boundary vertices within
+            // the weld tolerance, even if they share a face ID. This is
+            // necessary when cross-face vertex mismatches are larger than
+            // the conservative weld tolerance (e.g., cone lateral face
+            // has fewer bottom ring points than the Plane cap face due
+            // to dedup in split_boundary_into_rings_with_u).
+            if boundary_pct2 > 1.0 {
+                let aggressive_tol = model_scale * 2e-2; // 2% of model scale
+                log::info!(
+                    "Applying weld_boundary_edge_vertices_aggressive (tol={:.2e}) as fallback",
+                    aggressive_tol
+                );
+                crate::watertight::weld_boundary_edge_vertices_aggressive(&mut mesh, aggressive_tol);
             }
         }
     } else {
