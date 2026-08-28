@@ -10356,7 +10356,10 @@ impl<'a> StepConverter<'a> {
             // Already in radians — use as-is
             half_angle_raw.abs()
         };
-        // Negative semi-angle: apex is opposite to axis direction → flip axis
+        // Negative semi-angle: apex is opposite to axis direction → flip axis.
+        // This preserves the original geometry: with flipped axis, v becomes
+        // negative (going in -Z direction), and r = radius + v * tan(half_angle)
+        // correctly produces a narrowing cone.
         let (axis, u_dir) = if half_angle_raw < 0.0 {
             let flipped_axis = Direction3d::new(-axis.x, -axis.y, -axis.z).unwrap_or(axis);
             let flipped_u_dir = Direction3d::new(-u_dir.x, -u_dir.y, -u_dir.z).unwrap_or(u_dir);
