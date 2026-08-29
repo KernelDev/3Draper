@@ -19,11 +19,13 @@ pub mod boolean;
 pub mod queries;
 pub mod operations;
 pub mod feature_history;
+pub mod edge_store;
 
 pub use entity::*;
 pub use shape::*;
 pub use builder::*;
 pub use traversal::*;
+pub use edge_store::{EdgeStore, EdgeDedupReport};
 pub use validation::{
     ValidationError, validate_solid, validate_solid_readonly, validate_shell,
     Severity, ValidationIssue, TopologyValidationConfig, TopologyValidationReport,

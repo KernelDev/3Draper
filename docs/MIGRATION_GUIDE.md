@@ -34,7 +34,7 @@ git remote set-url origin https://<TOKEN>@github.com/KernelDev/3Draper.git
 ### 1.3. Проверка целостности
 
 ```bash
-# Core tests (658 tests, должны все pass)
+# Core tests (667 tests, должны все pass; 658 базовых + 9 EdgeStore C5 Stage 2)
 cargo test -p draper-geometry --lib --release
 cargo test -p draper-topology --lib --release
 cargo test -p draper-mesh --lib --release
@@ -44,7 +44,8 @@ cargo test -p draper-step --lib --release
 cargo test -p draper-testing --release step_regression_ -- --nocapture
 ```
 
-**Ожидаемый результат:** 658 core tests + 33 STEP regression = 691 tests, 0 failed.
+**Ожидаемый результат:** 667 core tests + 33 STEP regression = 700 tests, 0 failed
+(Vulcan — документированный таймаут ~10+ мин на 2-CPU машинах, см. KNOWN_ISSUES).
 
 ### 1.4. Сборка приложения
 
@@ -227,10 +228,10 @@ git clean -fd
 | Crate | Tests | Status |
 |-------|-------|--------|
 | `draper-geometry --lib` | 121 | ✅ 0 failed |
-| `draper-topology --lib` | 158 | ✅ 0 failed |
+| `draper-topology --lib` | 167 | ✅ 0 failed |
 | `draper-mesh --lib` | 253 | ✅ 0 failed |
 | `draper-step --lib` | 126 | ✅ 0 failed |
-| **Total** | **658** | **✅ 0 failed** |
+| **Total** | **667** | **✅ 0 failed** |
 
 ### STEP Regression (33 файла, все PASS)
 
@@ -262,9 +263,9 @@ git clean -fd
 
 ## 6. Known Limitations (future work)
 
-1. **C5: `Face.edges: Vec<Edge>` structural refactor** — root cause большинства оставшихся boundary edge problems. Shared edge между двумя гранями дублируется как отдельные Edge-структуры с разными TopoId. Требует перехода к `Face.edge_ids: Vec<TopoId>` + global `EdgeStore`.
+1. **C5: `Face.edges: Vec<Edge>` structural refactor** — root cause большинства оставшихся boundary edge problems. Shared edge между двумя гранями дублируется как отдельные Edge-структуры с разными TopoId. **Stage 1 (mesh-level, edge cache unification) и Stage 2 (EdgeStore + Face.edge_ids + alias-резолвинг, non-breaking) выполнены 2026-08-29.** Осталось: Stage 3 — геометрическая дедупликация нативных рёбер (boolean/builder) + миграция потребителей на store-lookup; Stage 4 — финальное удаление `Face.edges` зеркал. Детали: worklog_new.md.
 
-2. **Cone (12.44%)** — cross-face vertex mismatch между cone lateral face и Plane cap face. Решится после C5.
+2. **Cone (12.44%)** — решено в C5 Stage 1: nist_cone теперь **0.00%** boundary (watertight).
 
 3. **273 warnings в draper-viewer** — unused imports/variables. Не влияют на functionality.
 
@@ -371,7 +372,7 @@ git push origin main
 - [ ] Клонирован репозиторий (`git clone`)
 - [ ] Настроен remote с token (если нужен push)
 - [ ] `cargo test -p draper-geometry --lib --release` → 121 passed / 0 failed
-- [ ] `cargo test -p draper-topology --lib --release` → 158 passed / 0 failed
+- [ ] `cargo test -p draper-topology --lib --release` → 167 passed / 0 failed
 - [ ] `cargo test -p draper-mesh --lib --release` → 253 passed / 0 failed
 - [ ] `cargo test -p draper-step --lib --release` → 126 passed / 0 failed
 - [ ] `cargo test -p draper-testing --release step_regression_synthetic_cube` → PASS

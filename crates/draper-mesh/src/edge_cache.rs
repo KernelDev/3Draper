@@ -35,7 +35,7 @@
 //! accumulating at shared boundaries.
 
 use draper_geometry::{Point3d, Point2d, Direction3d, Curve3d, Curve2d, Surface, tolerance::ToleranceContext};
-use draper_topology::{Edge, Solid, TopoId};
+use draper_topology::{Edge, EdgeStore, Solid, TopoId};
 use std::collections::HashMap;
 
 /// Number of mantissa bits to preserve during deterministic rounding.
@@ -1725,6 +1725,31 @@ impl EdgeDiscretizationCache {
                 }
             }
         }
+
+        // C5 Stage 2: register EdgeStore alias mappings so instance TopoIds
+        // resolve to their canonical edge's cache entry.
+        self.register_edge_store_aliases(&solid.edge_store);
+    }
+
+    /// C5 Stage 2: register the solid's [`EdgeStore`] alias mappings.
+    ///
+    /// For every (instance, canonical) pair, `topo_id_to_key[instance]` is
+    /// set to the canonical edge's cache key, so `get(instance_id)` resolves
+    /// to the same entry as `get(canonical_id)` — the cache follows the
+    /// topology-level edge identity established by `Solid::index_edges`.
+    ///
+    /// Idempotent and safe on stale stores: aliases whose canonical edge is
+    /// missing are skipped, and callers already fall back to
+    /// `sample_edge_points` for unregistered ids.
+    pub fn register_edge_store_aliases(&mut self, store: &EdgeStore) {
+        for (instance, canonical) in store.iter_aliases() {
+            if let Some(edge) = store.get_canonical(canonical) {
+                if !edge.degenerate {
+                    let key = EdgeCacheKey::from_edge(edge);
+                    self.topo_id_to_key.insert(instance, key);
+                }
+            }
+        }
     }
 
     /// Pre-populate the cache with all edge discretizations AND UV coordinates
@@ -1776,6 +1801,10 @@ impl EdgeDiscretizationCache {
                 }
             }
         }
+        // C5 Stage 2: register EdgeStore alias mappings so instance TopoIds
+        // resolve to their canonical edge's cache entry.
+        self.register_edge_store_aliases(&solid.edge_store);
+
         // Second pass: compute UVs for each face-edge pair (needed for parallel)
         for face in solid.faces() {
             if let Some(ref surface) = face.surface {

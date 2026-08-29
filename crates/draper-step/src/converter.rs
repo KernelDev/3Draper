@@ -272,6 +272,21 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
         solid.add_void(void_shell);
     }
 
+    // C5 Stage 2: build the canonical edge store — dedup shared STEP edges
+    // (same EDGE_CURVE entity used by two ORIENTED_EDGEs) into a single
+    // canonical TopoId with alias mappings. Per-face `edges` mirrors are left
+    // untouched; `Face.edge_ids` are synced to canonical ids so downstream
+    // consumers (mesh cache, healing, future C5 stages) see unified identity.
+    let dedup_report = solid.index_edges();
+    if dedup_report.deduplicated > 0 {
+        log::debug!(
+            "face_data_list_to_solid: indexed {} edge instances → {} canonical edges ({} shared STEP edges deduplicated)",
+            dedup_report.total_instances,
+            dedup_report.unique_edges,
+            dedup_report.deduplicated
+        );
+    }
+
     (solid, face_id_to_index)
 }
 

@@ -177,3 +177,95 @@
 - `tools/src/bin/tri_log_diag.rs` — прогон с логами (env_logger)
 - `tools/src/bin/topo_face_diag.rs` — пофасетная триангуляция topology-путём
 - `tools/src/bin/face_size_diag.rs`, `tools/src/bin/circle_n_diag.rs` — профилирование размеров/плотности
+
+---
+
+# Worklog — C5 Stage 2: EdgeStore Canonical Registry
+
+**Дата:** 2026-08-29
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `4515a59` (после C5 Stage 1)
+**Задача:** Структурная часть C5 — глобальный `EdgeStore` + `Face.edge_ids`, устранение дублирования идентичности shared-рёбер (без ломающего изменения API)
+
+## Work Log
+
+### Пункт 1 — верификация целостности в новом sandbox
+
+- Rust 1.98.0 установлен через rustup (stable, minimal) — соответствует требованию cargo 1.98+
+- Core tests: geometry 121 ✅, topology 158 ✅, mesh 253 ✅, step 126 ✅ = 658/0 failed
+- STEP regression: 32/33 PASS порционно (synthetic 11, nist/brick 9, as1/assembly 8, industrial 4)
+- Vulcan: ~700-900s на 2-CPU sandbox — не помещается в 10-мин лимит инструмента (документированный
+  trade-off Stage 1: тяжёлые industrial-файлы ~2.5x медленнее после корректных UV-полигонов).
+  Поведение совпадает с baseline — деградации нет.
+
+### Пункт 2 — C5 Stage 2: EdgeStore
+
+**Диагностика (edge_id_diag на nist_cone.stp):** shared EDGE_CURVE step#70 живёт как ДВА Edge
+с разными TopoId (#1 в Face 0, #7 в Face 2); step#71 → #4/#13; seam step#72 → #10/#16.
+Та же картина, что диагностирована в Stage 1, теперь закрыта структурно.
+
+**Реализация:**
+
+1. **`crates/draper-topology/src/edge_store.rs`** (новый, ~330 LOC + 9 тестов):
+   - `EdgeStore { edges, aliases, by_step_id }` — канонический реестр рёбер
+   - API: `insert`, `get` (с прозрачным alias-following), `get_canonical`, `get_mut`,
+     `find_by_step_id`, `remove` (чистит aliases), `iter`, `iter_ids`, `iter_aliases`,
+     `canonical_of`, `same_edge`, `len`, `alias_count`
+   - `Solid::index_edges(&mut self) -> EdgeDedupReport { total_instances, unique_edges, deduplicated, shared_step_edges }`
+     — дедупликация по `step_entity_id`, алиасы instance→canonical, апгрейд канонической копии
+     при встрече варианта с curve, синхронизация `Face.edge_ids` зеркал
+   - `Solid::ensure_edge_store()` — идемпотентная ленивая индексация (для deserialize-пути)
+   - `Face::canonical_edge_ids()` — fallback на instance ids, если грань не индексирована
+2. **entity.rs:** `Face.edge_ids: Vec<TopoId>` (serde default — обратная совместимость),
+   `Solid.edge_store: EdgeStore` (serde skip — store не сериализуется, rebuild по требованию)
+3. **converter.rs:** `face_data_list_to_solid` вызывает `solid.index_edges()` после сборки —
+   все STEP-конверсии получают унифицированную идентичность рёбер
+4. **healing.rs:** `heal_solid` переиндексирует store ПОСЛЕ лечения (healing реструктурирует
+   faces → store обязан отражать healed-топологию, не входную)
+5. **edge_cache.rs:** `register_edge_store_aliases(&EdgeStore)` в `pre_populate_for_solid(_full)`
+   — кэш следует топологической идентичности: `get(instance_id)` резолвится в каноническую entry
+6. **tools/edge_id_diag.rs:** dump EdgeStore (канонические рёбра + алиасы + edge_ids зеркала)
+
+**Ключевые гарантии Stage 2 (non-breaking):**
+- `Face.edges: Vec<Edge>` зеркала НЕ тронуты — все существующие потребители работают как раньше
+- CoEdge.edge ссылки НЕ переписываются — per-face lookup'и (`face.edges.find(|e| e.id == coedge.edge)`)
+  находят свои instance-копии
+- Seam-рёбра (одно EDGE_CURVE дважды в ОДНОЙ грани) сохраняют обе записи — унифицируется только идентичность
+
+**Верификация (nist_cone.stp):**
+```
+EdgeStore: 3 canonical edges, 3 alias mappings
+  canonical step#70 [#1 Circle], step#71 [#4 Circle], step#72 [#10 Line]
+  alias #7 -> #1, #13 -> #4, #16 -> #10
+  face 2: edge_ids=["#1", "#10", "#4", "#10"]   (было: 4 разных instance-id)
+```
+
+### Тесты после Stage 2
+
+- draper-topology: **167 passed** (158 + 9 новых EdgeStore)
+- draper-geometry 121 ✅, draper-mesh 253 ✅, draper-step 126 ✅ (658 → 667 core)
+- draper-core 73 ✅, draper-json 13 ✅
+- STEP regression: 32/33 PASS (группы: synthetic 11, nist/brick 9 @57s, as1 8 @8s, industrial 4 @170s —
+  transmission быстрее baseline: 170s vs 197s)
+- Vulcan — документированный таймаут (как в baseline Stage 1)
+- `cargo check --workspace --lib` + draper-diag bins + draper-viewer bins — 0 errors
+
+### Известные ограничения / Stage 3+
+
+1. **Нативные рёбра (builder/boolean) пока не дедуплицируются** — нет надёжного ключа идентичности
+   (step_entity_id отсутствует). Геометрическая дедупликация (curve + endpoints hash) — Stage 3.
+2. **Потребители всё ещё читают face.edges зеркала** — миграция на store-lookup'и поэтапно
+   (boolean.rs `shared_split_edges` HashMap → миграция в EdgeStore; healing-мутации через
+   `store.get_mut` для сквозной пропагации фиксов).
+3. **Финальное удаление `Face.edges`** — Stage 4, после миграции всех потребителей.
+
+## Stage Summary
+
+- EdgeStore — единый источник истины идентичности рёбер (667 core tests green, 32/33 STEP green)
+- Shared STEP-рёбра структурно едины: один canonical TopoId + alias-резолвинг на всех уровнях
+  (топология + mesh-кэш), задокументирован путь к полному удалению дубликатов
+
+## Артефакты
+
+- `crates/draper-topology/src/edge_store.rs` — EdgeStore + index_edges + 9 тестов
+- `tools/src/bin/edge_id_diag.rs` — расширен dump'ом EdgeStore

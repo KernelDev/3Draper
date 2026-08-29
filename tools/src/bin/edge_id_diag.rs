@@ -16,6 +16,7 @@ fn main() {
     };
     let (solids, _) = extract_solids(&step);
     println!("Solids: {}", solids.len());
+    dump_edge_stores(&solids);
 
     for (si, solid) in solids.iter().enumerate() {
         println!("\n=== Solid #{} ===", si);
@@ -70,5 +71,44 @@ fn main() {
         let total_keys = occurrences.len();
         let shared_keys = shared.len();
         println!("\nTotal distinct edge keys: {}, shared: {}", total_keys, shared_keys);
+    }
+}
+
+/// C5 Stage 2 verification: dump the EdgeStore state (canonical edges +
+/// alias mappings) for each solid, proving that shared STEP edges resolve
+/// to a single canonical TopoId.
+fn dump_edge_stores(solids: &[draper_topology::Solid]) {
+    println!("\n=== EdgeStore (C5 Stage 2) ===");
+    for (si, solid) in solids.iter().enumerate() {
+        let store = &solid.edge_store;
+        println!("Solid #{}: {} canonical edges, {} alias mappings",
+            si, store.len(), store.alias_count());
+        for edge in store.iter() {
+            let key = match edge.step_entity_id {
+                Some(sid) => format!("step#{}", sid),
+                None => format!("topo#{}", edge.id),
+            };
+            let et = edge.curve.as_ref().map(|c| match c {
+                draper_geometry::Curve3d::Line(_) => "Line",
+                draper_geometry::Curve3d::Circle(_) => "Circle",
+                draper_geometry::Curve3d::Nurbs(_) => "Nurbs",
+                _ => "Other",
+            }).unwrap_or("None");
+            println!("  canonical {} [{} {}] range=({:.4},{:.4})",
+                key, edge.id, et, edge.param_range.0, edge.param_range.1);
+        }
+        let mut aliases: Vec<_> = store.iter_aliases().collect();
+        aliases.sort_by_key(|(inst, _)| *inst);
+        for (inst, canon) in &aliases {
+            println!("  alias #{} -> canonical #{}", inst, canon);
+        }
+        // Face edge_ids mirror check
+        for (fi, face) in solid.faces().iter().enumerate() {
+            if !face.edge_ids.is_empty() {
+                let ids: Vec<String> = face.edge_ids.iter()
+                    .map(|id| id.to_string()).collect();
+                println!("  face {}: edge_ids={:?}", fi, ids);
+            }
+        }
     }
 }

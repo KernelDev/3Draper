@@ -26,6 +26,7 @@
 //! ```
 
 use crate::entity::*;
+use crate::edge_store::EdgeStore;
 use draper_geometry::{
     CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
@@ -332,12 +333,18 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
         })
         .collect();
 
-    let healed_solid = Solid {
+    let mut healed_solid = Solid {
         id: solid.id,
         tolerance: solid.tolerance,
         outer_shell,
         inner_shells,
+        edge_store: EdgeStore::new(),
     };
+
+    // C5 Stage 2: healing may restructure faces and their edge mirrors
+    // (stitching, merging, hole filling) — rebuild the edge store so the
+    // canonical registry reflects the HEALED topology, not the input.
+    healed_solid.index_edges();
 
     (healed_solid, report)
 }
@@ -2983,6 +2990,7 @@ mod tests {
             id: TopoId::new(),
             outer_shell: None,
             inner_shells: vec![],
+            edge_store: EdgeStore::new(),
         };
         let params = HealingParams::default();
         let (_healed, report) = heal_solid(&solid, &params);

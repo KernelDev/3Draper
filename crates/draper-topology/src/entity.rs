@@ -296,7 +296,18 @@ pub struct Face {
     pub tolerance: f64,
     /// Edge geometry stored directly in the face for triangulation.
     /// Maps edge ID → Edge object so triangulation can sample edge curves.
+    ///
+    /// C5 note: this per-face mirror duplicates shared edges between adjacent
+    /// faces (different TopoIds for the same topological edge). It is
+    /// scheduled for removal in a later C5 stage — consumers migrate to
+    /// `edge_ids` + the owning solid's `EdgeStore`.
     pub edges: Vec<Edge>,
+    /// Canonical edge references into the owning Solid's `EdgeStore` (C5).
+    /// Populated by `Solid::index_edges` — a shared edge carries the SAME
+    /// id in every incident face. Falls back to `edges[i].id` semantics when
+    /// the face has not been indexed yet.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub edge_ids: Vec<TopoId>,
 }
 
 impl Face {
@@ -310,6 +321,7 @@ impl Face {
             forward: true,
             tolerance: 1e-6,
             edges: Vec::new(),
+            edge_ids: Vec::new(),
         }
     }
 
@@ -323,6 +335,7 @@ impl Face {
             forward: true,
             tolerance: 1e-6,
             edges: Vec::new(),
+            edge_ids: Vec::new(),
         }
     }
 
@@ -341,6 +354,7 @@ impl Face {
             forward: !self.forward,
             tolerance: self.tolerance,
             edges: self.edges.clone(),
+            edge_ids: self.edge_ids.clone(),
         }
     }
 }
@@ -401,7 +415,7 @@ impl Shell {
 // Solid
 // ============================================================
 
-/// A solid — a closed 3D region bounded by shells.
+/// A solid — a closed shell plus zero or more void shells.
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Solid {
@@ -414,6 +428,13 @@ pub struct Solid {
     ///
     /// Audit item 2.2 (2026-07-19): Added for hierarchical tolerant modeling.
     pub tolerance: f64,
+    /// Canonical edge registry (C5 Stage 2) — single source of truth for
+    /// edge identity. Deduplicated by `step_entity_id`; alias mappings let
+    /// any instance TopoId resolve to its canonical shared edge.
+    /// Rebuilt lazily via `Solid::ensure_edge_store` / `Solid::index_edges`;
+    /// not serialized (per-face `edges` mirrors are the serde format).
+    #[cfg_attr(feature = "serde", serde(skip, default = "crate::edge_store::EdgeStore::new"))]
+    pub edge_store: crate::edge_store::EdgeStore,
 }
 
 impl Solid {
@@ -424,6 +445,7 @@ impl Solid {
             outer_shell: Some(shell),
             inner_shells: Vec::new(),
             tolerance,
+            edge_store: crate::edge_store::EdgeStore::new(),
         }
     }
 
