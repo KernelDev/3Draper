@@ -20,35 +20,33 @@ const BOUNDARY_PCT_TOLERANCE: f64 = 5.0;
 
 /// Известные проблемные файлы — для них тест не падает, только warns.
 /// Каждый entry: (filename, expected_max_boundary_pct).
+///
+/// 2026-08-29 (C5 edge-cache unification): пороги ужесточены после фиксов
+/// канонизации направления рёбер в EdgeDiscretizationCache + выравнивания
+/// n для tube-колец (union-find по co-facial same-axis окружностям).
+/// 15 файлов теперь на 0.00% и удалены из таблицы: 3.05.078, as1_nut,
+/// as1_bolt, as1_assembly, brick_thin, brick_thin_hole, drill_top,
+/// nested_assembly, nist_assembly, nist_block_with_hole,
+/// nist_chamfer_block, nist_complex_surface, nist_cone, nist_cube,
+/// SampleCube, Spit-Fire, Zentralstaender.
 const KNOWN_ISSUES: &[(&str, f64)] = &[
-    // Industrial files with complex topology — aggressive weld significantly
-    // improved boundary_pct, but some still exceed 5% threshold.
-    ("drill_top.stp", 10.0),           // 3.56% (was 41% before aggressive weld)
-    ("Zentralstaender.stp", 40.0),     // worst solid 36%, overall 0.95%
-    ("3.05.078.stp", 15.0),            // 7.74%
+    // Industrial files with complex topology — remaining boundary edges are
+    // NURBS CDT fallbacks and cross-face mismatches in fillet regions.
+    ("Zentralstaender.stp", 40.0),     // worst solid 39%, overall 0.94%
     ("8500-02_Vulcan.STEP", 80.0),     // large assembly, slow
-    ("8394-121_Spit-Fire.STEP", 20.0), // 5.76%
-    ("transmission_top.stp", 35.0),    // 9.08% overall, worst solid 31%
-    ("compressor-13920_top.stp", 10.0), // 3.74%
-    ("nested_assembly.stp", 10.0),      // 5.26%
+    ("transmission_top.stp", 8.0),     // 6.03% overall (was 9.08%)
+    ("compressor-13920_top.stp", 10.0), // 6.22%
     ("gdt_test.stp", 50.0),             // GD&T annotations
     // Curved surfaces
-    ("brick_thin_round.stp", 10.0),     // 6.00% (was 16% before aggressive weld)
-    // Barely above 5% threshold
-    ("nist_complex_surface.stp", 10.0), // 5.26%
-    ("nist_chamfer_block.stp", 15.0),   // 11.11%
-    ("nist_cube.stp", 10.0),           // 5.26%
-    ("nist_cone.stp", 20.0),           // 12.44% (was 18% before H2+L1 fixes)
-    ("nist_assembly.stp", 10.0),        // 5.26%
-    ("synthetic/synth_cone.stp", 20.0), // 14.49%
+    ("brick_thin_round.stp", 8.0),     // 6.17%
+    // as1 parts
+    ("as1-oc-214_plate.stp", 8.0),     // 6.93%
+    ("as1-oc-214_rod.stp", 8.0),       // 4.00% (NURBS CDT strip fallback — see worklog)
+    // Seam-line geometry bug: STEP LINE direction inconsistent with vertices
+    // (vertical line + slanted vertex pair) — needs junction-level snap.
+    ("synthetic/synth_cone.stp", 18.0), // 15.33%
+    ("synthetic/synth_thin_annulus.stp", 12.0), // 9.14%
     ("cube_with_void.stp", 90.0),       // 80% (very small solid)
-    // as1 parts — aggressive weld dramatically improved these
-    ("as1-oc-214_bolt.stp", 10.0),     // 6.50% (was 30%!)
-    ("as1-oc-214_nut.stp", 15.0),      // 11.14% (was 41%!)
-    ("as1-oc-214_plate.stp", 10.0),    // 4.17% (was 50%!)
-    ("as1-oc-214.stp", 30.0),          // 6.58% overall (was 26%!)
-    ("SampleCube.step", 10.0),         // 5.26%
-    ("synthetic/synth_thin_annulus.stp", 15.0), // 9.14%
 ];
 
 fn test_step_file(filename: &str) {

@@ -8215,6 +8215,16 @@ impl<'a> StepConverter<'a> {
                         let mut edge = TopoEdge::new(curve, (t1_proj, t2_proj));
                         edge.vertex_start = Some(draper_topology::TopoId::new());
                         edge.vertex_end = Some(draper_topology::TopoId::new());
+                        // C5 fix: LINE edges must carry the same identity metadata
+                        // as circle/other-curve edges — step_entity_id for the
+                        // unified edge cache key (two faces sharing this EDGE_CURVE
+                        // must resolve to ONE cache entry) and the authoritative
+                        // VERTEX_POINT coordinates for bit-identical endpoints.
+                        // Previously only the Circle/generic branches set these,
+                        // leaving shared LINE edges duplicated in the cache.
+                        edge.start_vertex_point = Some(deterministic_round_point(*p1));
+                        edge.end_vertex_point = Some(deterministic_round_point(*p2));
+                        edge.step_entity_id = Some(edge_curve_id);
                         edge
                     } else {
                         // Override with line through vertices
@@ -8236,6 +8246,9 @@ impl<'a> StepConverter<'a> {
                             );
                             edge.vertex_start = Some(draper_topology::TopoId::new());
                             edge.vertex_end = Some(draper_topology::TopoId::new());
+                            edge.start_vertex_point = Some(deterministic_round_point(*p1));
+                            edge.end_vertex_point = Some(deterministic_round_point(*p2));
+                            edge.step_entity_id = Some(edge_curve_id);
                             edge
                         } else {
                             // Degenerate (vertices coincide) — fallback to original line
@@ -8245,6 +8258,9 @@ impl<'a> StepConverter<'a> {
                             let mut edge = TopoEdge::new(curve, (t1_proj, t2_proj));
                             edge.vertex_start = Some(draper_topology::TopoId::new());
                             edge.vertex_end = Some(draper_topology::TopoId::new());
+                            edge.start_vertex_point = Some(deterministic_round_point(*p1));
+                            edge.end_vertex_point = Some(deterministic_round_point(*p2));
+                            edge.step_entity_id = Some(edge_curve_id);
                             edge
                         }
                     }

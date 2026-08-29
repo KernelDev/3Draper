@@ -114,3 +114,66 @@
 - `tools/src/bin/cone_diag.rs` — cone diagnostic tool
 - `tools/src/bin/annulus_diag.rs` — annulus diagnostic tool
 - `examples/vp_graphs/` — 10 VP graph JSON files + README
+
+---
+
+# Worklog — C5 Stage 1: Edge Cache Unification
+
+**Дата:** 2026-08-29
+**Аудитор:** Main Agent (Super Z)
+**Baseline:** commit `77663ca` (после миграции в новый sandbox)
+**Задача:** Начать C5 (структурный рефакторинг `Face.edges` → единый источник истины для рёбер) — устранить корневую причину cross-face vertex mismatch
+
+## Work Log
+
+### Диагностика (инструменты: edge_id_diag, cache_unify_diag, tri_log_diag, topo_face_diag)
+
+- `edge_id_diag`: подтвердил — shared EDGE_CURVE (#70/#71 в nist_cone) даёт ДВЕ копии Edge с разными TopoId; LINE-рёбра вообще без `step_entity_id` (ветка Line в `resolve_edge_curve` не проставляла метаданные)
+- `cache_unify_diag`: кэш дедуплицирует точки shared-окружностей корректно (bit-identical), но `triangulate_cone_tube_from_boundary` отбрасывал кэшированное верхнее кольцо (`use_cached_top=false` при n₁≠n₂) и генерировал аналитические точки → трещина по всей окружности
+- Причина n₁≠n₂: `AxisKey::from_circle` ключовал по (center, normal) — два кольца конуса (z=0 r=5, z=5 r=2.5) попадали в РАЗНЫЕ группы выравнивания → разный n (52 vs 36)
+
+### Фиксы
+
+1. **converter.rs (Line-ветка)**: `step_entity_id` + `start_vertex_point`/`end_vertex_point` теперь проставляются во всех трёх подветках LINE-рёбер (раньше только Circle/generic) — shared LINE-рёбра получают один ключ кэша
+2. **edge_cache.rs (AxisKey)**: ключ = каноническая осевая ЛИНИЯ (ближайшая к началу координат точка + каноническое направление), а не (center, normal) — разнонаправленные нормали торцов и центры вдоль оси больше не разбивают группы
+3. **edge_cache.rs (канонизация направления)**: `discretize_edge`, `pre_populate_for_solid`, `pre_populate_for_solid_full` дискретизируют FORWARD-копию ребра (`edge.reversed()` при param_range.0 > param_range.1) — общая запись кэша не наследует произвольное направление первой копии. Раньше XOR-формула реверса в `collect_face_boundary_from_cache` давала ДВОЙНОЙ реверс → зигзаг-полигоны (существовало всегда; nist_cube имел 1 boundary edge из-за этого)
+4. **edge_cache.rs (union-find выравнивание n)**: новый `pre_compute_circle_n_face_groups` — union-find по правилу «co-facial same-axis окружности», ссылается только на Cone/Cylinder грани (tube-grid требует равенства колец; торы — нет). Заменяет глобальный `pre_compute_circle_axis_n` (который инфлировал n всем окружностям оси — Vulcan ~1.5× медленнее)
+
+### Результаты (33 STEP regression, все PASS)
+
+| Файл | До | После |
+|------|-----|-------|
+| nist_cone | 12.44% | **0.00%** |
+| as1-oc-214_nut | 10.95% | **0.00%** |
+| nist_chamfer_block | 11.11% | **0.00%** |
+| 3.05.078 | 7.74% | **0.00%** |
+| nist_cube / SampleCube / nist_assembly / nested_assembly | 5.26% | **0.00%** |
+| nist_block_with_hole | 3.10% | **0.00%** |
+| brick_thin / brick_thin_hole | 0.53-0.55% | **0.00%** |
+| as1-oc-214 (assembly) | 6.99% | **2.73%** |
+| as1_bolt | 6.57% | **1.61%** |
+| Spit-Fire | 5.76% | **3.29%** |
+| transmission | 9.08% | **6.74%** |
+| drill_top | 3.24% | **3.27%** (≈) |
+| compressor | 3.74% | 6.28% (регрессия, NURBS CDT) |
+| as1_rod | 0.00% | 4.96% (регрессия: NURBS CDT strip-fallback вместо earcutr; pre-weld mesh теперь правильнее — 512 vs 251 треугольников) |
+| synth_cone | 14.49% | 14.83% (≈; отдельный баг геометрии швов — см. ниже) |
+
+- **15 файлов на идеальных 0.00%** (было 8)
+- KNOWN_ISSUES ужесточены: 23 → 11 записей (защита от регрессий)
+- 658 core tests — 0 failed
+
+### Известные trade-offs (follow-up)
+
+1. **Производительность на тяжёлых industrial-файлах**: transmission 61s → 161s, Vulcan ~376s → ~700-900s (не помещается в 10-мин лимит инструмента; порог 80% проходит по данным per-solid < 16%). Причина: корректные направления обхода → правильные UV-полигоны → CDT вставляет Steiner-точки по всей области (раньше зигзаг-полигоны давали разреженный/недотриангулированный меш). Оптимизация: плотность Steiner для торусов/NURBS в parametric_domain.rs
+2. **synth_cone швы**: STEP LINE #42 вертикальна, а вершины шва наклонные ((5,0,0)→(3,0,10)) — конвертер сохраняет линию (угол < 30°), точки шва не совпадают с окружностями. Нужен junction-level snap (проверка «какой кандидат лежит на соседней окружности»)
+3. **NURBS CDT strip-fallback** (as1_rod): u_deg=1/v_deg=3 NURBS грани падают из CDT в strip — существовало и раньше (earcutr-fallback), теперь другая ветка fallback
+4. Полный C5 (Face.edge_ids + EdgeStore в Solid) — следующий этап; текущая работа закрывает mesh-level корень проблемы (единый источник дискретизации рёбер)
+
+### Артефакты
+
+- `tools/src/bin/edge_id_diag.rs` — идентичность рёбер по граням (step_entity_id / TopoId)
+- `tools/src/bin/cache_unify_diag.rs` — проверка унификации кэша для shared-рёбер
+- `tools/src/bin/tri_log_diag.rs` — прогон с логами (env_logger)
+- `tools/src/bin/topo_face_diag.rs` — пофасетная триангуляция topology-путём
+- `tools/src/bin/face_size_diag.rs`, `tools/src/bin/circle_n_diag.rs` — профилирование размеров/плотности

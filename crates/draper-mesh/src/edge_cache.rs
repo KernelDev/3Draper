@@ -140,17 +140,34 @@ pub fn nurbs_surface_hash(nurbs: &draper_geometry::NurbsSurface) -> u64 {
     hasher.finish()
 }
 
-/// Canonical key identifying a circle's axis (origin + direction), quantized
-/// so that two circles on the "same" axis (within tolerance) map to the same
-/// key. Used by `pre_compute_circle_axis_n` to enforce identical sample
+/// Canonical key identifying a circle's axis LINE, quantized so that two
+/// circles on the "same" axis (within tolerance) map to the same key.
+/// Used by `pre_compute_circle_axis_n` to enforce identical sample
 /// counts across all circles on a shared axis — critical for watertightness
 /// of cone/cylinder tube faces where bottom and top rings come from DIFFERENT
 /// CIRCLE entities with DIFFERENT radii.
+///
+/// C5 fix: the key identifies the axis LINE, not the (center, normal) pair.
+/// Two circles of a cone tube share the axis but have DIFFERENT centers
+/// (offset along the axis) and possibly OPPOSITE normals (cap planes face
+/// away from each other). Keying on (center, normal) splits them into
+/// separate groups, so each got its own radius-dependent sample count
+/// (e.g., n=52 for R=5 vs n=36 for R=2.5) — the tube triangulation then
+/// discarded the cached top ring (`use_cached_top=false`) and generated
+/// analytic vertices that no longer matched the cap face's cached ring →
+/// boundary-edge cracks around the shared circle (nist_cone 12.44%).
+///
+/// Canonicalization:
+/// 1. Direction: flip `normal` so its first non-zero component is positive
+///    (antiparallel normals of the two cap circles unify).
+/// 2. Point: the point on the axis line closest to the coordinate origin
+///    (`center - dot(center, dir)·dir`) — identical for every circle on the
+///    line regardless of where along the axis its center sits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct AxisKey {
-    ox: i64,
-    oy: i64,
-    oz: i64,
+    px: i64,
+    py: i64,
+    pz: i64,
     dx: i64,
     dy: i64,
     dz: i64,
@@ -158,15 +175,32 @@ struct AxisKey {
 
 impl AxisKey {
     fn from_circle(c: &draper_geometry::Circle) -> Self {
-        // Quantize origin to 1e-4 mm grid
-        let ox = (c.center.x / AXIS_ORIGIN_QUANT).round() as i64;
-        let oy = (c.center.y / AXIS_ORIGIN_QUANT).round() as i64;
-        let oz = (c.center.z / AXIS_ORIGIN_QUANT).round() as i64;
-        // Quantize direction cosines to 1e-4 grid
-        let dx = (c.normal.x / AXIS_DIR_QUANT).round() as i64;
-        let dy = (c.normal.y / AXIS_DIR_QUANT).round() as i64;
-        let dz = (c.normal.z / AXIS_DIR_QUANT).round() as i64;
-        Self { ox, oy, oz, dx, dy, dz }
+        // 1. Canonical direction: flip so the first non-zero component is > 0.
+        let (nx, ny, nz) = (c.normal.x, c.normal.y, c.normal.z);
+        let flip = if nx.abs() > 1e-12 {
+            nx < 0.0
+        } else if ny.abs() > 1e-12 {
+            ny < 0.0
+        } else {
+            nz < 0.0
+        };
+        let (dx, dy, dz) = if flip { (-nx, -ny, -nz) } else { (nx, ny, nz) };
+
+        // 2. Canonical point on the axis line: closest point to the origin.
+        //    center - dot(center, dir) * dir
+        let dot = c.center.x * dx + c.center.y * dy + c.center.z * dz;
+        let px = c.center.x - dot * dx;
+        let py = c.center.y - dot * dy;
+        let pz = c.center.z - dot * dz;
+
+        // Quantize point to 1e-4 grid, direction cosines to 1e-4 grid
+        let qx = (px / AXIS_ORIGIN_QUANT).round() as i64;
+        let qy = (py / AXIS_ORIGIN_QUANT).round() as i64;
+        let qz = (pz / AXIS_ORIGIN_QUANT).round() as i64;
+        let qdx = (dx / AXIS_DIR_QUANT).round() as i64;
+        let qdy = (dy / AXIS_DIR_QUANT).round() as i64;
+        let qdz = (dz / AXIS_DIR_QUANT).round() as i64;
+        Self { px: qx, py: qy, pz: qz, dx: qdx, dy: qdy, dz: qdz }
     }
 }
 
@@ -386,6 +420,24 @@ pub struct EdgeDiscretizationCache {
     /// tube faces).
     circle_axis_n: HashMap<AxisKey, usize>,
 
+    /// Per-circle-GROUP sample count (C5: face-based union-find alignment).
+    ///
+    /// Key: the circle's cache key (step_entity_id or TopoId). Value: the MAX n
+    /// across the circle's alignment GROUP. A group is the transitive closure
+    /// of "co-facial same-axis" links: circles that appear in the SAME face's
+    /// edge list on the SAME axis line are linked (tube rings of a cone/cylinder
+    /// lateral face); circles shared between faces link their groups (stacked
+    /// cones sharing a middle ring).
+    ///
+    /// Unlike `circle_axis_n` (which aligns ALL circles on an axis — inflating
+    /// sample counts for independent features on the same axis and slowing
+    /// large industrial files ~1.5×), this only aligns circles that actually
+    /// need matching counts for tube-face watertightness.
+    ///
+    /// Computed by `pre_compute_circle_n_face_groups()` which must be called
+    /// before triangulation starts.
+    circle_group_n: HashMap<EdgeCacheKey, usize>,
+
     /// Per-NURBS-surface shared interior refinement grid.
     ///
     /// Key: `nurbs_surface_hash()` of the surface. Value: a list of UV
@@ -496,6 +548,7 @@ impl EdgeDiscretizationCache {
             max_samples: 64,
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
@@ -514,6 +567,7 @@ impl EdgeDiscretizationCache {
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
@@ -532,6 +586,7 @@ impl EdgeDiscretizationCache {
             max_samples: max_samples.max(4),
             chord_tolerance_override: None,
             circle_axis_n: HashMap::new(),
+            circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
@@ -569,7 +624,22 @@ impl EdgeDiscretizationCache {
         if !self.entries.contains_key(&key) {
             self.cache_misses += 1;
 
-            let (mut points_3d, params) = self.adaptive_discretize(edge, n_samples_hint);
+            // C5 fix: canonicalize the entry direction. The edge copy may carry
+            // a BAKED-REVERSED param_range (STEP ORIENTED_EDGE with .F. orientation
+            // bakes the reversal into the Edge via `reversed()`). The cache entry
+            // is SHARED between all copies of this edge (keyed by step_entity_id),
+            // so it must not inherit an arbitrary copy's traversal direction.
+            // Discretize in the canonical FORWARD direction (t: min → max) —
+            // same normalization `discretize_step_edge` already applies.
+            // Consumers (`collect_face_boundary_from_cache` etc.) use the XOR
+            // formula `!coedge.forward != (param_range.0 > param_range.1)` which
+            // is only correct when entries are canonically forward.
+            let forward_edge = if edge.param_range.0 > edge.param_range.1 {
+                edge.reversed()
+            } else {
+                edge.clone()
+            };
+            let (mut points_3d, params) = self.adaptive_discretize(&forward_edge, n_samples_hint);
 
             // Apply deterministic rounding to all 3D points
             for p in &mut points_3d {
@@ -898,6 +968,161 @@ impl EdgeDiscretizationCache {
         self.circle_axis_n.get(&key).copied()
     }
 
+    /// C5: Pre-compute per-group circle sample counts using FACE-based
+    /// union-find alignment.
+    ///
+    /// Two circles need IDENTICAL sample counts iff their discretizations must
+    /// match for watertightness — i.e., they are the two boundary rings of the
+    /// same tube face (cone/cylinder lateral). Linking rules:
+    ///
+    /// 1. **Co-facial same-axis**: circles appearing in the SAME face's edge
+    ///    list on the SAME axis line (canonical `AxisKey`) are linked. This
+    ///    covers tube rings (cone r=5 @ z=0 + r=2.5 @ z=5), including
+    ///    half-arc tube faces split at a seam.
+    /// 2. **Transitivity through shared edges**: circles shared between faces
+    ///    (stacked cones sharing a middle ring) link their groups, so the
+    ///    whole connected component converges to one n.
+    ///
+    /// Circles NOT in any multi-circle group keep their own per-radius n —
+    /// unlike `pre_compute_circle_axis_n`, which aligns ALL circles on an
+    /// axis (correct but slow: independent features on a common axis, e.g.
+    /// stacked bolt shafts in industrial assemblies, get inflated to the
+    /// axis max, ~1.5× runtime on 8500-02_Vulcan.STEP).
+    ///
+    /// Must be called before triangulation starts (from
+    /// `pre_populate_for_solid` / `pre_populate_for_solid_full`).
+    pub fn pre_compute_circle_n_face_groups(&mut self, solid: &Solid) {
+        let chord_tol = self.effective_chord_tolerance();
+
+        // ---------- Union-Find over circle cache keys ----------
+        struct DisjointSet {
+            parent: Vec<usize>,
+        }
+        impl DisjointSet {
+            fn new(n: usize) -> Self {
+                Self { parent: (0..n).collect() }
+            }
+            fn find(&mut self, x: usize) -> usize {
+                let mut root = x;
+                while self.parent[root] != root {
+                    root = self.parent[root];
+                }
+                // Path compression
+                let mut cur = x;
+                while self.parent[cur] != root {
+                    let next = self.parent[cur];
+                    self.parent[cur] = root;
+                    cur = next;
+                }
+                root
+            }
+            fn union(&mut self, a: usize, b: usize) {
+                let ra = self.find(a);
+                let rb = self.find(b);
+                if ra != rb {
+                    self.parent[rb] = ra;
+                }
+            }
+        }
+
+        // Collect all distinct circle edges (by cache key) with their radius + axis.
+        // node_meta: (cache_key, radius, axis_key)
+        let mut node_index: HashMap<EdgeCacheKey, usize> = HashMap::new();
+        let mut node_meta: Vec<(EdgeCacheKey, f64, AxisKey)> = Vec::new();
+        for face in solid.faces() {
+            for edge in &face.edges {
+                if edge.degenerate { continue; }
+                let circle = match &edge.curve {
+                    Some(Curve3d::Circle(c)) => c,
+                    _ => continue,
+                };
+                let key = EdgeCacheKey::from_edge(edge);
+                if !node_index.contains_key(&key) {
+                    node_index.insert(key, node_meta.len());
+                    node_meta.push((key, circle.radius, AxisKey::from_circle(circle)));
+                }
+            }
+        }
+
+        let mut dsu = DisjointSet::new(node_meta.len());
+
+        // Rule 1: co-facial same-axis circles are linked — but ONLY for
+        // surfaces whose triangulation requires ring-count matching: the
+        // Cone/Cylinder tube-grid paths (`split_boundary_into_rings_with_u`
+        // + `use_cached_top`). Torus faces also contain same-axis circle
+        // pairs (inner/outer equator) but their grid triangulation does NOT
+        // need equal counts — linking them inflates sample counts ~3× on
+        // fillet-heavy industrial models (8500-02_Vulcan.STEP).
+        for face in solid.faces() {
+            let is_tube_surface = matches!(
+                face.surface,
+                Some(Surface::Cylinder(_)) | Some(Surface::Cone(_))
+            );
+            if !is_tube_surface {
+                continue;
+            }
+            // (axis_key, node ids in this face on that axis)
+            let mut face_axis_members: HashMap<AxisKey, Vec<usize>> = HashMap::new();
+            for edge in &face.edges {
+                if edge.degenerate { continue; }
+                let circle = match &edge.curve {
+                    Some(Curve3d::Circle(c)) => c,
+                    _ => continue,
+                };
+                let key = EdgeCacheKey::from_edge(edge);
+                // Edges in face.edges always have an entry (inserted above)
+                if let Some(&idx) = node_index.get(&key) {
+                    face_axis_members
+                        .entry(AxisKey::from_circle(circle))
+                        .or_default()
+                        .push(idx);
+                }
+            }
+            for (_, members) in face_axis_members {
+                if members.len() >= 2 {
+                    for w in members.windows(2) {
+                        dsu.union(w[0], w[1]);
+                    }
+                }
+            }
+        }
+
+        // Per-component max n.
+        let mut comp_n: HashMap<usize, usize> = HashMap::new();
+        for (idx, (_, radius, _)) in node_meta.iter().enumerate() {
+            let root = dsu.find(idx);
+            let n = compute_circle_n(*radius, chord_tol, self.max_samples);
+            let entry = comp_n.entry(root).or_insert(0);
+            if n > *entry {
+                *entry = n;
+            }
+        }
+
+        // Fill the per-key map. Only circles that are actually in a
+        // multi-circle group get an override — singletons fall through to
+        // the per-radius computation in `adaptive_discretize`.
+        let mut comp_size: HashMap<usize, usize> = HashMap::new();
+        for idx in 0..node_meta.len() {
+            *comp_size.entry(dsu.find(idx)).or_insert(0) += 1;
+        }
+        for (idx, (key, _, _)) in node_meta.iter().enumerate() {
+            let root = dsu.find(idx);
+            if comp_size.get(&root).copied().unwrap_or(0) >= 2 {
+                if let Some(&n) = comp_n.get(&root) {
+                    self.circle_group_n.insert(*key, n);
+                }
+            }
+        }
+    }
+
+    /// Look up the face-group-aligned n for a circle edge (C5).
+    /// Returns `None` if the edge's circle is not part of a multi-circle
+    /// alignment group.
+    fn circle_group_n_for(&self, edge: &Edge) -> Option<usize> {
+        let key = EdgeCacheKey::from_edge(edge);
+        self.circle_group_n.get(&key).copied()
+    }
+
     /// Pre-compute a shared interior refinement grid for a single NURBS surface.
     ///
     /// The grid covers the FULL surface parameter range (u_min..u_max,
@@ -1190,21 +1415,24 @@ impl EdgeDiscretizationCache {
         // which may break watertightness for multi-radius tube faces. Therefore
         // `pre_compute_circle_axis_n` MUST be called before triangulation.
         if let Curve3d::Circle(ref circle) = curve {
-            // Determine n: prefer pre-computed per-axis value, else compute
-            // from chord tolerance and this circle's radius.
-            let n = if let Some(n_pre) = self.circle_n_for(circle) {
+            // Determine n: prefer the C5 face-group-aligned value (tube rings),
+            // then the legacy per-axis value, else compute from chord tolerance
+            // and this circle's radius.
+            let hint_floor = n_samples_hint.max(8).min(self.max_samples);
+            let n = if let Some(n_group) = self.circle_group_n_for(edge) {
+                // C5: aligned with the other rings of this tube face.
+                // NOT scaled (see comment above).
+                n_group.max(hint_floor)
+            } else if let Some(n_pre) = self.circle_n_for(circle) {
                 // Use the pre-computed (axis-group max) n. Also enforce a
                 // minimum based on the hint so we don't UNDER-tessellate when
                 // the pre-compute was done with a stale tolerance.
-                n_pre.max(n_samples_hint.max(8).min(self.max_samples))
+                n_pre.max(hint_floor)
             } else {
                 // Fallback: per-circle n from chord tolerance
                 let chord_tol = self.effective_chord_tolerance();
                 let n_from_tol = compute_circle_n(circle.radius, chord_tol, self.max_samples);
-                // Use the MAX of (n_from_tol, n_samples_hint) so the hint
-                // acts as a floor. This is important for the native path
-                // where pre_compute_circle_axis_n may not have been called.
-                n_from_tol.max(n_samples_hint.max(8).min(self.max_samples))
+                n_from_tol.max(hint_floor)
             };
             // Final clamp to max_samples
             let n = n.min(self.max_samples).max(2);
@@ -1220,7 +1448,17 @@ impl EdgeDiscretizationCache {
         }
 
         // For other curve types (NURBS, etc.), keep the adaptive refinement.
-        // Start with uniformly spaced points based on hint
+        // Start with uniformly spaced points based on hint.
+        //
+        // C5 perf fix: scale the initial sample count by the fraction of the
+        // curve's natural param range that this edge actually covers. STEP
+        // files from some exporters split boundary curves into MANY tiny
+        // segments (e.g., Vulcan's torus fillets: 32 arcs + 32 "connector"
+        // NURBS edges spanning 0.0002 of the param range). Giving each tiny
+        // segment the full hint (20) points over-samples the boundary ~10×
+        // and inflates industrial meshes. The adaptive chord refinement below
+        // still subdivides up when the geometry actually requires it, so
+        // quality is preserved; only genuinely tiny edges stay coarse.
         let n_initial = n_samples_hint.min(self.max_samples).max(2);
         let mut t_params: Vec<f64> = vec![0.0]; // Normalized parameter [0, 1]
         let mut points: Vec<Point3d> = vec![curve.point_at(t_min)];
@@ -1443,18 +1681,13 @@ impl EdgeDiscretizationCache {
     /// computed all UVs eagerly. Lazy UV computation saves ~30% of time for
     /// models with many faces per edge.
     pub fn pre_populate_for_solid(&mut self, solid: &Solid, default_n_samples: usize) {
-        // Phase 0a: Pre-compute per-axis-group n for circles. This MUST happen
-        // before any discretization so that the Circle branch in
-        // adaptive_discretize can look up the pre-computed n and ensure all
-        // circles on the same axis get the same sample count (critical for
-        // watertightness of cone/cylinder tube faces with multi-radius rings).
-        let all_edges: Vec<&Edge> = solid
-            .faces()
-            .iter()
-            .flat_map(|f| f.edges.iter())
-            .filter(|e| !e.degenerate)
-            .collect();
-        self.pre_compute_circle_axis_n(all_edges);
+        // Phase 0a (C5): Pre-compute per-GROUP n for circles using face-based
+        // union-find alignment. This MUST happen before any discretization so
+        // that the Circle branch in adaptive_discretize can look up the
+        // pre-computed n and ensure tube-ring circles (co-facial, same axis)
+        // get the same sample count — critical for watertightness of
+        // cone/cylinder tube faces with multi-radius rings.
+        self.pre_compute_circle_n_face_groups(solid);
 
         // Phase 0b: Pre-compute shared NURBS refinement grids (MS-2).
         // For each unique NURBS surface in the solid, generate a chord-error-
@@ -1473,7 +1706,13 @@ impl EdgeDiscretizationCache {
                 let key = EdgeCacheKey::from_edge(edge);
                 self.topo_id_to_key.insert(edge.id, key);
                 if !self.entries.contains_key(&key) {
-                    let (mut points_3d, params) = self.adaptive_discretize(edge, default_n_samples);
+                    // C5 fix: canonicalize direction (see discretize_edge).
+                    let forward_edge = if edge.param_range.0 > edge.param_range.1 {
+                        edge.reversed()
+                    } else {
+                        edge.clone()
+                    };
+                    let (mut points_3d, params) = self.adaptive_discretize(&forward_edge, default_n_samples);
                     // Apply deterministic rounding
                     for p in &mut points_3d {
                         *p = deterministic_round_point(*p);
@@ -1498,15 +1737,9 @@ impl EdgeDiscretizationCache {
     /// Use `pre_populate_for_solid` instead for sequential triangulation
     /// where UV can be computed lazily.
     pub fn pre_populate_for_solid_full(&mut self, solid: &Solid, default_n_samples: usize) {
-        // Phase 0a: Pre-compute per-axis-group n for circles (see
-        // pre_populate_for_solid for rationale).
-        let all_edges: Vec<&Edge> = solid
-            .faces()
-            .iter()
-            .flat_map(|f| f.edges.iter())
-            .filter(|e| !e.degenerate)
-            .collect();
-        self.pre_compute_circle_axis_n(all_edges);
+        // Phase 0a (C5): Pre-compute per-GROUP n for circles (face-based
+        // union-find alignment — see pre_compute_circle_n_face_groups).
+        self.pre_compute_circle_n_face_groups(solid);
 
         // Phase 0b: Pre-compute shared NURBS refinement grids (MS-2).
         for face in solid.faces() {
@@ -1523,7 +1756,13 @@ impl EdgeDiscretizationCache {
                     let key = EdgeCacheKey::from_edge(edge);
                     self.topo_id_to_key.insert(edge.id, key);
                     if !self.entries.contains_key(&key) {
-                        let (mut points_3d, params) = self.adaptive_discretize(edge, default_n_samples);
+                        // C5 fix: canonicalize direction (see discretize_edge).
+                        let forward_edge = if edge.param_range.0 > edge.param_range.1 {
+                            edge.reversed()
+                        } else {
+                            edge.clone()
+                        };
+                        let (mut points_3d, params) = self.adaptive_discretize(&forward_edge, default_n_samples);
                         // Apply deterministic rounding
                         for p in &mut points_3d {
                             *p = deterministic_round_point(*p);

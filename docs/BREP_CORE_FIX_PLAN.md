@@ -18,7 +18,7 @@
 | F. Documentation | ✅ DONE | — | `BREPCAD_DEEP_AUDIT.md` переписан с реальными цифрами после всех исправлений. Честный аудит: «до vs после», известные limitations, метрики успеха. |
 | **G. Geometry polish** | ✅ DONE | `6695706` | G1 RuledSurface::project_point: ✅; G2 OffsetSurface::project_point: ✅; G3 Surface::transform uniform scale radii: ✅ |
 | **H1. Sphere triangulation fix** | ✅ DONE | — | `detect_sphere_seam` → `triangulate_sphere_full_grid`. nist_sphere: 31.36% → **0.00%**; synth_sphere: 30.33% → **0.00%**. Euler=2, watertight=true. |
-| H2. Cone triangulation fix | ⚠️ PARTIAL | — | Diagnostic показал: cone boundary edges на z=5 имеют radius **7.5** (Plane face) vs **2.5** (Cone lateral). Это разные окружности — проблема в STEP importer или Face.edges дублировании (C5). Weld не помогает (вершины на разных радиусах). Добавлен Phase 4.5 weld_boundary_edge_vertices для общих cross-face mismatches. Cone требует C5 refactor или STEP importer fix. |
+| H2. Cone triangulation fix | ✅ DONE | C5-stage1 | **Решено в C5 stage 1** (2026-08-29): корневая причина — `AxisKey` ключовал ось по (center, normal), поэтому кольца конуса (r=5@z=0, r=2.5@z=5) получали РАЗНЫЙ n (52 vs 36) → tube-триангуляция отбрасывала кэшированное верхнее кольцо (`use_cached_top=false`) и генерировала аналитические точки → трещина. Фикс: канонический ключ осевой ЛИНИИ + канонизация направления записи в кэше + union-find выравнивание n для tube-колец. nist_cone: 12.44% → **0.00%** (watertight, χ=2). |
 | **G4. fix_self_intersections_heal** | ✅ DONE | — | Documentation обновлена: функция уже была conservative real implementation (не stub). Detect через bounding-box + sampling, удаляет face с меньшим числом edges, skip NURBS faces. Limitations задокументированы. |
 | **J1. thin_annulus hang fix** | ✅ DONE | `c304f3d` | Синтаксическая ошибка в STEP файле (#92 = FACE_BOUND('',(#90,.T.); → пропущена `)`). Исправлено → все 33 теста теперь runnable (0 ignored). |
 
@@ -229,6 +229,8 @@ B4-B5 (BVH pre-filter + deterministic face classification) — отложены,
 **C4.** Исправить `add_coedge_for_edge_in_face` (validator.rs:643-664): вставлять coedge в правильную позицию в wire's end-to-start цепочке (через `find_coedge_with_end_vertex`), а не `push` в конец.
 
 **C5.** Структурный рефакторинг `Face.edges: Vec<Edge>` (entity.rs:299) → `Face.edge_ids: Vec<TopoId>` с глобальным `EdgeStore`. Shared edge между гранями становится одним Edge struct, а не дубликатом. Устраняет корневую причину ~30% healing-работы.
+
+> **Статус: Stage 1 выполнен (2026-08-29).** Mesh-level корень проблемы закрыт без ломающего изменения API: единый источник истины для дискретизации рёбер (EdgeDiscretizationCache) — канонизация направления записей, LINE-рёбра получили step_entity_id (общий ключ для shared-рёбер), union-find выравнивание n для tube-колец. Результат: 15 файлов STEP regression на 0.00% boundary (nist_cone 12.44→0, as1_nut 10.95→0, nist_chamfer_block 11.11→0 и др.), 658 core tests green, KNOWN_ISSUES ужесточены 23→11. Trade-off: тяжёлые industrial-файлы (transmission, Vulcan) медленнее в ~2.5× — корректные UV-полигоны дают более плотный CDT (раньше зигзаг давал недотриангулированный меш). Полный структурный переход на `Face.edge_ids` + `EdgeStore` — следующий этап. Детали: worklog_new.md, секция «C5 Stage 1».
 
 **DoD C:** `validate_brep_default` на результате `boolean_subtract(box, cylinder)` возвращает `faces_without_outer_loop == 0`, `edges_with_bad_orientation == 0`, `dangling_edges == 0`.
 
