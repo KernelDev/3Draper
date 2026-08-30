@@ -1,5 +1,16 @@
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 
+/// Resolve a test-data file relative to the workspace `test/` dir.
+/// Robust to repo relocation: derived from CARGO_MANIFEST_DIR
+/// (crates/draper-step -> workspace root), not from a hardcoded sandbox path.
+fn test_file(name: &str) -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // crates/draper-step -> crates
+    dir.pop(); // crates -> workspace root
+    dir.join("test").join(name)
+}
+
+
 /// Detailed diagnostic for a single planar face:
 /// 1. Show the 2D polygon (outer + holes) going into earcutr
 /// 2. Show the signed area before and after CCW normalization  
@@ -8,7 +19,7 @@ use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 /// 5. Check if the `forward:false` winding swap corrects or corrupts
 #[test]
 fn diag_planar_face_earcutr_detail() {
-    let content = std::fs::read_to_string("/home/z/my-project/test/3.05.078.stp")
+    let content = std::fs::read_to_string(test_file("3.05.078.stp"))
         .expect("Failed to read 3.05.078.stp");
     
     let step = parse_step(&content).expect("Failed to parse STEP file");
@@ -105,10 +116,10 @@ fn diag_planar_face_earcutr_detail() {
 fn diag_all_faces_normal_consistency() {
     // Test with multiple STEP files
     let test_files = [
-        "/home/z/my-project/test/3.05.078.stp",
-        "/home/z/my-project/test/nist_cube.stp",
-        "/home/z/my-project/test/nist_cylinder.stp",
-        "/home/z/my-project/test/brick_thin.stp",
+        test_file("3.05.078.stp"),
+        test_file("nist_cube.stp"),
+        test_file("nist_cylinder.stp"),
+        test_file("brick_thin.stp"),
     ];
     
     for file in &test_files {
@@ -157,7 +168,7 @@ fn diag_all_faces_normal_consistency() {
                     
                     if mismatch_count > match_count {
                         eprintln!("MISMATCH in {}: Face Step#{} {} forward={} — cross: match={}, mismatch={}",
-                            file, fi.step_face_id, fi.surface_type, fi.forward, match_count, mismatch_count);
+                            file.display(), fi.step_face_id, fi.surface_type, fi.forward, match_count, mismatch_count);
                     }
                 }
             }

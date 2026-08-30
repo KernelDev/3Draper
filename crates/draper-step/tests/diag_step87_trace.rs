@@ -1,10 +1,21 @@
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 
+/// Resolve a test-data file relative to the workspace `test/` dir.
+/// Robust to repo relocation: derived from CARGO_MANIFEST_DIR
+/// (crates/draper-step -> workspace root), not from a hardcoded sandbox path.
+fn test_file(name: &str) -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // crates/draper-step -> crates
+    dir.pop(); // crates -> workspace root
+    dir.join("test").join(name)
+}
+
+
 /// Deep diagnostic: for the Step#87 plane face in 3.05.078.stp,
 /// trace EXACTLY what happens from boundary points → earcutr → triangle winding
 #[test]
 fn diag_step87_plane_tracing() {
-    let content = std::fs::read_to_string("/home/z/my-project/test/3.05.078.stp")
+    let content = std::fs::read_to_string(test_file("3.05.078.stp"))
         .expect("Failed to read 3.05.078.stp");
     
     let step = parse_step(&content).expect("Failed to parse STEP file");
@@ -88,7 +99,7 @@ fn diag_step87_plane_tracing() {
 /// Check normal consistency for a simple cube (should be perfect)
 #[test]
 fn diag_cube_normal_consistency() {
-    let content = std::fs::read_to_string("/home/z/my-project/test/nist_cube.stp")
+    let content = std::fs::read_to_string(test_file("nist_cube.stp"))
         .expect("Failed to read nist_cube.stp");
     
     let step = parse_step(&content).expect("Failed to parse STEP file");

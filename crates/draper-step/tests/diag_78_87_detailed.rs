@@ -1,5 +1,16 @@
 use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 
+/// Resolve a test-data file relative to the workspace `test/` dir.
+/// Robust to repo relocation: derived from CARGO_MANIFEST_DIR
+/// (crates/draper-step -> workspace root), not from a hardcoded sandbox path.
+fn test_file(name: &str) -> std::path::PathBuf {
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // crates/draper-step -> crates
+    dir.pop(); // crates -> workspace root
+    dir.join("test").join(name)
+}
+
+
 /// Diagnostic for Step#78 (cone) and Step#87 (plane) 3D triangulation issues.
 /// Checks:
 /// 1. Whether the face triangulation has correct winding order
@@ -8,7 +19,7 @@ use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 /// 4. Specific cone tube grid issues
 #[test]
 fn diag_step_78_87_detailed() {
-    let content = std::fs::read_to_string("/home/z/my-project/test/3.05.078.stp")
+    let content = std::fs::read_to_string(test_file("3.05.078.stp"))
         .expect("Failed to read 3.05.078.stp");
     
     let step = parse_step(&content).expect("Failed to parse STEP file");
