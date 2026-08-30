@@ -344,6 +344,19 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
     // C5 Stage 2: healing may restructure faces and their edge mirrors
     // (stitching, merging, hole filling) — rebuild the edge store so the
     // canonical registry reflects the HEALED topology, not the input.
+    //
+    // C5 Stage 3: BEFORE indexing, propagate unambiguous edge fixes across
+    // instances of the same shared edge. Healing mutates per-face copies
+    // independently; without this pass a fix (degenerate flag, tolerance
+    // bump, curve backfill) applied to one copy leaves its twin in the
+    // adjacent face stale — the exact cross-face inconsistency C5 removes.
+    let propagated = healed_solid.propagate_edge_fixes();
+    if propagated > 0 {
+        report.add_msg(format!(
+            "Propagated {} edge field fix(es) across shared-edge instances",
+            propagated
+        ));
+    }
     healed_solid.index_edges();
 
     (healed_solid, report)

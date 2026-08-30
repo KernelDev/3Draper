@@ -43,6 +43,7 @@
 //! per-face `Vec<Edge>` mirrors entirely.
 
 use crate::entity::{Edge, Face, Shell, Solid, TopoId};
+use draper_geometry::Curve3d;
 use std::collections::HashMap;
 
 /// Statistics returned by [`Solid::index_edges`].
@@ -57,6 +58,233 @@ pub struct EdgeDedupReport {
     pub deduplicated: usize,
     /// Number of distinct STEP entity ids that had more than one instance.
     pub shared_step_edges: usize,
+    /// Number of instance ids unified by GEOMETRIC identity (C5 Stage 3):
+    /// native edges without `step_entity_id` that match an earlier edge's
+    /// canonical geometric key (same curve + same endpoint pair).
+    pub geometric_dedup: usize,
+}
+
+// ============================================================
+// Geometric edge identity (C5 Stage 3)
+//
+// Native edges (builder primitives, boolean results) carry no
+// `step_entity_id`, so Stage 2 could not unify shared instances of them.
+// The geometric key below identifies an edge by its curve geometry plus
+// its endpoint pair, direction-insensitively:
+//
+//   - Line: canonicalized (closest point to origin + sign-canonical
+//     direction) — any parametrization of the same line matches.
+//   - Circle: center + sign-canonical normal + radius. `x_axis` is a
+//     parametrization artifact for a full circle and is excluded.
+//   - Ellipse / Hyperbola / Parabola: placement + axes + scalar params.
+//     `x_axis` IS geometric here (it orients the major/transverse axis).
+//   - Arc: circle key + angle pair (min, max) — same arc from either
+//     direction matches.
+//   - NURBS: degree + quantized control points + weights + knots.
+//     Reversed representations intentionally do NOT match (conservative).
+//   - `None` and `PCurve` curves are excluded: endpoints alone cannot
+//     distinguish e.g. two arcs of different circles joining the same
+//     points (lens shapes), and pcurves live in surface-parametric space.
+//
+// All coordinates are quantized onto a 1e-9 absolute grid: far below the
+// loosest modeling tolerance (STEP default 1e-6), far above double
+// rounding noise at mm-scale coordinates — only bit-level near-identical
+// geometries collide. A missed match is always safe (no dedup); a false
+// match would require two *distinct* edges with identical curve geometry
+// AND identical endpoint pair inside one solid.
+// ============================================================
+
+/// Quantization grid for geometric edge keys (absolute, in model units).
+const GEOM_KEY_GRID: f64 = 1e-9;
+
+/// Quantize a coordinate onto the key grid. Non-finite values collapse to 0
+/// (edges with NaN/Inf geometry cannot be identified and will simply fail
+/// to match anything else — the safe direction).
+fn q(v: f64) -> i64 {
+    if v.is_finite() {
+        (v / GEOM_KEY_GRID).round() as i64
+    } else {
+        0
+    }
+}
+
+/// Sign-canonical quantized direction: the first non-zero component is
+/// positive, so `(d)` and `(-d)` hash identically.
+fn canon_dir(d: &draper_geometry::Direction3d) -> (i64, i64, i64) {
+    let (x, y, z) = (q(d.x), q(d.y), q(d.z));
+    let flip = x < 0 || (x == 0 && (y < 0 || (y == 0 && z < 0)));
+    if flip {
+        (-x, -y, -z)
+    } else {
+        (x, y, z)
+    }
+}
+
+/// Direction-insensitive geometric identity key for an edge instance.
+///
+/// Returns `None` for edges that cannot be identified geometrically
+/// (`curve == None`, PCurve, non-finite geometry) — those never take part
+/// in geometric dedup.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub struct GeomEdgeKey {
+    kind: u8,
+    params: Vec<i64>,
+    /// Quantized (start, end) pair, lexicographically ordered so a reversed
+    /// instance of the same edge produces the same key.
+    endpoints: [i64; 6],
+}
+
+/// Compute the geometric identity key of an edge (see module docs).
+pub fn geom_edge_key(edge: &Edge) -> Option<GeomEdgeKey> {
+    let curve = edge.curve.as_ref()?;
+    let (kind, params) = match curve {
+        Curve3d::Line(l) => {
+            // Canonical point on the line: the closest point to the origin.
+            // `origin` itself is a parametrization artifact.
+            let d = &l.direction;
+            let o = &l.origin;
+            let dot = o.x * d.x + o.y * d.y + o.z * d.z;
+            let px = q(o.x - d.x * dot);
+            let py = q(o.y - d.y * dot);
+            let pz = q(o.z - d.z * dot);
+            let (dx, dy, dz) = canon_dir(d);
+            (1u8, vec![px, py, pz, dx, dy, dz])
+        }
+        Curve3d::Circle(c) => {
+            let (nx, ny, nz) = canon_dir(&c.normal);
+            (
+                2u8,
+                vec![q(c.center.x), q(c.center.y), q(c.center.z), nx, ny, nz, q(c.radius)],
+            )
+        }
+        Curve3d::Ellipse(e) => {
+            let (nx, ny, nz) = canon_dir(&e.normal);
+            let (ax, ay, az) = canon_dir(&e.x_axis);
+            (
+                3u8,
+                vec![
+                    q(e.center.x),
+                    q(e.center.y),
+                    q(e.center.z),
+                    nx,
+                    ny,
+                    nz,
+                    ax,
+                    ay,
+                    az,
+                    q(e.semi_major),
+                    q(e.semi_minor),
+                ],
+            )
+        }
+        Curve3d::Arc(a) => {
+            let c = &a.circle;
+            let (nx, ny, nz) = canon_dir(&c.normal);
+            let (ax, ay, az) = canon_dir(&c.x_axis);
+            let (s, e) = (q(a.start_angle), q(a.end_angle));
+            // Direction-insensitive angle pair.
+            let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+            (
+                4u8,
+                vec![
+                    q(c.center.x),
+                    q(c.center.y),
+                    q(c.center.z),
+                    nx,
+                    ny,
+                    nz,
+                    ax,
+                    ay,
+                    az,
+                    q(c.radius),
+                    lo,
+                    hi,
+                ],
+            )
+        }
+        Curve3d::Hyperbola(h) => {
+            let (nx, ny, nz) = canon_dir(&h.normal);
+            let (ax, ay, az) = canon_dir(&h.x_axis);
+            (
+                5u8,
+                vec![
+                    q(h.center.x),
+                    q(h.center.y),
+                    q(h.center.z),
+                    nx,
+                    ny,
+                    nz,
+                    ax,
+                    ay,
+                    az,
+                    q(h.semi_real),
+                    q(h.semi_imag),
+                ],
+            )
+        }
+        Curve3d::Parabola(p) => {
+            let (nx, ny, nz) = canon_dir(&p.normal);
+            let (ax, ay, az) = canon_dir(&p.x_axis);
+            (
+                6u8,
+                vec![
+                    q(p.vertex.x),
+                    q(p.vertex.y),
+                    q(p.vertex.z),
+                    nx,
+                    ny,
+                    nz,
+                    ax,
+                    ay,
+                    az,
+                    q(p.focal_dist),
+                ],
+            )
+        }
+        Curve3d::Nurbs(n) => {
+            let mut params = Vec::with_capacity(4 + 4 * n.control_points.len() + n.knots.len());
+            params.push(n.degree as i64);
+            for cp in &n.control_points {
+                params.push(q(cp.x));
+                params.push(q(cp.y));
+                params.push(q(cp.z));
+            }
+            for w in &n.weights {
+                params.push(q(*w));
+            }
+            for k in &n.knots {
+                params.push(q(*k));
+            }
+            (7u8, params)
+        }
+        // PCurve lives in surface-parametric space — excluded (see docs).
+        // Trimmed/Composite bases could in principle be keyed recursively,
+        // but their parameter conventions are representation-dependent;
+        // excluded in Stage 3 (conservative — a missed match is safe).
+        Curve3d::PCurve { .. } | Curve3d::Trimmed { .. } | Curve3d::Composite { .. } => {
+            return None
+        }
+    };
+
+    // Endpoint pair: prefer authoritative VERTEX_POINT coords, fall back to
+    // curve evaluation at the parametric range.
+    let sp = edge
+        .start_vertex_point
+        .unwrap_or_else(|| curve.point_at(edge.param_range.0));
+    let ep = edge
+        .end_vertex_point
+        .unwrap_or_else(|| curve.point_at(edge.param_range.1));
+    let mut a = [q(sp.x), q(sp.y), q(sp.z)];
+    let mut b = [q(ep.x), q(ep.y), q(ep.z)];
+    if b < a {
+        std::mem::swap(&mut a, &mut b);
+    }
+
+    Some(GeomEdgeKey {
+        kind,
+        params,
+        endpoints: [a[0], a[1], a[2], b[0], b[1], b[2]],
+    })
 }
 
 /// Canonical registry of B-Rep edges.
@@ -202,6 +430,8 @@ impl Solid {
         let mut report = EdgeDedupReport::default();
         // step_entity_id → canonical id (local, to count shared edges).
         let mut seen_step: HashMap<i64, TopoId> = HashMap::new();
+        // Geometric key → canonical id for native edges (C5 Stage 3).
+        let mut seen_geom: HashMap<GeomEdgeKey, TopoId> = HashMap::new();
         // Per-face canonical id lists, parallel to shells/faces order.
         let mut face_edge_ids: Vec<Vec<TopoId>> = Vec::new();
 
@@ -226,6 +456,20 @@ impl Solid {
                             }
                             None => {
                                 seen_step.insert(step_id, edge.id);
+                                edge.id
+                            }
+                        }
+                    } else if let Some(key) = geom_edge_key(edge) {
+                        // C5 Stage 3: native edges unify by geometric identity
+                        // (same curve + same endpoint pair, direction-insensitive).
+                        match seen_geom.get(&key) {
+                            Some(&existing) => {
+                                report.deduplicated += 1;
+                                report.geometric_dedup += 1;
+                                existing
+                            }
+                            None => {
+                                seen_geom.insert(key, edge.id);
                                 edge.id
                             }
                         }
@@ -309,6 +553,120 @@ impl Solid {
         if self.edge_store.is_empty() {
             self.index_edges();
         }
+    }
+
+    /// Propagate unambiguous edge fixes across instances of the same shared
+    /// edge (C5 Stage 3).
+    ///
+    /// Healing and validation mutate per-face `Face.edges` copies
+    /// independently. When two faces share one topological edge (same
+    /// `step_entity_id` — e.g. after tolerant stitching — or the same
+    /// geometric key), a fix applied to one copy leaves the other stale,
+    /// which is precisely the cross-face inconsistency C5 eliminates.
+    /// This pass groups instances by shared identity and reconciles the
+    /// orientation-independent fields:
+    ///
+    /// - `degenerate`: OR — if one instance is degenerate, the edge is
+    ///   degenerate for every incident face.
+    /// - `tolerance`: MAX — tolerant-modeling semantics (the loosest
+    ///   tolerance wins).
+    /// - `curve`: backfilled into curve-less copies **only when their
+    ///   parametric range matches the donor's range (or its swap)**, so the
+    ///   backfilled geometry is guaranteed to describe the same segment.
+    ///
+    /// Orientation-dependent fields (`param_range`, `forward`, vertex ids,
+    /// vertex points) are deliberately NOT propagated — reversed instances
+    /// legitimately carry swapped values.
+    ///
+    /// Returns the number of instance fields updated.
+    pub fn propagate_edge_fixes(&mut self) -> usize {
+        /// Identity of a shared edge for the reconciliation pass.
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum SharedKey {
+            Step(i64),
+            Geom(GeomEdgeKey),
+            /// Instances that cannot be identified never share a group.
+            Unique(u64),
+        }
+
+        // Pass 1 (read-only): aggregate the reconciliation values per group.
+        let mut agg: HashMap<SharedKey, (bool, f64, Option<(Curve3d, (f64, f64))>)> =
+            HashMap::new();
+        let mut unique_counter: u64 = 0;
+        {
+            let mut shells: Vec<&Shell> = Vec::new();
+            if let Some(ref shell) = self.outer_shell {
+                shells.push(shell);
+            }
+            for shell in &self.inner_shells {
+                shells.push(shell);
+            }
+            for shell in shells {
+                for face in &shell.faces {
+                    for edge in &face.edges {
+                        let key = match (edge.step_entity_id, geom_edge_key(edge)) {
+                            (Some(s), _) => SharedKey::Step(s),
+                            (None, Some(g)) => SharedKey::Geom(g),
+                            (None, None) => {
+                                unique_counter += 1;
+                                SharedKey::Unique(unique_counter)
+                            }
+                        };
+                        let entry = agg.entry(key).or_insert((false, 0.0, None));
+                        entry.0 |= edge.degenerate;
+                        entry.1 = entry.1.max(edge.tolerance);
+                        if entry.2.is_none() && edge.curve.is_some() {
+                            entry.2 = edge.curve.clone().map(|c| (c, edge.param_range));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Pass 2: apply the reconciled values to every instance.
+        let mut updated = 0usize;
+        let mut shells: Vec<&mut Shell> = Vec::new();
+        if let Some(ref mut shell) = self.outer_shell {
+            shells.push(shell);
+        }
+        for shell in &mut self.inner_shells {
+            shells.push(shell);
+        }
+        for shell in shells.iter_mut() {
+            for face in shell.faces.iter_mut() {
+                for edge in face.edges.iter_mut() {
+                    let key = match (edge.step_entity_id, geom_edge_key(edge)) {
+                        (Some(s), _) => SharedKey::Step(s),
+                        (None, Some(g)) => SharedKey::Geom(g),
+                        // Unidentifiable instances never share a group.
+                        (None, None) => continue,
+                    };
+                    let Some(&(degenerate, tolerance, ref donor)) = agg.get(&key) else {
+                        continue;
+                    };
+                    if edge.degenerate != degenerate {
+                        edge.degenerate = degenerate;
+                        updated += 1;
+                    }
+                    if edge.tolerance < tolerance {
+                        edge.tolerance = tolerance;
+                        updated += 1;
+                    }
+                    if edge.curve.is_none() {
+                        if let Some((ref curve, ref donor_range)) = donor {
+                            let same = edge.param_range == *donor_range;
+                            let swapped =
+                                (edge.param_range.1, edge.param_range.0) == *donor_range;
+                            if same || swapped {
+                                edge.curve = Some(curve.clone());
+                                updated += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        updated
     }
 }
 
@@ -457,16 +815,217 @@ mod tests {
 
     #[test]
     fn test_index_edges_no_step_ids() {
-        // Native edges (no step_entity_id) are all canonical — no dedup yet
-        // (geometric dedup is Stage 3).
+        // C5 Stage 3: native edges without step_entity_id now unify by
+        // GEOMETRIC identity. The two faces below have IDENTICAL edge
+        // geometry (same lines, same endpoints) → each geometric edge
+        // exists once canonically.
         let face_a = square_face(&[None, None]);
         let face_b = square_face(&[None, None]);
         let mut solid = solid_of(vec![face_a, face_b]);
         let report = solid.index_edges();
 
         assert_eq!(report.total_instances, 4);
-        assert_eq!(report.unique_edges, 4);
-        assert_eq!(report.deduplicated, 0);
+        assert_eq!(report.unique_edges, 2, "two distinct geometric edges");
+        assert_eq!(report.deduplicated, 2);
+        assert_eq!(report.geometric_dedup, 2);
+        // face_b's instances must alias face_a's canonicals.
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(solid
+            .edge_store
+            .same_edge(fa.edges[0].id, fb.edges[0].id));
+        assert!(solid
+            .edge_store
+            .same_edge(fa.edges[1].id, fb.edges[1].id));
+        assert!(!solid
+            .edge_store
+            .same_edge(fa.edges[0].id, fa.edges[1].id));
+    }
+
+    #[test]
+    fn test_geometric_dedup_direction_insensitive() {
+        // A reversed instance of the same shared edge (opposite direction,
+        // swapped param_range, forward=false) must unify with the original.
+        let mut face_a = square_face(&[None]);
+        let mut face_b = square_face(&[None]);
+        // Reverse face_b's copy in place: swap endpoints + param_range.
+        {
+            let edge = &mut face_b.edges[0];
+            let sp = edge.start_vertex_point;
+            edge.start_vertex_point = edge.end_vertex_point;
+            edge.end_vertex_point = sp;
+            edge.param_range = (edge.param_range.1, edge.param_range.0);
+            edge.forward = !edge.forward;
+        }
+        let mut solid = solid_of(vec![face_a, face_b]);
+        let report = solid.index_edges();
+
+        assert_eq!(report.geometric_dedup, 1);
+        assert_eq!(report.unique_edges, 1);
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(solid
+            .edge_store
+            .same_edge(fa.edges[0].id, fb.edges[0].id));
+    }
+
+    #[test]
+    fn test_geometric_dedup_no_false_merge_lens() {
+        // Two DIFFERENT arcs joining the same endpoints (lens shape) must
+        // NOT merge: different circle centers → different keys.
+        let mut face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        let circle_a = draper_geometry::Circle::new(
+            Point3d::new(0.0, 1.0, 0.0),
+            draper_geometry::Direction3d::Z,
+            1.0,
+        );
+        let circle_b = draper_geometry::Circle::new(
+            Point3d::new(0.0, -1.0, 0.0),
+            draper_geometry::Direction3d::Z,
+            1.0,
+        );
+        // Both arcs pass through (0,0,0); full circles with distinct centers.
+        let mut e1 = Edge::new(
+            Curve3d::Circle(circle_a),
+            (0.0, std::f64::consts::TAU),
+        );
+        e1.start_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+        e1.end_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+        let mut e2 = Edge::new(
+            Curve3d::Circle(circle_b),
+            (0.0, std::f64::consts::TAU),
+        );
+        e2.start_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+        e2.end_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+        face.edges = vec![e1, e2];
+
+        let mut solid = solid_of(vec![face]);
+        let report = solid.index_edges();
+        assert_eq!(report.unique_edges, 2, "distinct circles must not merge");
+        assert_eq!(report.geometric_dedup, 0);
+    }
+
+    #[test]
+    fn test_geometric_dedup_excludes_curveless() {
+        // Edges with curve == None never participate in geometric dedup —
+        // endpoints alone cannot establish identity.
+        let mut face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        let mk = |from: Point3d, to: Point3d| {
+            let mut e = Edge {
+                curve: None,
+                ..line_edge(from, to, None)
+            };
+            e.start_vertex_point = Some(from);
+            e.end_vertex_point = Some(to);
+            e
+        };
+        let a = mk(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+        let b = mk(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+        face.edges = vec![a, b];
+
+        let mut solid = solid_of(vec![face]);
+        let report = solid.index_edges();
+        assert_eq!(report.unique_edges, 2);
+        assert_eq!(report.geometric_dedup, 0);
+    }
+
+    #[test]
+    fn test_geom_key_line_parametrization_invariant() {
+        // Same geometric line, different parametrization origins and
+        // opposite directions → identical keys.
+        let mut e1 = Edge::new(
+            Curve3d::Line(draper_geometry::Line::new(
+                Point3d::new(0.0, 0.0, 0.0),
+                draper_geometry::Direction3d::X,
+            )),
+            (0.0, 1.0),
+        );
+        e1.start_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+        e1.end_vertex_point = Some(Point3d::new(1.0, 0.0, 0.0));
+        let mut e2 = Edge::new(
+            Curve3d::Line(draper_geometry::Line::new(
+                Point3d::new(5.0, 0.0, 0.0),
+                draper_geometry::Direction3d::NEG_X,
+            )),
+            (0.0, 1.0),
+        );
+        e2.start_vertex_point = Some(Point3d::new(1.0, 0.0, 0.0));
+        e2.end_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
+
+        assert_eq!(geom_edge_key(&e1), geom_edge_key(&e2));
+    }
+
+    #[test]
+    fn test_propagate_edge_fixes_shared_step_id() {
+        // Two faces share EDGE_CURVE #77. Healing marked one copy degenerate
+        // and bumped its tolerance; the twin in the other face is stale.
+        let mut face_a = square_face(&[Some(77)]);
+        let mut face_b = square_face(&[Some(77)]);
+        face_a.edges[0].degenerate = true;
+        face_a.edges[0].tolerance = 1e-3;
+        face_b.edges[0].tolerance = 1e-6;
+
+        let mut solid = solid_of(vec![face_a, face_b]);
+        let updated = solid.propagate_edge_fixes();
+
+        assert!(updated >= 2, "degenerate + tolerance must propagate");
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(fb.edges[0].degenerate, "degenerate flag must propagate");
+        assert!((fa.edges[0].tolerance - 1e-3).abs() < 1e-12);
+        assert!((fb.edges[0].tolerance - 1e-3).abs() < 1e-12, "MAX tolerance wins");
+        // Orientation-dependent fields must stay untouched.
+        assert_eq!(fa.edges[0].param_range, fb.edges[0].param_range);
+    }
+
+    #[test]
+    fn test_propagate_edge_fixes_curve_backfill_range_guard() {
+        // A curve-less twin gets the donor curve ONLY when its param_range
+        // matches the donor's (or is its swap); a mismatching range means
+        // a different parametrization → no backfill.
+        let mut face_a = square_face(&[None]);
+        let mut face_b = square_face(&[None]);
+        // face_a's copy keeps the curve and donates it; face_b's copy loses
+        // its curve. Identity comes from the shared step id (a curve-less
+        // edge has no geometric key of its own).
+        face_a.edges[0].step_entity_id = Some(88);
+        face_b.edges[0].step_entity_id = Some(88);
+        let donor_range = face_a.edges[0].param_range;
+        face_b.edges[0].curve = None;
+        face_b.edges[0].param_range = (7.0, 9.0); // mismatching range
+
+        let mut solid = solid_of(vec![face_a.clone(), face_b.clone()]);
+        let updated = solid.propagate_edge_fixes();
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(
+            fb.edges[0].curve.is_none(),
+            "mismatching param_range must NOT receive a blind backfill"
+        );
+        assert_eq!(updated, 0);
+
+        // Now with a matching (swapped) range the backfill fires.
+        let mut solid = solid_of(vec![face_a, face_b]);
+        {
+            let fb = solid.outer_shell.as_mut().unwrap().faces.get_mut(1).unwrap();
+            fb.edges[0].param_range = (donor_range.1, donor_range.0); // swap = OK
+        }
+        let updated = solid.propagate_edge_fixes();
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(fb.edges[0].curve.is_some(), "swapped range may take the donor curve");
+        assert!(updated >= 1);
+    }
+
+    #[test]
+    fn test_propagate_edge_fixes_geometric_group() {
+        // Native (no step id) shared edges group by geometric key too.
+        let mut face_a = square_face(&[None]);
+        let mut face_b = square_face(&[None]);
+        face_b.edges[0].tolerance = 0.5;
+
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.propagate_edge_fixes();
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        assert!((fa.edges[0].tolerance - 0.5).abs() < 1e-12);
     }
 
     #[test]

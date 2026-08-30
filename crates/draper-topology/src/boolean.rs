@@ -3699,7 +3699,7 @@ pub fn boolean_union(
     solid_b: &Solid,
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<Solid> {
-    boolean_operation(solid_a, solid_b, BooleanOp::Union, tol_ctx)
+    index_boolean_result(boolean_operation(solid_a, solid_b, BooleanOp::Union, tol_ctx))
 }
 
 /// Boolean subtract: remove solid_b from solid_a.
@@ -3708,7 +3708,7 @@ pub fn boolean_subtract(
     solid_b: &Solid,
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<Solid> {
-    boolean_operation(solid_a, solid_b, BooleanOp::Subtract, tol_ctx)
+    index_boolean_result(boolean_operation(solid_a, solid_b, BooleanOp::Subtract, tol_ctx))
 }
 
 /// Boolean intersect: keep only the overlapping volume.
@@ -3717,7 +3717,21 @@ pub fn boolean_intersect(
     solid_b: &Solid,
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<Solid> {
-    boolean_operation(solid_a, solid_b, BooleanOp::Intersect, tol_ctx)
+    index_boolean_result(boolean_operation(solid_a, solid_b, BooleanOp::Intersect, tol_ctx))
+}
+
+/// C5 Stage 3: give boolean results a unified edge store.
+///
+/// Boolean split faces share geometrically identical split edges (the
+/// `shared_split_edges` map inside `split_face` clones one `Edge` into both
+/// result faces). `index_edges` unifies their identity through geometric
+/// dedup, so healing and the mesh edge-discretization cache observe ONE
+/// canonical edge per shared segment instead of independent copies.
+fn index_boolean_result(result: BooleanResult<Solid>) -> BooleanResult<Solid> {
+    result.map(|mut solid| {
+        solid.index_edges();
+        solid
+    })
 }
 
 // ============================================================
