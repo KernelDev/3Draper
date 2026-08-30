@@ -27,21 +27,27 @@
 //! ```
 //! use draper_core::quantum_hash::*;
 //!
-//! // Hash a solid's topology
+//! // Fingerprint a part's geometry
 //! let fingerprint = GeometryHasher::new()
-//!     .hash_solid(&solid)
+//!     .update_str("part_1")
+//!     .update_point(1.0, 0.0, 0.0)
+//!     .update_point(0.0, 1.0, 0.0)
 //!     .finalize();
 //!
-//! // Verify a solid hasn't been tampered with
-//! let stored_hash = "a1b2c3..."; // from database
-//! assert_eq!(fingerprint.to_hex(), stored_hash);
+//! // Persist the hex digest and compare later to detect tampering
+//! let stored_hash = fingerprint.to_hex();
+//! let recheck = GeometryHasher::new()
+//!     .update_str("part_1")
+//!     .update_point(1.0, 0.0, 0.0)
+//!     .update_point(0.0, 1.0, 0.0)
+//!     .finalize();
+//! assert_eq!(recheck.to_hex(), stored_hash);
 //!
 //! // Build a Merkle tree for a multi-solid assembly
-//! let tree = MerkleTree::build(&[
-//!     ("part_1", hash1),
-//!     ("part_2", hash2),
-//!     ("part_3", hash3),
-//! ]);
+//! let hash_a = GeometryHasher::new().update_str("part_a").finalize();
+//! let hash_b = GeometryHasher::new().update_str("part_b").finalize();
+//! let tree = MerkleTree::build(&[("part_a", hash_a), ("part_b", hash_b)]);
+//! assert!(tree.is_some());
 //! ```
 
 use std::collections::HashMap;
