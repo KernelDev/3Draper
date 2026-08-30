@@ -275,14 +275,56 @@ fn triangle_centroid(tri: &[Point3d; 3]) -> Point3d {
 
 /// Remove degenerate triangles and empty vertices.
 fn clean_mesh(mut mesh: TriangleMesh) -> TriangleMesh {
-    // Remove degenerate triangles (zero area or duplicate vertices)
-    mesh.triangles.retain(|tri| {
-        let a = &mesh.vertices[tri[0] as usize];
-        let b = &mesh.vertices[tri[1] as usize];
-        let c = &mesh.vertices[tri[2] as usize];
-        let area_sq = triangle_normal(&[*a, *b, *c]).length_sq();
-        area_sq > 1e-18
-    });
+    // Remove degenerate triangles (zero area or duplicate vertices).
+    // Index-preserving filter so the per-triangle attribute arrays
+    // (face_normals, triangle_colors, triangle_face_ids) stay in sync —
+    // `Vec::retain` on `triangles` alone would leave them stale and break
+    // every downstream consumer that zips them with `triangles`.
+    let keep: Vec<bool> = mesh
+        .triangles
+        .iter()
+        .map(|tri| {
+            let a = &mesh.vertices[tri[0] as usize];
+            let b = &mesh.vertices[tri[1] as usize];
+            let c = &mesh.vertices[tri[2] as usize];
+            let area_sq = triangle_normal(&[*a, *b, *c]).length_sq();
+            area_sq > 1e-18
+        })
+        .collect();
+
+    let keep_idx = |i: usize| keep.get(i).copied().unwrap_or(true);
+    mesh.triangles = mesh
+        .triangles
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| keep_idx(*i))
+        .map(|(_, t)| *t)
+        .collect();
+    // Filter each per-triangle attribute with the same predicate.
+    if let Some(ref mut face_normals) = mesh.face_normals {
+        *face_normals = face_normals
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep_idx(*i))
+            .map(|(_, v)| *v)
+            .collect();
+    }
+    if let Some(ref mut colors) = mesh.triangle_colors {
+        *colors = colors
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep_idx(*i))
+            .map(|(_, v)| *v)
+            .collect();
+    }
+    if let Some(ref mut ids) = mesh.triangle_face_ids {
+        *ids = ids
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| keep_idx(*i))
+            .map(|(_, v)| *v)
+            .collect();
+    }
 
     // Compact vertices (remove unused)
     let mut used = vec![false; mesh.vertices.len()];

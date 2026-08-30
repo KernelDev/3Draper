@@ -823,18 +823,15 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
                 "fix_inconsistent_winding: removing {} same-face overlapping triangles (180° angles)",
                 to_remove.len(),
             );
-            // Rebuild triangles and face_ids without the removed ones
-            let mut new_tris: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len() - to_remove.len());
-            let mut new_face_ids: Vec<u64> = Vec::with_capacity(new_tris.len());
-            for (ti, tri) in mesh.triangles.iter().enumerate() {
-                if to_remove.contains(&ti) { continue; }
-                new_tris.push(*tri);
-                if let Some(fid) = face_ids.get(ti) {
-                    new_face_ids.push(*fid);
-                }
-            }
-            mesh.triangles = new_tris;
-            mesh.triangle_face_ids = Some(new_face_ids);
+            // Rebuild triangles and ALL per-triangle attributes without the removed ones
+            let kept: Vec<(usize, [u32; 3])> = mesh
+                .triangles
+                .iter()
+                .enumerate()
+                .filter(|(ti, _)| !to_remove.contains(ti))
+                .map(|(ti, tri)| (ti, *tri))
+                .collect();
+            rebuild_triangles_with_attrs(mesh, &kept);
             // Also rebuild triangle_range in face_infos if present
             if let Some(ref fids) = mesh.triangle_face_ids {
                 let mut fid_ranges: HashMap<u64, (usize, usize)> = HashMap::new();
@@ -1798,11 +1795,10 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         .map(|i| find(&mut parent, i))
         .collect();
 
-    // Update all triangles
+    // Update all triangles — rebuild via rebuild_triangles_with_attrs so
+    // face_normals / triangle_colors stay length-synced with triangles
     let mut removed_degenerate = 0usize;
-    let mut kept_tris = Vec::with_capacity(mesh.triangles.len());
-    let mut kept_face_ids = Vec::with_capacity(mesh.triangles.len());
-    let face_ids = mesh.triangle_face_ids.take();
+    let mut kept: Vec<(usize, [u32; 3])> = Vec::with_capacity(mesh.triangles.len());
 
     for (ti, tri) in mesh.triangles.iter().enumerate() {
         let a = root_map[tri[0] as usize];
@@ -1812,14 +1808,10 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             removed_degenerate += 1;
             continue;
         }
-        kept_tris.push([a, b, c]);
-        if let Some(ref ids) = face_ids {
-            kept_face_ids.push(ids[ti]);
-        }
+        kept.push((ti, [a, b, c]));
     }
 
-    mesh.triangles = kept_tris;
-    mesh.triangle_face_ids = if kept_face_ids.is_empty() { None } else { Some(kept_face_ids) };
+    rebuild_triangles_with_attrs(mesh, &kept);
 
     // Remove duplicate triangles (same 3 indices in any order).
     // NOTE: After welding, two triangles from DIFFERENT faces may end up
@@ -1832,14 +1824,13 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
     // The later `remove_duplicate_triangles` post-processing step handles
     // true geometric duplicates that would create non-manifold edges.
     let mut seen: HashMap<[u32; 3], u64> = HashMap::with_capacity(mesh.triangles.len());
-    let mut unique_tris = Vec::with_capacity(mesh.triangles.len());
-    let mut unique_ids = Vec::with_capacity(mesh.triangles.len());
-    let face_ids = mesh.triangle_face_ids.take();
+    let mut unique: Vec<(usize, [u32; 3])> = Vec::with_capacity(mesh.triangles.len());
+    let face_ids = mesh.triangle_face_ids.as_ref();
     let mut cross_face_dup_removed = 0usize;
     for (ti, tri) in mesh.triangles.iter().enumerate() {
         let mut sorted = [tri[0], tri[1], tri[2]];
         sorted.sort();
-        let fid = face_ids.as_ref().and_then(|ids| ids.get(ti)).copied().unwrap_or(u64::MAX);
+        let fid = face_ids.and_then(|ids| ids.get(ti)).copied().unwrap_or(u64::MAX);
         if let Some(&existing_fid) = seen.get(&sorted) {
             // Same vertex indices — only remove if from the same face
             if existing_fid == fid {
@@ -1848,22 +1839,15 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             } else {
                 // Different faces: cross-face duplicate, KEEP it to avoid holes
                 cross_face_dup_removed += 1;
-                unique_tris.push(*tri);
-                if let Some(ref ids) = face_ids {
-                    unique_ids.push(ids[ti]);
-                }
+                unique.push((ti, *tri));
             }
         } else {
             seen.insert(sorted, fid);
-            unique_tris.push(*tri);
-            if let Some(ref ids) = face_ids {
-                unique_ids.push(ids[ti]);
-            }
+            unique.push((ti, *tri));
         }
     }
-    let dup_removed = mesh.triangles.len() - unique_tris.len();
-    mesh.triangles = unique_tris;
-    mesh.triangle_face_ids = if unique_ids.is_empty() { None } else { Some(unique_ids) };
+    let dup_removed = mesh.triangles.len() - unique.len();
+    rebuild_triangles_with_attrs(mesh, &unique);
 
     log::warn!(
         "WELD: removed {} degenerate + {} same-face duplicate triangles after welding (kept {} cross-face duplicates)",
@@ -2202,25 +2186,37 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
         }
 
         // Step 3: Rebuild triangle list — keep unaffected, append new.
-        let mut keep_triangles: Vec<[u32; 3]> = Vec::with_capacity(mesh.triangles.len());
-        let mut keep_face_ids: Vec<u64> = Vec::with_capacity(mesh.triangles.len());
+        let mut kept: Vec<(usize, [u32; 3])> = Vec::with_capacity(mesh.triangles.len());
         let face_ids_owned = mesh.triangle_face_ids.take();
         for (ti, tri) in mesh.triangles.iter().enumerate() {
             if triangles_to_remove.contains(&ti) {
                 continue;
             }
-            keep_triangles.push(*tri);
-            if let Some(ref ids) = face_ids_owned {
-                keep_face_ids.push(ids[ti]);
-            }
+            kept.push((ti, *tri));
         }
+        // Rebuild kept triangles with ALL per-triangle attributes in sync
+        rebuild_triangles_with_attrs(mesh, &kept);
+        // Restore face_ids for the "all u64::MAX -> None" convention check below
+        let mut keep_face_ids: Vec<u64> = face_ids_owned
+            .as_ref()
+            .map(|ids| {
+                kept.iter()
+                    .filter_map(|&(src, _)| ids.get(src).copied())
+                    .collect()
+            })
+            .unwrap_or_default();
         let n_new = new_triangles.len();
-        keep_triangles.extend(new_triangles);
+        // Append split-child triangles: face_ids from the split map,
+        // face_normals/colors derived from geometry so the arrays stay
+        // length-synced with `triangles`.
+        for &nt in &new_triangles {
+            mesh.triangles.push(nt);
+            push_default_face_normal(mesh, nt);
+        }
         if !keep_face_ids.is_empty() || !new_face_ids.is_empty() {
             keep_face_ids.extend(new_face_ids);
         }
 
-        mesh.triangles = keep_triangles;
         mesh.triangle_face_ids = if keep_face_ids.is_empty() {
             None
         } else {
@@ -2373,11 +2369,89 @@ fn point_on_segment_3d(
     (cx * cx + cy * cy + cz * cz) < tol_sq
 }
 
+/// Rebuild `mesh.triangles` from a kept-index list, keeping ALL per-triangle
+/// attribute arrays (`triangle_face_ids`, `face_normals`, `triangle_colors`)
+/// in sync with the new triangle list.
+///
+/// `kept` maps each surviving triangle to its source: `(src_index, new_tri)`,
+/// where `src_index` refers to the pre-filter `mesh.triangles` / attribute
+/// arrays and `new_tri` is the (possibly vertex-remapped) triangle to store.
+/// Attribute entries missing in a source array (defensively, if an array was
+/// shorter than the old triangle list) are skipped.
+///
+/// This fixes the class of bug where post-processing rebuilds `triangles`
+/// but only syncs `triangle_face_ids`, leaving `face_normals` /
+/// `triangle_colors` stale — every downstream consumer that zips them with
+/// `triangles` (selection, normals debug-assert, export) then breaks.
+fn rebuild_triangles_with_attrs(mesh: &mut TriangleMesh, kept: &[(usize, [u32; 3])]) {
+    let old_fn = mesh.face_normals.take();
+    let old_tc = mesh.triangle_colors.take();
+    let old_fids = mesh.triangle_face_ids.take();
+
+    let mut new_fn: Option<Vec<[f64; 3]>> = old_fn.as_ref().map(|_| Vec::with_capacity(kept.len()));
+    let mut new_tc: Option<Vec<[f32; 4]>> = old_tc.as_ref().map(|_| Vec::with_capacity(kept.len()));
+    let mut new_fids: Option<Vec<u64>> = old_fids.as_ref().map(|_| Vec::with_capacity(kept.len()));
+
+    let mut new_tris: Vec<[u32; 3]> = Vec::with_capacity(kept.len());
+    for &(src, tri) in kept {
+        new_tris.push(tri);
+        if let (Some(ref old), Some(ref mut new)) = (&old_fn, &mut new_fn) {
+            if let Some(&v) = old.get(src) {
+                new.push(v);
+            }
+        }
+        if let (Some(ref old), Some(ref mut new)) = (&old_tc, &mut new_tc) {
+            if let Some(&v) = old.get(src) {
+                new.push(v);
+            }
+        }
+        if let (Some(ref old), Some(ref mut new)) = (&old_fids, &mut new_fids) {
+            if let Some(&v) = old.get(src) {
+                new.push(v);
+            }
+        }
+    }
+
+    mesh.triangles = new_tris;
+    // Preserve the "empty vec -> None" convention used by the weld paths
+    // (an attribute array that ends up empty is dropped, not kept as Some([])).
+    mesh.face_normals = new_fn.filter(|v| !v.is_empty());
+    mesh.triangle_colors = new_tc.filter(|v| !v.is_empty());
+    mesh.triangle_face_ids = new_fids.filter(|v| !v.is_empty());
+}
+
+/// Push a geometry-derived face normal for a newly appended triangle
+/// (e.g. T-junction split children) so `face_normals` stays length-synced
+/// with `triangles` when the array already exists.
+fn push_default_face_normal(mesh: &mut TriangleMesh, tri: [u32; 3]) {
+    if mesh.face_normals.is_some() {
+        let v0 = mesh.vertices[tri[0] as usize];
+        let v1 = mesh.vertices[tri[1] as usize];
+        let v2 = mesh.vertices[tri[2] as usize];
+        let e1 = (v1.x - v0.x, v1.y - v0.y, v1.z - v0.z);
+        let e2 = (v2.x - v0.x, v2.y - v0.y, v2.z - v0.z);
+        let nx = e1.1 * e2.2 - e1.2 * e2.1;
+        let ny = e1.2 * e2.0 - e1.0 * e2.2;
+        let nz = e1.0 * e2.1 - e1.1 * e2.0;
+        let len = (nx * nx + ny * ny + nz * nz).sqrt();
+        let n = if len > 1e-15 {
+            [nx / len, ny / len, nz / len]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        mesh.face_normals.as_mut().unwrap().push(n);
+    }
+    if mesh.triangle_colors.is_some() {
+        mesh.triangle_colors
+            .as_mut()
+            .unwrap()
+            .push([0.62, 0.65, 0.70, 1.0]);
+    }
+}
+
 /// Remove degenerate triangles (zero area) in place.
 fn filter_degenerate_triangles_in_place(mesh: &mut TriangleMesh, min_area_sq: f64) {
-    let face_ids = mesh.triangle_face_ids.take();
-    let mut kept = Vec::with_capacity(mesh.triangles.len());
-    let mut kept_ids = Vec::with_capacity(mesh.triangles.len());
+    let mut kept: Vec<(usize, [u32; 3])> = Vec::with_capacity(mesh.triangles.len());
 
     for (ti, tri) in mesh.triangles.iter().enumerate() {
         let v0 = mesh.vertices[tri[0] as usize];
@@ -2394,19 +2468,11 @@ fn filter_degenerate_triangles_in_place(mesh: &mut TriangleMesh, min_area_sq: f6
         let cz = e1x * e2y - e1y * e2x;
         let area_sq = (cx * cx + cy * cy + cz * cz) * 0.25;
         if area_sq >= min_area_sq {
-            kept.push(*tri);
-            if let Some(ref ids) = face_ids {
-                kept_ids.push(ids[ti]);
-            }
+            kept.push((ti, *tri));
         }
     }
 
-    mesh.triangles = kept;
-    mesh.triangle_face_ids = if kept_ids.is_empty() || face_ids.is_none() {
-        face_ids
-    } else {
-        Some(kept_ids)
-    };
+    rebuild_triangles_with_attrs(mesh, &kept);
 }
 
 // ============================================================
