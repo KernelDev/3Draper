@@ -269,3 +269,103 @@ EdgeStore: 3 canonical edges, 3 alias mappings
 
 - `crates/draper-topology/src/edge_store.rs` — EdgeStore + index_edges + 9 тестов
 - `tools/src/bin/edge_id_diag.rs` — расширен dump'ом EdgeStore
+
+---
+
+# Worklog — Пункт 1 (верификация в новом sandbox) + C5 Stage 3
+
+**Дата:** 2026-08-30
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `83d2f64` (после C5 Stage 2)
+**Задача:** Пункт 1 — целостность (691+ тестов); Пункт 2 — C5 Stage 3 (геометрическая идентичность нативных рёбер + пропагация фиксов)
+
+## Пункт 1 — Верификация целостности
+
+- Rust 1.98.0 (rustup stable) установлен — требование cargo 1.98+ выполнено
+- Репозиторий переклонирован (sandbox сброшен между сессиями)
+
+### Найденные и исправленные предсуществующие баги (оба воспроизведены на baseline 77663ca)
+
+1. **N1 — test_union_and_intersect_are_not_stubs падал в debug-режиме**
+   (`face_normals length (44) != triangles length (13)`). Корневая причина: 6 код-путей
+   пересобирали `mesh.triangles`, синхронизируя только `triangle_face_ids`:
+   weld apply (degenerate+remap), same-face duplicate removal, repair_t_junctions
+   (kept + split children), filter_degenerate_triangles_in_place,
+   fix_inconsistent_winding, mesh_boolean::clean_mesh. Фикс: общий хелпер
+   `rebuild_triangles_with_attrs()` фильтрует ВСЕ per-triangle массивы одним
+   kept-index списком (+ `push_default_face_normal` для split-детей).
+   boolean_subtract_test: 4/4 PASS (было 3/4).
+2. **N2 — 8 diag-интеграционных тестов draper-step падали file-not-found**
+   (хардкод `/home/z/my-project/test/...` из СТАРОЙ раскладки sandbox; K1 чинил только
+   converter.rs, каталог tests/ остался). Фикс: хелпер `test_file()` от
+   `CARGO_MANIFEST_DIR` — устойчив к cwd и будущим релокациям. 13 путей в 8 файлах.
+3. **N3 — doc-тест draper-core quantum_hash никогда не компилировался**
+   (несуществующий API hash_solid, несвязанные переменные). Переписан на реальный API.
+
+### Итоги прогона (после N1–N3)
+
+- **Core (debug):** geometry 121+154 ✅, topology 167→174 ✅, mesh 253+51 ✅,
+  step 122 (debug; 4 тяжёлых industrial отложены) + 38 integration ✅, core 73+2 doc ✅, json 13 ✅
+- **draper-step lib (release): 126/126** (включая 4 тяжёлых industrial, 194s)
+- **STEP regression: 32/33 PASS**; Vulcan — задокументированный таймаут (RC=124 при
+  лимите 570s; per-solid < 16% при пороге 80%) — поведение baseline, деградации нет
+
+## Пункт 2 — C5 Stage 3
+
+### Часть A — геометрическая дедупликация нативных рёбер
+
+`Solid::index_edges()`: рёбра без `step_entity_id` (builder/boolean) теперь
+унифицируются по геометрическому ключу — направление-нечувствительному:
+- Line: каноническая точка (ближайшая к началу координат) + знак-каноническое направление
+- Circle: центр + каноническая нормаль + радиус (x_axis исключён — артефакт параметризации)
+- Ellipse/Hyperbola/Parabola: placement + оси + скаляры (x_axis геометричен)
+- Arc: ключ окружности + пара углов (min, max)
+- NURBS: степень + квантованные контрольные точки/веса/узлы (реверс намеренно не матчится)
+- Без кривой / PCurve / Trimmed / Composite — исключены (эндпоинты одни не дают
+  идентичности: линзы; pcurve в параметрическом пространстве поверхности)
+- Все координаты на сетке 1e-9: промах всегда безопасен (нет дедупа), ложное
+  слияние требует идентичной кривой И пары эндпоинтов в одном solid
+
+### Часть B — пропагация healing-фиксов
+
+`Solid::propagate_edge_fixes()`: группирует инстансы по общей идентичности
+(step id ИЛИ геометрический ключ), реконсилирует однозначные поля:
+- `degenerate` — OR; `tolerance` — MAX (tolerant-modeling семантика)
+- curve-backfill ТОЛЬКО при совпадении param_range с донором (или свап) —
+  гарантия той же геометрии
+- Ориентационно-зависимые поля (param_range, forward, vertex ids/points) НЕ
+  трогаются. Вызывается из `heal_solid` ДО index_edges — healed-топология
+  консистентна между гранями
+
+### Часть C — индексация boolean-результатов
+
+`boolean_union/subtract/intersect` оборачивают результат `index_edges()` —
+split-рёбра (клонируемые shared_split_edges в обе грани) получают единую
+идентичность; mesh edge_cache (register_edge_store_aliases) резолвит оба
+инстанса в одну запись дискретизации автоматически
+
+### Верификация Stage 3
+
+- draper-topology: **174 passed** (167 + 7 новых тестов)
+- draper-mesh: 253 + 51 ✅; draper-step release: 126/126 ✅
+- STEP regression 32/33 PASS; industrial УЛУЧШИЛИСЬ:
+  compressor overall 5.56%→**4.08%**, drill_top 2.34%→**2.12%**,
+  transmission 6.04% (<8%)
+- `cargo check --workspace --lib` + draper-diag/viewer bins — 0 errors
+
+## Коммиты
+
+- `8f0bb70` fix(mesh): N1 — sync per-triangle attributes in weld/dedup/cleanup paths
+- `8a292f3` fix(step): N2 — robust test-file paths for relocated repo
+- `9ad55c0` refactor(core): C5 stage 3 — geometric edge identity + fix propagation
+- `e7f0cde` fix(core): N3 — repair quantum_hash doc example (never compiled)
+
+## Stage Summary
+
+- Пункт 1 закрыт: 667+ core тестов зелёные, 32/33 STEP-регрессии PASS (Vulcan —
+  документированный таймаут как в baseline), попутно закрыты 3 предсуществующих бага
+- Пункт 2 закрыт для Stage 3: идентичность рёбер едина на всех трёх уровнях —
+  STEP (step id), нативная геометрия (geometric key), healing (fix propagation);
+  boolean-результаты индексируются автоматически
+- Следующий этап (Stage 4): миграция оставшихся потребителей face.edges на
+  store-lookup'и и финальное удаление зеркал Face.edges
