@@ -555,3 +555,91 @@ junction-snap, as1_rod NURBS CDT strip).
 - `d14af6e` refactor(core): C5 stage 5 — decoupled consumers
   (explicit-edge API + EdgeStore serde) (11 файлов, +645/−39),
   запушен в origin/main
+
+# C5 follow-up #1 — industrial perf: O(n²) post-processing eliminated (2026-09-01)
+
+Цель: закрыть trade-off Stage 1 №1 — «тяжёлые industrial-файлы ~2.5×
+медленнее» (transmission 61s → 161s, Vulcan 700-900s = документированный
+таймаут STEP-регрессии). План предсказывал «плотность Steiner для
+торусов/NURBS в parametric_domain.rs» — прогноз оказался НЕВЕРНЫМ.
+
+## Профилирование (новый bench: draper-step/examples/transmission_bench.rs)
+
+- transmission: 165-180s total; solid #6 = 109s, при этом ПОФАСЕТНАЯ
+  триангуляция solid #6 — 0.17s (!!), 44 faces
+- Vulcan: solid #0 = 93-109s, пофасетная триангуляция — 4.8s, 1430 faces
+- Время НЕ коррелировало с числом треугольников → виноваты
+  ПОСТ-процессинги, а не CDT/Steiner
+
+## Найденные корневые причины (4×)
+
+1. **validate_edge_consistency** — near-miss диагностика: O(B²) пары
+   граничных рёбер (B = pre-weld boundary! transmission #6: 59,736 →
+   1.78 млрд пар = 119s) + O(V²) пары вершин (1.8s) + `Vec::any`-дедуп
+   O(V²). Результат диагностики — 0 находок: 122s чистой траты на solid.
+   NB: EC считает грани ДО weld (59.7K), финальный отчёт — ПОСЛЕ (6.6K,
+   weld закрывает 53K) — расхождение легитимно.
+2. **merge_deduplicating** — rebuilding `existing_tris` HashMap из ВСЕХ
+   накопленных треугольников на КАЖДОМ вызове → O(faces × triangles):
+   Vulcan #0: 1430 × ~50K avg = 71.5M inserts = 26s
+3. **weld PASS 1** — spatial hash из ВСЕХ вершин (47K) при cell =
+   weld_tol: кандидаты фильтруются boundary-чеком → 96% скана — впустую;
+   + `Vec<HashSet<u64>>` vertex_face_ids: 2 случайных HashSet-дерефа на
+   кандидата (cache-miss) → 35-43s
+4. **weld PASS 3** — find() + shares_face() на КАЖДОГО кандидата до
+   дистанционной проверки
+
+## Исправления (все — с сохранением семантики подсчёта/результатов)
+
+- **EC**: оба near-miss скана → spatial hash (cell = closeness threshold,
+  27 соседей; доказательство покрытия: best_dist < X ⇒ каждая концевая
+  дистанция < X ⇒ |mid_i − mid_j| ≤ (√d_a+√d_b)/2 ≤ √(d_a+d_b) < X).
+  Дедуп vertex-info → HashSet. Boundary edges: Vec<((u32,u32), usize)>
+  вместо клонирования Vec<(usize,u32,u32)> на каждое ребро
+- **merge_deduplicating**: tri_keys HashMap живёт В VertexDedupMap
+  инкрементально через вызовы; `tri_keys_sync_len` guard — при внешней
+  мутации таргета (len mismatch) полный rebuild = старое поведение
+- **weld PASS 1**: spatial только из boundary-вершин (кандидаты в
+  порядке возрастания индекса = прежний tie-breaking), distance-first
+  порядок проверок (гвард faces — только для кандидатов, улучшающих
+  best; результат weld идентичен, меняется только счётчик диагностики),
+  убран гарантированно-истинный boundary-фильтр
+- **weld PASS 2/3**: distance-first + убран boundary-фильтр; PASS 3:
+  root_v1 вынесен из цикла кандидатов
+- **vertex_face_ids**: Vec<HashSet<u64>> → плоский CSR (offsets + sorted
+  faces), shares_face = линейное пересечение срезов — 2 cache-linear
+  чтения вместо случайных HashSet-дерефов
+
+## Результаты (release, 2-CPU sandbox)
+
+| Файл | До | После | Ускорение |
+|------|-----|-------|-----------|
+| transmission_top.stp | 165-180s | **3.22s** | ~52× |
+| 8500-02_Vulcan.STEP | 700-900s (timeout) | **9.73s** | ~80× |
+
+- Оба файла теперь БЫСТРЕЕ до-C5 baseline (transmission 61s) —
+  trade-off Stage 1 №1 закрыт с превышением
+- Качество не пострадало: transmission boundary 6.11 → 5.92%,
+  Vulcan 1.46 → 1.48% (в шуме); несколько файлов УЛУЧШИЛИСЬ:
+  as1_bolt 1.62%, compressor 4.66% (было 6.22%), as1_plate 5.43%
+  (было 6.93%), as1_rod 3.20% (было 4.00%)
+- **Vulcan больше НЕ таймаут**: STEP-регрессия впервые может быть 33/33;
+  порог KNOWN_ISSUES ужесточён 80 → 5
+
+## Верификация
+
+- draper-mesh: 253 + все integration suites ✅ (edge_cache, boolean,
+  edge_explicit, fuzz, lod, nurbs_fallback, proptest, triangulation)
+- draper-topology: 183+17+11 ✅; core 74 ✅; json 13 ✅; ffi 10+2 ✅
+- cargo check --tests -p draper-step — 0 errors
+- Bench-прогон всех 31 файлов test/ — все в пределах порогов
+  (бенч использует тот же код-путь triangulate_solid_with_report,
+  что и step_regression, без egui-зависимости draper-testing)
+- draper-testing STEP-регрессия не запускалась в этой сессии (debug
+  target на 9.9GB rootfs); bench покрывает тот же путь
+
+## Артефакты
+
+- `crates/draper-step/examples/transmission_bench.rs` — бенч
+  (per-solid + per-face режимы, --solid N / --faces / --verbose);
+  оставлен в репо как инструмент диагностики производительности

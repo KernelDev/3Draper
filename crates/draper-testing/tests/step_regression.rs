@@ -33,14 +33,18 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     // Industrial files with complex topology — remaining boundary edges are
     // NURBS CDT fallbacks and cross-face mismatches in fillet regions.
     ("Zentralstaender.stp", 40.0),     // worst solid 39%, overall 0.94%
-    ("8500-02_Vulcan.STEP", 80.0),     // large assembly, slow
+    // 2026-09-01 (C5 follow-up #1, industrial perf): the O(n²) diagnostics
+    // in validate_edge_consistency / weld made Vulcan take 700-900s
+    // (documented timeout). After the spatial-hash/CSR fixes it triangulates
+    // in ~10s with overall boundary 1.48% — threshold tightened 80 → 5.
+    ("8500-02_Vulcan.STEP", 5.0),
     ("transmission_top.stp", 8.0),     // 6.03% overall (was 9.08%)
-    ("compressor-13920_top.stp", 10.0), // 6.22%
+    ("compressor-13920_top.stp", 10.0), // 6.22% (4.66% observed 2026-09-01)
     ("gdt_test.stp", 50.0),             // GD&T annotations
     // Curved surfaces
     ("brick_thin_round.stp", 8.0),     // 6.17%
     // as1 parts
-    ("as1-oc-214_plate.stp", 8.0),     // 6.93%
+    ("as1-oc-214_plate.stp", 8.0),     // 6.93% (5.43% observed 2026-09-01)
     ("as1-oc-214_rod.stp", 8.0),       // 4.00% (NURBS CDT strip fallback — see worklog)
     // Seam-line geometry bug: STEP LINE direction inconsistent with vertices
     // (vertical line + slanted vertex pair) — needs junction-level snap.

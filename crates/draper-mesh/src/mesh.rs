@@ -68,6 +68,19 @@ pub struct VertexDedupMap {
     tolerance_hits: Cell<usize>,
     /// Number of new vertex insertions.
     misses: Cell<usize>,
+    /// Incremental triangle-duplicate index (C5 follow-up #1, industrial
+    /// perf): sorted vertex triple → face id of the first triangle with
+    /// that key. Maintained by [`TriangleMesh::merge_deduplicating`]
+    /// across calls so the per-call rebuild of the whole accumulated
+    /// triangle set — O(faces × triangles) total, ~26s on Vulcan #0
+    /// (1430 faces) — becomes O(triangles) total.
+    tri_keys: HashMap<[u32; 3], u64>,
+    /// Triangle count of the merge target at the end of the last
+    /// `merge_deduplicating` call. A mismatch at the next call means the
+    /// target mesh was mutated externally (or the map is used with a
+    /// different target) — `merge_deduplicating` then falls back to a
+    /// full rebuild, preserving the pre-optimization behavior exactly.
+    tri_keys_sync_len: usize,
 }
 
 impl VertexDedupMap {
@@ -101,6 +114,8 @@ impl VertexDedupMap {
             exact_hits: Cell::new(0),
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
+            tri_keys: HashMap::new(),
+            tri_keys_sync_len: 0,
         }
     }
 
@@ -120,6 +135,8 @@ impl VertexDedupMap {
             exact_hits: Cell::new(0),
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
+            tri_keys: HashMap::new(),
+            tri_keys_sync_len: 0,
         }
     }
 
@@ -881,21 +898,33 @@ impl TriangleMesh {
             // because removing them creates visible holes in the 3D view
             // (e.g., Step#87 plane face, Step#78 cone face).  Only same-face
             // duplicates are removed.
-            let mut existing_tris: std::collections::HashMap<[u32; 3], u64> = std::collections::HashMap::with_capacity(self.triangles.len());
+            //
+            // C5 follow-up #1 (industrial perf): the triangle-key map is
+            // maintained INCREMENTALLY in the dedup map across merge calls
+            // (rebuilding it from `self.triangles` on every call made the
+            // whole merge loop O(faces × triangles) — ~26s on Vulcan solid
+            // #0 with 1430 faces). The `tri_keys_sync_len` guard detects
+            // external mutation of the target mesh (or a dedup map shared
+            // with a different target) and falls back to a full rebuild,
+            // preserving the previous behavior in every scenario.
+            if dedup_map.tri_keys_sync_len != self.triangles.len() {
+                dedup_map.tri_keys.clear();
+                dedup_map.tri_keys.reserve(self.triangles.len());
+                for (ti, tri) in self.triangles.iter().enumerate() {
+                    let mut sorted = [tri[0], tri[1], tri[2]];
+                    sorted.sort();
+                    let fid = self.triangle_face_ids.as_ref()
+                        .and_then(|ids| ids.get(ti).copied())
+                        .unwrap_or(u64::MAX);
+                    dedup_map.tri_keys.entry(sorted).or_insert(fid);
+                }
+            }
+            let existing_tris = &mut dedup_map.tri_keys;
             // Get the face_id for other's triangles — per-face meshes set all
             // triangle_face_ids to the same value (the face's ID).
             let other_face_id = other.triangle_face_ids.as_ref()
                 .and_then(|ids| ids.first().copied())
                 .unwrap_or(u64::MAX);
-            for (ti, tri) in self.triangles.iter().enumerate() {
-                let mut sorted = [tri[0], tri[1], tri[2]];
-                sorted.sort();
-                let fid = self.triangle_face_ids.as_ref()
-                    .and_then(|ids| ids.get(ti).copied())
-                    .unwrap_or(u64::MAX);
-                existing_tris.entry(sorted).or_insert(fid);
-            }
-
             for (src_idx, tri) in other.triangles.iter().enumerate() {
                 let a = index_map[tri[0] as usize];
                 let b = index_map[tri[1] as usize];
@@ -934,6 +963,7 @@ impl TriangleMesh {
                 self.triangles.push([a, b, c]);
                 kept_src_indices.push(src_idx);
             }
+            dedup_map.tri_keys_sync_len = self.triangles.len();
         }
         if became_degenerate > 0 || duplicate_count > 0 || cross_face_kept > 0 {
             log::warn!(

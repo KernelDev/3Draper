@@ -24,7 +24,7 @@ use crate::mesh::TriangleMesh;
 use crate::edge_cache::compute_adaptive_crease_angle;
 use draper_geometry::{Point3d};
 use draper_topology::Solid;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Statistics for all gap-fill mechanisms (KS-3 from audit plan).
 ///
@@ -370,75 +370,118 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
     // from different faces whose endpoints are close in 3D space but
     // weren't merged by dedup (indicating the edge cache produced slightly
     // different positions for the same logical edge).
-    let boundary_edges: Vec<((u32, u32), Vec<(usize, u32, u32)>)> = edge_map
+    //
+    // C5 follow-up #1 (2026-09-01, industrial perf): the near-miss pair
+    // scans below used to be O(B²)/O(V²) over boundary edges/vertices
+    // (transmission_top solid #6: B ≈ 60k → 1.8 billion pairs, ~2 minutes
+    // for ONE solid — the whole "industrial files ~2.5× slower" regression
+    // traced to this diagnostic, not to CDT/Steiner density). Both scans
+    // now use spatial hashing keyed at the closeness threshold, making
+    // them O(B + V) expected while preserving the exact counting
+    // semantics. Coverage proof: a pair qualifies only when
+    // `best_dist < near_miss_tol * 100`, which bounds every endpoint
+    // distance and therefore the midpoint distance by the same threshold
+    // (|mid_i − mid_j| ≤ (√d_a + √d_b)/2 ≤ √(d_a + d_b) < threshold), so
+    // the 27-cell neighborhood at cell size = threshold finds every
+    // qualifying pair.
+    let boundary_edges: Vec<((u32, u32), usize)> = edge_map
         .iter()
         .filter(|(_, entries)| entries.len() == 1)
-        .map(|(k, v)| (*k, v.clone()))
+        .map(|(k, v)| (*k, v[0].0))
         .collect();
 
     if !boundary_edges.is_empty() {
-        // Build spatial index of boundary vertex positions for near-miss detection
-        let mut vertex_positions: HashMap<u32, Point3d> = HashMap::new();
-        for &(lo, hi) in boundary_edges.iter().map(|(k, _)| k) {
-            if !vertex_positions.contains_key(&lo) {
-                vertex_positions.insert(lo, mesh.vertices[lo as usize]);
-            }
-            if !vertex_positions.contains_key(&hi) {
-                vertex_positions.insert(hi, mesh.vertices[hi as usize]);
-            }
-        }
+        // Face id of the (single) triangle owning each boundary edge (O(B)).
+        let face_id_of = |tri: usize| -> u64 {
+            face_ids.and_then(|ids| ids.get(tri).copied()).unwrap_or(0)
+        };
+        let edge_faces: Vec<u64> = boundary_edges
+            .iter()
+            .map(|(_, tri)| face_id_of(*tri))
+            .collect();
+        let endpoints: Vec<(Point3d, Point3d)> = boundary_edges
+            .iter()
+            .map(|((lo, hi), _)| (mesh.vertices[*lo as usize], mesh.vertices[*hi as usize]))
+            .collect();
 
         // For each boundary edge, check if there's another boundary edge
         // from a DIFFERENT face with close but not identical endpoints.
         // This indicates the edge cache produced slightly different positions.
         let near_miss_tol = tolerance.max(1e-6);
-        let _near_miss_tol_sq = near_miss_tol * near_miss_tol;
+        let close_thresh = near_miss_tol * 100.0;
 
-        for (i, (edge_i, entries_i)) in boundary_edges.iter().enumerate() {
-            let face_id_i = face_ids
-                .and_then(|ids| ids.get(entries_i[0].0).copied())
-                .unwrap_or(0);
-            let p_lo_i = vertex_positions[&edge_i.0];
-            let p_hi_i = vertex_positions[&edge_i.1];
+        // Spatial hash on edge midpoints (cell size = closeness threshold).
+        let midpoint_cell = |p_lo: &Point3d, p_hi: &Point3d| -> (i64, i64, i64) {
+            (
+                ((p_lo.x + p_hi.x) * 0.5 / close_thresh).floor() as i64,
+                ((p_lo.y + p_hi.y) * 0.5 / close_thresh).floor() as i64,
+                ((p_lo.z + p_hi.z) * 0.5 / close_thresh).floor() as i64,
+            )
+        };
+        let mut edge_cells: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (i, (p_lo, p_hi)) in endpoints.iter().enumerate() {
+            edge_cells
+                .entry(midpoint_cell(p_lo, p_hi))
+                .or_default()
+                .push(i);
+        }
 
-            for (j, (edge_j, entries_j)) in boundary_edges.iter().enumerate() {
-                if j <= i { continue; } // Avoid duplicate checks
+        for i in 0..boundary_edges.len() {
+            let (p_lo_i, p_hi_i) = &endpoints[i];
+            let face_id_i = edge_faces[i];
+            let cell_i = midpoint_cell(p_lo_i, p_hi_i);
 
-                let face_id_j = face_ids
-                    .and_then(|ids| ids.get(entries_j[0].0).copied())
-                    .unwrap_or(0);
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let bucket = match edge_cells.get(&(cell_i.0 + dx, cell_i.1 + dy, cell_i.2 + dz)) {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        for &j in bucket {
+                            // Enumeration order: each unordered pair once.
+                            if j <= i {
+                                continue;
+                            }
 
-                // Skip edges from the same face (they're just face boundaries)
-                if face_id_i == face_id_j && face_id_i != 0 { continue; }
+                            let face_id_j = edge_faces[j];
 
-                let p_lo_j = vertex_positions[&edge_j.0];
-                let p_hi_j = vertex_positions[&edge_j.1];
+                            // Skip edges from the same face (they're just face boundaries)
+                            if face_id_i == face_id_j && face_id_i != 0 {
+                                continue;
+                            }
 
-                // Check both alignment options (lo↔lo,hi↔hi or lo↔hi,hi↔lo)
-                let d_ll = dist_sq(&p_lo_i, &p_lo_j);
-                let d_hh = dist_sq(&p_hi_i, &p_hi_j);
-                let d_lh = dist_sq(&p_lo_i, &p_hi_j);
-                let d_hl = dist_sq(&p_hi_i, &p_lo_j);
+                            let (p_lo_j, p_hi_j) = &endpoints[j];
 
-                let aligned_dist = (d_ll + d_hh).sqrt();
-                let flipped_dist = (d_lh + d_hl).sqrt();
-                let best_dist = aligned_dist.min(flipped_dist);
+                            // Check both alignment options (lo↔lo,hi↔hi or lo↔hi,hi↔lo)
+                            let d_ll = dist_sq(p_lo_i, p_lo_j);
+                            let d_hh = dist_sq(p_hi_i, p_hi_j);
+                            let d_lh = dist_sq(p_lo_i, p_hi_j);
+                            let d_hl = dist_sq(p_hi_i, p_lo_j);
 
-                // Only count as near-miss if vertices are close but NOT identical
-                // (identical would mean they should have been merged by dedup)
-                let is_close = best_dist < near_miss_tol * 100.0;
-                let is_not_identical = best_dist > 0.0;
+                            let aligned_dist = (d_ll + d_hh).sqrt();
+                            let flipped_dist = (d_lh + d_hl).sqrt();
+                            let best_dist = aligned_dist.min(flipped_dist);
 
-                if is_close && is_not_identical {
-                    report.inconsistent_edges += 1;
-                    report.max_vertex_distance = report.max_vertex_distance.max(best_dist);
+                            // Only count as near-miss if vertices are close but NOT identical
+                            // (identical would mean they should have been merged by dedup)
+                            let is_close = best_dist < close_thresh;
+                            let is_not_identical = best_dist > 0.0;
 
-                    if report.worst_inconsistencies.len() < 10 {
-                        report.worst_inconsistencies.push(EdgeInconsistency {
-                            vertex_indices: (edge_i.0, edge_j.0),
-                            distance: best_dist,
-                            face_ids: vec![face_id_i, face_id_j],
-                        });
+                            if is_close && is_not_identical {
+                                report.inconsistent_edges += 1;
+                                report.max_vertex_distance =
+                                    report.max_vertex_distance.max(best_dist);
+
+                                if report.worst_inconsistencies.len() < 10 {
+                                    report.worst_inconsistencies.push(EdgeInconsistency {
+                                        vertex_indices: (boundary_edges[i].0 .0, boundary_edges[j].0 .0),
+                                        distance: best_dist,
+                                        face_ids: vec![face_id_i, face_id_j],
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -453,35 +496,72 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
         let mut vertex_near_miss_max_dist = 0.0f64;
         let vertex_nm_tol = tolerance.max(1e-6);
         let vertex_nm_tol_sq = vertex_nm_tol * vertex_nm_tol;
+        let vertex_close_thresh = vertex_nm_tol * 100.0;
 
-        // Collect unique boundary vertex (index, position, face_id) tuples
+        // Collect unique boundary vertex (index, position, face_id) tuples.
+        // First-seen face id wins — the same rule the previous linear-scan
+        // dedup applied, but O(V) via a HashSet.
+        let mut seen_vertices: HashSet<u32> = HashSet::new();
         let mut boundary_vertex_info: Vec<(u32, Point3d, u64)> = Vec::new();
         for ((lo, hi), entries) in &edge_map {
             if entries.len() == 1 {
-                let face_id = face_ids.and_then(|ids| ids.get(entries[0].0).copied()).unwrap_or(0);
-                if !boundary_vertex_info.iter().any(|(idx, _, _)| *idx == *lo) {
+                let face_id = face_id_of(entries[0].0);
+                if seen_vertices.insert(*lo) {
                     boundary_vertex_info.push((*lo, mesh.vertices[*lo as usize], face_id));
                 }
-                if !boundary_vertex_info.iter().any(|(idx, _, _)| *idx == *hi) {
+                if seen_vertices.insert(*hi) {
                     boundary_vertex_info.push((*hi, mesh.vertices[*hi as usize], face_id));
                 }
             }
         }
 
+        // Spatial hash on vertex positions (cell size = closeness threshold).
+        let vertex_cell = |p: &Point3d| -> (i64, i64, i64) {
+            (
+                (p.x / vertex_close_thresh).floor() as i64,
+                (p.y / vertex_close_thresh).floor() as i64,
+                (p.z / vertex_close_thresh).floor() as i64,
+            )
+        };
+        let mut vertex_cells: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        for (i, (_vi, p, _fi)) in boundary_vertex_info.iter().enumerate() {
+            vertex_cells.entry(vertex_cell(p)).or_default().push(i);
+        }
+
         // Check pairs of boundary vertices from different faces
         for i in 0..boundary_vertex_info.len() {
-            for j in (i+1)..boundary_vertex_info.len() {
-                let (_vi, pi, fi) = &boundary_vertex_info[i];
-                let (_vj, pj, fj) = &boundary_vertex_info[j];
-                if fi == fj && *fi != 0 { continue; } // Same face
-                let dx = pi.x - pj.x;
-                let dy = pi.y - pj.y;
-                let dz = pi.z - pj.z;
-                let dist_sq = dx*dx + dy*dy + dz*dz;
-                if dist_sq > 0.0 && dist_sq < vertex_nm_tol_sq * 10000.0 {
-                    vertex_near_misses += 1;
-                    let dist = dist_sq.sqrt();
-                    vertex_near_miss_max_dist = vertex_near_miss_max_dist.max(dist);
+            let (_vi, pi, fi) = &boundary_vertex_info[i];
+            let cell_i = vertex_cell(pi);
+
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for dz in -1..=1 {
+                        let bucket = match vertex_cells
+                            .get(&(cell_i.0 + dx, cell_i.1 + dy, cell_i.2 + dz))
+                        {
+                            Some(b) => b,
+                            None => continue,
+                        };
+                        for &j in bucket {
+                            // Enumeration order: each unordered pair once.
+                            if j <= i {
+                                continue;
+                            }
+                            let (_vj, pj, fj) = &boundary_vertex_info[j];
+                            if fi == fj && *fi != 0 {
+                                continue; // Same face
+                            }
+                            let dxv = pi.x - pj.x;
+                            let dyv = pi.y - pj.y;
+                            let dzv = pi.z - pj.z;
+                            let dist_sq_ij = dxv * dxv + dyv * dyv + dzv * dzv;
+                            if dist_sq_ij > 0.0 && dist_sq_ij < vertex_nm_tol_sq * 10000.0 {
+                                vertex_near_misses += 1;
+                                let dist = dist_sq_ij.sqrt();
+                                vertex_near_miss_max_dist = vertex_near_miss_max_dist.max(dist);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1286,46 +1366,86 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
     // share ANY face ID, the two vertices are on the same face (or share a
     // seam) — refuse to weld. Seam vertices (used by 2+ faces) can still
     // be welded to vertices from a DIFFERENT face (no shared face ID).
-    let vertex_face_ids: Vec<HashSet<u64>> = if let Some(ref face_ids) = mesh.triangle_face_ids {
-        let mut vfids: Vec<HashSet<u64>> = vec![HashSet::new(); mesh.vertices.len()];
+    // ── Flat vertex → incident-face-ids index (CSR) ─────────────────────
+    //
+    // C5 follow-up #1 (industrial perf): the face-aware guard previously
+    // used `Vec<HashSet<u64>>` — two random HashSet derefs (cache-miss
+    // prone) per weld candidate. The flat CSR layout below answers the
+    // same "do these vertices share a face?" question with two cache-
+    // linear slice reads plus a sorted intersect. Semantics preserved:
+    // - fid == u64::MAX entries are skipped (same as before);
+    // - a vertex with no recorded faces has an empty slice → the guard
+    //   is disabled for it (same as the empty-set case before).
+    let nv = mesh.vertices.len();
+    let mut vf_offsets: Vec<u32> = vec![0; nv + 1];
+    if let Some(face_ids) = mesh.triangle_face_ids.as_deref() {
         for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
             let fid = face_ids.get(tri_idx).copied().unwrap_or(u64::MAX);
-            if fid == u64::MAX { continue; }
+            if fid == u64::MAX {
+                continue;
+            }
             for &vi in tri {
-                // vi is u32, safe to index into vfids
                 let idx = vi as usize;
-                if idx < vfids.len() {
-                    vfids[idx].insert(fid);
+                if idx < nv {
+                    vf_offsets[idx + 1] += 1;
                 }
             }
         }
-        vfids
-    } else {
-        // No face IDs available — cannot do face-aware check.
-        // Fall back to empty sets (effectively disabling the guard).
-        vec![HashSet::new(); mesh.vertices.len()]
-    };
+    }
+    for i in 0..nv {
+        vf_offsets[i + 1] += vf_offsets[i];
+    }
+    let mut vf_faces: Vec<u64> = vec![0; vf_faces_len(&vf_offsets)];
+    {
+        let mut cursor = vf_offsets.clone();
+        if let Some(face_ids) = mesh.triangle_face_ids.as_deref() {
+            for (tri_idx, tri) in mesh.triangles.iter().enumerate() {
+                let fid = face_ids.get(tri_idx).copied().unwrap_or(u64::MAX);
+                if fid == u64::MAX {
+                    continue;
+                }
+                for &vi in tri {
+                    let idx = vi as usize;
+                    if idx < nv {
+                        vf_faces[cursor[idx] as usize] = fid;
+                        cursor[idx] += 1;
+                    }
+                }
+            }
+        }
+        // Sort each vertex's slice so the intersection below is linear.
+        for v in 0..nv {
+            let s = vf_offsets[v] as usize..vf_offsets[v + 1] as usize;
+            vf_faces[s].sort_unstable();
+        }
+    }
 
-    // Helper: returns true if v1 and candidate share ANY face ID.
-    // When face IDs are unavailable (empty sets), returns false (no shared
-    // face) to preserve original behavior.
+    /// Total length of the CSR faces array from its offsets.
     #[inline]
-    fn shares_face(
-        vfid_a: &HashSet<u64>,
-        vfid_b: &HashSet<u64>,
-    ) -> bool {
-        if vfid_a.is_empty() || vfid_b.is_empty() {
+    fn vf_faces_len(vf_offsets: &[u32]) -> usize {
+        *vf_offsets.last().unwrap_or(&0) as usize
+    }
+
+    /// Returns true if vertices `a` and `b` share ANY incident face id.
+    /// When face IDs are unavailable (empty slices), returns false (no
+    /// shared face) — preserving the original guard-disabling behavior.
+    #[inline]
+    fn shares_face_flat(vf_offsets: &[u32], vf_faces: &[u64], a: u32, b: u32) -> bool {
+        let (ia, ib) = (a as usize, b as usize);
+        let (sa, sb) = (
+            vf_offsets[ia] as usize..vf_offsets[ia + 1] as usize,
+            vf_offsets[ib] as usize..vf_offsets[ib + 1] as usize,
+        );
+        let (la, lb) = (&vf_faces[sa], &vf_faces[sb]);
+        if la.is_empty() || lb.is_empty() {
             return false;
         }
-        // Iterate the smaller set, look up in the larger
-        let (small, large) = if vfid_a.len() <= vfid_b.len() {
-            (vfid_a, vfid_b)
-        } else {
-            (vfid_b, vfid_a)
-        };
-        for fid in small {
-            if large.contains(fid) {
-                return true;
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < la.len() && j < lb.len() {
+            match la[i].cmp(&lb[j]) {
+                std::cmp::Ordering::Equal => return true,
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
             }
         }
         false
@@ -1417,16 +1537,28 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         short_boundary_edges.len(), boundary_vertices.len(), weld_tolerance
     );
 
-    // Build a spatial hash for vertex lookup
+    // Build a spatial hash for vertex lookup.
+    //
+    // C5 follow-up #1 (industrial perf): hash ONLY the boundary vertices.
+    // PASS 1 below filters every candidate with
+    // `boundary_vertices.contains(&candidate)` — non-boundary vertices in
+    // a cell were pure scan waste (Vulcan solid #0: 47k mesh vertices vs
+    // 3.4k boundary ones in weld-tolerance-sized cells → ~35s of filter
+    // work per solid). Candidates within each cell are inserted in
+    // ascending vertex-index order, matching the previous full-mesh
+    // iteration order, so best-match tie-breaking is unchanged.
     let cell_size = weld_tolerance;
+    let mut boundary_verts_sorted: Vec<u32> = boundary_vertices.iter().copied().collect();
+    boundary_verts_sorted.sort_unstable();
     let mut spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-    for (vi, v) in mesh.vertices.iter().enumerate() {
+    for vi in boundary_verts_sorted {
+        let v = mesh.vertices[vi as usize];
         let cell = (
             (v.x / cell_size).floor() as i64,
             (v.y / cell_size).floor() as i64,
             (v.z / cell_size).floor() as i64,
         );
-        spatial.entry(cell).or_default().push(vi as u32);
+        spatial.entry(cell).or_default().push(vi);
     }
 
     // For each short boundary edge, find a nearby vertex to weld with
@@ -1478,6 +1610,27 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                             if candidate == *v0 || candidate == *v1 {
                                 continue;
                             }
+                            // NOTE (C5 follow-up #1): `spatial` is built from
+                            // BOUNDARY vertices only, so every candidate is a
+                            // boundary vertex — the previous
+                            // `boundary_vertices.contains(&candidate)` filter is
+                            // guaranteed to pass and was removed.
+                            //
+                            // Distance-first ordering: candidates that cannot
+                            // improve the current best are skipped BEFORE the
+                            // (relatively expensive) face-aware guard. The weld
+                            // RESULT is unchanged — a candidate beyond the
+                            // current best could never become best_match; only
+                            // the diagnostic `skip_same_face_count` may count
+                            // fewer far same-face candidates.
+                            let pc = mesh.vertices[candidate as usize];
+                            let dx = pc.x - p1.x;
+                            let dy = pc.y - p1.y;
+                            let dz = pc.z - p1.z;
+                            let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if dist_sq >= best_dist_sq {
+                                continue;
+                            }
                             // CRITICAL: Only weld to OTHER boundary vertices.
                             //
                             // Without this check, a boundary vertex from face A
@@ -1492,9 +1645,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                             // with 2 holes) showed triangles covering the holes
                             // because the weld step replaced hole-boundary vertices
                             // with interior vertices from the hole-filling faces.
-                            if !boundary_vertices.contains(&candidate) {
-                                continue;
-                            }
+                            //
                             // CRITICAL #2: Refuse to weld two vertices that share
                             // ANY face ID, UNLESS they're very close (within
                             // pass2_tolerance — FP drift range). Welding vertices
@@ -1525,21 +1676,14 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                             // with inner ring vertices, destroying the
                             // annulus triangulation while leaving the UV
                             // visualization (computed before weld) intact.
-                            let pc = mesh.vertices[candidate as usize];
-                            let dx = pc.x - p1.x;
-                            let dy = pc.y - p1.y;
-                            let dz = pc.z - p1.z;
-                            let dist_sq = dx * dx + dy * dy + dz * dz;
-                            if shares_face(&vertex_face_ids[*v1 as usize], &vertex_face_ids[candidate as usize])
+                            if shares_face_flat(&vf_offsets, &vf_faces, *v1, candidate)
                                 && dist_sq > pass2_tol_sq_for_pass1
                             {
                                 skip_same_face_count += 1;
                                 continue;
                             }
-                            if dist_sq < best_dist_sq {
-                                best_dist_sq = dist_sq;
-                                best_match = Some(candidate);
-                            }
+                            best_dist_sq = dist_sq;
+                            best_match = Some(candidate);
                         }
                     }
                 }
@@ -1622,13 +1766,18 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                             if candidate == v1 {
                                 continue;
                             }
-                            // CRITICAL: Only weld to OTHER boundary vertices.
-                            // See PASS 1 comment for the full rationale.
-                            // Without this check, a boundary vertex from face A
-                            // can be welded to an INTERIOR vertex from face B,
-                            // corrupting face A's triangulation (e.g., triangles
-                            // covering holes that should be empty).
-                            if !boundary_vertices.contains(&candidate) {
+                            // NOTE (C5 follow-up #1): `pass2_spatial` is built
+                            // from boundary vertices only — the redundant
+                            // `boundary_vertices.contains` filter was removed.
+                            // Distance-first ordering (see PASS 1 note): the
+                            // expensive face-aware guard now runs only for
+                            // candidates that can improve the current best.
+                            let pc = mesh.vertices[candidate as usize];
+                            let dx = pc.x - p1.x;
+                            let dy = pc.y - p1.y;
+                            let dz = pc.z - p1.z;
+                            let dist_sq = dx * dx + dy * dy + dz * dz;
+                            if dist_sq >= best_dist_sq {
                                 continue;
                             }
                             // CRITICAL #2: Refuse to weld two vertices that share
@@ -1637,12 +1786,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                             // threshold, so the distance exemption is automatic
                             // — but we still need the face check to prevent
                             // same-face welds at the tight tolerance.
-                            let pc = mesh.vertices[candidate as usize];
-                            let dx = pc.x - p1.x;
-                            let dy = pc.y - p1.y;
-                            let dz = pc.z - p1.z;
-                            let dist_sq = dx * dx + dy * dy + dz * dz;
-                            if shares_face(&vertex_face_ids[v1 as usize], &vertex_face_ids[candidate as usize])
+                            if shares_face_flat(&vf_offsets, &vf_faces, v1, candidate)
                                 && dist_sq > pass2_tol_sq
                             {
                                 continue;
@@ -1718,6 +1862,11 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                 (p1.z / pass3_cell_size).floor() as i64,
             );
 
+            // Hoisted out of the candidate loop (C5 follow-up #1): v1's
+            // union-find root is stable while scanning — welds are only
+            // applied after the loop finishes.
+            let root_v1 = find(&mut parent, v1);
+
             let mut best_match: Option<u32> = None;
             let mut best_dist_sq = pass3_tol_sq;
 
@@ -1728,22 +1877,31 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                         if let Some(candidates) = pass3_spatial.get(&neighbor_cell) {
                             for &candidate in candidates {
                                 if candidate == v1 { continue; }
-                                if !boundary_vertices.contains(&candidate) { continue; }
-                                // Skip if already welded to the same root
-                                let root_v1 = find(&mut parent, v1);
-                                let root_cand = find(&mut parent, candidate);
-                                if root_v1 == root_cand { continue; }
-
+                                // NOTE (C5 follow-up #1): `pass3_spatial` is
+                                // built from boundary vertices only — the
+                                // redundant `boundary_vertices.contains`
+                                // filter was removed. Distance-first ordering
+                                // (see PASS 1 note): the per-candidate
+                                // union-find `find` and the face-aware guard
+                                // now run only for candidates that can
+                                // improve the current best. `root_v1` is
+                                // stable during the scan (welds are applied
+                                // after the loop), so hoisting it out of
+                                // the candidate loop is safe.
                                 let pc = mesh.vertices[candidate as usize];
                                 let ddx = pc.x - p1.x;
                                 let ddy = pc.y - p1.y;
                                 let ddz = pc.z - p1.z;
                                 let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                                if dist_sq >= best_dist_sq { continue; }
+                                // Skip if already welded to the same root
+                                let root_cand = find(&mut parent, candidate);
+                                if root_v1 == root_cand { continue; }
                                 // CRITICAL #2: Refuse to weld two vertices that share
                                 // ANY face ID, UNLESS very close. See PASS 1 comment.
                                 // PASS 3 uses pass3_tol_sq as best_dist_sq threshold,
                                 // so the distance exemption is automatic.
-                                if shares_face(&vertex_face_ids[v1 as usize], &vertex_face_ids[candidate as usize])
+                                if shares_face_flat(&vf_offsets, &vf_faces, v1, candidate)
                                     && dist_sq > pass3_tol_sq
                                 {
                                     continue;

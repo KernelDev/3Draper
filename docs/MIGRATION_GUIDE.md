@@ -45,7 +45,8 @@ cargo test -p draper-testing --release step_regression_ -- --nocapture
 ```
 
 **Ожидаемый результат:** 667 core tests + 33 STEP regression = 700 tests, 0 failed
-(Vulcan — документированный таймаут ~10+ мин на 2-CPU машинах, см. KNOWN_ISSUES).
+(2026-09-01, C5 follow-up #1: Vulcan больше НЕ таймаут — ~10s после
+устранения O(n²) пост-процессинга; см. KNOWN_ISSUES и worklog_new.md).
 
 ### 1.4. Сборка приложения
 
@@ -241,7 +242,8 @@ git clean -fd
 | **≤5% boundary (PASS)** | 5 | nist_block_with_hole (3.10%), drill_top (4.51%), compressor (3.74%) |
 | **5-15% (KNOWN_ISSUES)** | 12 | nist_cone (12%), as1_bolt (6.5%), as1_nut (11%), synth_cone (14.5%) |
 | **15-40% (complex)** | 5 | Zentralstaender (0.95% overall, 27 solids), transmission (9.08%) |
-| **Timeout (slow)** | 2 | Vulcan, gdt_test |
+| **Timeout (slow)** | 1 | gdt_test |
+| **Быстрые (было timeout)** | 1 | Vulcan — 9.7s после C5 follow-up #1 (было 700-900s) |
 | **Hang (was, fixed)** | 1 | synth_thin_annulus — теперь PASS (9.14%) |
 
 ### Ключевые улучшения
@@ -269,7 +271,10 @@ git clean -fd
 
 3. **273 warnings в draper-viewer** — unused imports/variables. Не влияют на functionality.
 
-4. **Vulcan, gdt_test timeout** — большие industrial files (5+ минут).
+4. **gdt_test timeout** — GD&T annotations. ~~Vulcan~~ — устранён 2026-09-01
+   (C5 follow-up #1: O(n²) диагностики в validate_edge_consistency/weld →
+   spatial-hash/CSR; Vulcan ~10s, transmission 3.2s — industrial trade-off
+   Stage 1 закрыт: быстрее даже до-C5 baseline 61s).
 
 5. **`fix_self_intersections_heal`** — conservative real implementation (удаляет face с меньшим числом edges), но не rebuilds topology. Полная реализация требует trim + stitch.
 
