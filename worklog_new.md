@@ -549,3 +549,9 @@ instance-keyed геометрией для coedge-lookups и serde-совмес�
 носителем. Следующий шаг по PLAN — C6/industrial perf (transmission
 161s, Vulcan timeout) либо закрытие trade-offs Stage 1 (synth_cone
 junction-snap, as1_rod NURBS CDT strip).
+
+## Коммит
+
+- `d14af6e` refactor(core): C5 stage 5 — decoupled consumers
+  (explicit-edge API + EdgeStore serde) (11 файлов, +645/−39),
+  запушен в origin/main
