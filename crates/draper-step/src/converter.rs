@@ -2417,6 +2417,15 @@ pub struct StepConverter<'a> {
     /// This is the OpenCascade Shape Healing approach: before any edge
     /// discretization, canonicalize all vertex positions.
     vertex_canonical_map: std::cell::RefCell<Option<HashMap<i64, Point3d>>>,
+    /// Junction adjacency index (C5 follow-up #2, junction-level snap):
+    /// VERTEX_POINT id → Vec<(edge_curve_id, curve_ref_id)> for every
+    /// EDGE_CURVE referencing that vertex. Built lazily on the first
+    /// one-vertex-off-line query; read-only afterwards. Lets the LINE
+    /// branch of `resolve_edge_curve` check whether an off-line vertex
+    /// lies ON a neighboring circular edge — the authoritative-vertex
+    /// signal (synth_cone.stp) as opposed to the degenerate
+    /// center-vertex convention (nist_cylinder.stp).
+    junction_index: std::cell::RefCell<Option<HashMap<i64, Vec<(i64, i64)>>>>,
 }
 
 impl<'a> StepConverter<'a> {
@@ -2463,6 +2472,7 @@ impl<'a> StepConverter<'a> {
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
             vertex_canonical_map: std::cell::RefCell::new(None),
+            junction_index: std::cell::RefCell::new(None),
         }
     }
 
@@ -2577,6 +2587,7 @@ impl<'a> StepConverter<'a> {
             nauo_transform_map,
             bbox_cache: std::cell::RefCell::new(None),
             vertex_canonical_map: std::cell::RefCell::new(None),
+            junction_index: std::cell::RefCell::new(None),
         }
     }
 
@@ -7940,6 +7951,15 @@ impl<'a> StepConverter<'a> {
     /// P7: Now handles VERTEX_LOOP — a degenerate loop consisting of a single vertex
     /// (used for the apex of a cone or pyramid). Returns an empty edge list, which
     /// the triangulator will treat as a degenerate face (zero area, no triangles).
+    ///
+    /// C5 follow-up #2: the loop reference may be a DIRECT ref (standard:
+    /// `FACE_BOUND('', #83, .T.)`) or WRAPPED IN A LIST (non-standard but
+    /// produced by some exporters, e.g. synth_thin_annulus.stp:
+    /// `FACE_BOUND('', (#90), .T.)`). `get_ref` on a List returns None, so
+    /// the list form used to silently DROP the bound — for an inner bound
+    /// that meant the hole was lost and the face triangulated as a full
+    /// disk (top annulus covering the hole, leaving the neighboring
+    /// cylinder's ring as 51 boundary edges). We now unwrap both forms.
     fn resolve_face_bound_with_step_ids(&self, bound_entity: &crate::schema::StepEntity) -> Option<(Vec<TopoEdge>, Vec<i64>)> {
         // FACE_BOUND('', #loop_ref, .T.)
         // The loop reference is typically the 2nd parameter (index 1)
@@ -7952,7 +7972,18 @@ impl<'a> StepConverter<'a> {
                 orientation = e == "T";
                 continue;
             }
+            // Collect loop references: direct ref or refs inside a list
+            let mut loop_ids: Vec<i64> = Vec::new();
             if let Some(loop_id) = self.get_ref(param) {
+                loop_ids.push(loop_id);
+            } else if let StepValue::List(items) = param {
+                for item in items {
+                    if let Some(loop_id) = self.get_ref(item) {
+                        loop_ids.push(loop_id);
+                    }
+                }
+            }
+            for loop_id in loop_ids {
                 if let Some(loop_entity) = self.step.find_entity(loop_id) {
                     if loop_entity.type_name == "EDGE_LOOP" {
                         let (mut edges, step_ids) = self.resolve_edge_loop_with_step_ids(loop_id);
@@ -8193,9 +8224,12 @@ impl<'a> StepConverter<'a> {
                     // Decide whether to override the line.
                     // - both_on_line: use line as-is (standard case)
                     // - both_off_line: override (line is definitely wrong)
-                    // - one_off_line: check angle to decide
+                    // - one_off_line: check angle, then junction-level snap
                     let both_on_line = d1_sq <= tol_sq && d2_sq <= tol_sq;
                     let both_off_line = d1_sq > tol_sq && d2_sq > tol_sq;
+                    // Filled when the override is triggered by the
+                    // junction-level snap (for the warn log below).
+                    let mut junction_snap = false;
                     let should_override = if both_on_line {
                         false
                     } else if both_off_line {
@@ -8219,7 +8253,35 @@ impl<'a> StepConverter<'a> {
                             // the angle is > 30° → line direction is inconsistent.
                             // Use abs because the line might be parametrized in
                             // the opposite direction (which is fine).
-                            dot.abs() < 0.866
+                            let angle_inconsistent = dot.abs() < 0.866;
+                            if angle_inconsistent {
+                                true
+                            } else {
+                                // JUNCTION-LEVEL SNAP (C5 follow-up #2):
+                                // Small angle says "the line looks fine" — but
+                                // that heuristic alone cannot distinguish
+                                // synth_cone.stp (off-line vertex lies ON the
+                                // adjacent circle → the LINE is wrong) from
+                                // nist_cylinder.stp (off-line vertex sits at the
+                                // adjacent circle's CENTER — degenerate-vertex
+                                // convention → the LINE is right). If the
+                                // off-line vertex lies on a neighbor edge's
+                                // circle, the vertex is authoritative real
+                                // geometry and the line must be snapped to the
+                                // chord through the two vertices.
+                                let (off_vertex_id, off_point) = if d1_sq > tol_sq {
+                                    (vertex_ids[0], p1)
+                                } else {
+                                    (vertex_ids[1], p2)
+                                };
+                                let snap = self.vertex_lies_on_neighbor_circle(
+                                    off_vertex_id,
+                                    edge_curve_id,
+                                    off_point,
+                                );
+                                junction_snap = snap;
+                                snap
+                            }
                         }
                     };
 
@@ -8243,9 +8305,15 @@ impl<'a> StepConverter<'a> {
                         edge
                     } else {
                         // Override with line through vertices
-                        log::warn!(
-                            "    EDGE_CURVE #{}: LINE direction inconsistent with vertices (d1={:.2e}, d2={:.2e}, tol={:.2e}) — overriding with line through p1->p2",
-                            edge_curve_id, d1_sq.sqrt(), d2_sq.sqrt(), tol_sq.sqrt());
+                        if junction_snap {
+                            log::warn!(
+                                "    EDGE_CURVE #{}: LINE direction inconsistent with vertices (d1={:.2e}, d2={:.2e}, tol={:.2e}) — off-line vertex lies on a neighbor edge's circle (junction-level snap), overriding with line through p1->p2",
+                                edge_curve_id, d1_sq.sqrt(), d2_sq.sqrt(), tol_sq.sqrt());
+                        } else {
+                            log::warn!(
+                                "    EDGE_CURVE #{}: LINE direction inconsistent with vertices (d1={:.2e}, d2={:.2e}, tol={:.2e}) — overriding with line through p1->p2",
+                                edge_curve_id, d1_sq.sqrt(), d2_sq.sqrt(), tol_sq.sqrt());
+                        }
                         if let Some(new_line) = draper_geometry::Line::through_points(*p1, *p2) {
                             // Line::through_points normalizes the direction, so we
                             // must use param_range = (0, |p2-p1|) to cover the full
@@ -9378,8 +9446,20 @@ impl<'a> StepConverter<'a> {
                                 || bound_entity.type_name == "FACE_BOUND"
                             {
                                 // FACE_BOUND('', #loop_ref, .T.)
+                                // C5 follow-up #2: also unwrap the non-standard
+                                // list-wrapped form FACE_BOUND('', (#loop), .T.).
                                 for bp in &bound_entity.params {
+                                    let mut loop_ids: Vec<i64> = Vec::new();
                                     if let Some(loop_id) = self.get_ref(bp) {
+                                        loop_ids.push(loop_id);
+                                    } else if let StepValue::List(bp_items) = bp {
+                                        for bp_item in bp_items {
+                                            if let Some(loop_id) = self.get_ref(bp_item) {
+                                                loop_ids.push(loop_id);
+                                            }
+                                        }
+                                    }
+                                    for loop_id in loop_ids {
                                         if let Some(loop_entity) = self.step.find_entity(loop_id) {
                                             if loop_entity.type_name == "EDGE_LOOP" {
                                                 self.collect_oriented_edge_ids(loop_entity, &mut oriented_edge_ids);
@@ -10274,6 +10354,7 @@ impl<'a> StepConverter<'a> {
         self.resolve_vertex_point(vertex_id)
     }
 
+    /// Resolve a VERTEX_POINT entity to its 3D point.
     fn resolve_vertex_point(&self, vertex_id: i64) -> Option<Point3d> {
         let vertex_entity = self.step.find_entity(vertex_id)?;
 
@@ -10291,6 +10372,128 @@ impl<'a> StepConverter<'a> {
         }
 
         None
+    }
+
+    /// Junction-level snap check (C5 follow-up #2).
+    ///
+    /// Determines whether `point` — the 3D position of `vertex_id`, which
+    /// was found to lie OFF a LINE edge's geometry — lies ON a circular
+    /// curve of a NEIGHBORING edge at the same junction (i.e. another
+    /// EDGE_CURVE referencing the same VERTEX_POINT entity).
+    ///
+    /// This distinguishes two "one vertex off the line" scenarios that the
+    /// coarse angle heuristic (< 30° ⇒ keep the line) cannot tell apart:
+    ///
+    ///   - **synth_cone.stp**: the seam LINE #42 is vertical, but its end
+    ///     vertex (3,0,10) lies exactly ON the adjacent top circle #41
+    ///     (r=3 @ z=10). The vertex is real topology/geometry shared with
+    ///     the circle — the LINE's direction is the broken part. The edge
+    ///     must be snapped to the chord through the two vertices.
+    ///
+    ///   - **nist_cylinder.stp**: the off-line vertex (0,0,10) is the
+    ///     CENTER of the adjacent circle — the "degenerate vertex at the
+    ///     circle center" convention for full-circle edges. It does NOT
+    ///     lie on the circle, so the LINE (the cylinder seam) is correct
+    ///     and must be kept as-is.
+    ///
+    /// Returns `true` only in the first scenario (snap/override needed).
+    /// `exclude_edge_curve_id` is the edge currently being resolved (its
+    /// own curve is a LINE, so it could never match anyway — excluded for
+    /// clarity and to skip one useless curve resolution).
+    fn vertex_lies_on_neighbor_circle(
+        &self,
+        vertex_id: i64,
+        exclude_edge_curve_id: i64,
+        point: &Point3d,
+    ) -> bool {
+        // ── Lazily build the junction adjacency index ──
+        // vertex_id → Vec<(edge_curve_id, curve_ref_id)> over all EDGE_CURVEs.
+        // Built once per converter; O(E) scan of entity params.
+        {
+            let mut idx = self.junction_index.borrow_mut();
+            if idx.is_none() {
+                let mut map: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+                for entity in &self.step.entities {
+                    if entity.type_name != "EDGE_CURVE" {
+                        continue;
+                    }
+                    let mut vertex_refs: Vec<i64> = Vec::with_capacity(2);
+                    let mut curve_ref: Option<i64> = None;
+                    for param in &entity.params {
+                        if let Some(ref_id) = self.get_ref(param) {
+                            if let Some(target) = self.step.find_entity(ref_id) {
+                                if target.type_name == "VERTEX_POINT" {
+                                    vertex_refs.push(ref_id);
+                                } else if self.is_curve_type(&target.type_name)
+                                    || target.type_name == "SURFACE_CURVE"
+                                {
+                                    curve_ref = Some(ref_id);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(cr) = curve_ref {
+                        // A full-circle edge references the same vertex twice;
+                        // insert once per distinct vertex to keep the list small.
+                        vertex_refs.sort_unstable();
+                        vertex_refs.dedup();
+                        for v in vertex_refs {
+                            map.entry(v).or_default().push((entity.id, cr));
+                        }
+                    }
+                }
+                *idx = Some(map);
+            }
+        }
+
+        // Clone the (tiny) neighbor list so the RefCell borrow is released
+        // before curve resolution — which never touches this index, but a
+        // clone makes that invariant local and future-proof.
+        let neighbors: Vec<(i64, i64)> = {
+            let idx = self.junction_index.borrow();
+            match idx.as_ref().and_then(|m| m.get(&vertex_id)) {
+                Some(list) => list.clone(),
+                None => return false, // no other edge uses this vertex
+            }
+        };
+
+        // Tolerance: same family as the on-line check — 1e-6 of the
+        // coordinate scale (point + circle center + radius), 1e-9 floor
+        // for degenerate scales. synth_cone is exact (3.0 == 3.0), so
+        // this only matters for real-file FP drift.
+        for (ec_id, curve_ref) in neighbors {
+            if ec_id == exclude_edge_curve_id {
+                continue;
+            }
+            // Resolve the neighbor curve exactly like resolve_edge_curve does
+            // (SURFACE_CURVE → 3D curve ref first, then the curve itself).
+            let resolved_curve_id = self.resolve_3d_curve_ref(curve_ref);
+            let curve = match resolved_curve_id {
+                Some(id) => self.resolve_curve(id, 0),
+                None => self.resolve_curve(curve_ref, 0),
+            };
+            let circle = match curve {
+                Some(Curve3d::Circle(ref c)) => c.clone(),
+                Some(Curve3d::Arc(ref a)) => a.circle.clone(),
+                _ => continue,
+            };
+            let scale = point.x.abs()
+                .max(point.y.abs())
+                .max(point.z.abs())
+                .max(circle.center.x.abs())
+                .max(circle.center.y.abs())
+                .max(circle.center.z.abs())
+                .max(circle.radius)
+                .max(1.0);
+            if point_on_circle(point, &circle, scale * 1e-6) {
+                log::debug!(
+                    "    EDGE_CURVE #{}: junction vertex #{} ({:.4},{:.4},{:.4}) lies on circle of EDGE_CURVE #{} (center=({:.4},{:.4},{:.4}), r={:.4}) — vertex is authoritative",
+                    exclude_edge_curve_id, vertex_id, point.x, point.y, point.z, ec_id,
+                    circle.center.x, circle.center.y, circle.center.z, circle.radius);
+                return true;
+            }
+        }
+        false
     }
 
     /// Extract a Surface from a STEP surface entity.
@@ -13908,6 +14111,36 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
     // using proper geometric self-intersection tests, not vertex key matching.
 
     (unique_pts, unique_uvs)
+}
+
+/// Check whether a 3D point lies on a circle (on the circle's plane AND at
+/// the circle's radius from its center), within tolerance `tol`.
+///
+/// Used by the junction-level snap in `resolve_edge_curve` (C5 follow-up #2):
+/// an off-LINE vertex that lies ON a neighboring edge's circle proves the
+/// vertex is authoritative geometry (synth_cone.stp), while the degenerate
+/// center-vertex convention (nist_cylinder.stp) fails this test.
+fn point_on_circle(p: &Point3d, circle: &Circle, tol: f64) -> bool {
+    // Offset from circle center
+    let dx = p.x - circle.center.x;
+    let dy = p.y - circle.center.y;
+    let dz = p.z - circle.center.z;
+    let dist_sq = dx * dx + dy * dy + dz * dz;
+
+    // Axial distance from the circle's plane: |d · normal|
+    // (normal is unit, so no normalization needed)
+    let axial = dx * circle.normal.x + dy * circle.normal.y + dz * circle.normal.z;
+    if axial.abs() > tol {
+        return false; // not in the plane
+    }
+
+    // Radial distance from the axis: sqrt(|d|² − axial²)
+    let radial_sq = dist_sq - axial * axial;
+    if radial_sq <= 0.0 {
+        return false; // at (or beyond) the axis — cannot be on the circle
+    }
+    let radial_err = radial_sq.sqrt() - circle.radius;
+    radial_err.abs() <= tol
 }
 
 /// Project two 3D points onto a circle and return the angular parameter range (t1, t2).

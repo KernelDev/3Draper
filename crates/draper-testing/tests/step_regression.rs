@@ -46,10 +46,14 @@ const KNOWN_ISSUES: &[(&str, f64)] = &[
     // as1 parts
     ("as1-oc-214_plate.stp", 8.0),     // 6.93% (5.43% observed 2026-09-01)
     ("as1-oc-214_rod.stp", 8.0),       // 4.00% (NURBS CDT strip fallback — see worklog)
-    // Seam-line geometry bug: STEP LINE direction inconsistent with vertices
-    // (vertical line + slanted vertex pair) — needs junction-level snap.
-    ("synthetic/synth_cone.stp", 18.0), // 15.33%
-    ("synthetic/synth_thin_annulus.stp", 12.0), // 9.14%
+    // 2026-09-01 (C5 follow-up #2, seam robustness): both synthetic seam
+    // files removed — synth_cone 15.33% → 1.31% (junction-level snap:
+    // off-LINE vertex lying on a neighbor edge's circle now overrides the
+    // broken LINE with the vertex chord; 1.31% is the file's geometric
+    // floor — it models a half-cone without the closing XZ-plane face,
+    // same floor as synth_cylinder) and synth_thin_annulus 9.14% → 0.00%
+    // (list-wrapped FACE_BOUND loop refs like FACE_BOUND('',(#90),.T.)
+    // are now unwrapped — the top annulus hole is no longer lost).
     ("cube_with_void.stp", 90.0),       // 80% (very small solid)
 ];
 
