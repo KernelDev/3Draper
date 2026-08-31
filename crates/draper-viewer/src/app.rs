@@ -2493,13 +2493,19 @@ impl ViewerApp {
     }
 
     /// Find the first edge ID that is shared by exactly 2 faces (manifold edge).
+    ///
+    /// C5 Stage 5.3: counts CANONICAL edge ids (`Face::canonical_edge_ids`) —
+    /// a shared STEP/builder edge unified by the `EdgeStore` now counts as 2
+    /// under one id, so manifold detection works on identity, not instance
+    /// coincidence. Un-indexed faces fall back to instance ids (pre-C5
+    /// behavior preserved).
     fn find_first_manifold_edge(&self, solid: &Solid) -> usize {
         use std::collections::HashMap;
         let mut edge_count: HashMap<u64, usize> = HashMap::new();
         if let Some(shell) = solid.outer_shell.as_ref() {
             for face in &shell.faces {
-                for edge in &face.edges {
-                    *edge_count.entry(edge.id.to_u64()).or_insert(0) += 1;
+                for id in face.canonical_edge_ids() {
+                    *edge_count.entry(id.to_u64()).or_insert(0) += 1;
                 }
             }
         }
@@ -9851,7 +9857,7 @@ impl eframe::App for ViewerApp {
                                                     Some(_) => "Other",
                                                     None => "None",
                                                 };
-                                                let edge_count = face.edges.len();
+                                                let edge_count = face.canonical_edge_ids().len();
                                                 let face_label = format!("Face {}: {} ({} edges)", fi, surf_type, edge_count);
                                                 let face_id = face.id.to_u64();
                                                 let face_sel = self.selected_face == Some((0, face_id));
@@ -14696,6 +14702,11 @@ fn compute_solid_uv_breakdown_with_detailed(
 
         if let Some(ow) = face.outer_wire.as_ref() {
             if !ow.coedges.is_empty() {
+                // C5 Stage 5: INTENTIONAL instance-mirror read — `sample_wire_polyline`
+                // resolves edges by coedge INSTANCE ids (idiom `Face::edge_by_id`);
+                // mirrors are the instance-keyed geometry. Resolving through the
+                // canonical store would flip polyline direction (instance
+                // param_range vs canonical).
                 let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
                 let uv_raw: Vec<(f64, f64)> = pts3d
                     .iter()
@@ -18536,7 +18547,7 @@ fn build_vp_face_info(
                 // Collect edge endpoints (start point of each coedge's edge)
                 let mut segments: Vec<(Point3d, Point3d)> = Vec::new();
                 for coedge in &wire.coedges {
-                    if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                    if let Some(edge) = face.edge_by_id(coedge.edge) {
                         if let Some(ref curve) = edge.curve {
                             let (t_min, t_max) = edge.param_range;
                             let p0 = curve.point_at(t_min);
@@ -18627,7 +18638,7 @@ fn build_vp_face_info(
         let inner_boundaries: Vec<Vec<Point3d>> = face.inner_wires.iter().map(|wire| {
             let mut pts = Vec::new();
             for coedge in &wire.coedges {
-                if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                if let Some(edge) = face.edge_by_id(coedge.edge) {
                     if let Some(ref curve) = edge.curve {
                         let (t_min, t_max) = edge.param_range;
                         // Use more samples for curves (Circle needs ~40 for smooth appearance)
@@ -18673,7 +18684,7 @@ fn vp_solid_scale(solid: &draper_topology::Solid) -> f64 {
     let mut max = draper_geometry::Point3d::new(f64::MIN, f64::MIN, f64::MIN);
     let mut has = false;
     for face in solid.faces() {
-        for edge in &face.edges {
+        for edge in solid.face_edges(face) {
             if edge.degenerate { continue; }
             if let Some(p) = edge.start_point() {
                 min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
@@ -19426,7 +19437,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let mut bmin = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
                                 let mut bmax = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
                                 for face in solid.faces() {
-                                    for edge in &face.edges {
+                                    for edge in solid.face_edges(face) {
                                         if let Some(p) = edge.start_vertex_point {
                                             bmin.x = bmin.x.min(p.x); bmin.y = bmin.y.min(p.y); bmin.z = bmin.z.min(p.z);
                                             bmax.x = bmax.x.max(p.x); bmax.y = bmax.y.max(p.y); bmax.z = bmax.z.max(p.z);
@@ -20864,7 +20875,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let n = plane.normal;
                                 let o = plane.origin;
                                 for face in solid.faces() {
-                                    for edge in &face.edges {
+                                    for edge in solid.face_edges(face) {
                                         if let (Some(sp), Some(ep)) = (edge.start_vertex_point, edge.end_vertex_point) {
                                             let d1 = (sp.x - o.x) * n.x + (sp.y - o.y) * n.y + (sp.z - o.z) * n.z;
                                             let d2 = (ep.x - o.x) * n.x + (ep.y - o.y) * n.y + (ep.z - o.z) * n.z;
@@ -22788,7 +22799,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         let mut curves: Vec<VpData> = Vec::new();
                                         let mut points: Vec<VpData> = Vec::new();
                                         for face in intersection.faces() {
-                                            for edge in &face.edges {
+                                            for edge in intersection.face_edges(face) {
                                                 if let Some(sp) = edge.start_vertex_point {
                                                     points.push(VpData::Point([sp.x, sp.y, sp.z]));
                                                 }
@@ -22893,7 +22904,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let mut amin = [f64::MAX; 3]; let mut amax = [f64::MIN; 3];
                                 let mut bmin = [f64::MAX; 3]; let mut bmax = [f64::MIN; 3];
                                 for face in a.faces() {
-                                    for edge in &face.edges {
+                                    for edge in a.face_edges(face) {
                                         for p in [edge.start_vertex_point, edge.end_vertex_point].iter().flatten() {
                                             amin[0] = amin[0].min(p.x); amax[0] = amax[0].max(p.x);
                                             amin[1] = amin[1].min(p.y); amax[1] = amax[1].max(p.y);
@@ -22902,7 +22913,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                 }
                                 for face in b.faces() {
-                                    for edge in &face.edges {
+                                    for edge in b.face_edges(face) {
                                         for p in [edge.start_vertex_point, edge.end_vertex_point].iter().flatten() {
                                             bmin[0] = bmin[0].min(p.x); bmax[0] = bmax[0].max(p.x);
                                             bmin[1] = bmin[1].min(p.y); bmax[1] = bmax[1].max(p.y);
@@ -23503,7 +23514,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             if let Some(solid) = inputs.get(0).and_then(to_solid) {
                                 let mut hasher = draper_core::GeometryHasher::new();
                                 for face in solid.faces() {
-                                    for edge in &face.edges {
+                                    for edge in solid.face_edges(face) {
                                         if let Some(sp) = edge.start_vertex_point {
                                             hasher = hasher.update_point(sp.x, sp.y, sp.z);
                                         }

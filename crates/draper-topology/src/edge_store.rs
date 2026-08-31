@@ -298,9 +298,13 @@ pub fn geom_edge_key(edge: &Edge) -> Option<GeomEdgeKey> {
 /// Canonical registry of B-Rep edges.
 ///
 /// See the module documentation for the architecture. The store is cheap to
-/// rebuild (`Solid::index_edges`) and is `#[serde(skip)]`-ped on `Solid` —
-/// serialization keeps the per-face mirrors, deserialization rebuilds the
-/// store on demand via `Solid::ensure_edge_store`.
+/// rebuild (`Solid::index_edges`).
+///
+/// C5 Stage 5.1 (2026-08-31): the store IS serialized on `Solid` (flat
+/// format below), so canonical identity + alias mappings survive
+/// serialization round-trips. Legacy payloads written before Stage 5 carry
+/// no `edge_store` field; deserialization defaults it to empty and
+/// `Solid::ensure_edge_store` rebuilds it from the per-face mirrors.
 #[derive(Clone, Debug, Default)]
 pub struct EdgeStore {
     /// Canonical edges, keyed by canonical TopoId.
@@ -309,6 +313,81 @@ pub struct EdgeStore {
     aliases: HashMap<TopoId, TopoId>,
     /// STEP entity id → canonical TopoId.
     by_step_id: HashMap<i64, TopoId>,
+}
+
+// ============================================================
+// Serde (C5 Stage 5.1)
+//
+// HashMaps with `TopoId` keys cannot serialize to JSON directly (newtype
+// structs are not valid JSON map keys), so the flat on-wire format uses
+// sorted Vecs: edges as an array, aliases/by_step_id as (key, value) pair
+// arrays. Reconstruction rebuilds the HashMaps.
+// ============================================================
+
+#[cfg(feature = "serde")]
+mod serde_impl {
+    use super::EdgeStore;
+    use crate::entity::{Edge, TopoId};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Flat (de)serialization format for [`EdgeStore`].
+    #[derive(Serialize, Deserialize)]
+    struct EdgeStoreData {
+        /// Canonical edges.
+        edges: Vec<Edge>,
+        /// (instance TopoId, canonical TopoId) alias pairs.
+        aliases: Vec<(TopoId, TopoId)>,
+        /// (STEP entity id, canonical TopoId) index pairs.
+        by_step_id: Vec<(i64, TopoId)>,
+    }
+
+    impl From<&EdgeStore> for EdgeStoreData {
+        fn from(store: &EdgeStore) -> Self {
+            let mut edges: Vec<Edge> = store.edges.values().cloned().collect();
+            edges.sort_by_key(|e| e.id);
+            let mut aliases: Vec<(TopoId, TopoId)> =
+                store.aliases.iter().map(|(&k, &v)| (k, v)).collect();
+            aliases.sort();
+            let mut by_step_id: Vec<(i64, TopoId)> =
+                store.by_step_id.iter().map(|(&k, &v)| (k, v)).collect();
+            by_step_id.sort();
+            Self { edges, aliases, by_step_id }
+        }
+    }
+
+    impl From<EdgeStoreData> for EdgeStore {
+        fn from(data: EdgeStoreData) -> Self {
+            let mut store = EdgeStore::new();
+            for edge in data.edges {
+                let id = edge.id;
+                if let Some(step_id) = edge.step_entity_id {
+                    store.by_step_id.insert(step_id, id);
+                }
+                store.edges.insert(id, edge);
+            }
+            for (instance, canonical) in data.aliases {
+                if instance != canonical {
+                    store.aliases.insert(instance, canonical);
+                }
+            }
+            for (step_id, canonical) in data.by_step_id {
+                store.by_step_id.entry(step_id).or_insert(canonical);
+            }
+            store
+        }
+    }
+
+    impl Serialize for EdgeStore {
+        fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            EdgeStoreData::from(self).serialize(serializer)
+        }
+    }
+
+    impl<'de> Deserialize<'de> for EdgeStore {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            EdgeStoreData::deserialize(deserializer).map(EdgeStore::from)
+        }
+    }
 }
 
 impl EdgeStore {
@@ -1357,5 +1436,108 @@ mod tests {
         assert!(face.edge_by_id(TopoId::new()).is_none());
         face.edge_by_id_mut(id0).unwrap().tolerance = 1e-4;
         assert!((face.edges[0].tolerance - 1e-4).abs() < 1e-12);
+    }
+
+    // ============================================================
+    // C5 Stage 5.1 — serde: store round-trip + legacy mirror loading
+    // ============================================================
+
+    /// Solid with one shared STEP edge (two instances, one `step_entity_id`).
+    fn shared_edge_solid() -> Solid {
+        // face A: edges [shared(70), a1(71)]
+        let mut face_a = square_face(&[Some(70), Some(71)]);
+        // face B: edges [b0(80), shared(70)] — different instance id,
+        // same STEP entity id as face A's first edge.
+        let mut edge_b_shared = line_edge(
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Some(70),
+        );
+        edge_b_shared.id = TopoId::new();
+        let mut b0 = line_edge(
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(2.0, 0.0, 0.0),
+            Some(80),
+        );
+        b0.id = TopoId::new();
+        let mut face_b = square_face(&[]);
+        face_b.edges = vec![b0, edge_b_shared];
+        solid_of(vec![face_a, face_b])
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serde_roundtrip_preserves_store_identity() {
+        let mut solid = shared_edge_solid();
+        let report = solid.index_edges();
+        assert_eq!(report.deduplicated, 1, "one shared STEP edge expected");
+
+        let json = serde_json::to_string(&solid).expect("serialize solid");
+        assert!(
+            json.contains("\"edge_store\""),
+            "Stage 5.1: the store must be serialized"
+        );
+        let loaded: Solid = serde_json::from_str(&json).expect("deserialize solid");
+
+        // Store survives the round-trip with identical semantics.
+        let (instance, canonical) = loaded
+            .edge_store
+            .iter_aliases()
+            .next()
+            .expect("round-trip must preserve aliases");
+        assert_ne!(instance, canonical);
+        // The alias and its canonical target resolve to the SAME edge.
+        let via_alias = loaded.edge_store.get(instance);
+        let via_canonical = loaded.edge_store.get_canonical(canonical);
+        assert!(
+            via_alias.is_some() && via_canonical.is_some(),
+            "both alias and canonical lookups must resolve after round-trip"
+        );
+        assert!(
+            std::ptr::eq(via_alias.unwrap(), via_canonical.unwrap()),
+            "alias lookup must land on the canonical edge"
+        );
+
+        // The solid-level read API resolves the shared edge identically.
+        let shared = loaded
+            .edge_store
+            .find_by_step_id(70)
+            .expect("by_step_id index survives round-trip");
+        let shared_id = shared.id;
+        assert_eq!(
+            loaded.edge_store.get(shared_id).map(|e| e.id),
+            Some(shared_id),
+            "shared id resolves to itself"
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serde_legacy_payload_rebuilds_store() {
+        let mut solid = shared_edge_solid();
+        solid.index_edges();
+
+        // Emulate a LEGACY payload: written before Stage 5, when
+        // `edge_store` was `#[serde(skip)]` — the field is absent.
+        let mut value: serde_json::Value =
+            serde_json::to_value(&solid).expect("serialize to value");
+        let obj = value.as_object_mut().expect("solid serializes to an object");
+        obj.remove("edge_store");
+
+        let mut loaded: Solid =
+            serde_json::from_value(value).expect("legacy payload must deserialize");
+        assert!(
+            loaded.edge_store.is_empty(),
+            "legacy payload has no store — default empty"
+        );
+
+        // Legacy loading path: rebuild from mirrors on demand.
+        loaded.ensure_edge_store();
+        let report = loaded.index_edges();
+        assert_eq!(report.deduplicated, 1, "rebuild re-detects the shared edge");
+        assert!(
+            loaded.edge_store.find_by_step_id(70).is_some(),
+            "rebuilt store indexes STEP ids"
+        );
     }
 }

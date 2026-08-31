@@ -467,9 +467,14 @@ pub struct Solid {
     /// Canonical edge registry (C5 Stage 2) — single source of truth for
     /// edge identity. Deduplicated by `step_entity_id`; alias mappings let
     /// any instance TopoId resolve to its canonical shared edge.
-    /// Rebuilt lazily via `Solid::ensure_edge_store` / `Solid::index_edges`;
-    /// not serialized (per-face `edges` mirrors are the serde format).
-    #[cfg_attr(feature = "serde", serde(skip, default = "crate::edge_store::EdgeStore::new"))]
+    /// Rebuilt lazily via `Solid::ensure_edge_store` / `Solid::index_edges`.
+    ///
+    /// C5 Stage 5.1 (2026-08-31): the store is now SERIALIZED (flat format,
+    /// see `edge_store::serde_impl`) so shared-edge identity survives
+    /// round-trips. Legacy payloads without this field deserialize to an
+    /// empty store — call `Solid::ensure_edge_store` to rebuild it from
+    /// the per-face mirrors.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub edge_store: crate::edge_store::EdgeStore,
 }
 

@@ -1661,6 +1661,62 @@ pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, ca
     triangulate_face_impl(face, params, cache)
 }
 
+/// Triangulate a single face with EXPLICITLY supplied edge geometry
+/// (C5 Stage 5.2 — standalone API decoupled from `Face.edges`).
+///
+/// `face` contributes the surface, wires and orientation; `edges` carries
+/// the boundary edge geometry IN FACE-INSTANCE ORDER — element `i` is used
+/// where `face.edges[i]` would have been read, including the instance ids
+/// referenced by the face's coedges and the instance `param_range`
+/// orientation. Pass `face.edges.iter().collect()` to mirror today's
+/// behavior; post-Stage-5 callers resolve the same instance shells from
+/// the owning solid's `EdgeStore`.
+///
+/// Semantically equivalent to [`triangulate_face`] when handed the face's
+/// own mirrors: the provided edges are staged into a face view which the
+/// existing pipeline consumes unchanged.
+pub fn triangulate_face_with_edges(
+    face: &Face,
+    edges: &[&Edge],
+    params: &TriangulationParams,
+) -> TriangleMesh {
+    let mut cache = EdgeDiscretizationCache::new();
+    triangulate_face_with_edges_and_cache(face, edges, params, &mut cache)
+}
+
+/// Cache-sharing variant of [`triangulate_face_with_edges`].
+///
+/// Use this when triangulating several faces: one shared
+/// `EdgeDiscretizationCache` makes shared edges discretize identically,
+/// which is what keeps the resulting meshes watertight across faces.
+pub fn triangulate_face_with_edges_and_cache(
+    face: &Face,
+    edges: &[&Edge],
+    params: &TriangulationParams,
+    cache: &mut EdgeDiscretizationCache,
+) -> TriangleMesh {
+    let view = stage_face_view(face, edges);
+    triangulate_face_with_cache(&view, params, cache)
+}
+
+/// Build a shallow staging view of `face` whose mirrors are `edges`.
+///
+/// The view carries the face's surface/wires/orientation plus the supplied
+/// edge geometry; `edge_ids` is kept parallel to the staged mirrors so
+/// store-aware lookups inside the pipeline stay consistent. The caller's
+/// original face is not modified.
+///
+/// C5 note: `edges` must be in instance order — the face's coedges look
+/// edges up by instance id, so the staged mirrors carry the ids the
+/// coedges reference.
+fn stage_face_view(face: &Face, edges: &[&Edge]) -> Face {
+    let mut view = face.clone();
+    view.edges = edges.iter().map(|e| (*e).clone()).collect();
+    // Keep the id list parallel to the staged mirrors.
+    view.edge_ids = view.edges.iter().map(|e| e.id).collect();
+    view
+}
+
 /// Internal implementation: triangulate a face with a read-only cache.
 ///
 /// This is used both by `triangulate_face_with_cache` (sequential path)

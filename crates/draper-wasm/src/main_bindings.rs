@@ -718,8 +718,39 @@ impl DraperDocument {
         }
         let solid = &self.inner.root.solids[solid_index];
         use std::collections::HashMap;
+        // C5 Stage 5.3: iterate the solid's CANONICAL edges through the
+        // EdgeStore when it is populated — a shared edge is listed once
+        // under one id. Un-indexed solids fall back to per-face mirrors
+        // (the pre-C5 behavior).
         let mut edge_info: HashMap<u64, (String, Vec<usize>)> = HashMap::new();
-        if let Some(shell) = solid.outer_shell.as_ref() {
+        if !solid.edge_store.is_empty() {
+            let faces: Vec<(usize, Vec<draper_topology::TopoId>)> = solid
+                .outer_shell
+                .as_ref()
+                .map(|sh| {
+                    sh.faces
+                        .iter()
+                        .enumerate()
+                        .map(|(fi, f)| (fi, f.canonical_edge_ids()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            for (fi, ids) in &faces {
+                for id in ids {
+                    let edge = solid.edge_store.get(*id);
+                    let curve_type = edge
+                        .and_then(|e| e.curve.as_ref())
+                        .map(curve_type_name)
+                        .unwrap_or("None");
+                    edge_info
+                        .entry(id.to_u64())
+                        .and_modify(|(_, fs)| {
+                            if !fs.contains(fi) { fs.push(*fi); }
+                        })
+                        .or_insert_with(|| (curve_type.to_string(), vec![*fi]));
+                }
+            }
+        } else if let Some(shell) = solid.outer_shell.as_ref() {
             for (fi, face) in shell.faces.iter().enumerate() {
                 for edge in &face.edges {
                     let id = edge.id.to_u64();
@@ -884,13 +915,31 @@ impl DraperDocument {
 // Helpers
 // ============================================================
 
+/// Curve type name for edge listings (C5 Stage 5.3).
+fn curve_type_name(curve: &Curve3d) -> &'static str {
+    match curve {
+        Curve3d::Line(_) => "Line",
+        Curve3d::Circle(_) => "Circle",
+        Curve3d::Ellipse(_) => "Ellipse",
+        Curve3d::Arc(_) => "Arc",
+        Curve3d::Hyperbola(_) => "Hyperbola",
+        Curve3d::Parabola(_) => "Parabola",
+        Curve3d::Nurbs(_) => "Nurbs",
+        Curve3d::PCurve { .. } => "PCurve",
+        Curve3d::Trimmed { .. } => "Trimmed",
+        Curve3d::Composite { .. } => "Composite",
+    }
+}
+
 fn find_first_manifold_edge(solid: &Solid) -> usize {
     use std::collections::HashMap;
+    // C5 Stage 5.3: count CANONICAL edge ids — shared edges unified by the
+    // EdgeStore count as 2 under one id (identity-based manifold detection).
     let mut edge_count: HashMap<u64, usize> = HashMap::new();
     if let Some(shell) = solid.outer_shell.as_ref() {
         for face in &shell.faces {
-            for edge in &face.edges {
-                *edge_count.entry(edge.id.to_u64()).or_insert(0) += 1;
+            for id in face.canonical_edge_ids() {
+                *edge_count.entry(id.to_u64()).or_insert(0) += 1;
             }
         }
     }

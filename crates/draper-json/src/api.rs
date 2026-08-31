@@ -1100,23 +1100,51 @@ impl JsonApi {
         let solid = &doc.root.solids[solid_index];
         use std::collections::HashMap;
         let mut edge_info: HashMap<u64, (String, Vec<usize>)> = HashMap::new();
-        if let Some(shell) = solid.outer_shell.as_ref() {
+        // C5 Stage 5.3: store-first — when the solid's EdgeStore is
+        // populated, list CANONICAL edges (a shared edge appears once,
+        // under one id, with all incident faces). Un-indexed solids keep
+        // the per-face mirror walk (pre-C5 behavior).
+        let store_ready = !solid.edge_store.is_empty();
+        let curve_type_of = |curve: Option<&draper_geometry::Curve3d>| -> String {
+            match curve {
+                None => "None".to_string(),
+                Some(draper_geometry::Curve3d::Line(_)) => "Line".to_string(),
+                Some(draper_geometry::Curve3d::Circle(_)) => "Circle".to_string(),
+                Some(draper_geometry::Curve3d::Ellipse(_)) => "Ellipse".to_string(),
+                Some(draper_geometry::Curve3d::Arc(_)) => "Arc".to_string(),
+                Some(draper_geometry::Curve3d::Hyperbola(_)) => "Hyperbola".to_string(),
+                Some(draper_geometry::Curve3d::Parabola(_)) => "Parabola".to_string(),
+                Some(draper_geometry::Curve3d::Nurbs(_)) => "Nurbs".to_string(),
+                Some(draper_geometry::Curve3d::PCurve { .. }) => "PCurve".to_string(),
+                Some(draper_geometry::Curve3d::Trimmed { .. }) => "Trimmed".to_string(),
+                Some(draper_geometry::Curve3d::Composite { .. }) => "Composite".to_string(),
+            }
+        };
+        if store_ready {
+            let shell = match solid.outer_shell.as_ref() {
+                Some(sh) => sh,
+                None => return ApiResponse::ok("Edge listing", serde_json::Value::Array(vec![])),
+            };
+            for (fi, face) in shell.faces.iter().enumerate() {
+                for id in face.canonical_edge_ids() {
+                    let curve_type = curve_type_of(
+                        solid.edge_store.get(id).and_then(|e| e.curve.as_ref()),
+                    );
+                    edge_info
+                        .entry(id.to_u64())
+                        .and_modify(|(_, faces)| {
+                            if !faces.contains(&fi) {
+                                faces.push(fi);
+                            }
+                        })
+                        .or_insert_with(|| (curve_type, vec![fi]));
+                }
+            }
+        } else if let Some(shell) = solid.outer_shell.as_ref() {
             for (fi, face) in shell.faces.iter().enumerate() {
                 for edge in &face.edges {
                     let id = edge.id.to_u64();
-                    let curve_type = match &edge.curve {
-                        None => "None".to_string(),
-                        Some(draper_geometry::Curve3d::Line(_)) => "Line".to_string(),
-                        Some(draper_geometry::Curve3d::Circle(_)) => "Circle".to_string(),
-                        Some(draper_geometry::Curve3d::Ellipse(_)) => "Ellipse".to_string(),
-                        Some(draper_geometry::Curve3d::Arc(_)) => "Arc".to_string(),
-                        Some(draper_geometry::Curve3d::Hyperbola(_)) => "Hyperbola".to_string(),
-                        Some(draper_geometry::Curve3d::Parabola(_)) => "Parabola".to_string(),
-                        Some(draper_geometry::Curve3d::Nurbs(_)) => "Nurbs".to_string(),
-                        Some(draper_geometry::Curve3d::PCurve { .. }) => "PCurve".to_string(),
-                        Some(draper_geometry::Curve3d::Trimmed { .. }) => "Trimmed".to_string(),
-                        Some(draper_geometry::Curve3d::Composite { .. }) => "Composite".to_string(),
-                    };
+                    let curve_type = curve_type_of(edge.curve.as_ref());
                     edge_info.entry(id)
                         .and_modify(|(_, faces)| faces.push(fi))
                         .or_insert((curve_type, vec![fi]));

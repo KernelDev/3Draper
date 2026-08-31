@@ -252,9 +252,12 @@ impl HealingModel for RuleBasedHealingModel {
 
         // Rule: faces with small area between two planar faces → Fillet
         for (i, face) in shell.faces.iter().enumerate() {
-            if face.edges.len() <= 4 {
+            // C5 Stage 5.3: store-aware instance count (canonical ids list —
+            // same length as the mirror Vec, identity-resolved).
+            let face_edge_count = face.canonical_edge_ids().len();
+            if face_edge_count <= 4 {
                 // Check if neighbors are planes (simplified)
-                let is_small = face.edges.len() <= 2;
+                let is_small = face_edge_count <= 2;
                 if is_small {
                     features.push(FeatureDescriptor {
                         feature_type: FeatureType::Fillet,

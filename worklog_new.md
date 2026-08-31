@@ -459,3 +459,93 @@ split-рёбра (клонируемые shared_split_edges в обе грани
 
 - `8dd2c39` refactor(core): C5 stage 4 — store-first reads + derived mirrors
   (14 файлов, +691/−48), запушен в origin/main
+
+# C5 Stage 5 — decoupled consumers (2026-08-31)
+
+Цель: снять зависимость потребителей от ПОЛЯ `Face.edges` как источника
+правды — API, сериализация и листинги становятся store-first; зеркала
+остаются instance-keyed геометрией для coedge-lookups и writable
+materialization (Stage 4 contract).
+
+## Stage 5.1 — serde-формат EdgeStore
+
+- `Solid.edge_store`: `#[serde(skip)]` → `#[serde(default)]` — store
+  ТЕПЕРЬ сериализуется, идентичность shared-рёбер переживает round-trip
+- Flat-формат (`edge_store::serde_impl::EdgeStoreData`): HashMap с
+  TopoId-ключами не сериализуется в JSON напрямую (newtype-ключи) —
+  edges/aliases/by_step_id кладутся отсортированными Vec/парами,
+  HashMaps восстанавливаются при десериализации
+- Legacy-загрузка: payload без `edge_store` → default пустой store →
+  `ensure_edge_store()`/`index_edges()` rebuild из зеркал
+- Тесты: round-trip сохраняет дедупликацию (deduplicated=1 после
+  load), STEP-id индекс восстанавливается, legacy-payload rebuild
+
+## Stage 5.2 — mesh standalone-API с явными рёбрами
+
+- `triangulate_face_with_edges(face, edges: &[&Edge], params)` +
+  `_and_cache`-вариант: standalone-триангуляция больше НЕ читает поле
+  `Face.edges` — рёбра передаются явно в face-instance-порядке
+  (instance ids, на которые ссылаются coedges грани)
+- Реализация: `stage_face_view` — staging-view (surface/wires/
+  orientation от face + поставленные рёбра, `edge_ids` параллельно);
+  существующий пайплайн потребует view без изменений
+- `triangulate_face` сохранён без изменений (совместимость) =
+  `triangulate_face_with_edges(face, face.edges)`
+- 5 тестов (edge_explicit_api_test.rs): эквивалентность mirror/explicit
+  (box — bit-identical vertices/triangles), shared-cache watertight,
+  empty-edges degradation, отсутствие мутации face вызывающего,
+  API-surface contract
+
+## Stage 5.3 — миграция потребителей (store-first)
+
+- json/wasm/ffi `list_edges`: канонические рёбра через store — shared
+  edge = ОДНА запись (один id, все инцидентные грани); un-indexed
+  solids — fallback на зеркала (pre-C5 поведение)
+- viewer + wasm `find_first_manifold_edge`: подсчёт по каноническим
+  id (`canonical_edge_ids`) — shared STEP/builder-ребро считается 2
+  под одним id (identity-based manifold detection)
+- viewer: `vp_solid_scale`, `build_vp_face_info`, evaluate_graph
+  (bounding boxes, points, plane-dist) → `solid.face_edges`;
+  UI edge-count → `canonical_edge_ids().len()`
+- ai `healing_ml`: instance count → `canonical_edge_ids().len()`
+- subd: проверен — от `Face.edges` НЕ зависит (SubdEdge/mesh.edges —
+  домен subdivision-сетки, другая сущность), миграция не требуется
+
+## Классификация остаточных `face.edges` в viewer (легальные)
+
+- 2× `sample_wire_polyline(wire, &face.edges, …)`: coedge-id-keyed
+  instance-lookup — идиома Stage 4 (`Face::edge_by_id`): зеркала =
+  instance-keyed геометрия; направление обхода зависит от instance
+  param_range → миграция на канонические рёбра изменила бы
+  направленность UV-полилиний
+- 2 записи (`face.edges = vec![…]` synthetic build; `&mut face.edges`
+  reconciliation) — sanctioned mutation flow
+
+## Верификация
+
+- draper-topology --features serde: **183 passed** (было 181; +2
+  serde round-trip) + 17 + 11
+- draper-mesh: 253 lib + все integration suites, вкл. 5 новых
+  edge_explicit_api_test ✅
+- draper-json: 13 ✅; draper-core: 74 ✅; draper-ffi: 10 ✅
+- `cargo check`: topology/mesh/json/ffi/wasm/ai/viewer — 0 errors
+- draper-wasm native lib-tests: E0583 (`mod tests` без файла) —
+  ПРЕ-СУЩЕСТВУЮЩИЙ на HEAD (проверено stash), не регрессия
+- STEP-регрессия (draper-testing debug) и execution-прогон draper-step
+  lib-тестов не выполнялись: rootfs 9.9GB / debug-линковка тестовых
+  бинарников >9 мин на этой машине (убивается таймаутом), сборка
+  draper-testing тянет egui/wgpu (~5GB target). Вместо этого:
+  `cargo check --tests -p draper-step` — 0 errors (compile-level).
+  STEP-путь (converter/exporter/triangulate_face) в Stage 5 НЕ изменён
+  (git diff не затрагивает эти файлы); зависимости STEP-крейта
+  (topology/mesh) покрыты их зелёными debug-тестами выше
+
+## Статус C5
+
+Stage 1–5 выполнены. Полное удаление ПОЛЯ `Face.edges` (Stage 6)
+отложено осознанно: ядровые модули (builder/boolean/healing/
+validation/operations) — создатели зеркал; зеркала остаются
+instance-keyed геометрией для coedge-lookups и serde-совместимым
+носителем. Следующий шаг по PLAN — C6/industrial perf (transmission
+161s, Vulcan timeout) либо закрытие trade-offs Stage 1 (synth_cone
+junction-snap, as1_rod NURBS CDT strip).

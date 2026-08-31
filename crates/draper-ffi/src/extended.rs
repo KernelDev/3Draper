@@ -724,8 +724,44 @@ pub extern "C" fn draper_solid_list_edges(
     }
     let solid = solids[solid_index];
     use std::collections::HashMap;
+    // C5 Stage 5.3: store-first edge listing — canonical edges (a shared
+    // edge appears once under one id) when the EdgeStore is populated;
+    // per-face mirror walk otherwise (pre-C5 behavior).
     let mut edge_info: HashMap<u64, (String, Vec<usize>)> = HashMap::new();
-    if let Some(shell) = solid.outer_shell.as_ref() {
+    let store_ready = !solid.edge_store.is_empty();
+    if store_ready {
+        if let Some(shell) = solid.outer_shell.as_ref() {
+            for (fi, face) in shell.faces.iter().enumerate() {
+                for id in face.canonical_edge_ids() {
+                    let curve_type = match solid
+                        .edge_store
+                        .get(id)
+                        .and_then(|e| e.curve.as_ref())
+                    {
+                        None => "None".to_string(),
+                        Some(Curve3d::Line(_)) => "Line".to_string(),
+                        Some(Curve3d::Circle(_)) => "Circle".to_string(),
+                        Some(Curve3d::Ellipse(_)) => "Ellipse".to_string(),
+                        Some(Curve3d::Arc(_)) => "Arc".to_string(),
+                        Some(Curve3d::Hyperbola(_)) => "Hyperbola".to_string(),
+                        Some(Curve3d::Parabola(_)) => "Parabola".to_string(),
+                        Some(Curve3d::Nurbs(_)) => "Nurbs".to_string(),
+                        Some(Curve3d::PCurve { .. }) => "PCurve".to_string(),
+                        Some(Curve3d::Trimmed { .. }) => "Trimmed".to_string(),
+                        Some(Curve3d::Composite { .. }) => "Composite".to_string(),
+                    };
+                    edge_info
+                        .entry(id.to_u64())
+                        .and_modify(|(_, faces)| {
+                            if !faces.contains(&fi) {
+                                faces.push(fi);
+                            }
+                        })
+                        .or_insert_with(|| (curve_type, vec![fi]));
+                }
+            }
+        }
+    } else if let Some(shell) = solid.outer_shell.as_ref() {
         for (fi, face) in shell.faces.iter().enumerate() {
             for edge in &face.edges {
                 let id = edge.id.to_u64();
