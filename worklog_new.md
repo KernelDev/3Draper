@@ -454,3 +454,8 @@ split-рёбра (клонируемые shared_split_edges в обе грани
 - Миграция viewer (25 usages) / subd (15) / wasm / json / ffi
 - Serde-формат: сериализация EdgeStore, legacy-загрузка зеркал
 
+
+## Коммит
+
+- `8dd2c39` refactor(core): C5 stage 4 — store-first reads + derived mirrors
+  (14 файлов, +691/−48), запушен в origin/main
