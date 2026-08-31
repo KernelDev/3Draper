@@ -240,11 +240,11 @@ git clean -fd
 |-----------|------------|---------|
 | **0% boundary (ideal)** | 8 | synth_cube, synth_sphere, synth_torus, nist_cylinder, nist_sphere, as1_rod |
 | **≤5% boundary (PASS)** | 5 | nist_block_with_hole (3.10%), drill_top (4.51%), compressor (3.74%) |
-| **5-15% (KNOWN_ISSUES)** | 12 | nist_cone (12%), as1_bolt (6.5%), as1_nut (11%), synth_cone (14.5%) |
+| **5-15% (KNOWN_ISSUES)** | 12 | nist_cone (12%), as1_bolt (6.5%), as1_nut (11%) — synth_cone удалён (1.31%, follow-up #2) |
 | **15-40% (complex)** | 5 | Zentralstaender (0.95% overall, 27 solids), transmission (9.08%) |
 | **Timeout (slow)** | 1 | gdt_test |
 | **Быстрые (было timeout)** | 1 | Vulcan — 9.7s после C5 follow-up #1 (было 700-900s) |
-| **Hang (was, fixed)** | 1 | synth_thin_annulus — теперь PASS (9.14%) |
+| **Hang (was, fixed)** | 1 | synth_thin_annulus — 9.14% после J1; **0.00% после C5 follow-up #2** (FACE_BOUND list-unwrap) |
 
 ### Ключевые улучшения
 
@@ -258,7 +258,8 @@ git clean -fd
 | as1_nut | 40.80% | **11.14%** | L1: aggressive weld |
 | as1_rod | 17.03% | **0.00%** | L1: aggressive weld |
 | nist_cone | 18.22% | **12.44%** | H2+L1: semi_angle sign + weld |
-| synth_thin_annulus | **HANG** | **9.14%** | J1: syntax error fix |
+| synth_thin_annulus | **HANG** | **9.14%** | J1: syntax error fix; **0.00%** — C5 follow-up #2 |
+| synth_cone | 14.49% | **1.31%** | C5 follow-up #2: junction-level snap (1.31% — геом. пол: полуконус без грани разреза) |
 | Dead code | 879 LOC | **0** | A4: mesh_boolean cleanup |
 
 ---
@@ -275,6 +276,16 @@ git clean -fd
    (C5 follow-up #1: O(n²) диагностики в validate_edge_consistency/weld →
    spatial-hash/CSR; Vulcan ~10s, transmission 3.2s — industrial trade-off
    Stage 1 закрыт: быстрее даже до-C5 baseline 61s).
+
+4a. ~~synth_cone / synth_thin_annulus швы~~ — устранено 2026-09-01
+   (C5 follow-up #2): junction-level snap в LINE-ветке resolve_edge_curve
+   (off-line вершина НА соседней окружности ⇒ вершина авторитетна —
+   synth_cone 15.33→1.31%, геом. пол файла) + unwrap FACE_BOUND-ссылок,
+   обёрнутых в список (thin_annulus 9.14→0.00% — отверстие больше не
+   теряется). Остаток synth_cone 1.31% — НЕ дефект конвертера: файл
+   моделирует полуконус без замыкающей XZ-грани (тот же остаток у
+   synth_cylinder). Остался trade-off №3: as1_rod NURBS CDT
+   strip-fallback (4.96%).
 
 5. **`fix_self_intersections_heal`** — conservative real implementation (удаляет face с меньшим числом edges), но не rebuilds topology. Полная реализация требует trim + stitch.
 

@@ -648,3 +648,115 @@ junction-snap, as1_rod NURBS CDT strip).
 
 - `e425018` perf(mesh): C5 follow-up #1 — eliminate O(n²) post-processing
   (6 файлов, +622/−157), запушен в origin/main
+
+# C5 follow-up #2 — seam robustness: junction-level snap + FACE_BOUND list-unwrap (2026-09-01)
+
+Цель: закрыть trade-off Stage 1 №2 — «synth_cone швы (junction-level snap),
+synth_thin_annulus» (15.33% / 9.14% boundary). Диагностика показала, что у
+двух файлов РАЗНЫЕ корневые причины; обе исправлены.
+
+## Фикс 1: junction-level snap (synth_cone 15.33% → 1.31%)
+
+Симптом: LINE #42 (шов конуса) вертикальна, но вершины шва наклонные
+((5,0,0)→(3,0,10)); конвертер сохранял линию (угол 11.3° < 30°), точки шва
+не совпадали с верхней окружностью r=3 → 63/420 boundary-рёбер.
+
+Ключевое наблюдение: эвристика «угол < 30° ⇒ линия верна» не различает
+два сценария «одна вершина вне линии»:
+- **synth_cone**: off-line вершина (3,0,10) лежит НА соседней окружности
+  (EDGE_CURVE #71, circle #41) → вершина авторитетна, ЛИНИЯ сломана
+- **nist_cylinder**: off-line вершина (0,0,10) — ЦЕНТР соседней
+  окружности (degenerate-vertex конвенция полных окружностей) →
+  ЛИНИЯ верна, вершину игнорируем
+
+Реализация (converter.rs):
+- `junction_index: RefCell<Option<HashMap<i64, Vec<(edge_curve_id,
+  curve_ref_id)>>>>` — ленивый O(E) индекс смежности VERTEX_POINT →
+  EDGE_CURVEs (по образцу vertex_canonical_map; строится один раз,
+  только при первом one-off-line запросе — чистые файлы не платят)
+- `vertex_lies_on_neighbor_circle(vertex_id, exclude_ec, point)` —
+  для соседних по junction EDGE_CURVEs резолвит кривые (как
+  resolve_edge_curve: resolve_3d_curve_ref → resolve_curve) и проверяет
+  Circle/Arc тестом `point_on_circle` (|axial| ≤ tol ∧ |radial−r| ≤ tol,
+  tol = 1e-6·scale)
+- Ветка one-off-line в resolve_edge_curve: если угол мал И off-line
+  вершина лежит на соседней окружности → should_override=true (хорда
+  через вершины — существующая ветка переопределения); warn-лог
+  помечает причину (junction-level snap)
+- Семантика остальных веток не тронута: both_on_line → keep,
+  both_off_line → override, угол ≥ 30° → override
+
+Результат: шов = образующая конуса (5,0,0)→(3,0,10); mesh 202 tris,
+boundary 4/305 = 1.31%. Остаток 4 ребра — ГЕОМЕТРИЧЕСКИЙ ПОЛ файла:
+synth_cone моделирует ПОЛУконус без замыкающей грани XZ-плоскости
+(CLOSED_SHELL из 3 граней: низ/верх/бок) — то же поле у synth_cylinder
+(1.31% до и после, пре-существующее). nist_cylinder (degenerate-vertex)
+и nist_chamfer_block (угловое переопределение) — 0.00% без регрессий.
+
+## Фикс 2: FACE_BOUND со ссылкой на loop, обёрнутой в список (thin_annulus 9.14% → 0.00%)
+
+Симптом: у верхней плоскости-кольца 49 треугольников против 102 у нижней
+— отверстие r=4.9 не вырезано (face→полный диск), кольцо внутренней
+цилиндрической грани открыто (51/558 boundary). face.inner_wires=0.
+
+Корневая причина — в самом файле две РАЗНЫЕ записи FACE_BOUND:
+- низ (работало): `#85 = FACE_BOUND('',#83,.T.);` — прямая ссылка
+- верх (ломалось): `#92 = FACE_BOUND('',(#90),.T.);` — ссылка В СПИСКЕ
+  (нестандартный, но встречающийся синтаксис экспортёров)
+`get_ref(List)` возвращает None → внутренний bound молча отбрасывался
+(даже без warn) → отверстие терялось на уровне FaceData.
+
+Реализация (converter.rs): `resolve_face_bound_with_step_ids` теперь
+развёртывает оба варианта — прямую ссылку и ссылки внутри List
+(loop_ids: Vec<i64>); тот же unwrap добавлен в PCURVE-путь
+`extract_edge_curves_2d` (латентный баг той же природы).
+
+Результат: face 1 inner_wires=1, 102 tris (симметрично нижней),
+boundary 0/612 = 0.00%, mesh watertight.
+
+## Результаты (release)
+
+| Файл | До | После |
+|------|-----|-------|
+| synth_cone | 15.33% (порог 18) | **1.31%** (геом. пол) |
+| synth_thin_annulus | 9.14% (порог 12) | **0.00%** |
+| nist_cylinder / nist_chamfer_block | 0.00% | 0.00% (без регрессий) |
+| transmission_top | 6.03% / 3.22s | 5.63% / 3.85s |
+| 8500-02_Vulcan | 1.48% / 9.73s | 1.64% / 9.49s |
+| drill_top | 3.27% | 2.18% (улучшение) |
+| compressor | 4.66% | 4.34% (улучшение) |
+| as1 assembly | 2.73% | 2.41% (улучшение) |
+| as1_rod / bolt / plate / Spit-Fire / Zentralstaender / 3.05.078 | — | в пределах документированных уровней |
+
+- KNOWN_ISSUES: synth_cone и synth_thin_annulus УДАЛЕНЫ (обе записи);
+  таблица 11 → 9 записей
+- Небольшие сдвиги industrial-файлов (±0.2-0.4пп) в обе стороны —
+  эффект от unwrap-а list-wrapped FACE_BOUND в этих файлах и/или
+  junction-snap; все в порогах
+
+## Тесты
+
+- Новый `crates/draper-step/tests/seam_junction_regression.rs` (5 тестов):
+  шов = хорда вершин (топология+mesh-уровень), граница ≤ 2.0%,
+  нет вершины у сломанного топа шва (5,0,10); degenerate-центр
+  nist_cylinder НЕ снапается (вертикальный шов сохранён, 0.00%);
+  inner_wires=1 верхней грани thin_annulus; watertight 0.00%
+- draper-step: 126 lib + все integration suites — зелёные
+- cargo check: draper-json / draper-ffi / draper-wasm / --tests
+  draper-testing — 0 errors
+- STEP-регрессия draper-testing не запускалась (дисковое ограничение —
+  debug-линковка >9 мин); bench покрывает тот же путь
+  triangulate_solid_with_report по всем 31 файлам
+
+## Артефакты
+
+- `crates/draper-step/examples/boundary_edges_dump.rs` — дамп
+  boundary-рёбер с face-атрибуцией и структурой wires (инструмент
+  диагностики швов; env_logger + RUST_LOG=draper_step=info)
+
+## Коммит
+
+- `913d7ac` fix(step): C5 follow-up #2 — junction-level snap + FACE_BOUND
+  list-unwrap (4 файла, +622/−9: converter.rs, seam_junction_regression.rs
+  (новый, 5 тестов), boundary_edges_dump.rs (новый example), KNOWN_ISSUES
+  step_regression.rs)
