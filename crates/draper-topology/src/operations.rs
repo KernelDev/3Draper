@@ -39,7 +39,10 @@ struct EdgeInfo {
 fn collect_edges(solid: &Solid) -> Vec<EdgeInfo> {
     let mut result = Vec::new();
     for (fi, face) in solid.faces().iter().enumerate() {
-        for (ei, edge) in face.edges.iter().enumerate() {
+        // C5 Stage 4: store-resolved (canonical) edge list — shared edges
+        // resolve to the single canonical Edge; un-indexed faces fall back
+        // to their mirrors.
+        for (ei, edge) in solid.face_edges(face).into_iter().enumerate() {
             result.push(EdgeInfo {
                 face_index: fi,
                 edge_local_index: ei,
@@ -57,7 +60,8 @@ fn compute_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
     let mut max_pt = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
 
     for face in solid.faces() {
-        for edge in &face.edges {
+        // C5 Stage 4: store-resolved edge list (see collect_edges).
+        for edge in solid.face_edges(face) {
             // Sample points along the edge curve
             let n_samples = 20;
             for i in 0..=n_samples {

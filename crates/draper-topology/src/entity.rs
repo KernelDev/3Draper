@@ -36,6 +36,17 @@ impl TopoId {
     pub fn to_u64(self) -> u64 {
         self.0
     }
+
+    /// Reconstruct an ID from its raw u64 value (C5 Stage 4).
+    ///
+    /// Callers that receive an edge id as a plain number (CLI parameters,
+    /// fillet/chamfer selection) use this to resolve the id through the
+    /// owning solid's `EdgeStore` — shared-edge instances carry different
+    /// instance TopoIds, so a numeric id may name an alias rather than the
+    /// canonical edge.
+    pub fn from_u64(raw: u64) -> Self {
+        TopoId(raw)
+    }
 }
 
 impl fmt::Display for TopoId {
@@ -298,9 +309,16 @@ pub struct Face {
     /// Maps edge ID → Edge object so triangulation can sample edge curves.
     ///
     /// C5 note: this per-face mirror duplicates shared edges between adjacent
-    /// faces (different TopoIds for the same topological edge). It is
-    /// scheduled for removal in a later C5 stage — consumers migrate to
-    /// `edge_ids` + the owning solid's `EdgeStore`.
+    /// faces (different TopoIds for the same topological edge). Stage 4
+    /// (2026-08-31) demoted it to DERIVED data: the owning solid's
+    /// [`EdgeStore`](crate::edge_store::EdgeStore) is the source of truth,
+    /// and `Solid::sync_edge_mirrors` rebuilds these entries from the
+    /// canonical edges. New code should READ via
+    /// `Solid::face_edges` / `Solid::resolve_edge` (or `Face::edge_by_id`
+    /// for standalone faces) and MUTATE via `edge_store.get_mut` + sync —
+    /// direct writes to this field only stay valid for face-construction
+    /// paths followed by `Solid::index_edges`. Full removal is the Stage 5
+    /// serde+API migration.
     pub edges: Vec<Edge>,
     /// Canonical edge references into the owning Solid's `EdgeStore` (C5).
     /// Populated by `Solid::index_edges` — a shared edge carries the SAME
@@ -342,6 +360,24 @@ impl Face {
     /// Add an inner wire (hole).
     pub fn add_hole(&mut self, wire: Wire) {
         self.inner_wires.push(wire);
+    }
+
+    /// Look up one edge instance of this face by its id (C5 Stage 4).
+    ///
+    /// This encapsulates the mirror lookup
+    /// `self.edges.iter().find(|e| e.id == id)` that was previously written
+    /// out at ~30 call sites. Prefer [`crate::entity::Solid::resolve_edge`]
+    /// when the owning solid is at hand — it follows store aliases, so a
+    /// shared edge resolves identically from both incident faces; this
+    /// mirror-level helper remains correct for standalone (un-indexed)
+    /// faces and coedge id lookups.
+    pub fn edge_by_id(&self, id: TopoId) -> Option<&Edge> {
+        self.edges.iter().find(|e| e.id == id)
+    }
+
+    /// Mutable mirror lookup — see [`Face::edge_by_id`].
+    pub fn edge_by_id_mut(&mut self, id: TopoId) -> Option<&mut Edge> {
+        self.edges.iter_mut().find(|e| e.id == id)
     }
 
     /// Reversed face (normal points inward).

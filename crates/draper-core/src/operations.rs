@@ -465,13 +465,26 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
 
     let shell = solid.outer_shell.as_mut().unwrap();
 
+    // C5 Stage 4 (fillet identity): snapshot the canonical alias map BEFORE
+    // the mutable shell borrow. Both instances of a shared STEP edge carry
+    // DIFFERENT instance TopoIds — matching `edge_index` against instance
+    // ids alone found only one owner face and fillet rejected the edge
+    // ("only 1 adjacent face"). Resolving through the store finds both.
+    // Un-indexed / builder solids are unaffected (empty alias map).
+    let aliases: std::collections::HashMap<TopoId, TopoId> =
+        solid.edge_store.iter_aliases().collect();
+    let resolve = |id: TopoId| aliases.get(&id).copied().unwrap_or(id);
+    let wanted = resolve(TopoId::from_u64(edge_index as u64));
+
     // Find the edge by index across all faces. We need:
     // - the edge itself (curve, endpoints)
     // - the two adjacent faces (face_a, face_b)
     let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new(); // (face_idx, edge_pos_in_face)
     for (fi, face) in shell.faces.iter().enumerate() {
         for (ei, edge) in face.edges.iter().enumerate() {
-            if edge.id.to_u64() as usize == edge_index {
+            if edge.id.to_u64() as usize == edge_index
+                || resolve(edge.id) == wanted
+            {
                 edge_owner_faces.push((fi, ei));
             }
         }
@@ -704,11 +717,21 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
 
     let shell = solid.outer_shell.as_mut().unwrap();
 
+    // C5 Stage 4 (chamfer identity): see fillet_edge — resolve the numeric
+    // edge id through the store's alias map so both instances of a shared
+    // STEP edge are found.
+    let aliases: std::collections::HashMap<TopoId, TopoId> =
+        solid.edge_store.iter_aliases().collect();
+    let resolve = |id: TopoId| aliases.get(&id).copied().unwrap_or(id);
+    let wanted = resolve(TopoId::from_u64(edge_index as u64));
+
     // Find the edge by index across all faces.
     let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new();
     for (fi, face) in shell.faces.iter().enumerate() {
         for (ei, edge) in face.edges.iter().enumerate() {
-            if edge.id.to_u64() as usize == edge_index {
+            if edge.id.to_u64() as usize == edge_index
+                || resolve(edge.id) == wanted
+            {
                 edge_owner_faces.push((fi, ei));
             }
         }
@@ -1588,6 +1611,57 @@ mod tests {
         }
         // The fillet face should have 4 edges (2 offset + 2 caps).
         assert_eq!(fillet_face.edges.len(), 4);
+    }
+
+    #[test]
+    fn test_fillet_edge_on_step_style_shared_edge() {
+        // C5 Stage 4: STEP-imported solids duplicate a shared edge as two
+        // instances with DIFFERENT TopoIds (same step_entity_id). Fillet
+        // used to fail with "only 1 adjacent face(s)" because the scan
+        // matched instance ids only; the alias-resolved scan now finds both
+        // incident faces.
+        let mut cube = unit_cube();
+        // The vertical edge e_vert_0 is shared between front (face 2,
+        // edges[3]) and left (face 4, edges[3]).
+        let front_edge_id = cube.outer_shell.as_ref().unwrap().faces[2].edges[3].id;
+
+        // STEP-ify: replace the left face's copy with a twin carrying a
+        // FRESH TopoId and a shared step_entity_id.
+        {
+            let left = cube
+                .outer_shell
+                .as_mut()
+                .unwrap()
+                .faces
+                .get_mut(4)
+                .unwrap();
+            let mut twin = left.edges[3].clone();
+            twin.id = TopoId::new();
+            twin.step_entity_id = Some(700);
+            left.edges[3] = twin;
+        }
+        {
+            let front = cube
+                .outer_shell
+                .as_mut()
+                .unwrap()
+                .faces
+                .get_mut(2)
+                .unwrap();
+            front.edges[3].step_entity_id = Some(700);
+        }
+        cube.index_edges();
+
+        // Fillet by the FRONT copy's instance id — the alias map must
+        // resolve the left face's twin to the same canonical edge.
+        let result = fillet_edge(&mut cube, front_edge_id.to_u64() as usize, 0.1);
+        assert!(
+            result.is_ok(),
+            "fillet on STEP-style shared edge failed: {:?}",
+            result
+        );
+        // 6 original + 1 fillet face.
+        assert_eq!(cube.outer_shell.as_ref().unwrap().faces.len(), 7);
     }
 
     #[test]

@@ -1811,7 +1811,7 @@ impl EdgeDiscretizationCache {
                 // Outer wire
                 if let Some(ref wire) = face.outer_wire {
                     for coedge in &wire.coedges {
-                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                        let edge = face.edge_by_id(coedge.edge);
                         if let Some(edge) = edge {
                             if edge.degenerate { continue; }
                             let key = EdgeCacheKey::from_edge(edge);
@@ -1830,7 +1830,7 @@ impl EdgeDiscretizationCache {
                 // Inner wires
                 for wire in &face.inner_wires {
                     for coedge in &wire.coedges {
-                        let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                        let edge = face.edge_by_id(coedge.edge);
                         if let Some(edge) = edge {
                             if edge.degenerate { continue; }
                             let key = EdgeCacheKey::from_edge(edge);

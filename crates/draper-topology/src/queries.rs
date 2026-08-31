@@ -82,7 +82,8 @@ fn collect_boundary_points(face: &Face) -> Vec<Point3d> {
     let mut points = Vec::new();
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+            // C5 Stage 4: encapsulated mirror lookup (see Face::edge_by_id).
+            if let Some(edge) = face.edge_by_id(coedge.edge) {
                 if edge.degenerate {
                     continue;
                 }

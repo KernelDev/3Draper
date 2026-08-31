@@ -1932,7 +1932,7 @@ fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, sur
     // Outer wire
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+            if let Some(edge) = face.edge_by_id(coedge.edge) {
                 if edge.degenerate { continue; }
                 cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
             }
@@ -1941,7 +1941,7 @@ fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, sur
     // Inner wires
     for wire in &face.inner_wires {
         for coedge in &wire.coedges {
-            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+            if let Some(edge) = face.edge_by_id(coedge.edge) {
                 if edge.degenerate { continue; }
                 cache.discretize_edge(edge, face.id, surface, EDGE_SAMPLES, coedge.curve_2d.as_ref());
             }
@@ -1966,7 +1966,7 @@ fn collect_face_boundary_from_cache(
 
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            let edge = face.edge_by_id(coedge.edge);
             if let Some(edge) = edge {
                 if edge.degenerate { continue; }
 
@@ -2034,7 +2034,7 @@ fn collect_face_boundary_with_uv_from_cache(
 
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            let edge = face.edge_by_id(coedge.edge);
             if let Some(edge) = edge {
                 if edge.degenerate { continue; }
 
@@ -2127,7 +2127,7 @@ fn collect_face_holes_from_cache(
     for wire in &face.inner_wires {
         let mut points = Vec::new();
         for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            let edge = face.edge_by_id(coedge.edge);
             if let Some(edge) = edge {
                 if edge.degenerate { continue; }
 
@@ -2189,7 +2189,7 @@ fn collect_face_holes_with_uv_from_cache(
         let mut pts_uv = Vec::new();
 
         for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            let edge = face.edge_by_id(coedge.edge);
             if let Some(edge) = edge {
                 if edge.degenerate { continue; }
 
@@ -8793,7 +8793,7 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
     if v_min >= v_max {
         if let Some(ref wire) = face.outer_wire {
             for coedge in &wire.coedges {
-                let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                let edge = face.edge_by_id(coedge.edge);
                 if let Some(edge) = edge {
                     for i in 0..64 {
                         let t = i as f64 / 63.0;
@@ -8878,7 +8878,7 @@ fn compute_extrusion_v_range(face: &Face, ext: &draper_geometry::ExtrusionSurfac
     if v_min >= v_max {
         if let Some(ref wire) = face.outer_wire {
             for coedge in &wire.coedges {
-                let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+                let edge = face.edge_by_id(coedge.edge);
                 if let Some(edge) = edge {
                     for i in 0..64 {
                         let t = i as f64 / 63.0;
@@ -10299,7 +10299,7 @@ fn collect_face_boundary_no_surface(face: &Face, cache: &EdgeDiscretizationCache
 
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            let edge = face.edges.iter().find(|e| e.id == coedge.edge);
+            let edge = face.edge_by_id(coedge.edge);
             if let Some(edge) = edge {
                 if edge.degenerate { continue; }
 

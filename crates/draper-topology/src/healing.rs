@@ -359,6 +359,23 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
     }
     healed_solid.index_edges();
 
+    // C5 Stage 4: after the store is (re)built from the healed mirrors,
+    // reverse-sync the canonical fields back onto them. This is where the
+    // mirrors stop being an independent source of truth and become derived
+    // data: the store's curve-upgraded canonical copies (see the
+    // "upgrade with curve data" path in `index_edges`) backfill their
+    // curve-less twins in every incident face, and reconciled
+    // tolerance/degenerate values land on all copies — exactly the
+    // `ensure → get_mut → sync_edge_mirrors` flow Stage 4 establishes for
+    // the rest of the code base.
+    let synced = healed_solid.sync_edge_mirrors();
+    if synced > 0 {
+        report.add_msg(format!(
+            "Synced {} canonical edge field(s) onto face mirrors",
+            synced
+        ));
+    }
+
     (healed_solid, report)
 }
 

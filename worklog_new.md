@@ -369,3 +369,88 @@ split-рёбра (клонируемые shared_split_edges в обе грани
   boolean-результаты индексируются автоматически
 - Следующий этап (Stage 4): миграция оставшихся потребителей face.edges на
   store-lookup'и и финальное удаление зеркал Face.edges
+
+---
+
+# Worklog — C5 Stage 4: store-first reads + derived mirrors
+
+**Дата:** 2026-08-31
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `55e5b5c` (после C5 Stage 3 + N1–N3)
+**Задача:** Пункт 2 плана — C5 Stage 4: миграция потребителей `face.edges` на store-lookup'и, зеркала становятся производными от `EdgeStore`
+
+## Среда
+
+- Sandbox сброшен между сессиями: репозиторий переклонирован, Rust 1.98.0
+  (rustup stable) установлен заново
+- Integrity-check на baseline `55e5b5c`: topology 174✅, mesh 253+51✅,
+  geometry 121+59+5+7+83✅, core 73+2✅, json 13✅ — деградации нет
+
+## Stage 4.1 — read-API (edge_store.rs, entity.rs)
+
+- `Solid::resolve_edge(id)`: store-first (alias-following) с fallback-сканом
+  зеркал — инкапсулирует `face.edges.iter().find(|e| e.id == id)`
+- `Solid::face_edges(face)`: инстанс-точный список (параллелен `face.edges`),
+  индексированные записи резолвятся в канонические `&Edge` — shared-рёбра из
+  смежных граней равны по указателю
+- `Face::edge_by_id` / `edge_by_id_mut`: mirror-lookup хелпер для standalone-граней
+- `TopoId::from_u64`: реконструкция id из числа (CLI/selection-пути)
+- 7 новых тестов (resolve fallback, ptr-equality, sync-пропагация, range-guard,
+  no-op без store, edge_by_id)
+
+## Stage 4.2 — зеркала = производные данные
+
+- `Solid::sync_edge_mirrors()`: пропагирует ориентационно-НЕзависимые поля
+  канонического ребра (`degenerate`, `tolerance` max, `step_entity_id`,
+  `curve` с param_range-guard) на все зеркала инцидентных граней.
+  Идемпотентен, no-op без store. Санctioned flow:
+  `ensure_edge_store → store.get_mut → sync_edge_mirrors`
+
+## Stage 4.3 — boolean: shared_split_edges → EdgeStore
+
+- `split_planar_face_shared`: ad-hoc `HashMap<u64, Edge>` заменён локальным
+  EdgeStore + геометрическим ключом; новые грани получают `edge_ids`
+  от рождения (канонические ссылки, параллельные зеркалам)
+- `index_boolean_result` переиндексирует собранный solid — идентичность
+  уже канонична к этому моменту
+
+## Stage 4.4 — канонический healing-flow
+
+- `healing::heal_solid`: после `index_edges()` вызывается
+  `sync_edge_mirrors()` — curve-upgrade канонических копий бэкфилится в
+  curve-less зеркала-двойники, reconciliation-поля ложатся на все копии
+- `validation::heal_solid` (legacy, viewer): детект → `store.get_mut`
+  (каноническая мутация) → sync; `index_edges` вместо `ensure_edge_store`
+  гарантирует свежесть store к моменту мутации
+
+## Stage 4.5 — миграция потребителей
+
+- `validate_brep`: coedge-подсчёт по каноническим id — shared STEP-рёбра
+  больше НЕ ложные dangling edges (count=2 под одним ключом);
+  edge_count/Эйлер теперь топологически корректны; edge_map двухключевой
+  (instance + canonical) — fallback-lookups сохранены
+- `fillet_edge`/`chamfer_edge` (draper-core): числовой id резолвится через
+  alias-карту — fillet на STEP-солиде с shared-ребром больше не падает
+  «only 1 adjacent face» (тест на STEP-стиль twin-инстансах)
+- `queries.rs` `collect_boundary_points`, mesh `triangulate.rs`/`edge_cache.rs`
+  (11 call-site'ов), boolean/healing find-паттерны → `face.edge_by_id`
+- `operations.rs` (topology): `collect_edges`/`compute_bounding_box` →
+  `solid.face_edges` (store-resolved)
+- shape.rs `self.edges` — НЕ Face.edges (TopologyShape HashMap), не тронут
+
+## Верификация
+
+- draper-topology: **181 passed** (174 + 7 EdgeStore/validator)
+- draper-core: **74 passed** (73 + fillet STEP-style shared edge)
+- draper-mesh: 253 + 51 ✅
+- `cargo check --workspace --lib` — 0 errors
+- STEP regression 32/33 PASS (Vulcan — документированный таймаут, как в
+  baseline); draper-step lib release 126/126 — прогон в этой сессии
+
+## Осталось (Stage 5 — финальное удаление Face.edges)
+
+- Смена сигнатур mesh standalone-API (`triangulate_face(face, …)` →
+  передача рёбер/store)
+- Миграция viewer (25 usages) / subd (15) / wasm / json / ffi
+- Serde-формат: сериализация EdgeStore, legacy-загрузка зеркал
+

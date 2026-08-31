@@ -129,30 +129,48 @@ pub fn validate_brep(solid: &Solid, config: &TopologyValidationConfig) -> Topolo
     let mut edges_with_bad_orientation = 0usize;
     let mut dangling_edges = 0usize;
 
-    // Build edge → coedge count map (across all shells for cross-reference)
+    // Build edge → coedge count map (across all shells for cross-reference).
+    //
+    // C5 Stage 4: counted per CANONICAL edge id (store aliases followed), so
+    // the two per-face instances of one shared STEP edge count as ONE
+    // topological edge with 2 coedges — the identity-correct manifoldness
+    // check. Un-indexed solids (builder paths) are unaffected: an empty
+    // store maps every id to itself.
     let mut edge_coedge_count: HashMap<TopoId, usize> = HashMap::new();
     for shell in &shells {
         for face in &shell.faces {
             if let Some(ref wire) = face.outer_wire {
                 for coedge in &wire.coedges {
-                    *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
+                    let key = solid.edge_store.canonical_of(coedge.edge);
+                    *edge_coedge_count.entry(key).or_insert(0) += 1;
                 }
             }
             for wire in &face.inner_wires {
                 for coedge in &wire.coedges {
-                    *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
+                    let key = solid.edge_store.canonical_of(coedge.edge);
+                    *edge_coedge_count.entry(key).or_insert(0) += 1;
                 }
             }
         }
     }
 
-    // Build edge map for vertex counting
+    // Build edge map for vertex counting.
+    //
+    // C5 Stage 4: values resolve through the EdgeStore (canonical edge,
+    // alias-following); keys are inserted BOTH as the instance id (coedge
+    // lookups) and the canonical id, so `check_wire_edge_orientation`'s
+    // global fallback keeps answering regardless of which id a caller
+    // holds. Un-indexed solids fall back to the mirror instance — the
+    // pre-C5 behavior.
     let mut edge_map: HashMap<TopoId, &Edge> = HashMap::new();
     let mut vertex_set: HashSet<TopoId> = HashSet::new();
     for shell in &shells {
         for face in &shell.faces {
             for edge in &face.edges {
-                edge_map.entry(edge.id).or_insert(edge);
+                let resolved: &Edge = solid.edge_store.get(edge.id).unwrap_or(edge);
+                edge_map.entry(edge.id).or_insert(resolved);
+                let canonical = solid.edge_store.canonical_of(edge.id);
+                edge_map.entry(canonical).or_insert(resolved);
                 if let Some(vid) = edge.vertex_start {
                     vertex_set.insert(vid);
                 }
@@ -991,5 +1009,91 @@ mod tests {
         let report = validate_brep_default(&box_solid);
 
         assert_eq!(report.face_count, 6);
+    }
+
+    /// C5 Stage 4: shared-edge instances (different TopoIds, same
+    /// `step_entity_id` — the STEP duplication pattern) must count as ONE
+    /// topological edge with 2 coedges once the solid is indexed.
+    ///
+    /// Pre-Stage-4 behavior counted each instance separately, so BOTH
+    /// instances of a properly shared edge were reported as dangling
+    /// (count=1 each) in a closed solid.
+    #[test]
+    fn test_validate_brep_canonical_shared_edge_not_dangling() {
+        let v = [
+            Point3d::new(0.0, 0.0, 0.0), // 0
+            Point3d::new(1.0, 0.0, 0.0), // 1
+            Point3d::new(1.0, 1.0, 0.0), // 2
+            Point3d::new(0.0, 1.0, 0.0), // 3
+            Point3d::new(0.0, 0.0, 1.0), // 4
+            Point3d::new(1.0, 0.0, 1.0), // 5
+        ];
+
+        // Face A (z=0 quad) — shared edge v0→v1, step id 900.
+        let mut e_shared_a = Edge::new_line(v[0], v[1]);
+        e_shared_a.step_entity_id = Some(900);
+        let e_a2 = Edge::new_line(v[1], v[2]);
+        let e_a3 = Edge::new_line(v[2], v[3]);
+        let e_a4 = Edge::new_line(v[3], v[0]);
+        let ida1 = e_shared_a.id;
+
+        // Face B (y=0 quad) — the SAME topological edge as a SECOND
+        // instance: fresh TopoId, same step_entity_id.
+        let mut e_shared_b = Edge::new_line(v[0], v[1]);
+        e_shared_b.step_entity_id = Some(900);
+        let e_b2 = Edge::new_line(v[0], v[4]);
+        let e_b3 = Edge::new_line(v[4], v[5]);
+        let e_b4 = Edge::new_line(v[5], v[1]);
+        let idb1 = e_shared_b.id;
+
+        assert_ne!(ida1, idb1, "fixture: two instance copies");
+
+        let wire_a = Wire::new(vec![
+            CoEdge::new(ida1, true),
+            CoEdge::new(e_a2.id, true),
+            CoEdge::new(e_a3.id, true),
+            CoEdge::new(e_a4.id, true),
+        ]);
+        let mut face_a = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::new(0.5, 0.5, 0.0),
+                Direction3d::Z,
+            )),
+            wire_a,
+        );
+        face_a.edges = vec![e_shared_a, e_a2, e_a3, e_a4];
+
+        let wire_b = Wire::new(vec![
+            CoEdge::new(idb1, true),
+            CoEdge::new(e_b2.id, true),
+            CoEdge::new(e_b3.id, true),
+            CoEdge::new(e_b4.id, true),
+        ]);
+        let mut face_b = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::new(0.5, 0.0, 0.5),
+                Direction3d::new(0.0, -1.0, 0.0).unwrap(),
+            )),
+            wire_b,
+        );
+        face_b.edges = vec![e_shared_b, e_b2, e_b3, e_b4];
+
+        let mut solid = Solid::new(Shell::new_closed(vec![face_a, face_b]));
+
+        // Un-indexed (empty store): every instance counts separately — the
+        // pre-C5 semantics; all 8 edges report as dangling.
+        let raw = validate_brep(&solid, &TopologyValidationConfig::default());
+        assert_eq!(raw.dangling_edges, 8, "instance-level counting: 8 × count=1");
+        assert_eq!(raw.edge_count, 8);
+
+        // Indexed: the two step-900 instances unify → 2 coedges, not
+        // dangling; the 6 other edges remain single-use.
+        solid.index_edges();
+        let canonical = validate_brep(&solid, &TopologyValidationConfig::default());
+        assert_eq!(
+            canonical.dangling_edges, 6,
+            "shared edge must NOT be dangling after canonical counting"
+        );
+        assert_eq!(canonical.edge_count, 7, "8 instances → 7 topological edges");
     }
 }

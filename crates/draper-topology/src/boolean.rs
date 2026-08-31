@@ -14,6 +14,7 @@
 
 use crate::entity::*;
 use crate::builder::ShapeBuilder;
+use crate::edge_store::EdgeStore;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
     Curve3d, Curve2d, Line, Circle, Ellipse,
@@ -3086,6 +3087,8 @@ fn split_planar_face_shared(
         let wire = Wire::new(vec![coedge]);
         face_with_hole.add_hole(wire);
         face_with_hole.edges.push(shared_edge.clone());
+        // C5 Stage 4: canonical ref from birth (parallel to the mirror).
+        face_with_hole.edge_ids.push(shared_edge.id);
         return Ok(SplitFaceResult {
             faces: vec![face_with_hole],
         });
@@ -3126,8 +3129,17 @@ fn split_planar_face_shared(
     // in the B-Rep that would create spurious edges in the viewport.
     let mut result_faces = Vec::new();
 
-    // Map: edge_hash → Edge, for segments that need shared edges
-    let mut shared_split_edges: std::collections::HashMap<u64, Edge> = std::collections::HashMap::new();
+    // C5 Stage 4: split-edge identity lives in a local EdgeStore instead
+    // of an ad-hoc `HashMap<u64, Edge>` (worklog TODO). The canonical Edge
+    // is registered ONCE per geometric key; every incident split face gets
+    // its clone (same id) plus a canonical `edge_ids` entry at creation
+    // time — `index_boolean_result` re-indexes the assembled solid, and the
+    // identity mapping is already canonical when that happens.
+    let mut split_store = EdgeStore::new();
+    // Geometric key (quantized endpoint pair hash) → canonical TopoId —
+    // the split-face analogue of the store's `by_step_id` index.
+    let mut split_key_to_id: std::collections::HashMap<u64, TopoId> =
+        std::collections::HashMap::new();
 
     for poly_idx in 0..2 {
         let poly_2d = if poly_idx == 0 { &poly_a } else { &poly_b };
@@ -3244,40 +3256,56 @@ fn split_planar_face_shared(
             }
         }
 
-        // Third pass: create edges and coedges from merged segments
+        // Third pass: create edges and coedges from merged segments.
+        // C5 Stage 4: `edge_ids` is collected in parallel — the new faces
+        // carry canonical edge references from birth instead of waiting
+        // for a later `index_edges` pass.
         let mut edges = Vec::new();
+        let mut edge_ids: Vec<TopoId> = Vec::new();
         let mut coedges = Vec::new();
 
         for seg in &merged_segments {
             if seg.is_intersection {
                 // Use the shared edge for the intersection curve
                 edges.push(shared_edge.clone());
+                edge_ids.push(shared_edge.id);
                 coedges.push(CoEdge::new(shared_edge.id, true));
             } else if let Some(orig_id) = seg.orig_edge_id {
                 // Find the original edge and reuse it
-                if let Some(orig_edge) = face.edges.iter().find(|e| e.id == orig_id) {
+                if let Some(orig_edge) = face.edge_by_id(orig_id) {
                     edges.push(orig_edge.clone());
+                    edge_ids.push(orig_edge.id);
                     coedges.push(CoEdge::new(orig_edge.id, true));
                 } else {
                     // Fallback: create new edge
                     let e = Edge::new_line(seg.p0, seg.p1);
                     let eid = e.id;
                     edges.push(e);
+                    edge_ids.push(eid);
                     coedges.push(CoEdge::new(eid, true));
                 }
             } else {
-                // New segment from split — create a shared edge
+                // New segment from split — create/reuse the canonical shared
+                // edge through the EdgeStore (C5 Stage 4).
                 let edge_key_str = format!("{:.6},{:.6},{:.6}-{:.6},{:.6},{:.6}",
                     seg.p0.x.min(seg.p1.x), seg.p0.y.min(seg.p1.y), seg.p0.z.min(seg.p1.z),
                     seg.p0.x.max(seg.p1.x), seg.p0.y.max(seg.p1.y), seg.p0.z.max(seg.p1.z));
                 let edge_hash: u64 = edge_key_str.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
 
-                let edge = shared_split_edges.entry(edge_hash).or_insert_with(|| {
-                    Edge::new_line(seg.p0, seg.p1)
-                }).clone();
+                let canonical_id = *split_key_to_id.entry(edge_hash).or_insert_with(|| {
+                    let edge = Edge::new_line(seg.p0, seg.p1);
+                    let id = edge.id;
+                    split_store.insert(edge);
+                    id
+                });
+                let edge = split_store
+                    .get(canonical_id)
+                    .expect("split edge just inserted")
+                    .clone();
 
-                edges.push(edge.clone());
-                coedges.push(CoEdge::new(edge.id, true));
+                edges.push(edge);
+                edge_ids.push(canonical_id);
+                coedges.push(CoEdge::new(canonical_id, true));
             }
         }
 
@@ -3285,6 +3313,7 @@ fn split_planar_face_shared(
         let surface = Surface::Plane(plane.clone());
         let mut new_face = Face::new(surface, wire);
         new_face.edges = edges;
+        new_face.edge_ids = edge_ids;
         result_faces.push(new_face);
     }
 

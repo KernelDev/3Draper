@@ -39,8 +39,16 @@
 //! - a deduplicated iteration surface (`iter` yields each shared edge once),
 //! - a target-state API (`Face.edge_ids`) that downstream stages migrate to.
 //!
-//! Stage 3+ will migrate consumers to store lookups and finally remove the
-//! per-face `Vec<Edge>` mirrors entirely.
+//! # Stage 4 semantics (2026-08-31) — store-first reads, derived mirrors
+//!
+//! The store is now the READ path of record: `Solid::resolve_edge` /
+//! `Solid::face_edges` answer identity-aware queries with a mirror
+//! fallback for un-indexed solids, and `Solid::sync_edge_mirrors`
+//! reverse-propagates canonical edge fixes onto the per-face mirrors,
+//! establishing the sanctioned mutation flow
+//! `ensure → get_mut → sync_edge_mirrors`. Consumers are migrating
+//! incrementally; the per-face `Vec<Edge>` mirrors remain as derived
+//! data until the Stage 5 serde+API migration removes them entirely.
 
 use crate::entity::{Edge, Face, Shell, Solid, TopoId};
 use draper_geometry::Curve3d;
@@ -668,6 +676,135 @@ impl Solid {
         }
         updated
     }
+
+    /// Resolve any edge id — instance or canonical — to the canonical edge
+    /// (C5 Stage 4 read API).
+    ///
+    /// Store-first: aliases are followed transparently, so the two per-face
+    /// copies of one shared edge resolve to the SAME `&Edge`. When the store
+    /// cannot answer (not yet indexed, or the edge was appended after the
+    /// last `index_edges` call), the per-face mirrors are scanned as a
+    /// fallback — the pre-C5 lookup semantics, now encapsulated.
+    ///
+    /// Consumers previously wrote `face.edges.iter().find(|e| e.id == id)`;
+    /// migrating that pattern to `solid.resolve_edge(id)` is the Stage 4
+    /// read-path migration step.
+    pub fn resolve_edge(&self, id: TopoId) -> Option<&Edge> {
+        if let Some(edge) = self.edge_store.get(id) {
+            return Some(edge);
+        }
+        self.faces()
+            .iter()
+            .flat_map(|face| face.edges.iter())
+            .find(|edge| edge.id == id)
+    }
+
+    /// Instance-faithful edge list of `face`, resolved through the canonical
+    /// store (C5 Stage 4 read API).
+    ///
+    /// Element `i` corresponds to face instance `i` (parallel to
+    /// `face.edges`): if the face has been indexed and the store still holds
+    /// that edge, the CANONICAL edge is returned — shared edges from
+    /// adjacent faces compare equal by pointer. Un-indexed or drifted
+    /// entries fall back to the mirror entry, so behavior never regresses
+    /// for builder-created or post-mutation faces.
+    pub fn face_edges<'s>(&'s self, face: &'s Face) -> Vec<&'s Edge> {
+        let store = &self.edge_store;
+        let n = face.edges.len();
+        let indexed = n > 0 && face.edge_ids.len() == n;
+        (0..n)
+            .map(|i| match indexed {
+                true => store.get(face.edge_ids[i]).unwrap_or(&face.edges[i]),
+                false => &face.edges[i],
+            })
+            .collect()
+    }
+
+    /// Propagate canonical edge field fixes onto the per-face `edges`
+    /// mirrors (C5 Stage 4 — the store becomes the source of truth).
+    ///
+    /// The C5-sanctioned mutation flow is now:
+    ///
+    /// ```text
+    /// solid.ensure_edge_store();
+    /// if let Some(edge) = solid.edge_store.get_mut(instance_id) {
+    ///     edge.tolerance = 0.5;            // fix the CANONICAL edge once
+    /// }
+    /// solid.sync_edge_mirrors();           // every incident face sees it
+    /// ```
+    ///
+    /// Only orientation-INDEPENDENT fields are propagated from the canonical
+    /// edge onto each instance:
+    ///
+    /// - `degenerate`, `tolerance`, `step_entity_id` — unconditional;
+    /// - `curve` — only when the instance's `param_range` equals the
+    ///   canonical range (or its swap), the same guard
+    ///   [`Solid::propagate_edge_fixes`] uses to guarantee the backfilled
+    ///   curve describes the same segment.
+    ///
+    /// Per-instance orientation fields (`id`, `param_range`, `forward`,
+    /// `vertex_start`/`vertex_end`, vertex points) are never overwritten —
+    /// reversed instances legitimately carry swapped values, and coedges
+    /// keep referencing the instance ids.
+    ///
+    /// Returns the number of instance field updates applied. Idempotent: a
+    /// second call without intervening store mutations returns 0.
+    pub fn sync_edge_mirrors(&mut self) -> usize {
+        if self.edge_store.is_empty() {
+            return 0;
+        }
+        let store = &self.edge_store;
+        let mut updated = 0usize;
+
+        let mut shells: Vec<&mut Shell> = Vec::new();
+        if let Some(ref mut shell) = self.outer_shell {
+            shells.push(shell);
+        }
+        for shell in &mut self.inner_shells {
+            shells.push(shell);
+        }
+        for shell in shells.iter_mut() {
+            for face in shell.faces.iter_mut() {
+                // `edge_ids[i]` (canonical) or `edges[i].id` (un-indexed).
+                let instance_ids: Vec<TopoId> = if face.edge_ids.len() == face.edges.len()
+                    && !face.edge_ids.is_empty()
+                {
+                    face.edge_ids.clone()
+                } else {
+                    face.edges.iter().map(|e| e.id).collect()
+                };
+                for (edge, &instance_id) in face.edges.iter_mut().zip(instance_ids.iter()) {
+                    let Some(canonical) = store.get(instance_id) else {
+                        continue;
+                    };
+                    if edge.degenerate != canonical.degenerate {
+                        edge.degenerate = canonical.degenerate;
+                        updated += 1;
+                    }
+                    if edge.tolerance != canonical.tolerance
+                        && canonical.tolerance > edge.tolerance
+                    {
+                        edge.tolerance = canonical.tolerance;
+                        updated += 1;
+                    }
+                    if edge.step_entity_id.is_none() && canonical.step_entity_id.is_some() {
+                        edge.step_entity_id = canonical.step_entity_id;
+                        updated += 1;
+                    }
+                    if edge.curve.is_none() && canonical.curve.is_some() {
+                        let same = edge.param_range == canonical.param_range;
+                        let swapped =
+                            (edge.param_range.1, edge.param_range.0) == canonical.param_range;
+                        if same || swapped {
+                            edge.curve = canonical.curve.clone();
+                            updated += 1;
+                        }
+                    }
+                }
+            }
+        }
+        updated
+    }
 }
 
 impl Face {
@@ -1094,5 +1231,131 @@ mod tests {
         let ce = f.outer_wire.as_ref().unwrap().coedges[0].edge;
         assert_eq!(ce, e0, "coedge refs must stay untouched in Stage 2");
         assert!(f.edges.iter().any(|e| e.id == ce));
+    }
+
+    // ── C5 Stage 4: store-first read API + mirror sync ──────────────────
+
+    #[test]
+    fn test_resolve_edge_store_first_mirror_fallback() {
+        // Two faces sharing one STEP edge (same step_entity_id).
+        let face_a = square_face(&[Some(10)]);
+        let face_b = square_face(&[Some(10)]);
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.index_edges();
+
+        let instance_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].id;
+        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        assert_ne!(instance_a, instance_b, "fixture: two instance copies");
+
+        // Store path: BOTH instances resolve to the same canonical edge.
+        let ra = solid.resolve_edge(instance_a).unwrap();
+        let rb = solid.resolve_edge(instance_b).unwrap();
+        assert!(std::ptr::eq(ra, rb), "shared instances resolve identically");
+
+        // Mirror fallback path: a fresh (un-indexed) solid still answers.
+        let solid_raw = solid_of(vec![square_face(&[Some(10)])]);
+        let raw_instance = solid_raw
+            .outer_shell
+            .as_ref()
+            .unwrap()
+            .faces[0]
+            .edges[0]
+            .id;
+        assert!(solid_raw
+            .resolve_edge(raw_instance)
+            .is_some(), "un-indexed solid falls back to mirror scan");
+        assert!(solid_raw.resolve_edge(TopoId::new()).is_none());
+    }
+
+    #[test]
+    fn test_face_edges_yields_canonical_shared_edge() {
+        let face_a = square_face(&[Some(20)]);
+        let face_b = square_face(&[Some(20)]);
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.index_edges();
+
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let ea = &solid.face_edges(fa)[0];
+        let eb = &solid.face_edges(fb)[0];
+        assert!(
+            std::ptr::eq(*ea, *eb),
+            "face_edges must return the canonical edge for both incident faces"
+        );
+        // Length stays instance-faithful (parallel to face.edges).
+        assert_eq!(solid.face_edges(fa).len(), fa.edges.len());
+    }
+
+    #[test]
+    fn test_sync_edge_mirrors_propagates_canonical_fixes() {
+        let face_a = square_face(&[Some(30)]);
+        let face_b = square_face(&[Some(30)]);
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.index_edges();
+
+        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        let range_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].param_range;
+
+        // The C5 Stage 4 mutation flow: fix the canonical edge ONCE...
+        {
+            let canonical = solid.edge_store.get_mut(instance_b).unwrap();
+            canonical.tolerance = 1e-2;
+            canonical.degenerate = true;
+        }
+        // ...then sync every mirror.
+        let updated = solid.sync_edge_mirrors();
+        assert!(updated >= 3, "tolerance+degenerate on two mirrors, counted per field");
+
+        for f in &solid.outer_shell.as_ref().unwrap().faces {
+            assert!((f.edges[0].tolerance - 1e-2).abs() < 1e-12);
+            assert!(f.edges[0].degenerate);
+        }
+
+        // Idempotent: nothing left to do.
+        assert_eq!(solid.sync_edge_mirrors(), 0);
+
+        // Orientation-dependent fields untouched.
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert_eq!(fb.edges[0].param_range, range_b);
+        assert_eq!(fb.edges[0].id, instance_b, "instance id must never be rewritten");
+    }
+
+    #[test]
+    fn test_sync_edge_mirrors_curve_range_guard() {
+        let mut face_a = square_face(&[None]);
+        let mut face_b = square_face(&[None]);
+        // Shared identity via step id; face_b's copy is curve-less with a
+        // mismatching param_range.
+        face_a.edges[0].step_entity_id = Some(99);
+        face_b.edges[0].step_entity_id = Some(99);
+        face_b.edges[0].curve = None;
+        face_b.edges[0].param_range = (5.0, 6.0);
+
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.index_edges();
+
+        solid.sync_edge_mirrors();
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        assert!(
+            fb.edges[0].curve.is_none(),
+            "sync must respect the param_range guard — no blind curve backfill"
+        );
+    }
+
+    #[test]
+    fn test_sync_edge_mirrors_noop_without_store() {
+        let mut solid = solid_of(vec![square_face(&[Some(40)])]);
+        // Store empty (never indexed) → sync is a safe no-op.
+        assert_eq!(solid.sync_edge_mirrors(), 0);
+    }
+
+    #[test]
+    fn test_face_edge_by_id_helpers() {
+        let mut face = square_face(&[Some(50), Some(51)]);
+        let id0 = face.edges[0].id;
+        assert!(face.edge_by_id(id0).is_some());
+        assert!(face.edge_by_id(TopoId::new()).is_none());
+        face.edge_by_id_mut(id0).unwrap().tolerance = 1e-4;
+        assert!((face.edges[0].tolerance - 1e-4).abs() < 1e-12);
     }
 }

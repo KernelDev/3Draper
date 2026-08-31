@@ -174,11 +174,24 @@ pub fn validate_shell(shell: &Shell) -> Vec<ValidationError> {
 pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
     let mut fixes = Vec::new();
 
-    if let Some(ref mut shell) = solid.outer_shell {
-        // Mark degenerate edges
-        let mut degenerate_count = 0;
-        for face in &mut shell.faces {
-            for edge in &mut face.edges {
+    // C5 Stage 4: degeneracy marking goes through the canonical EdgeStore
+    // entry (`store.get_mut`) instead of per-face mirror mutation, then
+    // `sync_edge_mirrors` pushes the flag onto every incident face's twin.
+    // Pre-Stage-4, a degenerate edge shared by two faces was only flagged in
+    // the face whose copy was scanned — the twin stayed stale.
+    //
+    // `index_edges` (not `ensure_edge_store`) guarantees the store is fresh
+    // w.r.t. the current mirrors, so the canonical mutation pass cannot miss
+    // an instance — even if the caller mutated the solid after a previous
+    // indexing.
+    solid.index_edges();
+
+    // Detection pass (read-only over mirror instances — they carry the
+    // instance ids coedges reference).
+    let mut degenerate_ids: Vec<TopoId> = Vec::new();
+    if let Some(ref shell) = solid.outer_shell {
+        for face in &shell.faces {
+            for edge in &face.edges {
                 if !edge.degenerate {
                     let is_degen = if let Some(ref curve) = edge.curve {
                         curve.is_degenerate(edge.tolerance)
@@ -194,17 +207,32 @@ pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
                         }
                     };
                     if is_degen {
-                        edge.degenerate = true;
-                        degenerate_count += 1;
+                        degenerate_ids.push(edge.id);
                     }
                 }
             }
         }
-        if degenerate_count > 0 {
-            fixes.push(format!("Marked {} degenerate edges", degenerate_count));
-        }
+    }
 
-        // Remove degenerate faces
+    // Canonical mutation pass: set the flag ONCE per shared edge — only the
+    // `edge_store` field is borrowed, disjoint from the shell scan above.
+    let mut degenerate_count = 0usize;
+    for id in degenerate_ids {
+        if let Some(canonical) = solid.edge_store.get_mut(id) {
+            if !canonical.degenerate {
+                canonical.degenerate = true;
+                degenerate_count += 1;
+            }
+        }
+    }
+    // Propagation pass: every incident mirror sees the flag.
+    let _synced = solid.sync_edge_mirrors();
+    if degenerate_count > 0 {
+        fixes.push(format!("Marked {} degenerate edges", degenerate_count));
+    }
+
+    // Remove degenerate faces
+    if let Some(ref mut shell) = solid.outer_shell {
         let before = shell.faces.len();
         shell.faces.retain(|f| {
             f.surface.is_some() &&
