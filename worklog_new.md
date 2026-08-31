@@ -643,3 +643,8 @@ junction-snap, as1_rod NURBS CDT strip).
 - `crates/draper-step/examples/transmission_bench.rs` — бенч
   (per-solid + per-face режимы, --solid N / --faces / --verbose);
   оставлен в репо как инструмент диагностики производительности
+
+## Коммит
+
+- `e425018` perf(mesh): C5 follow-up #1 — eliminate O(n²) post-processing
+  (6 файлов, +622/−157), запушен в origin/main
