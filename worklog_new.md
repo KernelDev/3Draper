@@ -1325,4 +1325,5 @@ MIGRATION_GUIDE.md; фикс-кандидат — BTreeMap/сортировка 
 
 ## Коммит
 
-- (см. git log — этот файл коммитится вместе с кодом)
+- `6f3460e` feat(geometry): analytic Cylinder×Cylinder SSI — exact per-θ
+  quadratic solve (4 файла, +802/−57), запушен в origin/main
