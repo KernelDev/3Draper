@@ -915,6 +915,198 @@ pub fn intersect_sphere_sphere(
     vec![circle]
 }
 
+/// Intersect a sphere with a (full, infinite) cylinder — analytic SSI
+/// (B1-series follow-up, 2026-09-02; "Steinmetch" cases).
+///
+/// Setup: project the sphere center `c` onto the cylinder axis, giving foot
+/// `f` and lateral offset `d = |c − f|` (distance from the axis, not from
+/// the surface). In the cylinder frame `(e1, e2 = axis × e1, n = axis)` a
+/// cylinder point is `p(θ, t) = f + R(cosθ·e1 + sinθ·e2) + t·n`; writing
+/// the sphere-center offset as `w = d(cosφ₀·e1 + sinφ₀·e2)`, the sphere
+/// equation `|p − c|² = r²` reduces to the exact one-dimensional relation
+///
+/// ```text
+/// t²(θ) = A + B·cos(θ − φ₀),   A = r² − R² − d²,  B = 2·d·R
+/// ```
+///
+/// Classification (eps = max(tolerance, 1e-9)):
+///
+/// - **axis through the center** (`d ≤ eps`): the quartic degenerates to
+///   circles `z = ±√(r² − R²)` around the axis — 2 circles (`R < r`), 1
+///   equatorial circle of tangency (`R ≈ r`), empty (`R > r`, the sphere
+///   lies strictly inside the cylinder);
+/// - **disjoint** (`d − R > r`): the axis passes too far outside — empty;
+/// - **contained** (`R − d > r`): the whole sphere lies strictly inside
+///   the cylinder — empty;
+/// - **tangency** (`|d − R| ≈ r`, `d > eps`): the single closest point of
+///   the cylinder surface to the sphere center — a 1-point polyline;
+/// - **two loops** (`R + d < r`): `t² > 0` for every θ — the cylinder
+///   enters and exits the sphere along two disjoint closed curves (the
+///   `t = +√` and `t = −√` branches), each a full θ-sweep;
+/// - **one loop** (otherwise, `|A| < B`): the branches meet where `t = 0`
+///   at `θ = φ₀ ± α` with `α = arccos(−A/B)` — a single closed curve
+///   (Viviani-style; the `A ≈ B` boundary is the classic
+///   sphere-radius-twice-cylinder-radius self-tangent curve).
+///
+/// Every sampled point satisfies the cylinder equation exactly (it is
+/// constructed on the surface) and the sphere equation up to
+/// floating-point rounding (`t` is taken from the relation above) — no
+/// marching, no grid search, no Newton refinement. Cylinders in this
+/// kernel are infinite, so the curves need no boundary clipping.
+pub fn intersect_sphere_cylinder(
+    sphere: &SphereSurface,
+    cyl: &CylinderSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    let r = sphere.radius;
+    let big_r = cyl.radius;
+    if r <= eps || big_r <= eps {
+        return vec![];
+    }
+
+    // Cylinder frame at the sphere center's axial position.
+    let n = Vec3d::new(cyl.axis.x, cyl.axis.y, cyl.axis.z);
+    let e1 = Vec3d::new(cyl.x_dir.x, cyl.x_dir.y, cyl.x_dir.z);
+    let e2 = Vec3d::new(
+        cyl.axis.y * cyl.x_dir.z - cyl.axis.z * cyl.x_dir.y,
+        cyl.axis.z * cyl.x_dir.x - cyl.axis.x * cyl.x_dir.z,
+        cyl.axis.x * cyl.x_dir.y - cyl.axis.y * cyl.x_dir.x,
+    );
+    let cs = Vec3d::new(
+        sphere.center.x - cyl.origin.x,
+        sphere.center.y - cyl.origin.y,
+        sphere.center.z - cyl.origin.z,
+    );
+    let along = cs.x * n.x + cs.y * n.y + cs.z * n.z;
+    let foot = Vec3d::new(
+        cyl.origin.x + along * n.x,
+        cyl.origin.y + along * n.y,
+        cyl.origin.z + along * n.z,
+    );
+    let w = Vec3d::new(cs.x - along * n.x, cs.y - along * n.y, cs.z - along * n.z);
+    let d = (w.x * w.x + w.y * w.y + w.z * w.z).sqrt();
+
+    let push_point = |theta: f64, t: f64, out: &mut Vec<Point3d>| {
+        let c = theta.cos();
+        let s = theta.sin();
+        out.push(Point3d::new(
+            foot.x + big_r * (c * e1.x + s * e2.x) + t * n.x,
+            foot.y + big_r * (c * e1.y + s * e2.y) + t * n.y,
+            foot.z + big_r * (c * e1.z + s * e2.z) + t * n.z,
+        ));
+    };
+
+    // ── Case 1: axis through the sphere center — Steinmetch circles ─────
+    if d <= eps {
+        let t_sq = r * r - big_r * big_r;
+        if t_sq < -eps * eps {
+            // Sphere strictly inside the cylinder.
+            return vec![];
+        }
+        let t = t_sq.max(0.0).sqrt();
+        let n_samples = 128;
+        let t_values: &[f64] = if t > eps { &[t, -t] } else { &[0.0] };
+        let mut circles = Vec::with_capacity(t_values.len());
+        for &tt in t_values {
+            let mut circle = Vec::with_capacity(n_samples);
+            for i in 0..n_samples {
+                let theta = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
+                push_point(theta, tt, &mut circle);
+            }
+            circles.push(circle);
+        }
+        return circles;
+    }
+
+    // ── Case 2: off-axis — classify via t²(θ) = A + B·cos(θ − φ₀) ───────
+    // Tangency / disjoint / contained in terms of |d − R| vs r (linear
+    // units — cleaner than comparing A + B = r² − (d − R)² against eps²).
+    let lateral_gap = (d - big_r).abs();
+    if lateral_gap - r > eps {
+        // Disjoint (axis too far outside) or sphere fully inside the
+        // cylinder — no intersection either way.
+        return vec![];
+    }
+    if (lateral_gap - r).abs() <= eps {
+        // Tangency: the closest point of the cylinder surface to the
+        // sphere center, in the direction of w (θ = φ₀, t = 0).
+        let ux = w.x / d;
+        let uy = w.y / d;
+        let uz = w.z / d;
+        return vec![vec![Point3d::new(
+            foot.x + big_r * ux,
+            foot.y + big_r * uy,
+            foot.z + big_r * uz,
+        )]];
+    }
+
+    let a_coeff = r * r - big_r * big_r - d * d;
+    let b_coeff = 2.0 * d * big_r;
+    // Direction of w in the frame: w = d(cosφ₀·e1 + sinφ₀·e2) — recover
+    // φ₀ from the frame components.
+    let w_e1 = w.x * e1.x + w.y * e1.y + w.z * e1.z;
+    let w_e2 = w.x * e2.x + w.y * e2.y + w.z * e2.z;
+    let phi = w_e2.atan2(w_e1);
+
+    let n_samples = 128;
+
+    // Two loops: t² > 0 everywhere (r > R + d).
+    if a_coeff - b_coeff > eps * eps {
+        let mut loops = Vec::with_capacity(2);
+        for sign in [1.0, -1.0] {
+            let mut curve = Vec::with_capacity(n_samples);
+            for i in 0..n_samples {
+                let theta = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
+                let t_sq = (a_coeff + b_coeff * (theta - phi).cos()).max(0.0);
+                push_point(theta, sign * t_sq.sqrt(), &mut curve);
+            }
+            loops.push(curve);
+        }
+        return loops;
+    }
+
+    // One loop: the branches join at θ = φ ± α where t = 0.
+    // cos α = −A/B ∈ (−1, 1); α = π is the Viviani self-tangent boundary.
+    let cos_alpha = (-a_coeff / b_coeff).clamp(-1.0, 1.0);
+    let alpha = cos_alpha.acos();
+    let theta_start = phi - alpha;
+    let theta_end = phi + alpha;
+    let span = theta_end - theta_start;
+
+    // Near the pinch points (t → 0) the curve is sqrt-singular in θ:
+    // uniform θ-steps produce spatial steps ~√Δθ there, several times
+    // larger than mid-branch. The fraction s(η) = (1 − cos(ηπ))/2 has
+    // zero derivative at η = 0 and 1, clustering samples exactly at the
+    // two join points and equalizing the spatial step along the branch.
+    let branch_theta = |eta: f64| -> f64 { theta_start + span * (1.0 - (eta * std::f64::consts::PI).cos()) / 2.0 };
+    let branch_t = |theta: f64, sign: f64| -> f64 {
+        let t_sq = (a_coeff + b_coeff * (theta - phi).cos()).max(0.0);
+        sign * t_sq.sqrt()
+    };
+
+    let mut curve = Vec::with_capacity(2 * n_samples - 2);
+    // Upper branch: η from 0 to 1 (t ≥ 0), inclusive at both pinches.
+    for i in 0..n_samples {
+        let eta = i as f64 / (n_samples - 1) as f64;
+        let theta = branch_theta(eta);
+        push_point(theta, branch_t(theta, 1.0), &mut curve);
+    }
+    // Lower branch: η from 1 BACK to 0 (t ≤ 0), skipping both endpoints —
+    // they coincide with the upper branch's join points, so the loop
+    // closes without a duplicated vertex (house convention).
+    for i in 1..(n_samples - 1) {
+        let eta = 1.0 - i as f64 / (n_samples - 1) as f64;
+        let theta = branch_theta(eta);
+        push_point(theta, branch_t(theta, -1.0), &mut curve);
+    }
+    if curve.len() >= 2 {
+        vec![curve]
+    } else {
+        vec![]
+    }
+}
+
 /// Intersect two cylinders.
 ///
 /// Currently implements a marching-based approach for cylinders with
@@ -1090,6 +1282,10 @@ pub fn intersect_surfaces(
         }
         (Surface::Sphere(s1), Surface::Sphere(s2)) => {
             intersect_sphere_sphere(s1, s2, tolerance)
+        }
+        (Surface::Sphere(s), Surface::Cylinder(c))
+        | (Surface::Cylinder(c), Surface::Sphere(s)) => {
+            intersect_sphere_cylinder(s, c, tolerance)
         }
         (Surface::Plane(_), Surface::Nurbs(_)) | (Surface::Nurbs(_), Surface::Plane(_)) => {
             intersect_marching_ssi(a, b, tolerance)
@@ -2224,6 +2420,287 @@ mod sphere_sphere_tests {
         for p in &out[0] {
             assert_on_sphere(p, &s1.center, s1.radius, 1e-9, "near-tangent/s1");
             assert_on_sphere(p, &s2.center, s2.radius, 1e-9, "near-tangent/s2");
+        }
+    }
+}
+
+#[cfg(test)]
+mod sphere_cylinder_tests {
+    use super::*;
+    use crate::surface::{CylinderSurface, SphereSurface, Surface};
+
+    /// ||p − center| − radius| < eps
+    fn assert_on_sphere(p: &Point3d, center: &Point3d, radius: f64, eps: f64, label: &str) {
+        let d = ((p.x - center.x).powi(2)
+            + (p.y - center.y).powi(2)
+            + (p.z - center.z).powi(2))
+        .sqrt();
+        assert!(
+            (d - radius).abs() < eps,
+            "{label}: point {:?} not on sphere (c={:?}, r={}): |p-c|={}",
+            p,
+            center,
+            radius,
+            d
+        );
+    }
+
+    /// Lateral distance from the cylinder axis == radius, i.e. the point is
+    /// ON the (infinite) cylinder surface.
+    fn assert_on_cylinder(p: &Point3d, cyl: &CylinderSurface, eps: f64, label: &str) {
+        let dx = p.x - cyl.origin.x;
+        let dy = p.y - cyl.origin.y;
+        let dz = p.z - cyl.origin.z;
+        let along = dx * cyl.axis.x + dy * cyl.axis.y + dz * cyl.axis.z;
+        let perp_x = dx - along * cyl.axis.x;
+        let perp_y = dy - along * cyl.axis.y;
+        let perp_z = dz - along * cyl.axis.z;
+        let lateral = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
+        assert!(
+            (lateral - cyl.radius).abs() < eps,
+            "{label}: point {:?} not on cylinder (lateral = {} vs R = {})",
+            p,
+            lateral,
+            cyl.radius
+        );
+    }
+
+    fn z_cyl() -> CylinderSurface {
+        CylinderSurface::new_z(3.0)
+    }
+
+    #[test]
+    fn disjoint_axis_far_outside_empty() {
+        // d = 10 lateral, R = 3, r = 5 → d − R = 7 > 5.
+        let s = SphereSurface::new(Point3d::new(10.0, 0.0, 0.0), 5.0);
+        assert!(intersect_sphere_cylinder(&s, &z_cyl(), 1e-9).is_empty());
+    }
+
+    #[test]
+    fn sphere_inside_cylinder_empty() {
+        // d = 1, R = 3, r = 1.5 → R − d = 2 > 1.5: the whole sphere lies
+        // strictly inside the cylinder.
+        let s = SphereSurface::new(Point3d::new(1.0, 0.0, 0.0), 1.5);
+        assert!(intersect_sphere_cylinder(&s, &z_cyl(), 1e-9).is_empty());
+        // Axis through the center, R > r — also strictly inside.
+        let s2 = SphereSurface::new(Point3d::new(0.0, 0.0, 4.0), 2.0);
+        assert!(intersect_sphere_cylinder(&s2, &z_cyl(), 1e-9).is_empty());
+    }
+
+    #[test]
+    fn axis_through_center_two_circles() {
+        // R = 3 < r = 5 → circles at z = ±√(25 − 9) = ±4.
+        let s = SphereSurface::new(Point3d::new(0.0, 0.0, 2.0), 5.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 2, "expected two Steinmetch circles");
+        for circle in &out {
+            assert_eq!(circle.len(), 128);
+            for p in circle {
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "circles/sphere");
+                assert_on_cylinder(p, &z_cyl(), 1e-9, "circles/cylinder");
+            }
+        }
+        // Circle planes: z = 2 ± 4 → −2 and 6.
+        let zs: Vec<f64> = out
+            .iter()
+            .map(|c| c.iter().map(|p| p.z).fold(f64::MIN, f64::max))
+            .collect();
+        let mut sorted = zs.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((sorted[0] + 2.0).abs() < 1e-9, "first circle at z=-2, got {}", sorted[0]);
+        assert!((sorted[1] - 6.0).abs() < 1e-9, "second circle at z=6, got {}", sorted[1]);
+    }
+
+    #[test]
+    fn axis_through_center_tangent_equator() {
+        // R = r = 3 → single circle of tangency at z = 0.
+        let s = SphereSurface::new(Point3d::new(0.0, 0.0, 7.0), 3.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1, "expected a single equatorial circle");
+        for p in &out[0] {
+            assert_on_sphere(p, &s.center, s.radius, 1e-9, "equator/sphere");
+            assert_on_cylinder(p, &z_cyl(), 1e-9, "equator/cylinder");
+            assert!((p.z - 7.0).abs() < 1e-9, "equator must lie at z=7");
+        }
+    }
+
+    #[test]
+    fn external_tangency_single_point() {
+        // d = 8 = R + r = 3 + 5.
+        let s = SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 5.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1, "expected one tangent point polyline");
+        assert_eq!(out[0].len(), 1);
+        let p = out[0][0];
+        assert_on_sphere(&p, &s.center, s.radius, 1e-9, "tangent/sphere");
+        assert_on_cylinder(&p, &z_cyl(), 1e-9, "tangent/cylinder");
+        // On the line from the axis foot toward the center: x = 3.
+        assert!((p.x - 3.0).abs() < 1e-9, "x should be 3.0, got {}", p.x);
+        assert!(p.y.abs() < 1e-9 && p.z.abs() < 1e-9);
+    }
+
+    #[test]
+    fn internal_tangency_single_point() {
+        // d = 1, R − d = 2 = r: the sphere (inside) touches the cylinder
+        // wall from within, on the far side of its center.
+        let s = SphereSurface::new(Point3d::new(1.0, 0.0, 0.0), 2.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 1);
+        let p = out[0][0];
+        assert_on_sphere(&p, &s.center, s.radius, 1e-9, "internal/sphere");
+        assert_on_cylinder(&p, &z_cyl(), 1e-9, "internal/cylinder");
+        // Closest wall point in the direction of w: x = 3.
+        assert!((p.x - 3.0).abs() < 1e-9, "x should be 3.0, got {}", p.x);
+    }
+
+    #[test]
+    fn big_sphere_two_loops() {
+        // r = 8 > R + d = 3 + 2 = 5 → two disjoint closed loops.
+        let s = SphereSurface::new(Point3d::new(2.0, 0.0, 0.0), 8.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 2, "expected two loops");
+        for curve in &out {
+            assert_eq!(curve.len(), 128);
+            for p in curve {
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "loops/sphere");
+                assert_on_cylinder(p, &z_cyl(), 1e-9, "loops/cylinder");
+            }
+        }
+        // Axial extent: t²(φ₀) = A + B = r² − (d−R)² = 64 − 1 = 63,
+        // t²(φ₀+π) = r² − (d+R)² = 64 − 25 = 39. Branch separation:
+        // max |t| = √63 ≈ 7.937, min |t| = √39 ≈ 6.245.
+        let max_t = out
+            .iter()
+            .flat_map(|c| c.iter().map(|p| p.z.abs()))
+            .fold(0.0_f64, f64::max);
+        assert!(
+            (max_t - 63.0_f64.sqrt()).abs() < 1e-9,
+            "max |t| should be √63, got {}",
+            max_t
+        );
+    }
+
+    #[test]
+    fn general_position_one_closed_loop() {
+        // d = 2, R = 3, r = 4: |A| < B (A = 16−9−4 = 3, B = 12) → single
+        // closed Viviani-style curve, joined at the two t = 0 points.
+        let s = SphereSurface::new(Point3d::new(2.0, 0.0, 0.0), 4.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1, "expected one closed loop");
+        let curve = &out[0];
+        assert!(curve.len() >= 100, "curve should be densely sampled");
+        for p in curve {
+            assert_on_sphere(p, &s.center, s.radius, 1e-9, "loop/sphere");
+            assert_on_cylinder(p, &z_cyl(), 1e-9, "loop/cylinder");
+        }
+        // Closed by convention (no duplicated endpoint, house style): the
+        // wrap-around step (last → first) must be of the same order as the
+        // interior steps — cos-clustered branch sampling keeps the step
+        // uniform even near the sqrt-singular pinch points.
+        let steps: Vec<f64> = curve
+            .windows(2)
+            .map(|w| {
+                ((w[1].x - w[0].x).powi(2)
+                    + (w[1].y - w[0].y).powi(2)
+                    + (w[1].z - w[0].z).powi(2))
+                .sqrt()
+            })
+            .collect();
+        let first = curve[0];
+        let last = *curve.last().unwrap();
+        let wrap = ((first.x - last.x).powi(2)
+            + (first.y - last.y).powi(2)
+            + (first.z - last.z).powi(2))
+        .sqrt();
+        let mut sorted_steps = steps.clone();
+        sorted_steps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted_steps[sorted_steps.len() / 2];
+        assert!(
+            wrap < 3.0 * median,
+            "wrap step {} should be comparable to median step {}",
+            wrap,
+            median
+        );
+        let max_step = sorted_steps[sorted_steps.len() - 1];
+        assert!(
+            max_step < 3.0 * median,
+            "max step {} should be comparable to median step {} (pinch clustering)",
+            max_step,
+            median
+        );
+    }
+
+    #[test]
+    fn viviani_boundary_self_tangent() {
+        // r = 2R, d = R → A = B exactly: the branches join at the single
+        // far pinch point (θ = φ + π). Classic Viviani configuration.
+        let s = SphereSurface::new(Point3d::new(3.0, 0.0, 0.0), 6.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1, "Viviani is ONE closed curve");
+        for p in &out[0] {
+            assert_on_sphere(p, &s.center, s.radius, 1e-9, "viviani/sphere");
+            assert_on_cylinder(p, &z_cyl(), 1e-9, "viviani/cylinder");
+        }
+        // The pinch point is the far wall point x = −3 (t = 0).
+        let pinch = out[0]
+            .iter()
+            .min_by(|a, b| a.x.partial_cmp(&b.x).unwrap())
+            .unwrap();
+        assert!((pinch.x + 3.0).abs() < 1e-9, "pinch at x=-3, got {}", pinch.x);
+        assert!(pinch.z.abs() < 1e-9, "pinch has t = 0");
+    }
+
+    #[test]
+    fn near_tangent_tiny_loop() {
+        // d = 7.9, R = 3, r = 5 → |d − R| − r = −0.1: a small closed loop.
+        let s = SphereSurface::new(Point3d::new(7.9, 0.0, 0.0), 5.0);
+        let out = intersect_sphere_cylinder(&s, &z_cyl(), 1e-9);
+        assert_eq!(out.len(), 1);
+        for p in &out[0] {
+            assert_on_sphere(p, &s.center, s.radius, 1e-9, "tiny/sphere");
+            assert_on_cylinder(p, &z_cyl(), 1e-9, "tiny/cylinder");
+        }
+    }
+
+    #[test]
+    fn generic_frame_and_offset_axis() {
+        // Cylinder along +Y, sphere off-center in x and z — the frame math
+        // (e1 = x_dir, e2 = axis × e1, foot, w, φ) must still hold.
+        let cyl = CylinderSurface::new(
+            Point3d::new(-1.0, 10.0, 2.0),
+            Direction3d::new(0.0, 1.0, 0.0).unwrap(),
+            2.0,
+        );
+        let s = SphereSurface::new(Point3d::new(1.5, 3.0, 4.0), 4.0);
+        let out = intersect_sphere_cylinder(&s, &cyl, 1e-9);
+        assert!(out.len() >= 1, "expected an intersection");
+        for curve in &out {
+            assert!(curve.len() >= 1);
+            for p in curve {
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "frame/sphere");
+                assert_on_cylinder(p, &cyl, 1e-9, "frame/cylinder");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_both_orders_analytic_precision() {
+        let s = SphereSurface::new(Point3d::new(2.0, 0.0, 0.0), 4.0);
+        let cyl = z_cyl();
+        let a = Surface::Sphere(s.clone());
+        let b = Surface::Cylinder(cyl.clone());
+        let forward = intersect_surfaces(&a, &b, 1e-9);
+        let reverse = intersect_surfaces(&b, &a, 1e-9);
+        assert_eq!(forward.polylines.len(), reverse.polylines.len());
+        assert!(!forward.polylines.is_empty());
+        // 1e-9 on-surface accuracy proves the ANALYTIC path — the marching
+        // fallback only reaches ~1e-4.
+        for polyline in forward.polylines.iter().chain(reverse.polylines.iter()) {
+            for p in polyline {
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "dispatch/sphere");
+                assert_on_cylinder(p, &cyl, 1e-9, "dispatch/cylinder");
+            }
         }
     }
 }

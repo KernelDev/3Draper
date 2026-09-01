@@ -964,33 +964,96 @@ fn intersect_cylinder_cylinder(
     )
 }
 
-/// Cylinder-Sphere intersection.
+/// Cylinder-Sphere intersection (B1-series follow-up, 2026-09-02).
+///
+/// Analytic path via
+/// [`draper_geometry::intersection::intersect_sphere_cylinder`]
+/// ("Steinmetch" cases): axis-through-center → circles at
+/// `z = ±√(r² − R²)` (with the EXACT `Circle` geometry attached);
+/// off-axis → the quartic `t²(θ) = A + B·cos(θ − φ₀)` sampled with
+/// cos-clustered branch points (exact on both surfaces, no marching);
+/// tangency → a single point; disjoint/contained → empty.
 fn intersect_cylinder_sphere(
     cyl: &CylinderSurface,
     sphere: &SphereSurface,
     tol: f64,
 ) -> Vec<IntersectionCurve> {
-    // Distance from sphere center to cylinder axis
+    let eps = tol.max(1e-9);
+    let polylines = draper_geometry::intersection::intersect_sphere_cylinder(sphere, cyl, tol);
+
+    // Exact circle geometry for the axis-through-center case (d ≈ 0):
+    // two Steinmetch circles at t = ±√(r² − R²), or one equatorial circle
+    // of tangency (r ≈ R). Off-axis quartics and tangent points stay
+    // polyline-only (the curve is a space quartic, not an analytic
+    // Circle in this kernel's curve set).
     let dx = sphere.center.x - cyl.origin.x;
     let dy = sphere.center.y - cyl.origin.y;
     let dz = sphere.center.z - cyl.origin.z;
-    let along_axis = dx * cyl.axis.x + dy * cyl.axis.y + dz * cyl.axis.z;
-    let perp_x = dx - along_axis * cyl.axis.x;
-    let perp_y = dy - along_axis * cyl.axis.y;
-    let perp_z = dz - along_axis * cyl.axis.z;
-    let dist_to_axis = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
+    let along = dx * cyl.axis.x + dy * cyl.axis.y + dz * cyl.axis.z;
+    let perp_x = dx - along * cyl.axis.x;
+    let perp_y = dy - along * cyl.axis.y;
+    let perp_z = dz - along * cyl.axis.z;
+    let d = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
 
-    // Quick rejection
-    if dist_to_axis > sphere.radius + cyl.radius + tol {
-        return Vec::new();
-    }
+    let exact_circles: Vec<Option<Circle>> = if d <= eps {
+        let t_sq = sphere.radius * sphere.radius - cyl.radius * cyl.radius;
+        if t_sq < -eps * eps {
+            // Sphere strictly inside — no curves at all.
+            vec![]
+        } else {
+            let t = t_sq.max(0.0).sqrt();
+            let foot = Point3d::new(
+                cyl.origin.x + along * cyl.axis.x,
+                cyl.origin.y + along * cyl.axis.y,
+                cyl.origin.z + along * cyl.axis.z,
+            );
+            let normal = Direction3d::new(cyl.axis.x, cyl.axis.y, cyl.axis.z)
+                .unwrap_or(Direction3d::Z);
+            if t > eps {
+                vec![
+                    Some(Circle::new(
+                        Point3d::new(
+                            foot.x + t * cyl.axis.x,
+                            foot.y + t * cyl.axis.y,
+                            foot.z + t * cyl.axis.z,
+                        ),
+                        normal,
+                        cyl.radius,
+                    )),
+                    Some(Circle::new(
+                        Point3d::new(
+                            foot.x - t * cyl.axis.x,
+                            foot.y - t * cyl.axis.y,
+                            foot.z - t * cyl.axis.z,
+                        ),
+                        normal,
+                        cyl.radius,
+                    )),
+                ]
+            } else {
+                // Equatorial tangency (r ≈ R): one circle at t = 0.
+                vec![Some(Circle::new(foot, normal, cyl.radius))]
+            }
+        }
+    } else {
+        vec![]
+    };
 
-    // Use general sampling approach
-    sample_surface_intersection(
-        &Surface::Cylinder(cyl.clone()),
-        &Surface::Sphere(sphere.clone()),
-        tol,
-    )
+    polylines
+        .into_iter()
+        .enumerate()
+        .filter(|(_, pts)| !pts.is_empty())
+        .map(|(i, points)| IntersectionCurve {
+            points,
+            curve: exact_circles
+                .get(i)
+                .and_then(|c| c.clone())
+                .map(Curve3d::Circle),
+            pcurve_a: None,
+            pcurve_b: None,
+            tolerance: tol,
+        })
+        .collect()
 }
 
 /// Sphere-Sphere intersection (B1 series follow-up, 2026-09-01).
@@ -4282,6 +4345,89 @@ mod tests {
             &tol,
         );
         assert!(empty.is_empty(), "disjoint spheres should not intersect");
+    }
+
+    // ---- Sphere × Cylinder analytic intersection (B1 series follow-up) ----
+
+    #[test]
+    fn test_sphere_cylinder_dispatch_analytic_circles() {
+        // Axis through the sphere center: two Steinmetch circles at
+        // z = ±√(r² − R²) = ±4, each with the exact Circle attached.
+        let cyl = CylinderSurface::new_z(3.0);
+        let s = SphereSurface::new(Point3d::new(0.0, 0.0, 2.0), 5.0);
+        let tol = ToleranceContext::new();
+
+        let curves =
+            intersect_surfaces(&Surface::Cylinder(cyl.clone()), &Surface::Sphere(s.clone()), &tol);
+        assert_eq!(curves.len(), 2, "Expected 2 circles, got {}", curves.len());
+        for curve in &curves {
+            assert_eq!(curve.points.len(), 128);
+            for p in &curve.points {
+                let lateral = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((lateral - 3.0).abs() < 1e-9, "point not on cylinder");
+                let d = ((p.x).powi(2) + (p.y).powi(2) + (p.z - 2.0).powi(2)).sqrt();
+                assert!((d - 5.0).abs() < 1e-9, "point not on sphere: r={}", d);
+            }
+        }
+        // Exact circle geometry: centers at z = 2 ± 4, radius 3, axis +Z.
+        let z_centers: Vec<f64> = curves
+            .iter()
+            .map(|c| match &c.curve {
+                Some(Curve3d::Circle(g)) => g.center.z,
+                other => panic!("expected exact Circle, got {:?}", other),
+            })
+            .collect();
+        assert!(z_centers.contains(&(6.0)) && z_centers.contains(&(-2.0)),
+            "circle centers at z=-2 and z=6, got {:?}", z_centers);
+        for c in &curves {
+            if let Curve3d::Circle(g) = c.curve.as_ref().unwrap() {
+                assert!((g.radius - 3.0).abs() < 1e-9);
+                assert!(g.normal.z > 0.999);
+            }
+        }
+
+        // Reversed argument order: same curves.
+        let reverse = intersect_surfaces(&Surface::Sphere(s), &Surface::Cylinder(cyl), &tol);
+        assert_eq!(reverse.len(), 2);
+        assert_eq!(reverse[0].points.len(), 128);
+    }
+
+    #[test]
+    fn test_sphere_cylinder_off_axis_one_loop() {
+        // d = 2, R = 3, r = 4 → single closed Viviani-style curve, points
+        // exactly on both surfaces (1e-9 proves the analytic path).
+        let cyl = CylinderSurface::new_z(3.0);
+        let s = SphereSurface::new(Point3d::new(2.0, 0.0, 0.0), 4.0);
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(&Surface::Cylinder(cyl), &Surface::Sphere(s), &tol);
+        assert_eq!(curves.len(), 1, "Expected 1 closed loop");
+        for p in &curves[0].points {
+            let lateral = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((lateral - 3.0).abs() < 1e-9, "point not on cylinder");
+            let d = ((p.x - 2.0).powi(2) + (p.y).powi(2) + (p.z).powi(2)).sqrt();
+            assert!((d - 4.0).abs() < 1e-9, "point not on sphere: r={}", d);
+        }
+        // Off-axis quartic: no analytic Circle attached.
+        assert!(curves[0].curve.is_none(), "quartic should be polyline-only");
+    }
+
+    #[test]
+    fn test_sphere_cylinder_tangent_and_disjoint() {
+        let tol = ToleranceContext::new();
+        let cyl = CylinderSurface::new_z(3.0);
+        // External tangency: d = R + r = 3 + 5 → a single point at x = 3.
+        let s = SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 5.0);
+        let curves = intersect_surfaces(&Surface::Cylinder(cyl.clone()), &Surface::Sphere(s), &tol);
+        assert_eq!(curves.len(), 1);
+        assert_eq!(curves[0].points.len(), 1);
+        let p = curves[0].points[0];
+        assert!((p.x - 3.0).abs() < 1e-9 && p.y.abs() < 1e-9 && p.z.abs() < 1e-9);
+
+        // Disjoint: no curves.
+        let far = SphereSurface::new(Point3d::new(20.0, 0.0, 0.0), 5.0);
+        let empty = intersect_surfaces(&Surface::Cylinder(cyl), &Surface::Sphere(far), &tol);
+        assert!(empty.is_empty(), "disjoint pair should not intersect");
     }
 
     // ── Property-based tests (proptest) ──
