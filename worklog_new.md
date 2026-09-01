@@ -887,3 +887,84 @@ fill_boundary_gaps не тронуты (closed-loop) — все зелёные.
 - `482029b` refactor(mesh): этап D — D4 fallback removal + cone scale fix,
   D3 open-chain removal, A3 strict (9 файлов, +577/−684), запушен в
   origin/main
+
+---
+
+## D5: Möller triangle-triangle в mesh_boolean (2026-09-01)
+
+**Цель:** закрыть пункт D5 из BREP_CORE_FIX_PLAN — «Реализовать Möller
+triangle-triangle intersection в mesh_boolean.rs. Удалить
+centroid-classification hack». Mesh-level boolean (mesh_union /
+mesh_subtract / mesh_intersect) используется вьювером (app.rs, Mesh
+Boolean UI) и до сих пор был whole-triangle centroid-классификацией +
+fill_boundary_gaps — граница результата шла «ступеньками» по целым
+треугольникам, дыры закрывались gap-fill-хаком.
+
+**Архитектура (переписан целиком, 651 → ~1830 строк с тестами):**
+
+1. Broad phase — пространственный грид по AABB треугольников
+   (cell = scene_scale/32), дедуп пар.
+2. Narrow phase — Möller triangle-triangle: для некомпланарной пары
+   вычисляется линия L = plane_A ∩ plane_B и интервалы ОБЕИХ
+   треугольников на L (точки пересечения их рёбер с чужой плоскостью —
+   все лежат ровно на L). Пары пересекаются ⟺ интервалы перекрываются.
+   Для компланарных пар — флаг Coplanar + same-orientation.
+3. Декомпозиция: каждый треугольник режется в локальном 2D-фрейме
+   (u, v, n right-handed → CCW-фан сохраняет winding) линиями-
+   ограничениями от всех партнёров. Взаимная вставка: конечные точки
+   интервала партнёра копируются вербатим в разбиение этой стороны →
+   обе стороны порождают ИДЕНТИЧНУЮ структуру рёбер вдоль кривой
+   пересечения. Компланарные пары: каждая сторона режется линиями
+   рёбер партнёра (2D-arrangement, пересечения line×line совпадают с
+   обеих сторон автоматически).
+4. Классификация клеток: компланарно-покрытые — по таблице правил
+   ориентации (same/opposite × op × A/B); прочие — 3-осевой majority
+   ray-cast (Möller-Trumbore) из слегка возмущённого центроида с AABB-
+   префильтром (гарантированно меньше ray-cast'ов, чем старый код,
+   который кастовал из каждого треугольника).
+5. Пропагация граничных сплитов: разрез граничного ребра треугольника
+   распространяется на соседей (вставка точек в клетки соседа по
+   коллинеарности с линией ребра) — устраняет T-junction'ы вдоль
+   собственных рёбер меша.
+6. Сборка: quantized-дедуп вершин (1e7) + weld (fp-шум) + clean_mesh.
+   fill_boundary_gaps УДАЛЕН из пути — watertight по построению.
+
+**Найденные и исправленные при реализации баги (root causes):**
+
+1. Порядок вставки точек: точки вставлялись отсортированными по t вдоль
+   направления линии, но ребро полигона может обходиться в обратную
+   сторону → «бабочка» (самопересечение) → +27 к площади 4000,
+   дубликаты клеток, non-manifold рёбра (count=4). Фикс: reverse при
+   ta > tb.
+2. Fan-триангуляция полигона с коллинеарными вершинами: фан (p0, pi,
+   pi+1) даёт вырожденный треугольник → clean_mesh его удаляет →
+   вставленная shared-вершина тихо исчезает из структуры рёбер →
+   T-junction. Фикс: centroid-fan (v_k, v_k+1, c) для len ≥ 4 —
+   сохраняет каждое граничное ребро.
+3. Таблица правил: был пропущен (Intersect, B, same-orient) → keep
+   (недостающие грани результата).
+4. Пропагация сплитов: lookup по ключу (corner, corner) не матчит
+   фрагменты разрезанных рёбер → матч по коллинеарности с линией
+   оригинального ребра.
+
+**Тесты (5 → 17, все watertight=0 + объём через дивергенцию):**
+
+- Unit: tri-tri (crossing/disjoint/coplanar/parallel), decompose
+  (split/insert/no-constraints, сохранение площади).
+- Integration: box−box внутренний (V=970000), union/intersect/subtract
+  перекрывающихся (coplanar faces!), union disjoint, union/intersect
+  повёрнутых 30° (generic crossings), box±цилиндр 32-гон сквозь грани
+  (V с точностью до 32-гона), точный объём везде < 1e-4 rel.
+
+**Верификация:**
+
+- draper-mesh: 268 lib ✅ (было 255), 264 strict ✅, все integration
+  suites ✅ (boolean_subtract, edge_cache, edge_explicit_api, fuzz…)
+- cargo check -p draper-viewer --bins: 0 errors ✅
+- Публичный API не менялся (mesh_union/subtract/intersect) — вьювер
+  без изменений
+
+## Коммит
+
+- см. следующий commit: refactor(mesh): D5 — Möller triangle-triangle
+  boolean (exact intersection-curve boundary, no gap fill)
