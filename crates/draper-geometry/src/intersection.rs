@@ -553,6 +553,245 @@ pub fn intersect_plane_cylinder(
     }
 }
 
+/// Intersect a plane with a cone — analytic conic section.
+///
+/// B1 leftover (2026-09-01): Plane×Cone previously fell through to the
+/// generic marching SSI fallback. This is the analytic path.
+///
+/// Classification by the angle θ between the plane and the cone axis
+/// (α = |half_angle|):
+/// - θ > α: ellipse (a circle when the plane is perpendicular to the axis)
+/// - θ = α: parabola
+/// - θ < α: hyperbola — one branch per nappe; a single-nappe cone surface
+///   yields one branch
+/// - plane through the apex (degenerate): two generator rays (θ < α),
+///   one tangent ray (θ = α), or nothing (θ > α)
+///
+/// Method: the section is parametrized on cone generators. The generator at
+/// angle u is the ray from the apex A
+///     g(u) = sin α · radial(u) + s · cos α · k,   t ≥ 0
+/// where k is the unit axis, radial(u) = cos u·X + sin u·Y with (X, Y) ⊥ k,
+/// and s = sign(tan(half_angle)) selects the nappe side (the surface lives
+/// where r(v) ≥ 0, i.e. where s·(P−A)·k ≥ 0). The generator hits the plane
+/// n·(P − P0) = 0 at
+///     t(u) = −d / D(u),   d = n·(A − P0),   D(u) = n·g(u)
+/// so every output point P = A + t(u)·g(u) satisfies both surface equations
+/// exactly (up to floating point) — no marching, no grid search.
+/// D(u) = a·cos(u − u0) + b with a = sin α·|n⊥|, b = s·cos α·(n·k): when
+/// |b| ≤ a the plane is parallel to two generators (asymptote directions,
+/// u = u0 ± acos(−b/a)) and the valid arc between them is one hyperbola
+/// branch / parabola arm, clipped at a finite slant length.
+pub fn intersect_plane_cone(
+    plane: &Plane,
+    cone: &ConeSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let tan_ha = cone.half_angle.tan();
+
+    // Degenerate cone: half_angle ≈ 0 is a cylinder — reuse the analytic
+    // plane×cylinder path.
+    if !tan_ha.is_finite() || tan_ha.abs() < 1e-10 {
+        let cylinder = CylinderSurface {
+            origin: cone.origin,
+            axis: cone.axis,
+            radius: cone.radius,
+            x_dir: cone.x_dir,
+        };
+        return intersect_plane_cylinder(plane, &cylinder, tolerance);
+    }
+
+    // Apex and nappe side. For a standard cone the apex sits at
+    // v_apex = −radius / tan(half_angle) along the axis; for an expanding
+    // cone the origin *is* the apex.
+    let s = tan_ha.signum();
+    let apex = if cone.expanding {
+        cone.origin
+    } else {
+        let v_apex = -cone.radius / tan_ha;
+        Point3d::new(
+            cone.origin.x + v_apex * cone.axis.x,
+            cone.origin.y + v_apex * cone.axis.y,
+            cone.origin.z + v_apex * cone.axis.z,
+        )
+    };
+
+    let alpha = cone.half_angle.abs();
+    let sin_a = alpha.sin();
+    let cos_a = alpha.cos();
+
+    // Orthonormal frame ⊥ axis: X = x_dir re-orthogonalized against k,
+    // Y = k × X.
+    let kx = cone.axis.x;
+    let ky = cone.axis.y;
+    let kz = cone.axis.z;
+    let mut xx = cone.x_dir.x;
+    let mut xy = cone.x_dir.y;
+    let mut xz = cone.x_dir.z;
+    let x_dot_k = xx * kx + xy * ky + xz * kz;
+    xx -= x_dot_k * kx;
+    xy -= x_dot_k * ky;
+    xz -= x_dot_k * kz;
+    let mut x_len = (xx * xx + xy * xy + xz * xz).sqrt();
+    if x_len < 1e-9 {
+        // x_dir parallel to the axis — build any perpendicular direction
+        xx = if kz.abs() < 0.9 { 0.0 } else { -kz };
+        xy = if kz.abs() < 0.9 { kz } else { 0.0 };
+        xz = if kz.abs() < 0.9 { -ky } else { kx };
+        x_len = (xx * xx + xy * xy + xz * xz).sqrt();
+    }
+    xx /= x_len;
+    xy /= x_len;
+    xz /= x_len;
+    // Y = k × X
+    let yx = ky * xz - kz * xy;
+    let yy = kz * xx - kx * xz;
+    let yz = kx * xy - ky * xx;
+
+    let nx = plane.normal.x;
+    let ny = plane.normal.y;
+    let nz = plane.normal.z;
+
+    // Signed distance from the apex to the plane: d = n·(A − P0)
+    let d = (apex.x - plane.origin.x) * nx
+        + (apex.y - plane.origin.y) * ny
+        + (apex.z - plane.origin.z) * nz;
+
+    // D(u) = n·g(u) = a·cos(u − u0) + b
+    let nk = nx * kx + ny * ky + nz * kz;
+    let n_x = nx * xx + ny * xy + nz * xz;
+    let n_y = nx * yx + ny * yy + nz * yz;
+    let a = sin_a * (n_x * n_x + n_y * n_y).sqrt();
+    let b = s * cos_a * nk;
+    let u0 = n_y.atan2(n_x);
+
+    // Scale for ray clipping (hyperbola/parabola arms) and degeneracy eps.
+    // Includes the base radius, the cone height, and the apex-to-plane
+    // distance so that a far plane still yields its section.
+    let v_apex_len = if cone.expanding { 0.0 } else { (-cone.radius / tan_ha).abs() };
+    let scale = cone
+        .radius
+        .max(v_apex_len)
+        .max(apex.distance_to(&plane.origin))
+        .max(tolerance.max(1e-6));
+    let apex_eps = tolerance.max(1e-9) * scale.max(1.0);
+    let t_clip = 20.0 * scale.max(1.0);
+
+    // Evaluate a point on the generator at parameter u, slant length t.
+    let generator_point = |u: f64, t: f64| -> Point3d {
+        let cu = u.cos();
+        let su = u.sin();
+        let gx = sin_a * (cu * xx + su * yx) + s * cos_a * kx;
+        let gy = sin_a * (cu * xy + su * yy) + s * cos_a * ky;
+        let gz = sin_a * (cu * xz + su * yz) + s * cos_a * kz;
+        Point3d::new(
+            apex.x + t * gx,
+            apex.y + t * gy,
+            apex.z + t * gz,
+        )
+    };
+
+    // ── Degenerate: the plane passes through the apex ──
+    // The section degenerates to the generator rays lying in the plane
+    // (D(u) = 0 — the whole ray is in the plane because the apex is).
+    // θ < α → two rays, θ = α → one tangent ray, θ > α → nothing.
+    if d.abs() < apex_eps {
+        if a < 1e-12 * (1.0 + b.abs()) {
+            // n ∥ k: plane ⊥ axis through the apex — apex point only.
+            return vec![];
+        }
+        let rhs = (-b / a).clamp(-1.0, 1.0);
+        if rhs >= 1.0 {
+            // θ > α — the plane touches only the apex.
+            return vec![];
+        }
+        let base = rhs.acos();
+        let mut roots = vec![u0 + base];
+        if base > 1e-9 && (std::f64::consts::PI - base) > 1e-9 {
+            roots.push(u0 - base);
+        }
+        let n_samples = 20;
+        let mut lines = Vec::with_capacity(roots.len());
+        for u in roots {
+            let mut line = Vec::with_capacity(n_samples);
+            for i in 0..n_samples {
+                let t = t_clip * i as f64 / (n_samples - 1) as f64;
+                line.push(generator_point(u, t));
+            }
+            lines.push(line);
+        }
+        return lines;
+    }
+
+    let n_samples = 128;
+
+    // ── Closed section: |b| > a — D(u) never zero, ellipse / circle ──
+    // t = −d/D has constant sign over the loop; a non-positive sample means
+    // the whole ellipse lies on the opposite nappe → empty.
+    if a < 1e-12 * (1.0 + b.abs()) || (-b / a).abs() > 1.0 + 1e-12 {
+        let mut ellipse: Vec<Point3d> = Vec::with_capacity(n_samples);
+        // Sanity cap: near-parabolic planes can push the far side very far
+        // out; points stay exact, but avoid astronomically large output.
+        let t_cap = 1e9 * scale.max(1.0);
+        for i in 0..n_samples {
+            let u = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
+            let denom = a * (u - u0).cos() + b;
+            if !denom.is_finite() || denom.abs() < 1e-15 {
+                continue;
+            }
+            let t = -d / denom;
+            if !t.is_finite() || t <= 0.0 || t > t_cap {
+                // Constant-sign t: a single invalid sample ⇒ empty section.
+                return vec![];
+            }
+            ellipse.push(generator_point(u, t));
+        }
+        return if ellipse.len() >= 2 { vec![ellipse] } else { vec![] };
+    }
+
+    // ── Open section: |b| ≤ a — hyperbola branch / parabola arm ──
+    // D = 0 at u = u0 ± base (asymptote directions). The valid arc is where
+    // t = −d/D > 0:
+    //   d < 0 → D > 0 → arc (u0 − base, u0 + base)
+    //   d > 0 → D < 0 → arc (u0 + base, u0 − base + 2π)
+    // Midpoint sampling over the arc never lands on an asymptote.
+    let base = (-b / a).clamp(-1.0, 1.0).acos();
+    let (arc_start, arc_len) = if d < 0.0 {
+        (u0 - base, 2.0 * base)
+    } else {
+        (u0 + base, 2.0 * (std::f64::consts::PI - base))
+    };
+    if arc_len < 1e-12 {
+        // Degenerate arc — the valid arc shrank to a point (parabola on the
+        // opposite nappe).
+        return vec![];
+    }
+
+    let mut current: Vec<Point3d> = Vec::with_capacity(n_samples);
+    let mut polylines: Vec<Vec<Point3d>> = Vec::new();
+    for i in 0..n_samples {
+        let u = arc_start + arc_len * (i as f64 + 0.5) / n_samples as f64;
+        let denom = a * (u - u0).cos() + b;
+        if !denom.is_finite() || denom.abs() < 1e-15 {
+            continue;
+        }
+        let t = -d / denom;
+        // The arc guarantees t > 0; only clip runaway arms.
+        if !t.is_finite() || t <= 0.0 || t > t_clip {
+            if current.len() >= 2 {
+                polylines.push(std::mem::take(&mut current));
+            } else {
+                current.clear();
+            }
+            continue;
+        }
+        current.push(generator_point(u, t));
+    }
+    if current.len() >= 2 {
+        polylines.push(current);
+    }
+    polylines
+}
+
 /// Intersect two cylinders.
 ///
 /// Currently implements a marching-based approach for cylinders with
@@ -719,6 +958,9 @@ pub fn intersect_surfaces(
     let polylines = match (a, b) {
         (Surface::Plane(p), Surface::Cylinder(c)) | (Surface::Cylinder(c), Surface::Plane(p)) => {
             intersect_plane_cylinder(p, c, tolerance)
+        }
+        (Surface::Plane(p), Surface::Cone(c)) | (Surface::Cone(c), Surface::Plane(p)) => {
+            intersect_plane_cone(p, c, tolerance)
         }
         (Surface::Cylinder(a), Surface::Cylinder(b)) => {
             intersect_cylinder_cylinder(a, b, tolerance)
@@ -1260,6 +1502,371 @@ mod parallel_cylinder_tests {
                     assert!(p.x.abs() < 1e-6, "Tangent point x should be 0.0, got {}", p.x);
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod plane_cone_tests {
+    use super::*;
+    use crate::surface::{ConeSurface, Plane, Surface};
+    use crate::direction::Direction3d;
+
+    /// Narrowing cone: base radius 5 at z=0, apex at z=10 (tan(α) = 0.5,
+    /// half_angle negative — the STEP narrowing convention).
+    fn narrowing_cone() -> ConeSurface {
+        ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            5.0,
+            -(0.5f64).atan(),
+        )
+    }
+
+    /// Expanding cone: apex at origin, α = 45°, opening upward.
+    fn expanding_cone() -> ConeSurface {
+        ConeSurface::new_expanding(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            std::f64::consts::FRAC_PI_4,
+            Direction3d::X,
+        )
+    }
+
+    /// Apex of a standard (non-expanding) cone: origin + v_apex·axis with
+    /// v_apex = −radius / tan(half_angle).
+    fn cone_apex(cone: &ConeSurface) -> Point3d {
+        let v_apex = -cone.radius / cone.half_angle.tan();
+        Point3d::new(
+            cone.origin.x + v_apex * cone.axis.x,
+            cone.origin.y + v_apex * cone.axis.y,
+            cone.origin.z + v_apex * cone.axis.z,
+        )
+    }
+
+    /// Assert that a point lies on the plane (exact analytic check).
+    fn assert_on_plane(p: &Point3d, plane: &Plane, eps: f64) {
+        let dist = (p.x - plane.origin.x) * plane.normal.x
+            + (p.y - plane.origin.y) * plane.normal.y
+            + (p.z - plane.origin.z) * plane.normal.z;
+        assert!(
+            dist.abs() < eps,
+            "Point {:?} not on plane (signed dist {})",
+            p,
+            dist
+        );
+    }
+
+    /// Assert that a point lies on the cone: the angle between (P − apex)
+    /// and the axis equals half_angle, and P is on the nappe side.
+    fn assert_on_cone(p: &Point3d, cone: &ConeSurface, eps: f64) {
+        let apex = if cone.expanding { cone.origin } else { cone_apex(cone) };
+        let dx = p.x - apex.x;
+        let dy = p.y - apex.y;
+        let dz = p.z - apex.z;
+        let len = (dx * dx + dy * dy + dz * dz).sqrt();
+        let along = dx * cone.axis.x + dy * cone.axis.y + dz * cone.axis.z;
+        let cos_alpha = cone.half_angle.abs().cos();
+        let s = cone.half_angle.tan().signum();
+        if cone.expanding {
+            // r = v·tan(α) ≥ 0 → nappe is (P−A)·k ≥ 0
+            assert!(along > -eps, "Point {:?} not on expanding-cone nappe (along={})", p, along);
+        } else if s > 0.0 {
+            assert!(along > -eps, "Point {:?} not on nappe (along={})", p, along);
+        } else {
+            assert!(along < eps, "Point {:?} not on nappe (along={})", p, along);
+        }
+        if len > eps {
+            let cos_angle = along.abs() / len;
+            assert!(
+                (cos_angle - cos_alpha).abs() < 1e-9,
+                "Point {:?} not on cone surface (cos_angle={}, cos_alpha={})",
+                p,
+                cos_angle,
+                cos_alpha
+            );
+        }
+    }
+
+    fn assert_all_on_both(pts: &[Point3d], plane: &Plane, cone: &ConeSurface, eps: f64) {
+        for p in pts {
+            assert_on_plane(p, plane, eps);
+            assert_on_cone(p, cone, eps);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_circle_perpendicular() {
+        // Plane z=0 ⊥ axis of the narrowing cone → base circle, radius 5.
+        let cone = narrowing_cone();
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Expected 1 closed section, got {}", result.len());
+        assert!(result[0].len() >= 64, "Expected dense circle sampling, got {} points", result[0].len());
+        assert_all_on_both(&result[0], &plane, &cone, 1e-9);
+        for p in &result[0] {
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 5.0).abs() < 1e-9, "Circle radius should be 5.0, got {}", r);
+            assert!(p.z.abs() < 1e-9, "Circle should lie at z=0, got z={}", p.z);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_ellipse_oblique() {
+        // Tilted plane (20° from axis-normal) through the cone body →
+        // closed ellipse, all points exactly on both surfaces.
+        let cone = narrowing_cone();
+        let tilt = 20.0f64.to_radians();
+        let normal = Direction3d::new(tilt.sin(), 0.0, tilt.cos()).unwrap();
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 5.0),
+            normal,
+        );
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Expected 1 ellipse, got {}", result.len());
+        assert!(result[0].len() >= 64, "Expected dense ellipse sampling, got {} points", result[0].len());
+        assert_all_on_both(&result[0], &plane, &cone, 1e-9);
+        // The ellipse must be closed: the sampled loop wraps around the
+        // axis (points span the full 2π of generator angles).
+        let mut min_x = f64::MAX;
+        let mut max_x = f64::MIN;
+        for p in &result[0] {
+            min_x = min_x.min(p.x);
+            max_x = max_x.max(p.x);
+        }
+        assert!(max_x - min_x > 1.0, "Ellipse should have spread in the tilt direction");
+    }
+
+    #[test]
+    fn test_plane_cone_empty_beyond_apex() {
+        // Cone expanding upward from apex (0,0,-1): a plane below the apex
+        // cuts only the opposite nappe → empty.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        // apex = (0,0,-1), nappe upward.
+        let below = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, -5.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&below, &cone, 1e-6);
+        assert!(result.is_empty(), "Plane beyond the apex should give no section, got {} polylines", result.len());
+
+        // Same plane above the apex: circle. Cone at z=5 (v=5) has
+        // radius r = 1 + 5·tan(45°) = 6.
+        let above = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 5.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&above, &cone, 1e-6);
+        assert_eq!(result.len(), 1);
+        assert_all_on_both(&result[0], &above, &cone, 1e-9);
+        for p in &result[0] {
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 6.0).abs() < 1e-9, "Circle radius should be 6.0, got {}", r);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_parabola_clipped() {
+        // Plane parallel to a generator (θ = α) → parabola arm, clipped at
+        // a finite slant length. Cone: α=45°, apex (0,0,-1), nappe up.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let angle45 = 45.0f64.to_radians();
+        let normal = Direction3d::new(angle45.sin(), 0.0, angle45.cos()).unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), normal);
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Parabola should be 1 polyline, got {}", result.len());
+        let pts = &result[0];
+        assert!(pts.len() >= 10, "Parabola should have dense sampling, got {} points", pts.len());
+        assert_all_on_both(pts, &plane, &cone, 1e-9);
+        // Open curve: the arm does not close on itself.
+        let first = pts[0];
+        let last = pts[pts.len() - 1];
+        assert!(
+            first.distance_to(&last) > 1e-3,
+            "Parabola arm should be open (first≈last)"
+        );
+    }
+
+    #[test]
+    fn test_plane_cone_hyperbola_single_branch() {
+        // Steep plane (θ = 15° < α = 45°) → one hyperbola branch on this
+        // nappe (the double cone would have two).
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let normal = Direction3d::new(
+            (75.0f64.to_radians()).sin(),
+            0.0,
+            (75.0f64.to_radians()).cos(),
+        )
+        .unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), normal);
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Single nappe ⇒ 1 branch, got {}", result.len());
+        let pts = &result[0];
+        assert!(pts.len() >= 10, "Branch should have dense sampling, got {} points", pts.len());
+        assert_all_on_both(pts, &plane, &cone, 1e-9);
+        // Open curve with clipped far ends.
+        let first = pts[0];
+        let last = pts[pts.len() - 1];
+        assert!(first.distance_to(&last) > 1e-3, "Branch should be open");
+    }
+
+    #[test]
+    fn test_plane_cone_two_generator_rays_through_apex() {
+        // Plane through the apex, θ < α → two generator rays.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let apex = cone_apex(&cone); // (0,0,-1)
+        let normal = Direction3d::new(
+            (75.0f64.to_radians()).sin(),
+            0.0,
+            (75.0f64.to_radians()).cos(),
+        )
+        .unwrap();
+        let plane = Plane::from_origin_and_normal(apex, normal);
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 2, "Expected 2 generator rays, got {}", result.len());
+        for line in &result {
+            assert!(line.len() >= 2);
+            assert_all_on_both(line, &plane, &cone, 1e-9);
+            // Each ray starts at the apex.
+            assert!(
+                line[0].distance_to(&apex) < 1e-9,
+                "Ray should start at the apex, got {:?}",
+                line[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_tangent_ray_through_apex() {
+        // Plane through the apex with θ = α → tangent along one generator.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let apex = cone_apex(&cone);
+        let normal = Direction3d::new(
+            (45.0f64.to_radians()).sin(),
+            0.0,
+            (45.0f64.to_radians()).cos(),
+        )
+        .unwrap();
+        let plane = Plane::from_origin_and_normal(apex, normal);
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Expected 1 tangent ray, got {}", result.len());
+        assert_all_on_both(&result[0], &plane, &cone, 1e-9);
+        assert!(result[0][0].distance_to(&apex) < 1e-9);
+    }
+
+    #[test]
+    fn test_plane_cone_expanding_circle() {
+        // Expanding cone (apex at origin, α=45°) cut by z=2 → circle r=2.
+        let cone = expanding_cone();
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 2.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1);
+        assert_all_on_both(&result[0], &plane, &cone, 1e-9);
+        for p in &result[0] {
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 2.0).abs() < 1e-9, "Circle radius should be 2.0, got {}", r);
+            assert!((p.z - 2.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_zero_half_angle_delegates_to_cylinder() {
+        // half_angle ≈ 0 → cylinder: plane z=3 ⊥ axis → circle of the
+        // cone's base radius.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            2.0,
+            1e-13,
+        );
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 3.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1, "Expected 1 circle, got {}", result.len());
+        for p in &result[0] {
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 2.0).abs() < 1e-6, "Circle radius should be 2.0, got {}", r);
+            assert!((p.z - 3.0).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_dispatch_analytic() {
+        // The dispatcher must route Plane×Cone (both orders) to the
+        // analytic path — marching output would only be approximate, while
+        // analytic points satisfy both surface equations to 1e-9.
+        let cone = narrowing_cone();
+        let tilt = 20.0f64.to_radians();
+        let normal = Direction3d::new(tilt.sin(), 0.0, tilt.cos()).unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 5.0), normal);
+
+        let forward = intersect_surfaces(&Surface::Plane(plane.clone()), &Surface::Cone(cone.clone()), 1e-6);
+        let reverse = intersect_surfaces(&Surface::Cone(cone.clone()), &Surface::Plane(plane.clone()), 1e-6);
+
+        assert_eq!(forward.polylines.len(), 1);
+        assert_eq!(reverse.polylines.len(), 1);
+        assert_all_on_both(&forward.polylines[0], &plane, &cone, 1e-9);
+        assert_all_on_both(&reverse.polylines[0], &plane, &cone, 1e-9);
+        assert_eq!(forward.polylines[0].len(), reverse.polylines[0].len());
+    }
+
+    #[test]
+    fn test_plane_cone_circle_matches_cylinder_path() {
+        // A plane ⊥ axis cuts the cone in a circle whose radius follows
+        // r = R + v·tan(α) — cross-check at z=5 for the narrowing cone.
+        let cone = narrowing_cone();
+        // v=5: r = 5 + 5·(−0.5) = 2.5
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 5.0),
+            Direction3d::Z,
+        );
+        let result = intersect_plane_cone(&plane, &cone, 1e-6);
+        assert_eq!(result.len(), 1);
+        assert_all_on_both(&result[0], &plane, &cone, 1e-9);
+        for p in &result[0] {
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 2.5).abs() < 1e-9, "Circle radius should be 2.5, got {}", r);
+        }
+        // And the parametric surface must agree with the section points.
+        for p in &result[0] {
+            let v = p.z; // axis is +Z, origin at z=0
+            let surface_p = cone.point_at(0.0, v);
+            let surface_r = (surface_p.x * surface_p.x + surface_p.y * surface_p.y).sqrt();
+            let p_r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((surface_r - p_r).abs() < 1e-9);
         }
     }
 }

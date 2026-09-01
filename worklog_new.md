@@ -969,3 +969,90 @@ fill_boundary_gaps — граница результата шла «ступен
 - `e28f945` refactor(mesh): D5 — Möller triangle-triangle boolean
   (exact intersection-curve boundary, no gap fill) (3 файла,
   +1526/−250), запушен в origin/main
+
+---
+
+## B1-final: аналитический intersect_plane_cone (2026-09-01)
+
+**Цель:** закрыть последний незакрытый TODO этапа B из
+BREP_CORE_FIX_PLAN — «intersect_plane_cone сейчас делегирует в
+sample_surface_intersection. Нужно: аналитически вычислить коническое
+сечение (эллипс/парабола/гипербола) в зависимости от угла между
+плоскостью и осью конуса».
+
+**Что было:**
+
+1. `draper-geometry/src/intersection.rs` — dispatch `intersect_surfaces`:
+   Plane×Cone падал в generic `_ =>` marching SSI fallback.
+2. `draper-topology/src/boolean.rs::intersect_plane_cone` — заглушка:
+   комментарии про классификацию сечений, тело делегировало в
+   brute-force `sample_surface_intersection` (grid 40×40 × 40×40,
+   O(n²) попарные дистанции + Newton refine — приближённые точки).
+
+**Реализация (generator-based, всё аналитично):**
+
+Сечение параметризовано на образующих конуса. Образующая под углом u —
+луч из апекса A: g(u) = sinα·radial(u) + s·cosα·k, где k — ось,
+radial(u) = cos u·X + sin u·Y (X = x_dir ре-ортогонализован против k,
+Y = k×X), α = |half_angle|, s = sign(tan(half_angle)) — сторона напели
+(поверхность живёт при r(v) ≥ 0 ⟺ s·(P−A)·k ≥ 0; для narrowing
+STEP-конусов с отрицательным half_angle напель от апекса идёт ПРОТИВ
+оси). Пересечение образующей с плоскостью n·(P−P0)=0: t(u) = −d/D(u),
+d = n·(A−P0), D(u) = n·g(u) = a·cos(u−u0) + b, a = sinα·|n⊥|,
+b = s·cosα·(n·k). Тогда P = A + t·g(u) лежит на ОБЕИХ поверхностях
+точно (до fp) — без марширования и grid search.
+
+Классификация (классическая, выводится из D):
+- |b| > a (θ > α): D не меняет знак → t одного знака на всём цикле →
+  эллипс (круг при n∥k) ЦЕЛИКОМ в одной напели: t>0 → полная замкнутая
+  кривая (128 сэмплов, конвенция plane_cylinder — без дублирования
+  первой точки); t<0 → пусто (эллипс на противоположной напели).
+- |b| ≤ a (θ ≤ α): D=0 при u = u0 ± acos(−b/a) — асимптотические
+  направления. Валидная дуга (t>0): d<0 → (u0−base, u0+base);
+  d>0 → дополнение. Midpoint-сэмплирование дуги (никогда не попадает
+  на асимптоты, покрытие независимо от ширины дуги) → гипербола-ветвь /
+  парабола-плечо; уходящие в ∞ рукава клиппятся по длине образующей
+  t_clip = 20·scale (scale = max(R, |v_apex|, |A−P0|, tol) — включает
+  дистанцию апекс-плоскость, так что далёкая плоскость не теряет
+  сечение).
+- d ≈ 0 (плоскость через апекс): дегенераты — D(u)=0 даёт образующие,
+  лежащие в плоскости: 2 луча (θ<α), 1 касательный луч (θ=α), пусто
+  (θ>α). Каждый луч — 20 точек от апекса до t_clip.
+- half_angle ≈ 0 (конус→цилиндр): делегат в intersect_plane_cylinder.
+- Направление вставки точек и wrap-обработка не нужны: дуга задаётся
+  в непрерывном u-параметре (периодичность cos/sin сама обрабатывает
+  переход через 2π).
+
+**Точки интеграции:**
+
+- `draper-geometry`: dispatch `(Plane, Cone) | (Cone, Plane)` →
+  intersect_plane_cone (аналитический путь вместо marching).
+- `draper-topology/boolean.rs`: заглушка заменена на вызов
+  draper_geometry::intersection::intersect_plane_cone с обёрткой в
+  IntersectionCurve { points, curve: None, pcurve_a/b: None, tolerance }
+  (формат идентичен выходу chain_points_into_curves).
+
+**Тесты (13 новых):**
+
+- draper-geometry, `mod plane_cone_tests` (11): круг ⊥ оси для
+  narrowing-конуса (r=5 @ z=0, все точки на обеих поверхностях до
+  1e-9); эллипс наклонный (20°); пусто за апексом + круг над апексом
+  (r(v)=R+v·tan(α)=6 @ z=5); парабола (θ=α, 1 полилиния, открытая,
+  клипнутая); гипербола (θ=15°<α, ровно 1 ветвь — напель одна);
+  2 луча-образующие через апекс (каждый начинается в апексе);
+  касательный луч; expanding-конус (круг r=2 @ z=2); делегат в
+  цилиндр (ha=1e-13); dispatch обе стороны (точность 1e-9 доказывает
+  аналитический путь — marching даёт ~1e-4); кросс-чек r(v)=R+v·tan(α)
+  с point_at.
+- draper-topology, boolean.rs (2): dispatch Plane×Cone forward/reverse
+  (круг r=5, z=0, число точек совпадает), наклонный эллипс.
+
+**Верификация:**
+
+- draper-geometry: 132 lib ✅ (121 + 11)
+- draper-topology: 183 lib ✅ (181 + 2) + 11 integration ✅
+- draper-mesh: 268 lib ✅, 264 strict ✅
+- cargo check: draper-json / draper-ffi / draper-subd / draper-core /
+  draper-viewer --bins — 0 errors
+- Новых предупреждений нет (одно своё `mut` почистил; pre-existing
+  warnings не тронуты)

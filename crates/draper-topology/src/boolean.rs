@@ -924,37 +924,26 @@ fn intersect_plane_sphere(plane: &Plane, sphere: &SphereSurface, tol: f64) -> Ve
 
 /// Plane-Cone intersection: returns a conic section (ellipse, parabola, or hyperbola).
 fn intersect_plane_cone(plane: &Plane, cone: &ConeSurface, tol: f64) -> Vec<IntersectionCurve> {
-    // Distance from cone origin to plane
-    let dx = cone.origin.x - plane.origin.x;
-    let dy = cone.origin.y - plane.origin.y;
-    let dz = cone.origin.z - plane.origin.z;
-    let _signed_dist = dx * plane.normal.x + dy * plane.normal.y + dz * plane.normal.z;
-
-    // Angle between plane normal and cone axis
-    let cos_angle = plane.normal.x * cone.axis.x
-        + plane.normal.y * cone.axis.y
-        + plane.normal.z * cone.axis.z;
-
-    let _sin_angle = (1.0 - cos_angle * cos_angle).max(0.0).sqrt();
-
-    // If plane is perpendicular to cone axis (cos_angle ≈ 0):
-    //   - If |signed_dist| < cone.radius, it's a circle/ellipse
-    // If plane is parallel to cone surface (sin_angle ≈ sin(half_angle)):
-    //   - Parabola
-    // Otherwise: ellipse or hyperbola
-
-    // For simplicity, sample the intersection by finding points on both surfaces
-    let curves = sample_surface_intersection(
-        &Surface::Cone(cone.clone()),
-        &Surface::Plane(plane.clone()),
-        tol,
-    );
-
-    if curves.is_empty() {
-        Vec::new()
-    } else {
-        curves
-    }
+    // B1 leftover (2026-09-01): analytic conic section — ellipse / circle
+    // (plane flatter than the generators), parabola (plane parallel to a
+    // generator), hyperbola branch (steeper plane), or degenerate generator
+    // rays when the plane passes through the apex. Every output point
+    // satisfies both surface equations exactly (parametrized on cone
+    // generators: P = apex + t(u)·g(u)).
+    // Previously this was a stub delegating to the brute-force grid pairing
+    // in `sample_surface_intersection`.
+    let polylines = draper_geometry::intersection::intersect_plane_cone(plane, cone, tol);
+    polylines
+        .into_iter()
+        .filter(|pts| pts.len() >= 2)
+        .map(|points| IntersectionCurve {
+            points,
+            curve: None,
+            pcurve_a: None,
+            pcurve_b: None,
+            tolerance: tol,
+        })
+        .collect()
 }
 
 /// Cylinder-Cylinder intersection.
@@ -4103,6 +4092,73 @@ mod tests {
         assert_ne!(BooleanOp::Union, BooleanOp::Subtract);
         assert_ne!(BooleanOp::Subtract, BooleanOp::Intersect);
         assert_ne!(BooleanOp::Union, BooleanOp::Intersect);
+    }
+
+    // ---- Plane × Cone analytic intersection (B1 leftover fix) ----
+
+    #[test]
+    fn test_plane_cone_intersection_analytic() {
+        // Narrowing cone: base radius 5 at z=0, apex at z=10 (tan(α)=0.5,
+        // negative half_angle = STEP narrowing convention). Plane z=0 →
+        // the base circle: every point exactly on both surfaces.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            5.0,
+            -(0.5f64).atan(),
+        );
+        let plane = Plane::from_origin_and_normal(Point3d::ORIGIN, Direction3d::Z);
+        let tol = ToleranceContext::new();
+
+        let forward =
+            intersect_surfaces(&Surface::Plane(plane.clone()), &Surface::Cone(cone.clone()), &tol);
+        assert_eq!(forward.len(), 1, "Expected 1 circle section, got {}", forward.len());
+        assert!(forward[0].points.len() >= 64);
+        for p in &forward[0].points {
+            // On the plane
+            assert!(p.z.abs() < 1e-9, "Point should be at z=0, got z={}", p.z);
+            // On the cone: radius r(v) = 5 − 0.5·v, and v = z = 0 → r = 5
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 5.0).abs() < 1e-9, "Circle radius should be 5.0, got {}", r);
+        }
+
+        // Reversed order: same geometry (the dispatcher reverses point order
+        // for consistency, but the point set must match).
+        let reverse =
+            intersect_surfaces(&Surface::Cone(cone), &Surface::Plane(plane), &tol);
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(reverse[0].points.len(), forward[0].points.len());
+        for p in &reverse[0].points {
+            assert!(p.z.abs() < 1e-9);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 5.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_plane_cone_intersection_oblique_ellipse() {
+        // Tilted plane through the cone body → closed ellipse with points
+        // exactly on both surfaces (the old brute-force sampling path only
+        // produced approximate points).
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            5.0,
+            -(0.5f64).atan(),
+        );
+        let tilt = 20.0f64.to_radians();
+        let normal = Direction3d::new(tilt.sin(), 0.0, tilt.cos()).unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 5.0), normal);
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(&Surface::Plane(plane), &Surface::Cone(cone), &tol);
+        assert_eq!(curves.len(), 1, "Expected 1 ellipse, got {}", curves.len());
+        let pts = &curves[0].points;
+        assert!(pts.len() >= 64, "Expected dense sampling, got {}", pts.len());
+        // Ellipse spans both sides of the axis in x (tilt direction).
+        let min_x = pts.iter().map(|p| p.x).fold(f64::MAX, f64::min);
+        let max_x = pts.iter().map(|p| p.x).fold(f64::MIN, f64::max);
+        assert!(max_x - min_x > 1.0, "Ellipse should have spread");
     }
 
     // ── Property-based tests (proptest) ──
