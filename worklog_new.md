@@ -966,5 +966,6 @@ fill_boundary_gaps — граница результата шла «ступен
 
 ## Коммит
 
-- см. следующий commit: refactor(mesh): D5 — Möller triangle-triangle
-  boolean (exact intersection-curve boundary, no gap fill)
+- `e28f945` refactor(mesh): D5 — Möller triangle-triangle boolean
+  (exact intersection-curve boundary, no gap fill) (3 файла,
+  +1526/−250), запушен в origin/main
