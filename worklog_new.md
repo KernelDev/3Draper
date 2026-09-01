@@ -881,3 +881,9 @@ fill_boundary_gaps не тронуты (closed-loop) — все зелёные.
   изолированный прогон triangulate_face_with_cache) — инструмент
   диагностики «почему фейс упал на fallback»
 - `transmission_bench` — env_logger init (RUST_LOG-совместимость)
+
+## Коммит
+
+- `482029b` refactor(mesh): этап D — D4 fallback removal + cone scale fix,
+  D3 open-chain removal, A3 strict (9 файлов, +577/−684), запушен в
+  origin/main
