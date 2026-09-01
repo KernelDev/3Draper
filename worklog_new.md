@@ -1056,3 +1056,8 @@ b = s·cosα·(n·k). Тогда P = A + t·g(u) лежит на ОБЕИХ по
   draper-viewer --bins — 0 errors
 - Новых предупреждений нет (одно своё `mut` почистил; pre-existing
   warnings не тронуты)
+
+## Коммит
+
+- `108e23b` feat(geometry): B1-final — analytic plane×cone conic
+  section (4 файла, +783/−33), запушен в origin/main
