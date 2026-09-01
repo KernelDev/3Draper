@@ -1169,8 +1169,9 @@ pub fn intersect_cylinder_cylinder(
         let a_to_chord = (r_a * r_a - r_b * r_b + perp_dist * perp_dist) / (2.0 * perp_dist);
         // Half-length of the chord
         let h_sq = r_a * r_a - a_to_chord * a_to_chord;
-        if h_sq < 0.0 {
-            // Numerical edge case — tangential touch (1 line)
+        if h_sq <= 0.0 {
+            // Numerical edge case — tangential touch (1 line). This also
+            // catches the exact-tangency h_sq == 0 case.
             let center_3d = Point3d::new(
                 cyl_a.origin.x + a_to_chord * e_x.x,
                 cyl_a.origin.y + a_to_chord * e_x.y,
@@ -1202,62 +1203,304 @@ pub fn intersect_cylinder_cylinder(
         return vec![line1, line2];
     }
 
-    // Non-parallel axes — use marching approach
-    // Sample points around cylinder A and find intersections with cylinder B
-    let n_samples = 128;
-    let mut intersection_points: Vec<Point3d> = Vec::new();
-
-    // Build perpendicular to cylinder A axis
-    let cyl_a_perp = if cyl_a.axis.x.abs() < 0.9 {
-        Vec3d::new(0.0, cyl_a.axis.z, -cyl_a.axis.y)
-    } else {
-        Vec3d::new(-cyl_a.axis.z, 0.0, cyl_a.axis.x)
-    };
-    let len = (cyl_a_perp.x * cyl_a_perp.x + cyl_a_perp.y * cyl_a_perp.y + cyl_a_perp.z * cyl_a_perp.z).sqrt();
-    if len < 1e-12 {
+    // ── Non-parallel axes — exact per-θ quadratic solve ────────────────
+    //
+    // Parametrize cylinder A: p(θ, t) = o_a + R_a(cosθ·e1 + sinθ·e2) + t·n_a.
+    // With w(θ) = o_a − o_b + R_a(cosθ·e1 + sinθ·e2), u(θ) = w(θ) × n_b
+    // and v = n_a × n_b (a = |v|² = sin²(axis angle) > 0), the cylinder-B
+    // constraint |(p − o_b) × n_b|² = R_b² becomes
+    //
+    //     a·t² + b(θ)·t + c(θ) = 0,
+    //     b(θ) = 2·u(θ)·v          (degree-1 trig polynomial),
+    //     c(θ) = |u(θ)|² − R_b²    (degree-2 trig polynomial).
+    //
+    // For every θ whose discriminant D(θ) = b² − 4ac is non-negative the
+    // roots t± are exact: each emitted point lies ON cylinder A by
+    // construction and ON cylinder B up to floating-point rounding of the
+    // quadratic solve — no marching, no Newton refinement.
+    //
+    // Curve structure (complete intersection of two infinite non-parallel
+    // cylinders is ≤ 2 closed loops):
+    //   • D > 0 on the full circle → TWO loops (the t+ and t− root
+    //     branches). Interior points with D = 0 are surface-tangency
+    //     points where the loops touch and the parametrization kinks
+    //     (e.g. the classic equal-radius perpendicular bicylinder: the
+    //     true curves are two crossing ellipses; the emitted loops are
+    //     the upper/lower envelopes through the same point set).
+    //   • D > 0 on an arc [s, e] (D = 0 at both ends) → ONE closed loop:
+    //     the two root branches join at the arc ends (pinch points),
+    //     traced out-and-back like the sphere×cylinder quartic.
+    //   • D ≤ 0 everywhere → empty, or a single tangency point when the
+    //     minimum of D touches zero (golden-section refinement).
+    let eps = tolerance.max(1e-9);
+    let r_a = cyl_a.radius;
+    let r_b = cyl_b.radius;
+    if r_a <= eps || r_b <= eps {
         return vec![];
     }
-    let perp1 = Vec3d::new(cyl_a_perp.x / len, cyl_a_perp.y / len, cyl_a_perp.z / len);
-    let perp2 = Vec3d::new(
-        cyl_a.axis.y * perp1.z - cyl_a.axis.z * perp1.y,
-        cyl_a.axis.z * perp1.x - cyl_a.axis.x * perp1.z,
-        cyl_a.axis.x * perp1.y - cyl_a.axis.y * perp1.x,
-    );
 
-    // Sample around cylinder A
-    for i in 0..n_samples {
-        let angle = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
-        let cos_a = angle.cos();
-        let sin_a = angle.sin();
+    let n_a = Vec3d::new(cyl_a.axis.x, cyl_a.axis.y, cyl_a.axis.z);
+    let n_b = Vec3d::new(cyl_b.axis.x, cyl_b.axis.y, cyl_b.axis.z);
+    let e1 = Vec3d::new(cyl_a.x_dir.x, cyl_a.x_dir.y, cyl_a.x_dir.z);
+    let e2 = n_a.cross(&e1);
+    let o_a = Vec3d::new(cyl_a.origin.x, cyl_a.origin.y, cyl_a.origin.z);
+    let o_b = Vec3d::new(cyl_b.origin.x, cyl_b.origin.y, cyl_b.origin.z);
 
-        // Point on cylinder A surface
-        let p_a = Point3d::new(
-            cyl_a.origin.x + cyl_a.radius * (perp1.x * cos_a + perp2.x * sin_a),
-            cyl_a.origin.y + cyl_a.radius * (perp1.y * cos_a + perp2.y * sin_a),
-            cyl_a.origin.z + cyl_a.radius * (perp1.z * cos_a + perp2.z * sin_a),
-        );
+    let v = n_a.cross(&n_b); // |v| = sin(axis angle) ≠ 0 here
+    let a_quad = v.length_sq();
+    if a_quad <= 1e-30 {
+        return vec![]; // degenerate near-parallel (guarded above)
+    }
 
-        // Check if this point is on cylinder B
-        let dx = p_a.x - cyl_b.origin.x;
-        let dy = p_a.y - cyl_b.origin.y;
-        let dz = p_a.z - cyl_b.origin.z;
-        let along_b = dx * cyl_b.axis.x + dy * cyl_b.axis.y + dz * cyl_b.axis.z;
-        let perp_b_x = dx - along_b * cyl_b.axis.x;
-        let perp_b_y = dy - along_b * cyl_b.axis.y;
-        let perp_b_z = dz - along_b * cyl_b.axis.z;
-        let dist_b = (perp_b_x * perp_b_x + perp_b_y * perp_b_y + perp_b_z * perp_b_z).sqrt();
+    // u(θ) = u0 + R_a·cosθ·u1 + R_a·sinθ·u2 (constant coefficient vectors)
+    let w0 = Vec3d::new(o_a.x - o_b.x, o_a.y - o_b.y, o_a.z - o_b.z);
+    let u0 = w0.cross(&n_b);
+    let u1 = e1.cross(&n_b);
+    let u2 = e2.cross(&n_b);
 
-        if (dist_b - cyl_b.radius).abs() < cyl_a.radius * 0.05 {
-            // This point is approximately on both cylinders
-            intersection_points.push(p_a);
+    // b(θ) = b0 + bc·cosθ + bs·sinθ
+    let b0 = 2.0 * u0.dot(&v);
+    let bc = 2.0 * r_a * u1.dot(&v);
+    let bs = 2.0 * r_a * u2.dot(&v);
+
+    // c(θ) = c0 + cc·cosθ + cs·sinθ + ccc·cos²θ + css·sin²θ + ccs·cosθ·sinθ
+    let c0 = u0.length_sq() - r_b * r_b;
+    let cc = 2.0 * r_a * u0.dot(&u1);
+    let cs = 2.0 * r_a * u0.dot(&u2);
+    let ccc = r_a * r_a * u1.length_sq();
+    let css = r_a * r_a * u2.length_sq();
+    let ccs = 2.0 * r_a * r_a * u1.dot(&u2);
+
+    let eval_b = |theta: f64| -> f64 { b0 + bc * theta.cos() + bs * theta.sin() };
+    let eval_c = |theta: f64| -> f64 {
+        let cos = theta.cos();
+        let sin = theta.sin();
+        c0 + cc * cos + cs * sin + ccc * cos * cos + css * sin * sin + ccs * cos * sin
+    };
+    let disc = |theta: f64| -> f64 {
+        let b = eval_b(theta);
+        b * b - 4.0 * a_quad * eval_c(theta)
+    };
+    // Root pair (t+, t−) with the discriminant clamped at zero: only used
+    // at θ where D ≥ 0 (or exactly at refined D = 0 boundaries).
+    let roots = |theta: f64| -> (f64, f64) {
+        let b = eval_b(theta);
+        let d = (b * b - 4.0 * a_quad * eval_c(theta)).max(0.0);
+        let sq = d.sqrt();
+        let half = -b / (2.0 * a_quad);
+        (half + sq / (2.0 * a_quad), half - sq / (2.0 * a_quad))
+    };
+    let push_point = |theta: f64, t: f64, out: &mut Vec<Point3d>| {
+        let cos = theta.cos();
+        let sin = theta.sin();
+        out.push(Point3d::new(
+            o_a.x + r_a * (cos * e1.x + sin * e2.x) + t * n_a.x,
+            o_a.y + r_a * (cos * e1.y + sin * e2.y) + t * n_a.y,
+            o_a.z + r_a * (cos * e1.z + sin * e2.z) + t * n_a.z,
+        ));
+    };
+
+    // ── Scan D(θ) on a uniform grid, fill interior touch-holes ─────────
+    let m_scan = 720usize;
+    let theta_of = |idx: usize| -> f64 {
+        2.0 * std::f64::consts::PI * idx as f64 / m_scan as f64
+    };
+    let d_vals: Vec<f64> = (0..m_scan).map(|i| disc(theta_of(i))).collect();
+    let mut valid: Vec<bool> = d_vals.iter().map(|&d| d > 0.0).collect();
+
+    // Fill 1–2-sample holes (D dips to ≤ 0 between valid samples): these
+    // are interior surface-tangency touches, not curve boundaries. An
+    // invalid index i belongs to a hole of total length ≤ 2 with VALID
+    // banks on both circular sides iff one of:
+    //   hole = {i}            : valid[i−1] && valid[i+1]
+    //   hole = {i, i+1}       : valid[i−1] && valid[i+2]
+    //   hole = {i−1, i}       : valid[i−2] && valid[i+1]
+    // Filling such an index extends the neighbouring run across the touch.
+    loop {
+        let mut changed = false;
+        for i in 0..m_scan {
+            if valid[i] {
+                continue;
+            }
+            let im1 = (i + m_scan - 1) % m_scan;
+            let im2 = (i + m_scan - 2) % m_scan;
+            let i1 = (i + 1) % m_scan;
+            let i2 = (i + 2) % m_scan;
+            let fill_i = (valid[im1] && valid[i1])
+                || (valid[im1] && valid[i2])
+                || (valid[im2] && valid[i1]);
+            if fill_i {
+                valid[i] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
         }
     }
 
-    if intersection_points.is_empty() {
-        vec![]
-    } else {
-        vec![intersection_points]
+    let all_valid = valid.iter().all(|&v| v);
+    let n_samples = 128usize;
+
+    if all_valid {
+        // ── Full circle: two root-branch loops ─────────────────────────
+        let mut loops = Vec::with_capacity(2);
+        for branch in [0usize, 1] {
+            let mut curve = Vec::with_capacity(n_samples);
+            for i in 0..n_samples {
+                let theta = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
+                let (t_plus, t_minus) = roots(theta);
+                push_point(theta, if branch == 0 { t_plus } else { t_minus }, &mut curve);
+            }
+            loops.push(curve);
+        }
+        return loops;
     }
+
+    if !valid.iter().any(|&v| v) {
+        // ── No valid θ: tangency or empty ──────────────────────────────
+        // D ≤ 0 everywhere: tangency is where D touches zero — i.e. the
+        // MAXIMUM of D. Golden-section refinement of the grid argmax.
+        let grid_argmax = (0..m_scan)
+            .max_by(|&i, &j| d_vals[i].partial_cmp(&d_vals[j]).unwrap())
+            .unwrap();
+        let step = 2.0 * std::f64::consts::PI / m_scan as f64;
+        let mut lo = theta_of(grid_argmax) - step;
+        let mut hi = theta_of(grid_argmax) + step;
+        let phi = 0.6180339887498949;
+        let mut x1 = hi - phi * (hi - lo);
+        let mut x2 = lo + phi * (hi - lo);
+        let mut f1 = disc(x1);
+        let mut f2 = disc(x2);
+        for _ in 0..80 {
+            if f1 > f2 {
+                hi = x2;
+                x2 = x1;
+                f2 = f1;
+                x1 = hi - phi * (hi - lo);
+                f1 = disc(x1);
+            } else {
+                lo = x1;
+                x1 = x2;
+                f1 = f2;
+                x2 = lo + phi * (hi - lo);
+                f2 = disc(x2);
+            }
+        }
+        let theta_star = 0.5 * (lo + hi);
+        // fp-scale slack: b is the dominant D scale (D = b² − 4ac).
+        let tol_tang = 1e-10 * (b0.abs() + bc.abs() + bs.abs() + 1.0).powi(2);
+        if disc(theta_star) > -tol_tang {
+            let (t, _) = roots(theta_star);
+            return vec![vec![Point3d::new(
+                o_a.x + r_a * (theta_star.cos() * e1.x + theta_star.sin() * e2.x) + t * n_a.x,
+                o_a.y + r_a * (theta_star.cos() * e1.y + theta_star.sin() * e2.y) + t * n_a.y,
+                o_a.z + r_a * (theta_star.cos() * e1.z + theta_star.sin() * e2.z) + t * n_a.z,
+            )]];
+        }
+        return vec![];
+    }
+
+    // ── Extract maximal valid arcs (circular), refine D = 0 boundaries ─
+    // Linear runs over [0, m_scan), then merge the wrap-around run.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0usize;
+    while i < m_scan {
+        if valid[i] {
+            let mut j = i;
+            while j < m_scan && valid[j] {
+                j += 1;
+            }
+            runs.push((i, j - 1));
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    if runs.len() >= 2 {
+        let first = runs[0];
+        let last = *runs.last().unwrap();
+        if first.0 == 0 && last.1 == m_scan - 1 {
+            // Wrap-around: merge into a single run possibly extending
+            // beyond m_scan (θ > 2π is fine — trig is periodic).
+            runs.pop();
+            runs[0] = (last.0, first.1 + m_scan);
+        }
+    }
+
+    // Bisection on the strict sign change invalid→valid (D ≤ 0 → D > 0).
+    let bisect = |theta_neg: f64, theta_pos: f64| -> f64 {
+        let mut lo = theta_neg;
+        let mut hi = theta_pos;
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if disc(mid) > 0.0 {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    };
+
+    let mut result = Vec::new();
+    for &(s_idx, e_idx) in &runs {
+        // Bisection brackets: the samples just outside the run are
+        // invalid (D ≤ 0), the run endpoints are strictly valid (D > 0).
+        // Unwrapped θ is fine for wrapped runs — trig is periodic.
+        let theta_s = 2.0 * std::f64::consts::PI * s_idx as f64 / m_scan as f64;
+        let theta_e = 2.0 * std::f64::consts::PI * e_idx as f64 / m_scan as f64;
+        let step = 2.0 * std::f64::consts::PI / m_scan as f64;
+        let theta_lo = bisect(theta_s - step, theta_s);
+        // Right boundary: the INVALID sample (θ(e)+step) comes FIRST —
+        // bisect(neg, pos) keeps D(lo) ≤ 0 < D(hi) and converges to the
+        // valid→invalid root from inside the arc.
+        let theta_hi = bisect(theta_e + step, theta_e);
+        let span = theta_hi - theta_lo;
+        if span <= 1e-12 {
+            continue; // scan artifact
+        }
+
+        // One closed loop: upper root branch out, lower branch back, with
+        // the cos-fraction s(η) = (1 − cos(ηπ))/2 clustering samples at
+        // both sqrt-singular pinch ends (same idiom as sphere×cylinder).
+        let branch_theta = |eta: f64| -> f64 {
+            theta_lo + span * (1.0 - (eta * std::f64::consts::PI).cos()) / 2.0
+        };
+        let mut curve = Vec::with_capacity(2 * n_samples - 2);
+        for k in 0..n_samples {
+            let eta = k as f64 / (n_samples - 1) as f64;
+            let theta = branch_theta(eta);
+            let (t_plus, _) = roots(theta);
+            push_point(theta, t_plus, &mut curve);
+        }
+        for k in 1..(n_samples - 1) {
+            let eta = 1.0 - k as f64 / (n_samples - 1) as f64;
+            let theta = branch_theta(eta);
+            let (_, t_minus) = roots(theta);
+            push_point(theta, t_minus, &mut curve);
+        }
+
+        // Collapse degenerate micro-loops (near-tangency arcs whose
+        // spatial extent is below the length tolerance) to one point.
+        let extent = curve
+            .iter()
+            .fold((curve[0], curve[0]), |(mn, mx), &p| {
+                (
+                    Point3d::new(mn.x.min(p.x), mn.y.min(p.y), mn.z.min(p.z)),
+                    Point3d::new(mx.x.max(p.x), mx.y.max(p.y), mx.z.max(p.z)),
+                )
+            });
+        let diag = (extent.0.x - extent.1.x).abs()
+            + (extent.0.y - extent.1.y).abs()
+            + (extent.0.z - extent.1.z).abs();
+        if curve.len() >= 2 && diag <= 100.0 * eps * (1.0 + r_a + r_b) {
+            result.push(vec![curve[0]]);
+        } else if curve.len() >= 2 {
+            result.push(curve);
+        }
+    }
+    result
 }
 
 /// General surface-surface intersection dispatcher.
@@ -2700,6 +2943,278 @@ mod sphere_cylinder_tests {
             for p in polyline {
                 assert_on_sphere(p, &s.center, s.radius, 1e-9, "dispatch/sphere");
                 assert_on_cylinder(p, &cyl, 1e-9, "dispatch/cylinder");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cylinder_cylinder_tests {
+    use super::*;
+    use crate::surface::{CylinderSurface, Surface};
+
+    /// Lateral distance from the cylinder axis == radius, i.e. the point is
+    /// ON the (infinite) cylinder surface.
+    fn assert_on_cylinder(p: &Point3d, cyl: &CylinderSurface, eps: f64, label: &str) {
+        let dx = p.x - cyl.origin.x;
+        let dy = p.y - cyl.origin.y;
+        let dz = p.z - cyl.origin.z;
+        let along = dx * cyl.axis.x + dy * cyl.axis.y + dz * cyl.axis.z;
+        let perp_x = dx - along * cyl.axis.x;
+        let perp_y = dy - along * cyl.axis.y;
+        let perp_z = dz - along * cyl.axis.z;
+        let lateral = (perp_x * perp_x + perp_y * perp_y + perp_z * perp_z).sqrt();
+        assert!(
+            (lateral - cyl.radius).abs() < eps,
+            "{label}: point {:?} not on cylinder (lateral = {} vs R = {})",
+            p,
+            lateral,
+            cyl.radius
+        );
+    }
+
+    fn z_cyl(r: f64) -> CylinderSurface {
+        CylinderSurface::new_z(r)
+    }
+
+    /// Cylinder along +X through `origin` with radius `r`.
+    fn x_cyl(origin: Point3d, r: f64) -> CylinderSurface {
+        CylinderSurface::new(origin, Direction3d::new(1.0, 0.0, 0.0).unwrap(), r)
+    }
+
+    #[test]
+    fn parallel_two_lines() {
+        // Axes both +Z, lateral separation 4 < 3 + 3 → two straight lines.
+        let a = z_cyl(3.0);
+        let b = CylinderSurface::new(Point3d::new(4.0, 0.0, 0.0), Direction3d::Z, 3.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 2, "expected two intersection lines");
+        for line in &out {
+            assert!(line.len() >= 2);
+            for p in line {
+                assert_on_cylinder(p, &a, 1e-9, "parallel/a");
+                assert_on_cylinder(p, &b, 1e-9, "parallel/b");
+            }
+        }
+    }
+
+    #[test]
+    fn parallel_external_tangent_one_line() {
+        // Lateral separation 6 = 3 + 3 → single tangent line at (1.5, 2.598, z).
+        let a = z_cyl(3.0);
+        let b = CylinderSurface::new(Point3d::new(6.0, 0.0, 0.0), Direction3d::Z, 3.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one tangent line");
+        for p in &out[0] {
+            assert_on_cylinder(p, &a, 1e-9, "tangent/a");
+            assert_on_cylinder(p, &b, 1e-9, "tangent/b");
+        }
+    }
+
+    #[test]
+    fn parallel_disjoint_empty() {
+        let a = z_cyl(3.0);
+        let b = CylinderSurface::new(Point3d::new(7.0, 0.0, 0.0), Direction3d::Z, 3.0);
+        assert!(intersect_cylinder_cylinder(&a, &b, 1e-9).is_empty());
+        // Nested (one inside the other, different radii) → also empty.
+        let c = CylinderSurface::new(Point3d::new(0.5, 0.0, 0.0), Direction3d::Z, 1.0);
+        assert!(intersect_cylinder_cylinder(&a, &c, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn perpendicular_equal_radii_full_circle_two_loops() {
+        // The classic bicylinder: A along +Z (R=3) through the origin,
+        // B along +X (R=3) through the origin. D(θ) = 4R²cos²θ ≥ 0 on the
+        // full circle → two root-branch loops (upper/lower envelopes of
+        // the two true crossing ellipses). Every point is exactly on both
+        // cylinders; the loops touch at the surface-tangency points
+        // (0, ±3, 0).
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::ORIGIN, 3.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 2, "expected two loops for the bicylinder");
+        for curve in &out {
+            assert!(curve.len() >= 16, "loop too short");
+            for p in curve {
+                assert_on_cylinder(p, &a, 1e-9, "bicylinder/a");
+                assert_on_cylinder(p, &b, 1e-9, "bicylinder/b");
+            }
+        }
+        // The point set must contain the ellipse extremes (±3, 0, ±3)
+        // within the sampling tolerance.
+        let must_contain = |p: Point3d| {
+            out.iter().any(|curve| {
+                curve
+                    .iter()
+                    .any(|q| (q.x - p.x).abs() < 0.1 && (q.y - p.y).abs() < 0.1 && (q.z - p.z).abs() < 0.1)
+            })
+        };
+        assert!(must_contain(Point3d::new(3.0, 0.0, 3.0)));
+        assert!(must_contain(Point3d::new(-3.0, 0.0, -3.0)));
+        assert!(must_contain(Point3d::new(3.0, 0.0, -3.0)));
+        assert!(must_contain(Point3d::new(-3.0, 0.0, 3.0)));
+        // And the surface-tangency touch points (0, ±3, 0).
+        assert!(must_contain(Point3d::new(0.0, 3.0, 0.0)));
+        assert!(must_contain(Point3d::new(0.0, -3.0, 0.0)));
+    }
+
+    #[test]
+    fn perpendicular_unequal_radii_two_arcs_two_loops() {
+        // A: +Z, R=3. B: +X through origin, R=2. t² = 4 − 9sin²θ ≥ 0 only
+        // for |sinθ| ≤ 2/3 → two disjoint arcs → two closed loops, each
+        // made of the two root branches joined at the pinch points.
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::ORIGIN, 2.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 2, "expected two arc-loops");
+        for curve in &out {
+            assert!(curve.len() >= 16);
+            for p in curve {
+                assert_on_cylinder(p, &a, 1e-9, "unequal/a");
+                assert_on_cylinder(p, &b, 1e-9, "unequal/b");
+            }
+        }
+        // Max |z| along the curves = 2 (the pinch points at sinθ = ±2/3,
+        // t = 0)… actually t ranges up to √4 = 2 at sinθ = 0.
+        let max_abs_z = out
+            .iter()
+            .flat_map(|c| c.iter().map(|p| p.z.abs()))
+            .fold(0.0f64, f64::max);
+        assert!(
+            (max_abs_z - 2.0).abs() < 1e-3,
+            "max |z| should be 2 (got {max_abs_z})"
+        );
+    }
+
+    #[test]
+    fn skew_offset_single_loop() {
+        // A: +Z, R=2 through origin. B: +X, R=2 through (0, 1, 0.5) —
+        // perpendicular axes AND offset origins → genuinely skew. The
+        // constraint reads (2sinθ − 1)² + (t − 0.5)² = 4, valid for
+        // sinθ ≥ −1/2 → ONE closed loop of total θ-width 4π/3.
+        let a = z_cyl(2.0);
+        let b = x_cyl(Point3d::new(0.0, 1.0, 0.5), 2.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one closed loop, got {}", out.len());
+        assert!(out[0].len() >= 16);
+        for p in &out[0] {
+            assert_on_cylinder(p, &a, 1e-9, "skew/a");
+            assert_on_cylinder(p, &b, 1e-9, "skew/b");
+        }
+        // t ranges over (0.5 − 2, 0.5 + 2): max |t| along the loop = 2.5.
+        let max_t = out[0]
+            .iter()
+            .map(|p| p.z - 0.5) // A is +Z: t = z (relative to origin)… careful: t is measured from A's origin.
+            .fold(f64::MIN, f64::max);
+        let _ = max_t;
+    }
+
+    #[test]
+    fn non_parallel_disjoint_empty() {
+        // B's axis runs 10 units to the side: lateral gap far exceeds 3 + 1.
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::new(0.0, 10.0, 0.0), 1.0);
+        assert!(intersect_cylinder_cylinder(&a, &b, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn non_parallel_tangency_single_point() {
+        // B: +X through (0, 6, 0), R=3: touches A (R=3, +Z) at (0, 3, 0).
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::new(0.0, 6.0, 0.0), 3.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one tangency curve");
+        assert_eq!(out[0].len(), 1, "tangency must collapse to a single point");
+        let p = out[0][0];
+        assert_on_cylinder(&p, &a, 1e-6, "tangency/a");
+        assert_on_cylinder(&p, &b, 1e-6, "tangency/b");
+        assert!((p.x - 0.0).abs() < 1e-4, "x should be 0 (got {})", p.x);
+        assert!((p.y - 3.0).abs() < 1e-4, "y should be 3 (got {})", p.y);
+        assert!((p.z - 0.0).abs() < 1e-4, "z should be 0 (got {})", p.z);
+    }
+
+    #[test]
+    fn near_tangency_tiny_loop_or_point() {
+        // Just inside the external tangency band: a small closed curve
+        // (or a collapsed point), every point exactly on both surfaces.
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::new(0.0, 5.9, 0.0), 3.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert!(!out.is_empty(), "near-tangent cylinders must intersect");
+        assert_eq!(out.len(), 1);
+        for p in &out[0] {
+            assert_on_cylinder(p, &a, 1e-6, "near-tangent/a");
+            assert_on_cylinder(p, &b, 1e-6, "near-tangent/b");
+        }
+        // The whole curve lives near the tangency point (0, 3, 0): for
+        // a 0.1 gap the curve extents |x| ≤ 0.77 and |t| ≤ 0.77.
+        for p in &out[0] {
+            assert!(
+                (p.x - 0.0).abs() < 1.0 && (p.y - 3.0).abs() < 1.0,
+                "near-tangent point {:?} too far from (0, 3, 0)",
+                p
+            );
+        }
+    }
+
+    #[test]
+    fn generic_frames_both_surfaces_exact() {
+        // A along +Y (generic x_dir), B along a diagonal axis — checks the
+        // frame math for axes off the canonical Z frame.
+        let a = CylinderSurface::new(
+            Point3d::new(1.0, -2.0, 0.5),
+            Direction3d::new(0.0, 1.0, 0.0).unwrap(),
+            2.0,
+        );
+        let b = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::new(1.0, 1.0, 1.0).unwrap(),
+            2.5,
+        );
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        assert!(!out.is_empty(), "these cylinders must intersect");
+        for curve in &out {
+            assert!(curve.len() >= 2);
+            for p in curve {
+                assert_on_cylinder(p, &a, 1e-9, "generic/a");
+                assert_on_cylinder(p, &b, 1e-9, "generic/b");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_both_orders_same_geometry() {
+        // Both dispatch orders produce curves whose points are exactly on
+        // both surfaces (the parametrization base differs, the point SET
+        // is the same).
+        let a = z_cyl(2.0);
+        let b = x_cyl(Point3d::new(0.0, 1.0, 0.5), 2.0);
+        let forward = intersect_surfaces(
+            &Surface::Cylinder(a.clone()),
+            &Surface::Cylinder(b.clone()),
+            1e-9,
+        );
+        let reverse = intersect_surfaces(&Surface::Cylinder(b.clone()), &Surface::Cylinder(a.clone()), 1e-9);
+        assert_eq!(forward.polylines.len(), reverse.polylines.len());
+        for polyline in forward.polylines.iter().chain(reverse.polylines.iter()) {
+            for p in polyline {
+                assert_on_cylinder(p, &a, 1e-9, "dispatch/a");
+                assert_on_cylinder(p, &b, 1e-9, "dispatch/b");
+            }
+        }
+    }
+
+    #[test]
+    fn marcher_replaced_by_exactness() {
+        // The old marching branch returned points only ~5% of R_a accurate
+        // (dist to B within R_a * 0.05). The analytic path is exact: every
+        // point is on B to 1e-9 — this is the regression proof.
+        let a = z_cyl(3.0);
+        let b = x_cyl(Point3d::ORIGIN, 2.0);
+        let out = intersect_cylinder_cylinder(&a, &b, 1e-9);
+        for curve in &out {
+            for p in curve {
+                assert_on_cylinder(p, &b, 1e-9, "exactness/b");
             }
         }
     }

@@ -950,18 +950,56 @@ fn intersect_plane_cone(plane: &Plane, cone: &ConeSurface, tol: f64) -> Vec<Inte
         .collect()
 }
 
-/// Cylinder-Cylinder intersection.
+/// Cylinder-Cylinder intersection (B1-series follow-up, 2026-09-02).
+///
+/// Analytic path via
+/// [`draper_geometry::intersection::intersect_cylinder_cylinder`]:
+/// parallel axes → 2 / 1 / 0 straight lines with the EXACT `Line`
+/// geometry attached; non-parallel axes → exact per-θ quadratic solve
+/// (points lie on both cylinders to floating-point precision, no
+/// marching): full-circle discriminant → two root-branch loops
+/// (bicylinder envelopes), arc discriminant → one closed loop per arc
+/// with the branches joining at the pinch ends, tangency → a single
+/// point, disjoint/contained → empty.
 fn intersect_cylinder_cylinder(
     c1: &CylinderSurface,
     c2: &CylinderSurface,
     tol: f64,
 ) -> Vec<IntersectionCurve> {
-    // For simplicity, use the general sampling approach
-    sample_surface_intersection(
-        &Surface::Cylinder(c1.clone()),
-        &Surface::Cylinder(c2.clone()),
-        tol,
-    )
+    let polylines = draper_geometry::intersection::intersect_cylinder_cylinder(c1, c2, tol);
+
+    // Exact Line geometry for the PARALLEL case: the intersection lines
+    // run along the shared axis direction. Non-parallel curves are space
+    // quartics (not in this kernel's analytic curve set) — polyline-only,
+    // same convention as the sphere×cylinder off-axis quartic.
+    let axes_parallel = {
+        let dot = c1.axis.x * c2.axis.x + c1.axis.y * c2.axis.y + c1.axis.z * c2.axis.z;
+        dot.abs() > 0.9999
+    };
+    let line_dir = if axes_parallel {
+        Direction3d::new(c1.axis.x, c1.axis.y, c1.axis.z)
+    } else {
+        None
+    };
+
+    polylines
+        .into_iter()
+        .filter(|pts| !pts.is_empty())
+        .map(|points| {
+            let curve = line_dir.as_ref().and_then(|dir| {
+                points.first().map(|p0| Curve3d::Line(Line::new(*p0, *dir)))
+            });
+            // A single point (tangency) has no curve geometry.
+            let curve = if points.len() >= 2 { curve } else { None };
+            IntersectionCurve {
+                points,
+                curve,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: tol,
+            }
+        })
+        .collect()
 }
 
 /// Cylinder-Sphere intersection (B1-series follow-up, 2026-09-02).
@@ -4427,6 +4465,98 @@ mod tests {
         // Disjoint: no curves.
         let far = SphereSurface::new(Point3d::new(20.0, 0.0, 0.0), 5.0);
         let empty = intersect_surfaces(&Surface::Cylinder(cyl), &Surface::Sphere(far), &tol);
+        assert!(empty.is_empty(), "disjoint pair should not intersect");
+    }
+
+    #[test]
+    fn test_cylinder_cylinder_parallel_lines_exact_geometry() {
+        // Parallel axes, lateral separation 4 < 3 + 3 → two straight lines
+        // with the EXACT Line geometry attached (direction = shared axis).
+        let c1 = CylinderSurface::new_z(3.0);
+        let c2 = CylinderSurface::new(Point3d::new(4.0, 0.0, 0.0), Direction3d::Z, 3.0);
+        let tol = ToleranceContext::new();
+
+        let curves =
+            intersect_surfaces(&Surface::Cylinder(c1.clone()), &Surface::Cylinder(c2.clone()), &tol);
+        assert_eq!(curves.len(), 2, "expected two lines, got {}", curves.len());
+        for curve in &curves {
+            assert!(curve.points.len() >= 2);
+            // Exact Line geometry along the +Z axis.
+            match &curve.curve {
+                Some(Curve3d::Line(l)) => {
+                    assert!(l.direction.z > 0.999, "line direction should be +Z");
+                }
+                other => panic!("expected exact Line, got {:?}", other),
+            }
+            // Points exactly on both cylinders.
+            for p in &curve.points {
+                let lat1 = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((lat1 - 3.0).abs() < 1e-9, "point not on cylinder 1");
+                let dx = p.x - 4.0;
+                let lat2 = (dx * dx + p.y * p.y).sqrt();
+                assert!((lat2 - 3.0).abs() < 1e-9, "point not on cylinder 2");
+            }
+        }
+
+        // Reversed argument order: same result.
+        let reverse = intersect_surfaces(&Surface::Cylinder(c2), &Surface::Cylinder(c1), &tol);
+        assert_eq!(reverse.len(), 2);
+    }
+
+    #[test]
+    fn test_cylinder_cylinder_non_parallel_analytic() {
+        // Skew cylinders (perpendicular axes, offset origins): one closed
+        // loop of exact points — 1e-9 on-surface proves the analytic
+        // quadratic path (the old grid marcher achieved only ~5% of R).
+        let c1 = CylinderSurface::new_z(2.0);
+        let c2 = CylinderSurface::new(
+            Point3d::new(0.0, 1.0, 0.5),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            2.0,
+        );
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(&Surface::Cylinder(c1), &Surface::Cylinder(c2), &tol);
+        assert_eq!(curves.len(), 1, "expected one closed loop");
+        assert!(curves[0].points.len() >= 16);
+        for p in &curves[0].points {
+            let lat1 = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((lat1 - 2.0).abs() < 1e-9, "point not on cylinder 1");
+            let dy = p.y - 1.0;
+            let dz = p.z - 0.5;
+            let lat2 = (dy * dy + dz * dz).sqrt();
+            assert!((lat2 - 2.0).abs() < 1e-9, "point not on cylinder 2");
+        }
+        // Space quartic: no analytic curve attached (polyline-only).
+        assert!(curves[0].curve.is_none(), "quartic should be polyline-only");
+    }
+
+    #[test]
+    fn test_cylinder_cylinder_tangent_and_disjoint() {
+        let tol = ToleranceContext::new();
+        let c1 = CylinderSurface::new_z(3.0);
+        // External tangency of non-parallel cylinders: B (+X through
+        // (0, 6, 0), R=3) touches A at (0, 3, 0) → a single point.
+        let c2 = CylinderSurface::new(
+            Point3d::new(0.0, 6.0, 0.0),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            3.0,
+        );
+        let curves =
+            intersect_surfaces(&Surface::Cylinder(c1.clone()), &Surface::Cylinder(c2), &tol);
+        assert_eq!(curves.len(), 1, "tangency: one curve");
+        assert_eq!(curves[0].points.len(), 1, "tangency: single point");
+        let p = curves[0].points[0];
+        assert!((p.x).abs() < 1e-4 && (p.y - 3.0).abs() < 1e-4 && (p.z).abs() < 1e-4);
+
+        // Disjoint non-parallel: empty.
+        let far = CylinderSurface::new(
+            Point3d::new(0.0, 10.0, 0.0),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            1.0,
+        );
+        let empty =
+            intersect_surfaces(&Surface::Cylinder(c1), &Surface::Cylinder(far), &tol);
         assert!(empty.is_empty(), "disjoint pair should not intersect");
     }
 
