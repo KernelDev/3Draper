@@ -792,6 +792,129 @@ pub fn intersect_plane_cone(
     polylines
 }
 
+/// Intersect two spheres analytically (B1 series follow-up, 2026-09-01).
+///
+/// The intersection of two spheres is a circle lying in the **radical
+/// plane** — the plane perpendicular to the center line. Classification:
+///
+/// - concentric (`d ≈ 0`): empty — coincident surfaces produce no curve
+///   (same convention as co-axial cylinders in
+///   [`intersect_cylinder_cylinder`]);
+/// - disjoint (`d > r1 + r2`) or contained (`d < |r1 − r2|`): empty;
+/// - external tangency (`d ≈ r1 + r2`): a single point between the
+///   centers;
+/// - internal tangency (`d ≈ |r1 − r2|`): a single point on the center
+///   line on the far side of the smaller sphere;
+/// - general position: the circle `center = c1 + a·n`,
+///   `radius = √(r1² − a²)` with `n = (c2 − c1)/d` and
+///   `a = (d² + r1² − r2²)/(2d)`.
+///
+/// Every sampled point satisfies both sphere equations exactly (up to
+/// floating-point rounding) — no marching, no Newton refinement. Spheres
+/// in this kernel are full spheres, so the circle needs no boundary
+/// clipping.
+pub fn intersect_sphere_sphere(
+    s1: &SphereSurface,
+    s2: &SphereSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+
+    let dx = s2.center.x - s1.center.x;
+    let dy = s2.center.y - s1.center.y;
+    let dz = s2.center.z - s1.center.z;
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+
+    let (r1, r2) = (s1.radius, s2.radius);
+
+    // Concentric: no radical plane, no curve.
+    if d < eps {
+        return vec![];
+    }
+
+    let sum = r1 + r2;
+    let diff = (r1 - r2).abs();
+
+    // External tangency: the single point r1/(r1+r2) of the way from c1
+    // to c2 — at distance r1 from c1 and r2 from c2.
+    if (d - sum).abs() <= eps {
+        let t = r1 / sum;
+        return vec![vec![Point3d::new(
+            s1.center.x + t * dx,
+            s1.center.y + t * dy,
+            s1.center.z + t * dz,
+        )]];
+    }
+
+    // Internal tangency: the touch point lies on the center line at
+    // distance r1 from c1 — toward c2 when the first sphere is the larger
+    // one, away from c2 when it is the smaller one.
+    if (d - diff).abs() <= eps && diff > eps {
+        let sign = if r1 >= r2 { 1.0 } else { -1.0 };
+        let t = sign * r1 / d;
+        return vec![vec![Point3d::new(
+            s1.center.x + t * dx,
+            s1.center.y + t * dy,
+            s1.center.z + t * dz,
+        )]];
+    }
+
+    // Disjoint or one sphere fully inside the other.
+    if d > sum || d < diff {
+        return vec![];
+    }
+
+    // Radical-plane circle: a = distance from c1 to the radical plane
+    // along n; h = circle radius.
+    let a = (d * d + r1 * r1 - r2 * r2) / (2.0 * d);
+    let h_sq = (r1 * r1 - a * a).max(0.0);
+    let h = h_sq.sqrt();
+    let cx = s1.center.x + (a / d) * dx;
+    let cy = s1.center.y + (a / d) * dy;
+    let cz = s1.center.z + (a / d) * dz;
+
+    // Unit normal of the radical plane = center-line direction.
+    let n = Vec3d::new(dx / d, dy / d, dz / d);
+
+    // Orthonormal frame ⊥ n: reference axis not parallel to n, u =
+    // normalize(ref − (ref·n)·n), v = n × u.
+    let (rx, ry, rz) = if n.z.abs() < 0.9 {
+        (0.0, 0.0, 1.0)
+    } else {
+        (1.0, 0.0, 0.0)
+    };
+    let ref_dot_n = rx * n.x + ry * n.y + rz * n.z;
+    let mut ux = rx - ref_dot_n * n.x;
+    let mut uy = ry - ref_dot_n * n.y;
+    let mut uz = rz - ref_dot_n * n.z;
+    let u_len = (ux * ux + uy * uy + uz * uz).sqrt();
+    if u_len < 1e-12 {
+        return vec![];
+    }
+    ux /= u_len;
+    uy /= u_len;
+    uz /= u_len;
+    let vx = n.y * uz - n.z * uy;
+    let vy = n.z * ux - n.x * uz;
+    let vz = n.x * uy - n.y * ux;
+
+    // Sample the closed circle (same density as the plane×cone closed
+    // section: 128 points, endpoint not duplicated).
+    let n_samples = 128;
+    let mut circle = Vec::with_capacity(n_samples);
+    for i in 0..n_samples {
+        let theta = 2.0 * std::f64::consts::PI * i as f64 / n_samples as f64;
+        let c = theta.cos();
+        let s = theta.sin();
+        circle.push(Point3d::new(
+            cx + h * (c * ux + s * vx),
+            cy + h * (c * uy + s * vy),
+            cz + h * (c * uz + s * vz),
+        ));
+    }
+    vec![circle]
+}
+
 /// Intersect two cylinders.
 ///
 /// Currently implements a marching-based approach for cylinders with
@@ -964,6 +1087,9 @@ pub fn intersect_surfaces(
         }
         (Surface::Cylinder(a), Surface::Cylinder(b)) => {
             intersect_cylinder_cylinder(a, b, tolerance)
+        }
+        (Surface::Sphere(s1), Surface::Sphere(s2)) => {
+            intersect_sphere_sphere(s1, s2, tolerance)
         }
         (Surface::Plane(_), Surface::Nurbs(_)) | (Surface::Nurbs(_), Surface::Plane(_)) => {
             intersect_marching_ssi(a, b, tolerance)
@@ -1867,6 +1993,237 @@ mod plane_cone_tests {
             let surface_r = (surface_p.x * surface_p.x + surface_p.y * surface_p.y).sqrt();
             let p_r = (p.x * p.x + p.y * p.y).sqrt();
             assert!((surface_r - p_r).abs() < 1e-9);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sphere_sphere_tests {
+    use super::*;
+    use crate::surface::{SphereSurface, Surface};
+
+    /// |p − center| − radius| < eps
+    fn assert_on_sphere(p: &Point3d, center: &Point3d, radius: f64, eps: f64, label: &str) {
+        let d = ((p.x - center.x).powi(2)
+            + (p.y - center.y).powi(2)
+            + (p.z - center.z).powi(2))
+        .sqrt();
+        assert!(
+            (d - radius).abs() < eps,
+            "{label}: point {:?} not on sphere (c={:?}, r={}): |p-c|={}",
+            p,
+            center,
+            radius,
+            d
+        );
+    }
+
+    #[test]
+    fn disjoint_spheres_empty() {
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(20.0, 0.0, 0.0), 5.0);
+        assert!(intersect_sphere_sphere(&s1, &s2, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn contained_spheres_empty() {
+        // Small sphere fully inside the big one.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let s2 = SphereSurface::new(Point3d::new(2.0, 1.0, 0.0), 3.0);
+        assert!(intersect_sphere_sphere(&s1, &s2, 1e-9).is_empty());
+        // Same, arguments swapped.
+        assert!(intersect_sphere_sphere(&s2, &s1, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn concentric_spheres_empty() {
+        // Same center, same radius — coincident, no curve.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        assert!(intersect_sphere_sphere(&s1, &s2, 1e-9).is_empty());
+        // Same center, different radii — nested, no curve.
+        let s3 = SphereSurface::new(Point3d::ORIGIN, 2.0);
+        assert!(intersect_sphere_sphere(&s1, &s3, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn external_tangent_single_point() {
+        // d = r1 + r2 = 8 exactly.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 3.0);
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1, "expected a single tangent point");
+        assert_eq!(out[0].len(), 1);
+        let p = out[0][0];
+        assert_on_sphere(&p, &s1.center, s1.radius, 1e-9, "tangent/s1");
+        assert_on_sphere(&p, &s2.center, s2.radius, 1e-9, "tangent/s2");
+        // On the center line, between the centers.
+        assert!((p.x - 5.0).abs() < 1e-9, "x should be 5.0, got {}", p.x);
+        assert!(p.y.abs() < 1e-9 && p.z.abs() < 1e-9);
+    }
+
+    #[test]
+    fn internal_tangent_single_point() {
+        // d = r1 − r2 = 4 exactly; the small sphere touches from inside.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let s2 = SphereSurface::new(Point3d::new(4.0, 0.0, 0.0), 6.0);
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), 1);
+        let p = out[0][0];
+        assert_on_sphere(&p, &s1.center, s1.radius, 1e-9, "internal/s1");
+        assert_on_sphere(&p, &s2.center, s2.radius, 1e-9, "internal/s2");
+        // Touch point beyond the inner sphere's center: x = r1 = 10.
+        assert!((p.x - 10.0).abs() < 1e-9, "x should be 10.0, got {}", p.x);
+
+        // Swapped argument order: tangency is symmetric — the SAME touch
+        // point (x = 10) is produced regardless of which sphere is first.
+        let out_swapped = intersect_sphere_sphere(&s2, &s1, 1e-9);
+        assert_eq!(out_swapped.len(), 1);
+        assert_eq!(out_swapped[0].len(), 1);
+        let q = out_swapped[0][0];
+        assert_on_sphere(&q, &s2.center, s2.radius, 1e-9, "internal-swapped/s2");
+        assert_on_sphere(&q, &s1.center, s1.radius, 1e-9, "internal-swapped/s1");
+        // First sphere is the smaller one (c=(4,0,0), r=6): the touch point
+        // is still the unique point at distance 6 from it and 10 from the
+        // big sphere — x = 10.
+        assert!((q.x - 10.0).abs() < 1e-9, "x should be 10.0, got {}", q.x);
+    }
+
+    #[test]
+    fn general_position_circle_on_both_spheres() {
+        // d = 6, r1 = 5, r2 = 3 → a = (36+25−9)/12 = 13/3, h = √(25−169/9).
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(6.0, 0.0, 0.0), 3.0);
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1, "expected one circle polyline");
+        let pts = &out[0];
+        assert_eq!(pts.len(), 128, "expected 128 samples, got {}", pts.len());
+
+        let a = 13.0_f64 / 3.0;
+        let h = (25.0 - a * a).sqrt();
+        for p in pts {
+            assert_on_sphere(p, &s1.center, s1.radius, 1e-9, "general/s1");
+            assert_on_sphere(p, &s2.center, s2.radius, 1e-9, "general/s2");
+            // Radius of the circle around the radical-plane center.
+            let r = ((p.x - a).powi(2) + p.y.powi(2) + p.z.powi(2)).sqrt();
+            assert!(
+                (r - h).abs() < 1e-9,
+                "circle radius should be {h}, got {r}"
+            );
+        }
+
+        // Centroid of a uniformly sampled circle = circle center.
+        let centroid = {
+            let n = pts.len() as f64;
+            let mut c = Point3d::ORIGIN;
+            for p in pts {
+                c.x += p.x / n;
+                c.y += p.y / n;
+                c.z += p.z / n;
+            }
+            c
+        };
+        assert!((centroid.x - a).abs() < 1e-9);
+        assert!(centroid.y.abs() < 1e-9 && centroid.z.abs() < 1e-9);
+    }
+
+    #[test]
+    fn equal_radii_midpoint_circle() {
+        // Equal radii → the radical plane is the perpendicular bisector:
+        // circle center at the midpoint of the centers; circle radius
+        // h = √(r² − (d/2)²) = √(16 − 9) = √7.
+        let s1 = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 4.0);
+        let s2 = SphereSurface::new(Point3d::new(0.0, 0.0, 6.0), 4.0);
+        let h = 7.0_f64.sqrt();
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1);
+        for p in &out[0] {
+            assert_on_sphere(p, &s1.center, s1.radius, 1e-9, "equal/s1");
+            assert_on_sphere(p, &s2.center, s2.radius, 1e-9, "equal/s2");
+            assert!((p.z - 3.0).abs() < 1e-9, "radical plane at z=3, got z={}", p.z);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - h).abs() < 1e-9, "circle radius {h}, got {r}");
+        }
+    }
+
+    #[test]
+    fn off_axis_centers_perpendicular_circle() {
+        // General center-line direction (not aligned with any axis).
+        let c1 = Point3d::new(1.0, 2.0, 3.0);
+        let c2 = Point3d::new(4.0, 6.0, 3.0);
+        let s1 = SphereSurface::new(c1, 4.0);
+        let s2 = SphereSurface::new(c2, 2.0);
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1);
+        let pts = &out[0];
+
+        // Center-line vector (3, 4, 0)/5. The radical plane sits at
+        // distance a = (d² + r1² − r2²)/(2d) = (25+16−4)/10 = 3.7 from c1
+        // along the line — every point has the SAME projection.
+        let dir = (3.0_f64 / 5.0, 4.0_f64 / 5.0, 0.0_f64);
+        let a_expected = 3.7_f64;
+        for p in pts {
+            assert_on_sphere(p, &c1, 4.0, 1e-9, "offaxis/s1");
+            assert_on_sphere(p, &c2, 2.0, 1e-9, "offaxis/s2");
+            let dot = (p.x - c1.x) * dir.0 + (p.y - c1.y) * dir.1 + (p.z - c1.z) * dir.2;
+            assert!(
+                (dot - a_expected).abs() < 1e-9,
+                "point not in the radical plane: projection={} (expected {})",
+                dot,
+                a_expected
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_both_orders() {
+        // The geometry dispatcher routes Sphere×Sphere (both orders) to the
+        // analytic path — point sets must match exactly.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(6.0, 0.0, 0.0), 3.0);
+        let a = intersect_surfaces(
+            &Surface::Sphere(s1.clone()),
+            &Surface::Sphere(s2.clone()),
+            1e-9,
+        );
+        let b = intersect_surfaces(
+            &Surface::Sphere(s2),
+            &Surface::Sphere(s1),
+            1e-9,
+        );
+        assert_eq!(a.polylines.len(), 1);
+        assert_eq!(b.polylines.len(), 1);
+        assert_eq!(a.polylines[0].len(), b.polylines[0].len());
+        // The two orders build mirrored frames → different parameter phase
+        // (point[i] of A is not point[i] of B), so compare as POINT SETS:
+        // every point of A has a point of B within 1e-9.
+        for pa in a.polylines[0].iter() {
+            let min_dist = b.polylines[0]
+                .iter()
+                .map(|pb| {
+                    ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2))
+                        .sqrt()
+                })
+                .fold(f64::MAX, f64::min);
+            assert!(
+                min_dist < 1e-9,
+                "point sets differ between dispatch orders (min_dist={min_dist})"
+            );
+        }
+    }
+
+    #[test]
+    fn near_tangent_yields_tiny_circle() {
+        // Just inside the external tangency band: a small-but-valid circle,
+        // every point still exactly on both spheres.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(7.9, 0.0, 0.0), 3.0);
+        let out = intersect_sphere_sphere(&s1, &s2, 1e-9);
+        assert_eq!(out.len(), 1);
+        for p in &out[0] {
+            assert_on_sphere(p, &s1.center, s1.radius, 1e-9, "near-tangent/s1");
+            assert_on_sphere(p, &s2.center, s2.radius, 1e-9, "near-tangent/s2");
         }
     }
 }

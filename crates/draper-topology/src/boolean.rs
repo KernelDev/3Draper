@@ -575,6 +575,7 @@ pub struct IntersectionCurve {
 /// - Plane-Cone: conic section
 /// - Cylinder-Cylinder: intersection curve
 /// - Cylinder-Sphere: intersection curve
+/// - Sphere-Sphere: circle in the radical plane (analytic)
 /// - General: subdivision/Newton-Raphson approach
 pub fn intersect_surfaces(
     surface_a: &Surface,
@@ -618,6 +619,9 @@ pub fn intersect_surfaces(
         }
         (Surface::Sphere(s), Surface::Cylinder(c)) => {
             intersect_cylinder_sphere(c, s, tol)
+        }
+        (Surface::Sphere(s1), Surface::Sphere(s2)) => {
+            intersect_sphere_sphere(s1, s2, tol)
         }
         _ => {
             // General case: subdivision/Newton-Raphson
@@ -987,6 +991,64 @@ fn intersect_cylinder_sphere(
         &Surface::Sphere(sphere.clone()),
         tol,
     )
+}
+
+/// Sphere-Sphere intersection (B1 series follow-up, 2026-09-01).
+///
+/// The intersection of two spheres is a circle in the **radical plane**
+/// (perpendicular to the center line) — computed analytically by
+/// [`draper_geometry::intersection::intersect_sphere_sphere`]; tangency
+/// degenerates to a single point, disjoint/contained/concentric to empty.
+/// The exact circle is attached as `curve` so downstream consumers get
+/// the analytic geometry, not just the sampled polyline.
+fn intersect_sphere_sphere(
+    s1: &SphereSurface,
+    s2: &SphereSurface,
+    tol: f64,
+) -> Vec<IntersectionCurve> {
+    let polylines = draper_geometry::intersection::intersect_sphere_sphere(s1, s2, tol);
+
+    // Recompute the radical-plane circle parameters for the exact curve
+    // (mirrors the math in the geometry function; kept in sync by tests).
+    let dx = s2.center.x - s1.center.x;
+    let dy = s2.center.y - s1.center.y;
+    let dz = s2.center.z - s1.center.z;
+    let d = (dx * dx + dy * dy + dz * dz).sqrt();
+    let curve = if d > tol.max(1e-9) {
+        let sum = s1.radius + s2.radius;
+        let diff = (s1.radius - s2.radius).abs();
+        let eps = tol.max(1e-9);
+        let general = (d - sum).abs() > eps && (d - diff).abs() > eps && d <= sum && d >= diff;
+        if general {
+            let a = (d * d + s1.radius * s1.radius - s2.radius * s2.radius) / (2.0 * d);
+            let h_sq = (s1.radius * s1.radius - a * a).max(0.0);
+            let h = h_sq.sqrt();
+            let center = Point3d::new(
+                s1.center.x + (a / d) * dx,
+                s1.center.y + (a / d) * dy,
+                s1.center.z + (a / d) * dz,
+            );
+            let normal = Direction3d::new(dx / d, dy / d, dz / d)
+                .unwrap_or(Direction3d::Z);
+            Some(Circle::new(center, normal, h))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    polylines
+        .into_iter()
+        .filter(|pts| pts.len() >= 1)
+        .map(|points| IntersectionCurve {
+            points,
+            curve: curve.clone().map(Curve3d::Circle),
+            pcurve_a: None,
+            pcurve_b: None,
+            tolerance: tol,
+        })
+        .collect()
 }
 
 /// General surface-surface intersection using subdivision/Newton-Raphson.
@@ -4159,6 +4221,67 @@ mod tests {
         let min_x = pts.iter().map(|p| p.x).fold(f64::MAX, f64::min);
         let max_x = pts.iter().map(|p| p.x).fold(f64::MIN, f64::max);
         assert!(max_x - min_x > 1.0, "Ellipse should have spread");
+    }
+
+    // ---- Sphere × Sphere analytic intersection (B1 series follow-up) ----
+
+    #[test]
+    fn test_sphere_sphere_dispatch_analytic() {
+        // Two overlapping spheres → radical-plane circle, exact points on
+        // both surfaces, and the analytic Circle attached as `curve`.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(6.0, 0.0, 0.0), 3.0);
+        let tol = ToleranceContext::new();
+
+        let curves =
+            intersect_surfaces(&Surface::Sphere(s1.clone()), &Surface::Sphere(s2.clone()), &tol);
+        assert_eq!(curves.len(), 1, "Expected 1 circle, got {}", curves.len());
+        let pts = &curves[0].points;
+        assert!(pts.len() >= 64, "Expected dense sampling, got {}", pts.len());
+        for p in pts {
+            let d1 = ((p.x).powi(2) + (p.y).powi(2) + (p.z).powi(2)).sqrt();
+            assert!((d1 - 5.0).abs() < 1e-9, "point not on sphere 1: r={}", d1);
+            let d2 = ((p.x - 6.0).powi(2) + (p.y).powi(2) + (p.z).powi(2)).sqrt();
+            assert!((d2 - 3.0).abs() < 1e-9, "point not on sphere 2: r={}", d2);
+        }
+        // The exact curve: circle of radius h = √(25 − (13/3)²) centered
+        // at (13/3, 0, 0) with normal along the center line (+X).
+        match &curves[0].curve {
+            Some(Curve3d::Circle(c)) => {
+                assert!((c.center.x - 13.0 / 3.0).abs() < 1e-9, "circle center x");
+                assert!(c.center.y.abs() < 1e-9 && c.center.z.abs() < 1e-9);
+                let h = (25.0 - (13.0_f64 / 3.0).powi(2)).sqrt();
+                assert!((c.radius - h).abs() < 1e-9, "circle radius");
+            }
+            other => panic!("expected an exact Circle curve, got {:?}", other),
+        }
+
+        // Reversed order: same geometry, same point count.
+        let reverse = intersect_surfaces(&Surface::Sphere(s2), &Surface::Sphere(s1), &tol);
+        assert_eq!(reverse.len(), 1);
+        assert_eq!(reverse[0].points.len(), pts.len());
+    }
+
+    #[test]
+    fn test_sphere_sphere_tangent_and_disjoint() {
+        let tol = ToleranceContext::new();
+        // External tangency (d = r1 + r2): a single point on the center line.
+        let s1 = SphereSurface::new(Point3d::ORIGIN, 5.0);
+        let s2 = SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 3.0);
+        let curves = intersect_surfaces(&Surface::Sphere(s1), &Surface::Sphere(s2), &tol);
+        assert_eq!(curves.len(), 1, "tangent pair should yield 1 curve");
+        assert_eq!(curves[0].points.len(), 1, "tangent point only");
+        let p = curves[0].points[0];
+        assert!((p.x - 5.0).abs() < 1e-6 && p.y.abs() < 1e-6 && p.z.abs() < 1e-6);
+
+        // Disjoint: no curves.
+        let s3 = SphereSurface::new(Point3d::new(20.0, 0.0, 0.0), 3.0);
+        let empty = intersect_surfaces(
+            &Surface::Sphere(SphereSurface::new(Point3d::ORIGIN, 5.0)),
+            &Surface::Sphere(s3),
+            &tol,
+        );
+        assert!(empty.is_empty(), "disjoint spheres should not intersect");
     }
 
     // ── Property-based tests (proptest) ──
