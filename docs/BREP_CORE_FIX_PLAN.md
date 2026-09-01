@@ -13,7 +13,7 @@
 | **A. Стабилизация** | ✅ DONE | `979b7bb` | `cargo test --workspace`: 0 failed; 879 LOC dead code удалено из mesh_boolean.rs |
 | **B. Boolean Fixes** | ✅ DONE | `bd9885e` + B3 | B1 Cylinder×Cylinder parallel: ✅; B1 Plane×Cylinder tangent: ✅; B2 Möller ray-triangle: ✅; B3 split_general_face: ✅ (UV-projection split для неплоских граней) |
 | **C. Topology Healing** | ✅ DONE | `5b37e72` + C3+C4 | C1 stitch_collinear_edges: ✅; C2 fix_normal_orientation: ✅; C3 merge_faces для NURBS/Sphere/Cone/Torus: ✅; C4 add_coedge в правильную позицию: ✅ |
-| D. Triangulation | ✅ DONE | — | D1: pre_populate_for_solid уже mandatory в `triangulate_solid_sequential:1263`. D2: deprecation warning в `weld_boundary_edge_vertices_aggressive` (логирует если welded > 0.5% vertices). D3: warning в `fill_boundary_gaps` open-chain fallback (логирует если > 50 triangles). |
+| D. Triangulation | ✅ DONE | — | D1: pre_populate_for_solid уже mandatory в `triangulate_solid_sequential:1263`. D2: deprecation warning в `weld_boundary_edge_vertices_aggressive`. **D2/D3/D4 final (2026-09-01, после C5):** D3 open-chain ветка fill_boundary_gaps УДАЛЕНА (0 срабатываний на регрессии из 32 файлов); D4 3-tier fallback УДАЛЁН + root cause исправлен (scale-relative cone apex threshold в is_degenerate_uv + фан-guard ≥3 точек — Vulcan #40443/#40583 больше не падают на fallback); D2 aggressive weld ОСТАВЛЕН по данным измерений (удаление: transmission 6→14%, Vulcan 1.5→4.5%) — инструментирован + strict-гейт; A3 `--features strict` реализован (panic на PrimaryTriangulationFailed и aggressive-weld). |
 | E. STEP Importer | ✅ DONE | — | E1: 33 теста созданы. E2: прогнаны все NIST + brick + as1 + drill_top. Реальные цифры boundary_pct: nist_cylinder=0.00%, nist_block_with_hole=3.10%, drill_top=41.23% (helical flutes), nist_sphere=31.36% (sphere pole), nist_cone=18.22% (cone apex). Все known issues задокументированы в KNOWN_ISSUES таблице с relaxed threshold. |
 | F. Documentation | ✅ DONE | — | `BREPCAD_DEEP_AUDIT.md` переписан с реальными цифрами после всех исправлений. Честный аудит: «до vs после», известные limitations, метрики успеха. |
 | **G. Geometry polish** | ✅ DONE | `6695706` | G1 RuledSurface::project_point: ✅; G2 OffsetSurface::project_point: ✅; G3 Surface::transform uniform scale radii: ✅ |
@@ -31,7 +31,7 @@
 
 **A2.** ✅ Добавлен `triangulate_solid_with_report` (в `crates/draper-mesh/src/triangulate.rs`) — возвращает `TriangulationResult { mesh, report }` с `TriangulationReport` (boundary_edge_count, boundary_pct, is_watertight, is_acceptable()). Старый `triangulate_solid` сохранён как обёртка для обратной совместимости. Caller'ы в UI теперь могут показать пользователю предупреждение вместо тихого логирования в `log::error!`.
 
-**A3.** ⏳ `--features strict` отложен до Этапа D (после удаления fallback'ов — иначе будет слишком много false-positive паник).
+**A3.** ✅ DONE (2026-09-01, Этап D): `--features strict` в draper-mesh — `PrimaryTriangulationFailed` (D4) и вызов `weld_boundary_edge_vertices_aggressive` (D2) превращаются в panic. 4 юнит-теста с синтетически вырожденной геометрией исключены через `#[cfg(not(feature = "strict"))]`; strict-прогон 251 passed. Расширение strict на boolean/fillet/extrude — future work (см. строку ниже).
 
 **A4.** ✅ Удалено 879 строк dead code из `crates/draper-mesh/src/mesh_boolean.rs`:
 - `split_edges_by_planes_and_edges` (186-260)

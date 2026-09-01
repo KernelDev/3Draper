@@ -287,6 +287,31 @@ git clean -fd
    synth_cylinder). Остался trade-off №3: as1_rod NURBS CDT
    strip-fallback (4.96%).
 
+4b. ~~3-tier fallback в triangulate_face_impl~~ — УДАЛЁН 2026-09-01
+   (Этап D / D4). Корневая причина срабатываний (Vulcan #40443/#40583 —
+   крошечные конусы R=0.01, чьё основное кольцо ошибочно помечалось
+   «apex-degenerate» из-за LOD-tolerance в is_degenerate_uv) исправлена:
+   scale-relative порог (2% от radius конуса, выровнен с Revolution-веткой)
+   + guard «фан невозможен» (<3 невырожденных точек → CDT вместо
+   1-vertex/0-triangle фантома). Фейс с падающей primary-триангуляцией
+   теперь логирует `PrimaryTriangulationFailed` и возвращает пустой меш
+   (в strict-режиме — паника); единственный «легитимный» случай в
+   регрессии — cube_with_void #55 (Plane с zero-length LINE-петлёй —
+   вырожденная STEP-геометрия, пустой результат корректен).
+   С open-chain веткой fill_boundary_gaps (D3): удалена — 0 срабатываний
+   на всей регрессии. D2 (weld_boundary_edge_vertices_aggressive):
+   измеренное удаление дало бы transmission 6→14%, Vulcan 1.5→4.5% —
+   ОСТАВЛЕН с инструментацией + strict-гейтом до фиксации NURBS CDT
+   root causes.
+
+4c. **`--features strict` (draper-mesh, A3 Этап D)** — strict-режим для
+   CI-валидных-геометрий: `PrimaryTriangulationFailed` и вызов
+   aggressive-weld превращаются в панику. 4 юнит-теста с синтетически
+   вырожденной геометрией исключены через `#[cfg(not(feature = "strict"))]`.
+   НЕ для production: industrial-файлы легитимно используют aggressive
+   weld. Прогон: `cargo test -p draper-mesh --features strict --lib` —
+   251 passed.
+
 5. **`fix_self_intersections_heal`** — conservative real implementation (удаляет face с меньшим числом edges), но не rebuilds topology. Полная реализация требует trim + stitch.
 
 6. **RuledSurface::project_point** — approximate (sample curve1 + segment projection). Не точный closest-point-on-curve.

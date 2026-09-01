@@ -20,6 +20,12 @@ use draper_step::{extract_solids, parse_step_file};
 use std::time::Instant;
 
 fn main() {
+    // Honor RUST_LOG (e.g. `RUST_LOG=draper_mesh=info`) so the bench can
+    // surface mesh-pipeline instrumentation (fallback tiers, weld passes,
+    // gap-filling) while benchmarking. Default: warnings only.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
+        .format_timestamp(None)
+        .init();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let path = args
         .iter()

@@ -760,3 +760,124 @@ boundary 0/612 = 0.00%, mesh watertight.
   list-unwrap (4 файла, +622/−9: converter.rs, seam_junction_regression.rs
   (новый, 5 тестов), boundary_edges_dump.rs (новый example), KNOWN_ISSUES
   step_regression.rs)
+
+# Этап D cleanup — D2/D3/D4 + A3 strict (2026-09-01)
+
+Контекст: C5 Stage 1–5 + follow-ups #1/#2 завершены и запушены
+(d14af6e, e425018, 913d7ac). По BREP_CORE_FIX_PLAN Этап D стал
+разблокирован: «удалить fallback'и ПОСЛЕ C1-C5 — primary
+triangulation должна возвращать ненулевой результат для валидных
+solids. Fallback'и маскируют bugs». Подход — data-driven: сначала
+инструментация реальных срабатываний, потом решение по каждому пункту.
+
+## Инструментация (base + env_logger в transmission_bench)
+
+- `transmission_bench` теперь вызывает `env_logger::Builder::from_env`
+  (default warn) — RUST_LOG=draper_mesh=info включает mesh-логи в бенче
+- Baseline-прогон всех 32 файлов test/ (скрипт
+  scripts/run_bench_suite.sh в sandbox, не в репо):
+  - **FallbackSurface**: Vulcan 6 (2 Cone-фейса × 3 строки),
+    cube_with_void 1 — БОЛЬШЕ НИГДЕ
+  - **weld_boundary_edge_vertices_aggressive**: 16 файлов
+    (transmission 26, Zentralstaender 18, Vulcan 13...)
+  - **open-chain**: 0 срабатываний ВЕЗДЕ (fill_boundary_gaps вообще
+    не вызывается из main-пайплайна — только mesh_boolean + тесты)
+
+## D4 — root cause + удаление 3-tier fallback
+
+- Диагностика (новый example `fallback_face_probe.rs`): Vulcan face
+  #40443 (solid 7) = Cone R=0.01, 45°, 3 coedge (Circle 79° + 2 Line
+  к апексу). Первичная триангуляция падала в
+  `triangulate_surface_consistent`: **«100% boundary points degenerate
+  (21/21) — fan from apex»** → 0 невырожденных точек → fan выдавал
+  1 vertex / 0 triangles → ApproximatePlane маскировал дыру
+- Причина: `is_degenerate_uv` Cone-ветка брала
+  `apex_threshold = (cone.radius * 0.02).max(tol)`, где tol =
+  params.max_deviation = **0.01 = LOD-параметр** ≥ радиус крошечного
+  конуса → ВСЁ кольцо основания помечено «апекс-вырожденное»
+- **Фикс 1**: scale-relative порог `(cone.radius * 0.02).max(1e-9)`
+  (выровнен с Revolution-веткой, у которой floor 1e-4); параметр `tol`
+  УДАЛЁН из сигнатуры (после фикса ни одна ветка его не использовала;
+  sphere — POLE_EPS, generic — tight 1e-6)
+- **Фикс 2**: фан-путь в triangulate_surface_consistent больше не
+  возвращает 1-vertex/0-triangle фантом при <3 невырожденных точках —
+  fall-through к обычному CDT + warn
+- **Удаление**: 3-tier блок в triangulate_face_impl (ApproximatePlane →
+  BoundaryFan → SurfacePointSample) заменён на единый warn
+  `PrimaryTriangulationFailed` + empty mesh. Мёртвый код удалён:
+  fallback_approximate_plane, fallback_surface_point_sample,
+  collect_face_boundary_no_surface, FallbackStats. Сохранён
+  fallback_boundary_fan (легальный потребитель — 3D planar path при
+  коллинеарных точках)
+- Оставшиеся срабатывания PrimaryTriangulationFailed: ТОЛЬКО
+  cube_with_void #55 — Plane с outer wire из ОДНОЙ zero-length LINE
+  (first == last) — вырожденная STEP-геометрия, пустой меш корректен
+- Регрессия fix покрытие: test_is_degenerate_uv_tiny_cone_not_all_
+  degenerate (R=0.01, базовое кольцо НЕ вырождено при v=0/−0.005,
+  апекс вырожден при v=−0.01) + test_fully_degenerate_boundary_falls_
+  through_to_cdt (полностью коллапсированная граница ≠ фантом)
+
+## D3 — open-chain ветка удалена
+
+fill_boundary_gaps: entire «Second pass: Open-chain gap filling»
+(~5.9KB, топология-нарушающий snap к ближайшей interior-вершине)
+удалён. 0 срабатываний на регрессии; вызыватели (mesh_boolean,
+unit-тесты) используют только closed-loop заполнение. Юнит-тесты
+fill_boundary_gaps не тронуты (closed-loop) — все зелёные.
+
+## D2 — aggressive weld: измеренное ОСТАВЛЕНИЕ
+
+Эксперимент (вызов закомментирован, release, те же файлы):
+
+| Файл | С aggressive weld | Без |
+|------|-------------------|-----|
+| transmission_top | 5.84–6.07% | **14.42%** (порог 8 — FAIL) |
+| 8500-02_Vulcan | 1.48–1.55% | **4.45%** |
+
+Вывод: слой ещё закрывает РЕАЛЬНЫЕ щели (transmission: 453+250
+слитых пар, Vulcan #0: 439) в зонах NURBS CDT-мисматчей — отдельной
+более глубокой проблемы (as1_rod trade-off №3). Удаление = регрессия
+2-3×. Решение: оставить, документировать (комментарий D2 status в
+коде + MIGRATION_GUIDE 4b), strict-гейт (panic при включении).
+
+## A3 — `--features strict` (draper-mesh)
+
+- strict: panic на PrimaryTriangulationFailed и на вызов
+  weld_boundary_edge_vertices_aggressive
+- 4 юнит-теста с синтетически вырожденной геометрией исключены
+  `#[cfg(not(feature = "strict"))]` (plane без boundary, mixed solid
+  со sliver-фейсами, benchmark-тест с >1% boundary после
+  conservative weld) — с поясняющими NOTE(strict) комментариями
+- strict-прогон: 251 passed / 0 failed; обычный: 255 (253 + 2 новых)
+
+## Результаты регрессии (release, 32 файла, after vs baseline)
+
+- **FallbackSurface / PrimaryTriangulationFailed на валидных файлах: 0**
+  (было 7 срабатываний на 2 файлах)
+- Улучшения: as1_plate 7.46→5.22, transmission 6.25→5.84,
+  Vulcan 1.63→1.48 (solid 4: 7.41→3.72), as1 assembly 2.57→2.38
+- Сдвиги в пределах порогов: as1_rod 3.20→4.96 (порог 8; NURBS CDT
+  документирован, причина — сдвиг Steiner-точек у малых конусов),
+  drill 2.07→2.96, compressor 5.37→6.32 (порог 10), Spit-Fire
+  2.74→2.89; все прочие 26 файлов — идентичны/стабильны
+- Watertight-файлы: 21/32 на 0.00% — без изменений
+
+## Верификация
+
+- draper-mesh: 255 lib (253 + 2 новых) + 309 total --tests ✅;
+  strict --features strict --lib: 251 ✅
+- draper-topology: 181 ✅; draper-core: 74 ✅; draper-step (release):
+  171 ✅ (126 lib + integration); draper-json 13 ✅; draper-ffi 10 ✅
+- cargo check: draper-viewer / draper-wasm / draper-json / draper-ffi /
+  draper-subd / draper-core — 0 errors
+- draper-testing STEP-регрессия не запускалась (debug-линковка >9 мин
+  на 9.9GB rootfs); bench покрывает тот же путь
+  triangulate_solid_with_report по всем 32 файлам
+
+## Артефакты
+
+- `crates/draper-step/examples/fallback_face_probe.rs` — дамп структуры
+  конкретного фейса (surface params, coedges, cache pts, UV spans,
+  изолированный прогон triangulate_face_with_cache) — инструмент
+  диагностики «почему фейс упал на fallback»
+- `transmission_bench` — env_logger init (RUST_LOG-совместимость)

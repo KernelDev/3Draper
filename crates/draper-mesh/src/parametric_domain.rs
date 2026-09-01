@@ -2104,13 +2104,21 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
 /// # Arguments
 /// * `surface` — the parametric surface
 /// * `u`, `v` — parametric coordinates
-/// * `tol` — geometric tolerance for zero-comparisons
+///
+/// # Scale-relative thresholds (D4 fix, 2026-09-01)
+/// Degeneracy detection is purely scale-relative to the SURFACE'S OWN
+/// geometry (cone: 2% of base radius; revolution: 2% of max profile
+/// radius; sphere: fixed parameter-space POLE_EPS) — no caller
+/// tolerance. The former `tol` parameter received the caller's LOD
+/// `max_deviation`, which for tiny features (e.g. a 0.01-radius blend
+/// cone) exceeded the feature's own radius and mis-flagged the ENTIRE
+/// boundary as apex-degenerate.
 ///
 /// # Returns
 /// `true` if the (u, v) point is near a degenerate region where
 /// interior Steiner points would create phantom vertices that break
 /// watertightness.
-pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64, tol: f64) -> bool {
+pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64) -> bool {
     // Fast analytical checks for known surface types — these avoid
     // the expensive numerical derivative computation in is_degenerate_at().
 
@@ -2133,10 +2141,19 @@ pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64, tol: f64) -> b
             } else {
                 (cone.radius + v * cone.half_angle.tan()).max(0.0)
             };
-            // The threshold is relative to the base radius — points near
-            // the apex where the radius is < 1% of base radius or
-            // < absolute tol are degenerate.
-            let apex_threshold = (cone.radius * 0.02).max(tol);
+            // D4 root-cause fix (2026-09-01): the threshold must be scaled to
+            // the CONE's own geometry, NOT the caller's global tolerance
+            // (which is the LOD max_deviation, e.g. 0.01). With the old
+            // `.max(tol)` a legitimately tiny cone face — e.g. a 0.01-radius
+            // blend cone on Vulcan (8500-02_Vulcan.STEP faces #40443/#40583)
+            // — had its ENTIRE base ring flagged as "apex-degenerate"
+            // (100% degenerate boundary) and the fan-from-apex path then
+            // produced 1 vertex / 0 triangles, silently dropping the face
+            // onto the 3-tier fallback. Align with the Revolution branch
+            // pattern: scale-relative threshold + tiny absolute floor that
+            // only catches the true apex singularity (r == 0 exactly after
+            // the .max(0.0) clamp).
+            let apex_threshold = (cone.radius * 0.02).max(1e-9);
             r < apex_threshold
         }
         Surface::Revolution(rev) => {
@@ -2351,7 +2368,7 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
         // Unified degenerate-UV filter (2.7.2): skip Steiner points
         // near the cone apex where all u values collapse to one 3D point.
         // For cylinders this is a no-op (no degeneracy).
-        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+        if is_degenerate_uv(surface, pt.u, pt.v) {
             continue;
         }
 
@@ -2723,7 +2740,7 @@ pub(crate) fn generate_torus_steiner_grid(
         // Unified degenerate-UV filter (2.7.2): for torus this is
         // typically a no-op (no degeneracy), but catches degenerate
         // NURBS or unusual cases.
-        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+        if is_degenerate_uv(surface, pt.u, pt.v) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -2962,7 +2979,7 @@ pub(crate) fn generate_revolution_steiner_grid(
     let mut filtered: Vec<Point2d> = Vec::with_capacity(grid.len());
     for pt in &grid {
         // Unified degenerate-UV filter (2.7.2).
-        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+        if is_degenerate_uv(surface, pt.u, pt.v) {
             continue; // Degenerate-axis point — skip.
         }
 
@@ -3178,7 +3195,7 @@ pub(crate) fn generate_extrusion_steiner_grid(
         }
         // Unified degenerate-UV filter (2.7.2): for extrusion this is
         // typically a no-op (no degeneracy), but catches unusual profiles.
-        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+        if is_degenerate_uv(surface, pt.u, pt.v) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -3485,7 +3502,7 @@ pub(crate) fn generate_nurbs_steiner_grid(
         }
         // Unified degenerate-UV filter (2.7.2): catches NURBS with
         // collapsed boundary rows (degenerate edges).
-        if is_degenerate_uv(surface, pt.u, pt.v, params.max_deviation.max(1e-5)) {
+        if is_degenerate_uv(surface, pt.u, pt.v) {
             continue;
         }
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
@@ -4568,10 +4585,9 @@ pub fn triangulate_surface_consistent(
     // degenerate boundary points (e.g., a cone side that barely
     // touches the apex) are handled correctly by earcutr with the
     // degenerate-UV filter in the Steiner grid generators.
-    let degenerate_tol = params.max_deviation.max(1e-5);
     let n_boundary = outer_uv.len();
     let n_degenerate_boundary = outer_uv.iter()
-        .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, degenerate_tol))
+        .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
         .count();
     let degenerate_fraction = if n_boundary > 0 {
         n_degenerate_boundary as f64 / n_boundary as f64
@@ -4580,59 +4596,73 @@ pub fn triangulate_surface_consistent(
     };
 
     if degenerate_fraction > 0.5 && n_boundary >= 3 {
-        log::info!(
-            "triangulate_surface_consistent: {:.0}% boundary points degenerate ({}/{}) — using fan triangulation from apex",
-            degenerate_fraction * 100.0, n_degenerate_boundary, n_boundary
-        );
-
-        // Find the degenerate apex/pole point — the 3D point that most
-        // boundary points converge to. We evaluate the surface at the
-        // average UV of the degenerate boundary points.
-        let (avg_u, avg_v) = outer_uv.iter()
-            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, degenerate_tol))
-            .fold((0.0_f64, 0.0_f64), |(au, av), pt| (au + pt.u, av + pt.v));
-        let n_deg = n_degenerate_boundary.max(1);
-        let apex_uv = Point2d::new(avg_u / n_deg as f64, avg_v / n_deg as f64);
-        let apex_3d = surface.point_at(apex_uv.u, apex_uv.v);
-
-        let mut mesh = TriangleMesh::new();
-
-        // Add apex as vertex 0
-        let apex_idx = mesh.add_vertex(apex_3d);
-        let apex_normal = {
-            let n = surface.normal_at(apex_uv.u, apex_uv.v);
-            if n.x.is_finite() && n.y.is_finite() && n.z.is_finite() {
-                [n.x, n.y, n.z]
-            } else {
-                [0.0, 0.0, 1.0] // fallback
-            }
-        };
-        mesh.add_vertex_normal(apex_idx, apex_normal);
-
         // Add non-degenerate boundary points
         let non_degenerate_3d: Vec<Point3d> = outer_uv.iter()
             .zip(boundary_points_3d.iter())
-            .filter(|(uv, _)| !is_degenerate_uv(&surface, uv.u, uv.v, degenerate_tol))
+            .filter(|(uv, _)| !is_degenerate_uv(&surface, uv.u, uv.v))
             .map(|(_, p3d)| *p3d)
             .collect();
 
-        for p in &non_degenerate_3d {
-            let idx = mesh.add_vertex(*p);
-            mesh.add_vertex_normal(idx, apex_normal); // approximate
-        }
+        // D4 guard (2026-09-01): the fan needs at least 3 non-degenerate ring
+        // points. With fewer (a fully-degenerate collapsed boundary), the old
+        // code returned a 1-vertex / 0-triangle mesh — an invisible hole that
+        // downstream code cannot distinguish from a bug. Fall through to the
+        // normal CDT path instead so the face keeps a chance at a real
+        // triangulation, and failures remain visible in the boundary report.
+        if non_degenerate_3d.len() >= 3 {
+            log::info!(
+                "triangulate_surface_consistent: {:.0}% boundary points degenerate ({}/{}) — using fan triangulation from apex",
+                degenerate_fraction * 100.0, n_degenerate_boundary, n_boundary
+            );
 
-        // Fan triangulation from apex
-        let n = non_degenerate_3d.len();
-        for i in 0..n {
-            let i_next = (i + 1) % n;
-            if forward {
-                mesh.add_triangle(0, (i + 1) as u32, (i_next + 1) as u32);
-            } else {
-                mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
+            // Find the degenerate apex/pole point — the 3D point that most
+            // boundary points converge to. We evaluate the surface at the
+            // average UV of the degenerate boundary points.
+            let (avg_u, avg_v) = outer_uv.iter()
+                .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
+                .fold((0.0_f64, 0.0_f64), |(au, av), pt| (au + pt.u, av + pt.v));
+            let n_deg = n_degenerate_boundary.max(1);
+            let apex_uv = Point2d::new(avg_u / n_deg as f64, avg_v / n_deg as f64);
+            let apex_3d = surface.point_at(apex_uv.u, apex_uv.v);
+
+            let mut mesh = TriangleMesh::new();
+
+            // Add apex as vertex 0
+            let apex_idx = mesh.add_vertex(apex_3d);
+            let apex_normal = {
+                let n = surface.normal_at(apex_uv.u, apex_uv.v);
+                if n.x.is_finite() && n.y.is_finite() && n.z.is_finite() {
+                    [n.x, n.y, n.z]
+                } else {
+                    [0.0, 0.0, 1.0] // fallback
+                }
+            };
+            mesh.add_vertex_normal(apex_idx, apex_normal);
+
+            for p in &non_degenerate_3d {
+                let idx = mesh.add_vertex(*p);
+                mesh.add_vertex_normal(idx, apex_normal); // approximate
             }
-        }
 
-        return mesh;
+            // Fan triangulation from apex
+            let n = non_degenerate_3d.len();
+            for i in 0..n {
+                let i_next = (i + 1) % n;
+                if forward {
+                    mesh.add_triangle(0, (i + 1) as u32, (i_next + 1) as u32);
+                } else {
+                    mesh.add_triangle(0, (i_next + 1) as u32, (i + 1) as u32);
+                }
+            }
+
+            return mesh;
+        } else {
+            log::warn!(
+                "triangulate_surface_consistent: {:.0}% boundary points degenerate ({}/{}) but only {} non-degenerate ring points — fan impossible, falling through to CDT",
+                degenerate_fraction * 100.0, n_degenerate_boundary, n_boundary,
+                non_degenerate_3d.len()
+            );
+        }
     }
 
     let mut domain = ParametricDomain::new(
@@ -8065,19 +8095,19 @@ mod tests {
         let surface = Surface::Sphere(sphere);
 
         // North pole (v ≈ 0) — degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, 0.01, 0.05),
+        assert!(is_degenerate_uv(&surface, 0.0, 0.01),
                 "v=0.01 near north pole should be degenerate");
 
         // South pole (v ≈ π) — degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, PI - 0.01, 0.05),
+        assert!(is_degenerate_uv(&surface, 0.0, PI - 0.01),
                 "v=π-0.01 near south pole should be degenerate");
 
         // Equator (v = π/2) — NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, PI / 2.0, 0.05),
+        assert!(!is_degenerate_uv(&surface, 0.0, PI / 2.0),
                 "v=π/2 at equator should NOT be degenerate");
 
         // Mid-latitude — NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 1.0, 1.0, 0.05),
+        assert!(!is_degenerate_uv(&surface, 1.0, 1.0),
                 "v=1.0 mid-latitude should NOT be degenerate");
     }
 
@@ -8091,19 +8121,86 @@ mod tests {
         let surface = Surface::Cone(cone);
 
         // At v=0 (base) — NOT degenerate (full radius)
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
                 "v=0 at cone base should NOT be degenerate");
 
         // At v=-8.0 — close to apex but not yet degenerate
         // radius at v=-8: 5 + (-8)*tan(30°) = 5 - 4.62 = 0.38
-        // threshold = max(5 * 0.02, 0.05) = 0.1 → 0.38 > 0.1 → not degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, -8.0, 0.05),
+        // threshold = max(5 * 0.02, 1e-9) = 0.1 → 0.38 > 0.1 → not degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, -8.0),
                 "v=-8.0 should NOT be degenerate yet");
 
         // At v=-8.66 — near apex (radius ≈ 0)
         // radius at v=-8.66: 5 + (-8.66)*0.577 ≈ 5 - 5.0 = 0.0 → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, -8.66, 0.05),
+        assert!(is_degenerate_uv(&surface, 0.0, -8.66),
                 "v=-8.66 near apex should be degenerate");
+    }
+
+    #[test]
+    fn test_is_degenerate_uv_tiny_cone_not_all_degenerate() {
+        use draper_geometry::{ConeSurface, Surface};
+
+        // D4 regression (Vulcan faces #40443/#40583): a 0.01-radius cone —
+        // the scale of real blend/needle cones on industrial parts. The
+        // degeneracy check must be scale-relative: the base ring at FULL
+        // radius is NOT apex-degenerate even though the caller's LOD
+        // deviation (formerly the `tol` parameter) equals the base radius.
+        // Old behavior: threshold = max(0.02·R, tol=0.01) = 0.01 ≥ R → the
+        // WHOLE boundary was flagged → fan-from-apex → 1 vertex / 0
+        // triangles → face silently dropped onto the (now removed) 3-tier
+        // fallback.
+        let cone = ConeSurface::new_z(0.01, PI / 4.0); // half_angle 45°, R = 0.01
+        let surface = Surface::Cone(cone);
+
+        // v=0 → r = 0.01 = full base radius → NOT degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
+                "v=0 at tiny-cone base (r = R) must NOT be flagged degenerate");
+
+        // v=-0.005 → r = 0.01 - 0.005·tan(45°) = 0.005 = 50% of R → NOT degenerate
+        assert!(!is_degenerate_uv(&surface, 0.0, -0.005),
+                "v=-0.005 (r = 50% of R) must NOT be flagged degenerate");
+
+        // v=-0.01 → r = 0 (apex) → degenerate
+        assert!(is_degenerate_uv(&surface, 0.0, -0.01),
+                "v=-0.01 at tiny-cone apex (r = 0) must be flagged degenerate");
+    }
+
+    #[test]
+    fn test_fully_degenerate_boundary_falls_through_to_cdt() {
+        use draper_geometry::{ConeSurface, Surface, Point3d};
+
+        // D4 fan-guard regression: a boundary whose EVERY point is at the
+        // apex singularity (0 non-degenerate ring points) must NOT return
+        // the old "1 vertex / 0 triangles" phantom mesh — it falls through
+        // to the normal CDT path (whatever that yields for such collapsed
+        // input, it must never be the invisible 1-vertex-hole signature).
+        let cone = ConeSurface::new_z(5.0, PI / 6.0);
+        let surface = Surface::Cone(cone);
+        // All points exactly at the apex: v = -5/tan(30°) ≈ -8.660254
+        let apex_v = -5.0_f64 / (PI / 6.0).tan();
+        let apex = surface.point_at(0.0, apex_v);
+        let boundary_3d = vec![apex, apex, apex, apex];
+        let boundary_uvs = vec![
+            Point2d::new(0.0, apex_v),
+            Point2d::new(PI / 2.0, apex_v),
+            Point2d::new(PI, apex_v),
+            Point2d::new(3.0 * PI / 2.0, apex_v),
+        ];
+        let params = make_test_params(0.01);
+
+        let mesh = triangulate_surface_consistent(
+            &surface, &boundary_3d, &boundary_uvs, &[], &[], true, &params,
+        );
+
+        let is_phantom_hole =
+            mesh.vertices.len() == 1 && mesh.triangles.is_empty();
+        assert!(
+            !is_phantom_hole,
+            "fully-degenerate boundary must not produce the 1-vertex/0-triangle \
+             phantom mesh (got {} vertices / {} triangles)",
+            mesh.vertices.len(),
+            mesh.triangles.len()
+        );
     }
 
     #[test]
@@ -8114,9 +8211,9 @@ mod tests {
         let surface = Surface::Cylinder(cyl);
 
         // Cylinder has no degeneracy anywhere
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
                 "Cylinder should have no degeneracy");
-        assert!(!is_degenerate_uv(&surface, PI, 2.5, 0.05),
+        assert!(!is_degenerate_uv(&surface, PI, 2.5),
                 "Cylinder should have no degeneracy");
     }
 
@@ -8147,7 +8244,7 @@ mod tests {
         // All Steiner points should be far from the apex
         for pt in &pts {
             // Check that the point is not in the degenerate zone
-            assert!(!is_degenerate_uv(&surface, pt.u, pt.v, params.max_deviation.max(1e-5)),
+            assert!(!is_degenerate_uv(&surface, pt.u, pt.v),
                     "Steiner point at ({:.4}, {:.4}) is in degenerate zone near cone apex", pt.u, pt.v);
         }
     }
@@ -8190,7 +8287,7 @@ mod tests {
 
         // Check that most boundary points are degenerate near the pole
         let n_degenerate = outer_uv.iter()
-            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, 0.05))
+            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
             .count();
         // The bottom ring (n_u points at v=π/4) should NOT be degenerate.
         // The inner rings have v < 0.05? No — v_max/2 ≈ 0.39, v_max/4 ≈ 0.2.
@@ -8212,7 +8309,7 @@ mod tests {
             }
         }
         let n_deg_small = cap_uv.iter()
-            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v, 0.05))
+            .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
             .count();
         // All points with v < 0.05 are degenerate
         assert!(n_deg_small > cap_uv.len() / 2,
@@ -8233,16 +8330,16 @@ mod tests {
         let surface = Surface::Revolution(rev);
 
         // At v=0: profile at (0, 0, 0) — ON the axis → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, 0.0, 0.05),
+        assert!(is_degenerate_uv(&surface, 0.0, 0.0),
                 "v=0 on revolution axis should be degenerate");
 
         // At v=0.5: profile at (2.5, 0, 2.5) — perpendicular dist = 2.5
         // threshold ≈ max(5*0.02, 1e-4) = 0.1 → 2.5 > 0.1 → NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.5, 0.05),
+        assert!(!is_degenerate_uv(&surface, 0.0, 0.5),
                 "v=0.5 away from axis should NOT be degenerate");
 
         // At v=1.0: profile at (5, 0, 5) — perpendicular dist = 5
-        assert!(!is_degenerate_uv(&surface, 0.0, 1.0, 0.05),
+        assert!(!is_degenerate_uv(&surface, 0.0, 1.0),
                 "v=1.0 away from axis should NOT be degenerate");
     }
 

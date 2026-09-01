@@ -13,6 +13,16 @@ serde = ["dep:serde", "dep:serde_json", "draper-geometry/serde"]
 # WASM parallel: enables rayon threading on wasm32 via wasm-bindgen-rayon.
 # Requires the JS host to initialize a Web Worker pool with SharedArrayBuffer.
 wasm-parallel = ["wasm-bindgen-rayon"]
+# A3 (BREP_CORE_FIX_PLAN Этап D): strict mode — turns mesh-pipeline
+# workaround layers into hard errors so CI can catch regressions that
+# default mode only logs:
+#   * `PrimaryTriangulationFailed` (D4: primary triangulation returned
+#     an empty mesh for a face — a bug for valid solids)
+#   * `weld_boundary_edge_vertices_aggressive` invocation (D2: the
+#     topology-violating aggressive weld still fires)
+# Not for production: industrial STEP files (transmission, Vulcan)
+# legitimately exercise the aggressive weld today.
+strict = []
 
 [dependencies]
 draper-geometry = { workspace = true }
