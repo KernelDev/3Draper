@@ -1716,22 +1716,94 @@ pub fn triangulate_face_with_edges_and_cache(
     triangulate_face_with_cache(&view, params, cache)
 }
 
-/// Build a shallow staging view of `face` whose mirrors are `edges`.
+/// Build a staging view of `face` whose mirrors are `edges`.
 ///
 /// The view carries the face's surface/wires/orientation plus the supplied
-/// edge geometry; `edge_ids` is kept parallel to the staged mirrors so
-/// store-aware lookups inside the pipeline stay consistent. The caller's
-/// original face is not modified.
+/// edge geometry. The caller's original face is not modified.
 ///
-/// C5 note: `edges` must be in instance order — the face's coedges look
-/// edges up by instance id, so the staged mirrors carry the ids the
-/// coedges reference.
-fn stage_face_view(face: &Face, edges: &[&Edge]) -> Face {
+/// Two staging contracts, picked by length:
+///
+/// * **Replacement** (`edges.len() != face.edges.len()`, e.g. the mirror-less
+///   faces built by the STEP converter): the slice defines the view's edge
+///   set and id space outright (`edge_ids` derived from the slice). The
+///   edges must carry the ids the face's coedges reference.
+/// * **Parallel** (`edges.len() == face.edges.len()` — the
+///   `Solid::face_edges(face)` contract): element `i` upgrades instance `i`.
+///   The mirror keeps its traversal pairing (instance id, `param_range`,
+///   `forward`, vertex ids and pinned vertex points — the fields
+///   `Solid::sync_edge_mirrors` never overwrites), while
+///   orientation-independent fields (`degenerate`, `tolerance`,
+///   `step_entity_id`, `curve`) flow in from the slice under a direction
+///   guard (see [`restage_instance`]). This makes store-resolved CANONICAL
+///   edges usable even when the canonical id differs from the instance id
+///   the coedges reference — coedge lookups keep resolving, and shared
+///   edges from adjacent faces still compare equal by geometry.
+pub fn stage_face_view(face: &Face, edges: &[&Edge]) -> Face {
     let mut view = face.clone();
-    view.edges = edges.iter().map(|e| (*e).clone()).collect();
-    // Keep the id list parallel to the staged mirrors.
-    view.edge_ids = view.edges.iter().map(|e| e.id).collect();
+    if edges.len() == face.edges.len() {
+        for (slot, src) in view.edges.iter_mut().zip(edges.iter()) {
+            *slot = restage_instance(slot, src);
+        }
+        // `edge_ids` (canonical store references) stay as the face's own —
+        // parallel to the staged mirrors, which keep the instance ids.
+    } else {
+        view.edges = edges.iter().map(|e| (*e).clone()).collect();
+        // Keep the id list parallel to the staged mirrors.
+        view.edge_ids = view.edges.iter().map(|e| e.id).collect();
+    }
     view
+}
+
+/// Build the staged instance: the mirror slot keeps its traversal pairing
+/// (id, param_range, forward, vertex ids and pinned vertex points — the
+/// fields `Solid::sync_edge_mirrors` never overwrites), while
+/// orientation-independent upgrades (`degenerate`, `tolerance`,
+/// `step_entity_id`, `curve`) flow in from the provided — possibly
+/// canonical store — edge, with a direction guard on the curve.
+///
+/// **Curve direction guard.** C5 Stage 3 geometric dedup unifies
+/// OPPOSITE-direction twins of one shared edge under a single canonical
+/// entry (the store's first-seen instance): its curve may trace the segment
+/// backwards relative to this instance's param_range pairing. Adopting it
+/// blindly would flip the discretized point order and corrupt the wire
+/// traversal XOR logic (`!coedge.forward != (t0 > t1)`), doubling boundary
+/// vertices. The curve is therefore adopted only when it provably traces
+/// the instance's segment in the instance's own direction — exact endpoint
+/// match at each curve's range boundaries. A curve-less mirror (pre-sync
+/// healing state) is backfilled under the same range guard
+/// `sync_edge_mirrors` uses. When the caller passes the face's own mirrors,
+/// every adopted field round-trips and the staged edge equals the original.
+fn restage_instance(slot: &Edge, src: &Edge) -> Edge {
+    let mut staged = slot.clone();
+    if src.degenerate {
+        staged.degenerate = true;
+    }
+    if src.tolerance > staged.tolerance {
+        staged.tolerance = src.tolerance;
+    }
+    if staged.step_entity_id.is_none() {
+        staged.step_entity_id = src.step_entity_id;
+    }
+    match (&src.curve, &staged.curve) {
+        (Some(src_curve), Some(slot_curve)) => {
+            let src_start = src_curve.point_at(src.param_range.0);
+            let src_end = src_curve.point_at(src.param_range.1);
+            let slot_start = slot_curve.point_at(slot.param_range.0);
+            let slot_end = slot_curve.point_at(slot.param_range.1);
+            if src_start == slot_start && src_end == slot_end {
+                staged.curve = Some(src_curve.clone());
+            }
+        }
+        (Some(src_curve), None) => {
+            let same = staged.param_range == src.param_range;
+            let swapped = (staged.param_range.1, staged.param_range.0) == src.param_range;
+            if same || swapped {
+                staged.curve = Some(src_curve.clone());
+            }
+        }
+        _ => {}
+    }
+    staged
 }
 
 /// Internal implementation: triangulate a face with a read-only cache.

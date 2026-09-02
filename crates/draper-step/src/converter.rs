@@ -30,7 +30,7 @@ use draper_geometry::{
     NurbsSurface, Curve3d, Curve2d, Line, Circle,  Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Hyperbola2d, Parabola2d, Nurbs2d,
 };
-use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, filter_degenerate_triangles, weld_boundary_edge_vertices};
+use draper_mesh::{TriangleMesh, TriangulationParams, triangulate_face_with_edges, triangulate_face_with_boundary_and_holes_uv, ear_clip, validate_watertight, validate_edge_consistency, filter_degenerate_triangles, weld_boundary_edge_vertices};
 use draper_topology::{Face, Wire, CoEdge, Edge as TopoEdge, Shell, Solid};
 use draper_topology::healing::{heal_solid, HealingParams, HealingReport};
 use draper_topology::validator::validate_brep;
@@ -206,7 +206,7 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
 
     for (fd_idx, fd) in face_data_list.iter().enumerate() {
         // Build outer wire from outer edges — attach curve_2d (PCURVE) data
-        // so that triangulate_face can use it for accurate UV coordinates.
+        // so that the mesh pipeline can use it for accurate UV coordinates.
         let outer_wire = if fd.outer_edges.is_empty() {
             None
         } else {
@@ -12059,8 +12059,9 @@ impl<'a> StepConverter<'a> {
             let wire = Wire::new(vec![]);
             let mut face = Face::new(face_data.surface.clone(), wire);
             face.forward = face_data.forward;
-            face.edges = vec![];
-            return triangulate_face(&face, params);
+            // C5 Stage 5.2: no mirrors attached — the explicit-edges API
+            // (empty slice) replaces the legacy `face.edges = vec![]` write.
+            return triangulate_face_with_edges(&face, &[], params);
         }
 
         // For ALL planar faces (with or without holes), use the dedicated
@@ -12269,7 +12270,7 @@ impl<'a> StepConverter<'a> {
 
         // Fallback: use the old Face-based path
         log::warn!("FACE_DIAG_CACHED: surface={} → OLD Face-based path (no boundary points!)", surface_type);
-        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulate_face
+        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulation
         // can use PCURVE data for accurate UV coordinates on NURBS surfaces.
         let coedges: Vec<CoEdge> = face_data.edges.iter().enumerate().map(|(i, e)| {
             let mut coedge = CoEdge::new(e.id, true);
@@ -12278,11 +12279,14 @@ impl<'a> StepConverter<'a> {
         }).collect();
         let wire = Wire::new(coedges);
 
+        // C5 Stage 5.2: no mirror attach (`face.edges = face_data.edges.clone()`)
+        // — the locally built edges are passed EXPLICITLY, so the mesh path
+        // never reads Face.edges for this face.
         let mut face = Face::new(face_data.surface.clone(), wire);
         face.forward = face_data.forward;
-        face.edges = face_data.edges.clone();
+        let edge_refs: Vec<&TopoEdge> = face_data.edges.iter().collect();
 
-        triangulate_face(&face, params)
+        triangulate_face_with_edges(&face, &edge_refs, params)
     }
 
     fn surface_to_mesh(
@@ -12301,8 +12305,9 @@ impl<'a> StepConverter<'a> {
             let wire = Wire::new(vec![]);
             let mut face = Face::new(face_data.surface.clone(), wire);
             face.forward = face_data.forward;
-            face.edges = vec![];
-            return triangulate_face(&face, params);
+            // C5 Stage 5.2: no mirrors attached — the explicit-edges API
+            // (empty slice) replaces the legacy `face.edges = vec![]` write.
+            return triangulate_face_with_edges(&face, &[], params);
         }
 
         // For ALL planar faces (with or without holes), use the dedicated
@@ -12440,7 +12445,7 @@ impl<'a> StepConverter<'a> {
         }
 
         // Fallback: use the old Face-based path
-        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulate_face
+        // IMPORTANT: Attach curve_2d data to CoEdges so that triangulation
         // can use PCURVE data for accurate UV coordinates on NURBS surfaces.
         let coedges: Vec<CoEdge> = face_data.edges.iter().enumerate().map(|(i, e)| {
             let mut coedge = CoEdge::new(e.id, true);
@@ -12449,11 +12454,14 @@ impl<'a> StepConverter<'a> {
         }).collect();
         let wire = Wire::new(coedges);
 
+        // C5 Stage 5.2: no mirror attach (`face.edges = face_data.edges.clone()`)
+        // — the locally built edges are passed EXPLICITLY, so the mesh path
+        // never reads Face.edges for this face.
         let mut face = Face::new(face_data.surface.clone(), wire);
         face.forward = face_data.forward;
-        face.edges = face_data.edges.clone();
+        let edge_refs: Vec<&TopoEdge> = face_data.edges.iter().collect();
 
-        triangulate_face(&face, params)
+        triangulate_face_with_edges(&face, &edge_refs, params)
     }
 
     /// Triangulate a planar face with holes using the bridge-edge technique.

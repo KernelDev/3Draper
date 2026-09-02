@@ -1579,3 +1579,99 @@ BREP_CORE_FIX_PLAN (предыдущая сессия сброшена до ко
 
 - `c3846d2` feat(geometry): analytic Torus SSI — Plane/Sphere/Cylinder × Torus
   (intersection.rs + boolean.rs + docs, +1689/−2), запушен в origin/main
+
+---
+
+# Worklog — C5 Stage 5.2 follow-up: canonical-store staging + STEP-converter migration (2026-09-03)
+
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `c2e0a9d` (после Torus SSI)
+**Задача:** закрыть два пробела Stage 5.2 — канонический staging-контракт
+(`Solid::face_edges` через explicit API) и отложенную миграцию STEP-конвертера
+
+## Контекст сессии
+
+- Sandbox перегружен: toolchain и target/ уничтожены (Rust 1.98.0
+  переустановлен, PATH + CARGO_INCREMENTAL=0 в ~/.bashrc), репозиторий цел
+- Локально пере-реализовал Stage 5.2 с нуля (не зная, что коммиты
+  d14af6e/7f992fa дошли до origin при прошлом сбросе) — при push обнаружен
+  fast-forward-конфликт; локальный дубль отброшен (тег local-s51-backup),
+  база = origin/main; от сессии сохранены уникальные дельты:
+  параллельный staging-контракт + direction-guard + канонический
+  bit-identity тест + миграция конвертера (в remote Stage 5 их НЕ было)
+
+## 1 — Параллельный staging-контракт (canonical-store resolution)
+
+Проблема наивного replacement-staging из d14af6e: при передаче
+`Solid::face_edges(face)` (канонические рёбра Stage 4 read-API):
+
+- канонический id ≠ instance id, на который ссылаются coedges грани →
+  `Face::edge_by_id(coedge.edge)` в staging-view НЕ резолвится
+- Stage 3 геометрическая дедупликация унифицирует ПРОТИВОположно-
+  направленных двойников (линия A→B vs B→A) под одним каноническом entry:
+  наивное принятие канонической кривой под инстансной param_range
+  РАЗВОРАЧИВАЕТ порядок точек дискретизации и ломает XOR-логику обхода
+  wire — воспроизведено на боковых гранях box−cylinder (4→8 вершин)
+
+Фикс (`stage_face_view` + `restage_instance`, triangulate.rs):
+
+- **replacement** (len ≠ face.edges.len): слайс задаёт edges + edge_ids
+  целиком (как было — контракт конвертера)
+- **parallel** (len == face.edges.len, контракт `Solid::face_edges`):
+  инстанс сохраняет traversal-пару (id, param_range, forward, вершины,
+  pinned points — поля, которые `sync_edge_mirrors` никогда не пишет),
+  канонические degenerate/tolerance/step_entity_id/curve втекают
+  консервативно; curve — под direction-guard: принимается ТОЛЬКО при
+  точном совпадении endpoints на границах диапазонов (обе кривые идут
+  в своём диапазоне); curve-less зеркало бэкфилится под range-guard'ом
+  как в sync_edge_mirrors
+- `stage_face_view` теперь pub (мост для будущих миграций потребителей)
+- Обратно совместимо: все 5 тестов d14af6e зелёные без изменений
+
+## 2 — Миграция STEP-конвертера (отложена в d14af6e из-за невозможности
+прогнать STEP-регрессию в той сессии)
+
+- 4 call-site'а в converter.rs: 2× empty-edges fallback
+  (`face.edges = vec![]` → `triangulate_face_with_edges(&face, &[])`),
+  2× Face-based fallback (`face.edges = face_data.edges.clone()` →
+  явный `Vec<&TopoEdge>` слайс) — грани живут с ПУСТЫМИ зеркалами,
+  mesh-путь не читает `Face.edges`
+- import: `triangulate_face` → `triangulate_face_with_edges`
+- **draper-step lib release: 126/126 ✅ (184s)** — регрессия, которую
+  Stage 5.2 не смогла прогнать, теперь прогнана на мигрированном пути
+
+## 3 — Тесты (edge_explicit_api_test.rs: 5 → 10)
+
+- `test_explicit_edges_canonical_store_resolution`: boolean_subtract +
+  index_edges + `Solid::face_edges` через explicit API vs legacy —
+  bit-identity вершин/треугольников на всех гранях результата
+- `test_explicit_edges_bit_identical_curved`: cylinder + sphere (box
+  уже покрыт тестом d14af6e)
+- `test_explicit_api_shared_cache_full_solid_watertight`: box и
+  box−cylinder целиком через explicit API + shared cache → watertight,
+  0 boundary edges
+- `test_stage_view_parallel_contract_keeps_instance_orientation` /
+  `test_stage_view_replacement_contract_defines_id_space`: контракты
+  юнит-уровня (instance-pairing сохранён, canonical-апгрейды приняты,
+  face id сохранён для cache-ключей)
+
+## Верификация
+
+- draper-mesh: **268 lib** + все integration (вкл. 10 explicit-API) ✅
+- draper-topology: 199 + 17 + 11 ✅; draper-geometry: 203 ✅
+- draper-core: 74 + 2 ✅
+- `cargo check --workspace --lib --exclude draper-testing` — 0 errors;
+  `cargo check -p draper-step --tests` — 0 errors
+- draper-step release lib: 126/126 (184s) ✅
+- Диск: 5.2G free после всех прогонов
+
+## Осталось (Stage 6 — осознанно отложено, см. статус C5 в d14af6e)
+
+- Полное удаление поля `Face.edges` (ядровые модули-создатели зеркал,
+  serde-носитель, coedge instance-lookup идиомы в viewer)
+- C6/industrial perf либо trade-offs Stage 1 (по PLAN)
+
+## Коммит
+
+- (см. git log) fix(mesh): C5 stage 5.2 follow-up — canonical-store
+  staging contract + STEP-converter migration
