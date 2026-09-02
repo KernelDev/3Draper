@@ -1444,3 +1444,138 @@ MIGRATION_GUIDE.md; фикс-кандидат — BTreeMap/сортировка 
 
 - `4991a6d` feat(geometry): analytic Cone×Cone + Cone×Cylinder SSI
   (4 файла, +1834/−1), запушен в origin/main
+
+---
+
+# Torus SSI — аналитические Plane/Sphere/Cylinder × Torus (2026-09-02)
+
+**Baseline:** commit `43c54b6` (после Cone×Cone + Cone×Cylinder SSI)
+**Задача:** закрыть «Torus×любая» — последнюю пару из секции 1.1 п.4
+BREP_CORE_FIX_PLAN (предыдущая сессия сброшена до коммита — её Stage-5
+работа уже была на remote в `d14af6e`; локальный дубль снят reset'ом).
+
+## Контекст сессии
+
+- Начинал с C5 Stage 5 (mesh explicit-edges API) по устаревшему summary;
+  при пуше обнаружил, что remote ушёл вперёд на 17 коммитов: C5 Stage 5
+  (d14af6e: serde EdgeStore + stage_face_view + миграция потребителей),
+  C5 follow-up #1 (perf O(n²)), #2 (junction snap), этап D (D2/D3/D4+A3),
+  D5 (Möller triangle-triangle), B1-final (plane×cone), SSI-серия
+  (Sphere×Sphere, Sphere×Cylinder, Cylinder×Cylinder, Cone×Cone,
+  Cone×Cylinder). Локальный коммит c5ae72c (дубль Stage 5.1) снят
+  `git reset --hard origin/main`.
+- Sandbox сброшен: Rust 1.98.0 переустановлен (rustup, minimal);
+  `git config core.fileMode false` против mode-changes релокации.
+
+## T.1 — общий каркас (intersection.rs)
+
+- `TorusView`: ортонормированный фрейм (e1, e2, n) торуса
+  P(θ, φ) = O + (R + r·cosφ)·u(θ) + r·sinφ·n; ре-ортогонализация x_dir
+  против оси + cone-family двухступенчатый fallback (n×e_x, n×e_y)
+- `linear_trig_phi(a, b, c, scale)`: решение a·cosφ + b·sinφ = c —
+  ЛИНЕЙНОГО уравнения в (cosφ, sinφ), к которому редуцируются и
+  Torus×Plane, и Torus×Sphere. Ветви φ = φ₀ ± arccos(C/g); atan2-скачки
+  φ₀ НЕ ломают точечную кривую (φ проходит через cos/sin в point_at —
+  периодичность воспроизводит ту же точку). СТРОГАЯ валидность
+  (d < −d_slack → reject, cone_cone-идиома), degenerate-гвард g≈0
+- `sample_circle_xyz`: 128 точек замкнутой окружности (конвенция
+  sphere_sphere — без дублирования endpoint)
+
+## T.2 — Plane×Torus
+
+- plane ⟂ axis (|B|≈1): уравнение θ-свободно → 0/1/2 окружности
+  ρ = R ± √(r²−z²) на высоте плоскости z (нашёл и закрыл баг первой
+  итерации: касательная окружность возвращалась с центром в O вместо
+  O + z·n — тест ловил tube-dist=0)
+- plane ∥ axis содержащая ось (|B|≈0, |h|≈0): вырожденное 0=0 на
+  меридианных азимутах n_p·u(θ)=0 → 2 точные tube-окружности
+  (центры O ± R·u(θ₀), spanned (u, n))
+- generic oblique/offset: движок ThetaArcEngine с per-θ linear_trig_phi;
+  квартик-торические сечения и «арахисовые» овалы offset-плоскостей —
+  полилиниями, склейка ветвей на пинч-азимутах, касание = golden-section
+- 9 тестов: центр/офсет/касание/промах, меридианы (центры ±(0,10,0) r=3),
+  арахис x=5, облик 45°, диспетчер оба порядка, −Z нормаль
+
+## T.3 — Sphere×Torus
+
+- |P−C_s|²=R_s² через ρ²+z²=R²+r²+2Rr·cosφ → ЛИНЕЙНОЕ уравнение
+  a(θ)=2r(R−u·v), b=−2r(n·v), C(θ)=R²+r²+|v|²−2R(u·v)−R_s²
+- концентрическая сфера: константы → full-circle ветви движка = 2
+  широтные окружности (внутреннее/внешнее касание = одна);
+- profile-гварды (d_profile vs r±R_s) до движка — пустые конфигурации
+  без 80 итераций golden-section
+- 5 тестов: концентрик 2 окружности (ρ=9.55, z=±2.966), внутреннее
+  касание ρ=7, офсет-инварианты, disjoint/contained, диспетчер
+- Лимит (документирован): сфера с центром НА окружности центров tube и
+  R_s≈r содержит полную меридиану — вырожденный азимут возвращает
+  [None,None], эта окружность пропускается (остальные кривые строятся)
+
+## T.4 — Cylinder×Torus
+
+- коаксиальные (w⊥≈0): 0/1/2 окружности z=±√(r²−(R_c−R)²) радиуса R_c
+- параллельный оффсет: per-θ квадратичное в cosφ
+  r²c²+2r(R−w⊥·u(θ))c+(R²−2R·w⊥·u(θ)+|w⊥|²−R_c²)=0 — СТРОГИЙ
+  дискриминант, |cosφ|≤1-гвард; движок решает ВЕРХНЮЮ половину tube
+  (φ∈[0,π]), нижняя = экваториальное зеркало (z→−z); дуги, достигающие
+  экватора (|c|≈1), склеиваются с зеркалами в замкнутые петли,
+  строго-верхние остаются раздельными (геометрически корректно)
+- ПЕРПЕНДИКУЛЯРНЫЕ оси: ψ-параметризация торus_cylinder_perpendicular —
+  z(ψ) t-свободно (n_c⊥n), два ρ-таргета R±√(r²−z(ψ)²), каждый даёт
+  квадратичное в t (t²+B(ψ)t+C(ψ)−ρ±²=0); twin-pass + cross-pass склейка
+  на границах слэба |z|=r (таргеты совпадают при ρ=R); disc = min(слэб,
+  D) для касательного поиска. Заменяет marching-фолбэк (который на
+  перпендикулярных парах возвращал EMPTY — 16×16 grid + Newton из
+  центра параметрического диапазона не сходился)
+- skew (ни параллельны, ни перпендикулярны): quartic в tan(φ/2) →
+  marching (документированный пробел)
+- 6 тестов: коаксиал 2 окружности z=±√5, касание 13/7, промах 14/6,
+  параллельный офсет (инварианты + зеркальная симметрия каждой точки),
+  перпендикуляр (аналитические инварианты, цилиндр точно), диспетчер
+
+## T.5 — boolean.rs обёртки
+
+- диспетчер: 6 новых рукавов (3 пары × оба порядка)
+- `intersect_torus_plane_pair`: точная Circle для широтных
+  (коаксиальный фит вокруг оси торуса) и меридианных (dual-candidate
+  axis: центры O±R·u, направление u×n, второй кандидат — антипод)
+- `intersect_torus_sphere_pair`: концентрик → точная Circle
+- `intersect_torus_cylinder_pair`: коаксиал → точная Circle вокруг
+  общей оси
+- 5 тестов: перпенд-плоскость 2 Circle (r=7/13), осевая плоскость
+  2 меридианные Circle, концентрик-сфера 2 Circle, коаксиал-цилиндр
+  2 Circle оба порядка, перпендикуляр polyline-only с инвариантами
+
+## Найденные и исправленные баги первой итерации
+
+- касательная окружность plane⟂axis: центр O вместо O+z·n (тест
+  «off torus tube-dist=0» поймал)
+- clamp-границы движка: точки на биссектированных азимутах сидят на
+  strict-slack клампе → off-plane residual до 2.7e-9 — тесты переведены
+  на scale-relative eps (1e-7), интерьерные точки остаются 1e-9-точными
+
+## Верификация
+
+- draper-geometry: **203 lib** (183 + 20 T-тестов) + 59 + 5 ✅
+- draper-topology: **199 lib** (194 + 5) + 17 + 11 ✅
+- draper-mesh: **268 lib + все integration** (boolean_subtract_test не
+  изменился — torus-пары в boolean-пайплайне не активированы тестами
+  помимо SSI-диспетчера) ✅
+- draper-core: 74 ✅
+- `cargo check --workspace --lib` — 0 errors; `cargo check -p
+  draper-step --tests` — 0 errors (STEP-путь: parse→extract→triangulate,
+  SSI-изменения его не затрагивают)
+- Диск: 4.3G free после всех сборок
+
+## Осталось (SSI-пробелы)
+
+- Torus×Cone, Torus×Torus (степень ≥4/8 — quartic-в-tan(φ/2)/общий
+  случай остаются на marching)
+- Cylinder×Torus skew-оси (quartic в tan(φ/2))
+- `Surface::normal_at` → аналитические derivatives для
+  Revolution/Extrusion (п. 7 секции 1.1)
+- Недетерминизм all_files_test (HashMap-порядок в pre-compute фазах)
+
+## Коммит
+
+- `feat(geometry): analytic Torus SSI — Plane/Sphere/Cylinder × Torus`
+  (intersection.rs + boolean.rs + docs), запушен в origin/main

@@ -2401,6 +2401,729 @@ pub fn intersect_cone_cylinder(
     engine.solve()
 }
 
+// ============================================================
+// Torus analytic SSI (T-series, 2026-09-02)
+// ============================================================
+
+/// Orthonormal view of a torus.
+///
+/// `P(θ, φ) = O + (R + r·cosφ)·u(θ) + r·sinφ·n` with
+/// `u(θ) = cosθ·e1 + sinθ·e2`: θ is the azimuth around the main axis,
+/// φ the tube angle (φ = 0 outer equator, φ = π inner equator). The
+/// x_dir reference is re-orthogonalized against the axis (the
+/// `ConeView::of` / cone_cylinder frame idiom).
+struct TorusView {
+    center: Point3d,
+    e1: Vec3d,
+    e2: Vec3d,
+    n: Vec3d,
+    major: f64,
+    minor: f64,
+}
+
+impl TorusView {
+    fn of(t: &TorusSurface) -> TorusView {
+        let n = Vec3d::new(t.axis.x, t.axis.y, t.axis.z);
+        let raw = Vec3d::new(t.x_dir.x, t.x_dir.y, t.x_dir.z);
+        let dk = raw.dot(&n);
+        let mut e1 = Vec3d::new(raw.x - dk * n.x, raw.y - dk * n.y, raw.z - dk * n.z);
+        let e1_len = e1.length();
+        if e1_len < 1e-9 {
+            // x_dir ∥ axis — n × e_x, falling back to n × e_y (the
+            // cone-family two-step fallback for axes ∥ ±X).
+            let mut fb = Vec3d::new(0.0, n.z, -n.y);
+            if fb.length_sq() < 1e-6 {
+                fb = Vec3d::new(-n.z, 0.0, n.x);
+            }
+            let l = fb.length();
+            if l < 1e-12 {
+                // Degenerate axis — any equatorial pair works.
+                e1 = Vec3d::new(1.0, 0.0, 0.0);
+            } else {
+                e1 = Vec3d::new(fb.x / l, fb.y / l, fb.z / l);
+            }
+        } else {
+            e1 = Vec3d::new(e1.x / e1_len, e1.y / e1_len, e1.z / e1_len);
+        }
+        let e2 = n.cross(&e1);
+        TorusView {
+            center: Point3d::new(t.center.x, t.center.y, t.center.z),
+            e1,
+            e2,
+            n,
+            major: t.major_radius,
+            minor: t.minor_radius,
+        }
+    }
+
+    #[inline]
+    fn point(&self, theta: f64, phi: f64) -> Point3d {
+        let rho = self.major + self.minor * phi.cos();
+        let c = theta.cos();
+        let s = theta.sin();
+        Point3d::new(
+            self.center.x + rho * (c * self.e1.x + s * self.e2.x) + self.minor * phi.sin() * self.n.x,
+            self.center.y + rho * (c * self.e1.y + s * self.e2.y) + self.minor * phi.sin() * self.n.y,
+            self.center.z + rho * (c * self.e1.z + s * self.e2.z) + self.minor * phi.sin() * self.n.z,
+        )
+    }
+}
+
+/// Sample a full circle (128 points, endpoint not duplicated — the
+/// sphere_sphere closed-circle convention) with center `c`, radius `rad`,
+/// in the plane spanned by the orthonormal pair `(d1, d2)`.
+fn sample_circle_xyz(
+    c: &Point3d,
+    d1: &Vec3d,
+    d2: &Vec3d,
+    rad: f64,
+) -> Vec<Point3d> {
+    let n_samples = 128;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    (0..n_samples)
+        .map(|i| {
+            let th = two_pi * i as f64 / n_samples as f64;
+            let (c_t, s_t) = (th.cos(), th.sin());
+            Point3d::new(
+                c.x + rad * (c_t * d1.x + s_t * d2.x),
+                c.y + rad * (c_t * d1.y + s_t * d2.y),
+                c.z + rad * (c_t * d1.z + s_t * d2.z),
+            )
+        })
+        .collect()
+}
+
+/// Solve the tube equation `a·cosφ + b·sinφ = c` for φ.
+///
+/// The torus×plane and torus×sphere constraints both reduce to a
+/// LINEAR equation in `(cosφ, sinφ)` at fixed azimuth θ. Solutions
+/// exist iff `c² ≤ a² + b²`; the two branches are
+/// `φ = φ₀ ± arccos(c/g)` with `g = √(a²+b²)`, `φ₀ = atan2(b, a)`.
+///
+/// `atan2` branch cuts in φ₀ do NOT break the point curve: φ is
+/// re-applied through cos/sin in `point_at`, so a 2π jump in the
+/// returned φ reproduces the identical 3D point. The STRICT validity
+/// check (reject only `d < −d_slack`, the cone_cone idiom) keeps
+/// tangent azimuths usable without leaking off-surface points.
+///
+/// Returns `[None, None]` when the equation degenerates (`g ≈ 0`) —
+/// pair-level special cases handle the geometric degeneracies
+/// (plane containing the axis, sphere center on the tube-center
+/// circle).
+fn linear_trig_phi(a: f64, b: f64, c: f64, scale: f64) -> [Option<f64>; 2] {
+    let g_sq = a * a + b * b;
+    if g_sq <= 1e-12 * scale * scale {
+        return [None, None]; // degenerate azimuth — pair-level special case
+    }
+    let g = g_sq.sqrt();
+    let d = g_sq - c * c;
+    let d_slack = 1e-10 * (d.abs() + g_sq + c * c + 1.0) * (1.0 + scale);
+    if d < -d_slack {
+        return [None, None];
+    }
+    let ratio = (c / g).clamp(-1.0, 1.0);
+    let delta = ratio.acos();
+    let phi0 = b.atan2(a);
+    [Some(phi0 + delta), Some(phi0 - delta)]
+}
+
+/// Torus×Plane analytic SSI (T-series, 2026-09-02).
+///
+/// The plane constraint `n_p·P = d` with
+/// `P = O + (R + r·cosφ)·u(θ) + r·sinφ·n` reduces to the tube equation
+/// `r·A(θ)·cosφ + r·B·sinφ = −h − R·A(θ)` where `A(θ) = n_p·u(θ)` (linear
+/// trig in θ), `B = n_p·n` (constant) and `h` is the signed distance of
+/// the torus center from the plane.
+///
+/// Classification:
+///
+/// - **plane ⟂ axis** (`|B| ≈ 1`): `A ≈ 0`, the equation is θ-free —
+///   the plane cuts every tube cross-section at the same height
+///   `z = −s·h`: `|z| < r` → 2 circles `ρ = R ± √(r² − z²)`;
+///   `|z| ≈ r` → 1 tangent circle; `|z| > r` → empty;
+/// - **plane ∥ axis containing the axis** (`|B| ≈ 0`, `|h| ≈ 0`): the
+///   two meridian tube circles at the azimuths where `n_p·u(θ) = 0`
+///   (the whole circle solves the degenerate `0 = 0` equation);
+/// - **generic oblique / offset-parallel planes**: per-θ linear
+///   [`linear_trig_phi`] solve through the [`ThetaArcEngine`] — points
+///   exact on both surfaces, branch arcs glued at pinch azimuths
+///   (Villarceau-adjacent quartic toric sections, offset-plane
+///   "peanut" ovals), full-circle branch runs emitted as closed loops;
+/// - **tangency**: the discriminant maximum touching zero — the
+///   engine's golden-section single point.
+pub fn intersect_torus_plane(
+    plane: &Plane,
+    torus: &TorusSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    let tv = TorusView::of(torus);
+    let r = tv.minor;
+    let big_r = tv.major;
+    let scale = big_r.max(r).max(1.0);
+    if r <= eps * scale || big_r <= eps * scale {
+        return vec![]; // degenerate torus (no tube / no ring)
+    }
+
+    let np = Vec3d::new(plane.normal.x, plane.normal.y, plane.normal.z);
+    // h = signed distance of the torus center from the plane (along np).
+    let w0 = Vec3d::new(
+        tv.center.x - plane.origin.x,
+        tv.center.y - plane.origin.y,
+        tv.center.z - plane.origin.z,
+    );
+    let h = w0.dot(&np);
+    let b_axis = np.dot(&tv.n);
+    let ac = np.dot(&tv.e1);
+    let as_ = np.dot(&tv.e2);
+
+    // ── Plane ⟂ axis: constant-z circles ─────────────────────────────
+    if b_axis.abs() >= 1.0 - 1e-12 {
+        let s = b_axis.signum();
+        let z = -s * h;
+        let z_abs = z.abs();
+        let center_at_z = Point3d::new(
+            tv.center.x + z * tv.n.x,
+            tv.center.y + z * tv.n.y,
+            tv.center.z + z * tv.n.z,
+        );
+        if z_abs > r + eps {
+            return vec![];
+        }
+        if z_abs > r - eps {
+            // Tangent to the tube top/bottom: one circle at ρ = R,
+            // centered at the plane height.
+            return vec![sample_circle_xyz(&center_at_z, &tv.e1, &tv.e2, big_r)];
+        }
+        let half = (r * r - z * z).sqrt();
+        return vec![
+            sample_circle_xyz(&center_at_z, &tv.e1, &tv.e2, big_r + half),
+            sample_circle_xyz(&center_at_z, &tv.e1, &tv.e2, big_r - half),
+        ];
+    }
+
+    // ── Plane ∥ axis containing the axis: 2 meridian circles ─────────
+    // B ≈ 0 and the plane passes through the torus center ⟹ through the
+    // whole axis line. The tube cross-section circles at the azimuths
+    // with n_p·u(θ) = 0 lie entirely in the plane.
+    if b_axis.abs() <= 1e-10 && h.abs() <= eps {
+        // Azimuths with ac·cosθ + as·sinθ = 0 → θ₀ = atan2(ac, −as).
+        let theta0 = ac.atan2(-as_);
+        let u_at = |theta: f64| -> Vec3d {
+            let (c, s) = (theta.cos(), theta.sin());
+            Vec3d::new(
+                c * tv.e1.x + s * tv.e2.x,
+                c * tv.e1.y + s * tv.e2.y,
+                c * tv.e1.z + s * tv.e2.z,
+            )
+        };
+        let u0 = u_at(theta0);
+        let center0 = Point3d::new(
+            tv.center.x + big_r * u0.x,
+            tv.center.y + big_r * u0.y,
+            tv.center.z + big_r * u0.z,
+        );
+        let u1 = u_at(theta0 + std::f64::consts::PI);
+        let center1 = Point3d::new(
+            tv.center.x + big_r * u1.x,
+            tv.center.y + big_r * u1.y,
+            tv.center.z + big_r * u1.z,
+        );
+        // Meridian circle: in the plane spanned by (u, n).
+        return vec![
+            sample_circle_xyz(&center0, &u0, &tv.n, r),
+            sample_circle_xyz(&center1, &u1, &tv.n, r),
+        ];
+    }
+
+    // ── Generic: per-θ linear tube solve ─────────────────────────────
+    let roots_at = |theta: f64| -> [Option<f64>; 2] {
+        let a_theta = ac * theta.cos() + as_ * theta.sin();
+        linear_trig_phi(r * a_theta, r * b_axis, -h - big_r * a_theta, scale)
+    };
+    let disc_at = |theta: f64| -> f64 {
+        let a_theta = ac * theta.cos() + as_ * theta.sin();
+        let g_sq = r * r * (a_theta * a_theta + b_axis * b_axis);
+        let c_val = -h - big_r * a_theta;
+        g_sq - c_val * c_val
+    };
+    let point_at = |theta: f64, phi: f64| -> Point3d { tv.point(theta, phi) };
+
+    let engine = ThetaArcEngine {
+        m_scan: 720,
+        n_samples: 128,
+        roots_at: &roots_at,
+        disc_at: &disc_at,
+        point_at: &point_at,
+        glue_tol: 1e-6 * scale,
+        collapse_tol: 100.0 * eps * (1.0 + scale),
+        linear: false,
+    };
+    engine.solve()
+}
+
+/// Torus×Sphere analytic SSI (T-series, 2026-09-02).
+///
+/// `|P − C_s|² = R_s²` with
+/// `P − C_s = (R + r·cosφ)·u(θ) + r·sinφ·n − v` (v = C_s − O) reduces
+/// (using `ρ² + z² = R² + r² + 2Rr·cosφ`) to the LINEAR tube equation
+///
+/// ```text
+/// a(θ)·cosφ + b·sinφ = −C(θ),
+///   a(θ) = 2r·(R − u(θ)·v),         b = −2r·(n·v),
+///   C(θ) = R² + r² + |v|² − 2R·u(θ)·v − R_s²
+/// ```
+///
+/// with `u·v` linear trig in θ — the same [`linear_trig_phi`] machinery
+/// as torus×plane. Concentric spheres (`v = 0`) give constant
+/// coefficients: the engine's full-circle branch runs emit the two
+/// latitude circles directly (single circle at internal/external
+/// tangency radii). Tangency (discriminant maximum at zero) → a single
+/// point; contained/disjoint spheres → empty.
+///
+/// Known limitation: a sphere centered ON the tube-center circle with
+/// `R_s ≈ r` contains one full meridian circle — the degenerate azimuth
+/// returns `[None, None]` and that circle is missed (the remaining
+/// intersection curves are still produced).
+pub fn intersect_torus_sphere(
+    sphere: &SphereSurface,
+    torus: &TorusSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    let tv = TorusView::of(torus);
+    let r = tv.minor;
+    let big_r = tv.major;
+    let scale = big_r.max(r).max(sphere.radius).max(1.0);
+    if r <= eps * scale || big_r <= eps * scale || sphere.radius <= eps * scale {
+        return vec![];
+    }
+
+    let v = Vec3d::new(
+        sphere.center.x - tv.center.x,
+        sphere.center.y - tv.center.y,
+        sphere.center.z - tv.center.z,
+    );
+    let vc = v.dot(&tv.e1);
+    let vs = v.dot(&tv.e2);
+    let va = v.dot(&tv.n);
+    let v_sq = v.length_sq();
+    let rs = sphere.radius;
+    let const_c = big_r * big_r + r * r + v_sq - rs * rs;
+
+    // Cheap disjoint/contained guards (the engine would also return
+    // empty, but the guards keep the tangency search from burning 80
+    // golden-section iterations on obviously-empty configurations).
+    // Closest distance between the sphere center and the tube surface:
+    // the tube lives on the (ρ, z) circle of radius r around (R, 0).
+    {
+        let rho_c = (vc * vc + vs * vs).sqrt();
+        let d_profile = ((rho_c - big_r) * (rho_c - big_r) + va * va).sqrt();
+        if d_profile > r + rs + eps {
+            return vec![]; // sphere strictly outside the tube
+        }
+        if d_profile < r - rs - eps {
+            return vec![]; // tube surface strictly outside the sphere
+        }
+    }
+
+    let roots_at = |theta: f64| -> [Option<f64>; 2] {
+        let uv = vc * theta.cos() + vs * theta.sin();
+        let a = 2.0 * r * (big_r - uv);
+        let b = -2.0 * r * va;
+        let c = const_c - 2.0 * big_r * uv;
+        linear_trig_phi(a, b, -c, scale)
+    };
+    let disc_at = |theta: f64| -> f64 {
+        let uv = vc * theta.cos() + vs * theta.sin();
+        let a = 2.0 * r * (big_r - uv);
+        let b = -2.0 * r * va;
+        let c = const_c - 2.0 * big_r * uv;
+        a * a + b * b - c * c
+    };
+    let point_at = |theta: f64, phi: f64| -> Point3d { tv.point(theta, phi) };
+
+    let engine = ThetaArcEngine {
+        m_scan: 720,
+        n_samples: 128,
+        roots_at: &roots_at,
+        disc_at: &disc_at,
+        point_at: &point_at,
+        glue_tol: 1e-6 * scale,
+        collapse_tol: 100.0 * eps * (1.0 + scale),
+        linear: false,
+    };
+    engine.solve()
+}
+
+/// Torus×Cylinder analytic SSI (T-series, 2026-09-02).
+///
+/// With the cylinder axis parallel to the torus axis the cylinder
+/// constraint `|ρ·u(θ) − w⊥|² = R_c²` is z-free and reduces (with
+/// `ρ = R + r·cosφ`) to a per-θ QUADRATIC in `cosφ`:
+///
+/// ```text
+/// r²·c² + 2r·(R − w⊥·u(θ))·c + (R² − 2R·w⊥·u(θ) + |w⊥|² − R_c²) = 0
+/// ```
+///
+/// Classification:
+///
+/// - **coaxial** (`w⊥ ≈ 0`): θ-free quadratic — the tube cross-section
+///   meets the cylinder ρ = R_c at `z = ±√(r² − (R_c − R)²)`: 2 circles
+///   (|R_c − R| < r), 1 tangent circle (≈ r), empty otherwise;
+/// - **parallel offset**: the quadratic is solved per θ for
+///   `cosφ = c±` with the STRICT discriminant idiom; only the upper
+///   tube half (`φ ∈ [0, π]`, sinφ ≥ 0) is tracked by the engine and
+///   the lower half is the equatorial mirror (z → −z) — branch arcs
+///   reaching the equator (|c| ≈ 1) are glued to their mirrors into
+///   closed loops, arcs staying strictly inside remain disjoint
+///   top/bottom loops (geometrically correct);
+/// - **tangency**: discriminant maximum at zero → single point (the
+///   mirrored contact point of the lower half is measure-zero and
+///   omitted);
+/// - **perpendicular axes**: ψ-parametrized twin-pass solve (see
+///   [`torus_cylinder_perpendicular`]) — z is t-free, two ρ-target
+///   quadratics, cross-pass glue at the tube slab boundaries;
+/// - **skew axes**: the per-θ equation is a quartic in `tan(φ/2)` —
+///   delegated to marching SSI (documented gap).
+pub fn intersect_torus_cylinder(
+    cyl: &CylinderSurface,
+    torus: &TorusSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    let tv = TorusView::of(torus);
+    let r = tv.minor;
+    let big_r = tv.major;
+    let rc = cyl.radius;
+    let scale = big_r.max(r).max(rc).max(1.0);
+    if r <= eps * scale || big_r <= eps * scale || rc <= eps * scale {
+        return vec![];
+    }
+
+    let n_c = Vec3d::new(cyl.axis.x, cyl.axis.y, cyl.axis.z);
+    let axes_cross = n_c.cross(&tv.n);
+    let axes_parallel = axes_cross.length_sq() <= 1e-10;
+    let axes_perpendicular = n_c.dot(&tv.n).abs() <= 1e-10;
+
+    if !axes_parallel && !axes_perpendicular {
+        // Skew — per-θ quartic in tan(φ/2): marching (documented gap).
+        return intersect_marching_ssi(
+            &Surface::Cylinder(cyl.clone()),
+            &Surface::Torus(torus.clone()),
+            tolerance,
+        );
+    }
+
+    if axes_perpendicular {
+        return torus_cylinder_perpendicular(cyl, &tv, eps);
+    }
+
+    // w = cylinder origin − torus center; only the radial offset w⊥
+    // matters (the cylinder is infinite along its axis).
+    let w = Vec3d::new(
+        cyl.origin.x - tv.center.x,
+        cyl.origin.y - tv.center.y,
+        cyl.origin.z - tv.center.z,
+    );
+    let w_ax = w.dot(&tv.n);
+    let w_perp = Vec3d::new(
+        w.x - w_ax * tv.n.x,
+        w.y - w_ax * tv.n.y,
+        w.z - w_ax * tv.n.z,
+    );
+    let d_off = w_perp.length();
+
+    // ── Coaxial: θ-free circles ──────────────────────────────────────
+    if d_off <= eps {
+        let dr = rc - big_r;
+        if dr.abs() > r - eps {
+            if dr.abs() > r + eps {
+                return vec![]; // cylinder misses the tube (hole or outside)
+            }
+            // Tangent to the tube from inside/outside: one equator circle.
+            return vec![sample_circle_xyz(&tv.center, &tv.e1, &tv.e2, big_r + dr.signum() * r)];
+        }
+        let half = (r * r - dr * dr).sqrt();
+        // Circles at radius rc around the common axis at heights ±half.
+        let mk = |z: f64| -> Vec<Point3d> {
+            let center = Point3d::new(
+                tv.center.x + z * tv.n.x,
+                tv.center.y + z * tv.n.y,
+                tv.center.z + z * tv.n.z,
+            );
+            sample_circle_xyz(&center, &tv.e1, &tv.e2, rc)
+        };
+        return vec![mk(half), mk(-half)];
+    }
+
+    // ── Parallel offset: per-θ quadratic in cosφ (upper half + mirror) ─
+    let wc = w_perp.dot(&tv.e1);
+    let ws = w_perp.dot(&tv.e2);
+    let d_sq = d_off * d_off;
+
+    let roots_at = |theta: f64| -> [Option<f64>; 2] {
+        let wq = wc * theta.cos() + ws * theta.sin();
+        let a = r * r;
+        let b = 2.0 * r * (big_r - wq);
+        let c = big_r * big_r - 2.0 * big_r * wq + d_sq - rc * rc;
+        let d = b * b - 4.0 * a * c;
+        // STRICT discriminant (cone_cone idiom): clamp must not leak
+        // off-surface points into the validity masks.
+        let d_slack = 1e-10 * (d.abs() + b * b + (4.0 * a * c).abs() + 1.0) * (1.0 + scale);
+        if d < -d_slack {
+            return [None, None];
+        }
+        let d = d.max(0.0);
+        let sq = d.sqrt();
+        let half = -b / (2.0 * a);
+        let check = |cval: f64| -> Option<f64> {
+            // cosφ must be a real cosine: strict ±1 validity with slack.
+            if cval < -1.0 - 1e-10 * (1.0 + scale) || cval > 1.0 + 1e-10 * (1.0 + scale) {
+                return None;
+            }
+            Some(cval.clamp(-1.0, 1.0).acos()) // upper tube half: φ ∈ [0, π]
+        };
+        [check(half + sq / (2.0 * a)), check(half - sq / (2.0 * a))]
+    };
+    let disc_at = |theta: f64| -> f64 {
+        let wq = wc * theta.cos() + ws * theta.sin();
+        let b = 2.0 * r * (big_r - wq);
+        let c = big_r * big_r - 2.0 * big_r * wq + d_sq - rc * rc;
+        b * b - 4.0 * r * r * c
+    };
+    let point_at = |theta: f64, phi: f64| -> Point3d { tv.point(theta, phi) };
+
+    let engine = ThetaArcEngine {
+        m_scan: 720,
+        n_samples: 128,
+        roots_at: &roots_at,
+        disc_at: &disc_at,
+        point_at: &point_at,
+        glue_tol: 1e-6 * scale,
+        collapse_tol: 100.0 * eps * (1.0 + scale),
+        linear: false,
+    };
+    let upper = engine.solve();
+
+    // Lower half = equatorial mirror (z → −z about the torus center
+    // plane). Arcs that touch the equator glue with their mirrors into
+    // closed loops; strictly-upper loops stay disjoint (correct).
+    let mut result: Vec<Vec<Point3d>> = Vec::with_capacity(upper.len() * 2);
+    for curve in upper {
+        let n_pts = curve.len();
+        if n_pts == 0 {
+            continue;
+        }
+        if n_pts == 1 {
+            // Tangency point: only keep it if it lies ON the equator
+            // (where upper == lower); off-equator contact would have a
+            // mirrored twin — keep the twin too for completeness.
+            let p = curve[0];
+            let z = (p.x - tv.center.x) * tv.n.x
+                + (p.y - tv.center.y) * tv.n.y
+                + (p.z - tv.center.z) * tv.n.z;
+            if z.abs() > 100.0 * eps * scale {
+                result.push(vec![mirror_about_equator(&p, &tv)]);
+            }
+            result.push(curve);
+            continue;
+        }
+        let mirrored: Vec<Point3d> = curve
+            .iter()
+            .map(|p| mirror_about_equator(p, &tv))
+            .collect();
+        result.push(curve);
+        result.push(mirrored);
+    }
+    // Glue upper/lower arcs that meet on the equator (|c| ≈ 1 pinch
+    // points) — glue_arcs is idempotent for already-closed loops.
+    glue_arcs(result, 1e-6 * scale)
+}
+
+/// Torus×Cylinder with PERPENDICULAR axes (ψ-parametrized, T-series
+/// 2026-09-02).
+///
+/// Cylinder points `X(ψ, t) = O_c + R_c(cosψ·e1c + sinψ·e2c) + t·n_c`.
+/// Because `n_c ⊥ n` (the torus axis), the axial torus coordinate is
+/// t-FREE: `z(ψ) = w_ax + R_c(zc·cosψ + zs·sinψ)` — linear trig in ψ.
+/// The torus constraint `(ρ − R)² + z² = r²` then splits into two
+/// ρ-targets `ρ±(ψ) = R ± √(r² − z(ψ)²)` (valid where `|z| ≤ r`), and
+/// each target gives a per-ψ QUADRATIC in t (with `ρ²` a quadratic in t
+/// for perpendicular axes):
+///
+/// ```text
+/// t² + B(ψ)·t + C(ψ) − ρ±(ψ)² = 0,
+///   B(ψ) = 2·(w⊥ + R_c·q⊥(ψ))·n_c,   C(ψ) = |w⊥ + R_c·q⊥(ψ)|²
+/// ```
+///
+/// Two engine passes (ρ+ outer sheet, ρ− inner sheet); curves from the
+/// two passes meet where `|z| = r` (the targets coincide at ρ = R) and
+/// are cross-pass glued. Points are exact on the cylinder (constructed
+/// there) and on the torus up to the quadratic solve — no marching.
+fn torus_cylinder_perpendicular(
+    cyl: &CylinderSurface,
+    tv: &TorusView,
+    eps: f64,
+) -> Vec<Vec<Point3d>> {
+    let rc = cyl.radius;
+    let r = tv.minor;
+    let big_r = tv.major;
+    let scale = big_r.max(r).max(rc).max(1.0);
+    let t_clip = 20.0 * scale;
+
+    // Cylinder frame (re-orthogonalized x_dir — the cone_cylinder idiom).
+    let n_c = Vec3d::new(cyl.axis.x, cyl.axis.y, cyl.axis.z);
+    let raw = Vec3d::new(cyl.x_dir.x, cyl.x_dir.y, cyl.x_dir.z);
+    let dk = raw.dot(&n_c);
+    let mut e1c = Vec3d::new(raw.x - dk * n_c.x, raw.y - dk * n_c.y, raw.z - dk * n_c.z);
+    let e1c_len = e1c.length();
+    if e1c_len < 1e-9 {
+        let mut fb = Vec3d::new(0.0, n_c.z, -n_c.y); // n × e_x
+        if fb.length_sq() < 1e-6 {
+            fb = Vec3d::new(-n_c.z, 0.0, n_c.x); // n × e_y
+        }
+        let l = fb.length();
+        if l < 1e-12 {
+            return vec![];
+        }
+        e1c = Vec3d::new(fb.x / l, fb.y / l, fb.z / l);
+    } else {
+        e1c = Vec3d::new(e1c.x / e1c_len, e1c.y / e1c_len, e1c.z / e1c_len);
+    }
+    let e2c = n_c.cross(&e1c);
+
+    let w = Vec3d::new(
+        cyl.origin.x - tv.center.x,
+        cyl.origin.y - tv.center.y,
+        cyl.origin.z - tv.center.z,
+    );
+    let w_ax = w.dot(&tv.n);
+    let w_perp = Vec3d::new(
+        w.x - w_ax * tv.n.x,
+        w.y - w_ax * tv.n.y,
+        w.z - w_ax * tv.n.z,
+    );
+    // q⊥(ψ) = R_c·(cosψ·e1⊥ + sinψ·e2⊥), e_i⊥ = e_ic − (e_ic·n)·n
+    // (n_c ⊥ n ⇒ n_c needs no projection).
+    let e1p = Vec3d::new(
+        e1c.x - e1c.dot(&tv.n) * tv.n.x,
+        e1c.y - e1c.dot(&tv.n) * tv.n.y,
+        e1c.z - e1c.dot(&tv.n) * tv.n.z,
+    );
+    let e2p = Vec3d::new(
+        e2c.x - e2c.dot(&tv.n) * tv.n.x,
+        e2c.y - e2c.dot(&tv.n) * tv.n.y,
+        e2c.z - e2c.dot(&tv.n) * tv.n.z,
+    );
+    let zc = e1c.dot(&tv.n);
+    let zs = e2c.dot(&tv.n);
+    let wp_nc = w_perp.dot(&n_c);
+    let e1p_nc = e1p.dot(&n_c);
+    let e2p_nc = e2p.dot(&n_c);
+    let wp_sq = w_perp.length_sq();
+    let wp_e1p = w_perp.dot(&e1p);
+    let wp_e2p = w_perp.dot(&e2p);
+    let e1p_sq = e1p.length_sq();
+    let e2p_sq = e2p.length_sq();
+    let e1p_e2p = e1p.dot(&e2p);
+    let eps_sheet = eps * scale.max(1.0);
+
+    let mut combined: Vec<Vec<Point3d>> = Vec::new();
+    for target_sign in [1.0, -1.0] {
+        let roots_at = |psi: f64| -> [Option<f64>; 2] {
+            let c_p = psi.cos();
+            let s_p = psi.sin();
+            // Axial torus coordinate of the cylinder point (t-free).
+            let z = w_ax + rc * (zc * c_p + zs * s_p);
+            let rzz = r * r - z * z;
+            let z_slack = 1e-10 * (rzz.abs() + r * r + 1.0) * (1.0 + scale);
+            if rzz < -z_slack {
+                return [None, None]; // |z| > r — cylinder misses the tube slab
+            }
+            let rho_t = big_r + target_sign * rzz.max(0.0).sqrt();
+            let rho_t_sq = rho_t * rho_t;
+            // B(ψ) = 2·(w⊥ + R_c·q⊥)·n_c (linear trig), C(ψ) (Trig2-like,
+            // evaluated numerically).
+            let b = 2.0 * (wp_nc + rc * (e1p_nc * c_p + e2p_nc * s_p));
+            let q_len_sq = wp_sq + 2.0 * rc * (wp_e1p * c_p + wp_e2p * s_p)
+                + rc * rc * (e1p_sq * c_p * c_p + 2.0 * e1p_e2p * c_p * s_p + e2p_sq * s_p * s_p);
+            let d = b * b - 4.0 * (q_len_sq - rho_t_sq);
+            // STRICT discriminant (cone_cone idiom).
+            let d_slack = 1e-10 * (d.abs() + b * b + (4.0 * (q_len_sq - rho_t_sq)).abs() + 1.0)
+                * (1.0 + scale);
+            if d < -d_slack {
+                return [None, None];
+            }
+            let d = d.max(0.0);
+            let sq = d.sqrt();
+            let half = -0.5 * b;
+            let check = |t: f64| -> Option<f64> {
+                if t.abs() > t_clip {
+                    return None;
+                }
+                // Sheet sanity: the torus slab |z| ≤ r is already enforced
+                // above; nothing else gates a closed torus.
+                let _ = eps_sheet;
+                Some(t)
+            };
+            [check(half + 0.5 * sq), check(half - 0.5 * sq)]
+        };
+        let disc_at = |psi: f64| -> f64 {
+            // Both validity gates: the |z| ≤ r slab AND the quadratic
+            // discriminant (their min — 0 at either tangency family).
+            let c_p = psi.cos();
+            let s_p = psi.sin();
+            let z = w_ax + rc * (zc * c_p + zs * s_p);
+            let rzz = r * r - z * z;
+            let rho_t = big_r + target_sign * rzz.max(0.0).sqrt();
+            let rho_t_sq = rho_t * rho_t;
+            let b = 2.0 * (wp_nc + rc * (e1p_nc * c_p + e2p_nc * s_p));
+            let q_len_sq = wp_sq + 2.0 * rc * (wp_e1p * c_p + wp_e2p * s_p)
+                + rc * rc * (e1p_sq * c_p * c_p + 2.0 * e1p_e2p * c_p * s_p + e2p_sq * s_p * s_p);
+            let d = b * b - 4.0 * (q_len_sq - rho_t_sq);
+            rzz.min(d)
+        };
+        let point_at = |psi: f64, t: f64| -> Point3d {
+            let c_p = psi.cos();
+            let s_p = psi.sin();
+            Point3d::new(
+                cyl.origin.x + rc * (c_p * e1c.x + s_p * e2c.x) + t * n_c.x,
+                cyl.origin.y + rc * (c_p * e1c.y + s_p * e2c.y) + t * n_c.y,
+                cyl.origin.z + rc * (c_p * e1c.z + s_p * e2c.z) + t * n_c.z,
+            )
+        };
+
+        let engine = ThetaArcEngine {
+            m_scan: 720,
+            n_samples: 128,
+            roots_at: &roots_at,
+            disc_at: &disc_at,
+            point_at: &point_at,
+            glue_tol: 1e-6 * scale,
+            collapse_tol: 100.0 * eps * (1.0 + scale),
+            linear: false,
+        };
+        combined.extend(engine.solve());
+    }
+    // Cross-pass glue: ρ+ and ρ− curves meet where |z(ψ)| = r (both
+    // targets collapse to ρ = R — the tube's top/bottom pinch circles).
+    glue_arcs(combined, 1e-6 * scale)
+}
+
+/// Mirror a point about the torus equatorial plane (through the center,
+/// normal = axis).
+fn mirror_about_equator(p: &Point3d, tv: &TorusView) -> Point3d {
+    let dz = (p.x - tv.center.x) * tv.n.x
+        + (p.y - tv.center.y) * tv.n.y
+        + (p.z - tv.center.z) * tv.n.z;
+    Point3d::new(
+        p.x - 2.0 * dz * tv.n.x,
+        p.y - 2.0 * dz * tv.n.y,
+        p.z - 2.0 * dz * tv.n.z,
+    )
+}
+
 /// General surface-surface intersection dispatcher.
 ///
 /// Audit item 2.1 (2026-07-19): Dispatches to specialized intersection
@@ -2434,6 +3157,17 @@ pub fn intersect_surfaces(
         (Surface::Cone(c), Surface::Cylinder(y))
         | (Surface::Cylinder(y), Surface::Cone(c)) => {
             intersect_cone_cylinder(c, y, tolerance)
+        }
+        (Surface::Torus(t), Surface::Plane(p)) | (Surface::Plane(p), Surface::Torus(t)) => {
+            intersect_torus_plane(p, t, tolerance)
+        }
+        (Surface::Torus(t), Surface::Sphere(s))
+        | (Surface::Sphere(s), Surface::Torus(t)) => {
+            intersect_torus_sphere(s, t, tolerance)
+        }
+        (Surface::Torus(t), Surface::Cylinder(c))
+        | (Surface::Cylinder(c), Surface::Torus(t)) => {
+            intersect_torus_cylinder(c, t, tolerance)
         }
         (Surface::Plane(_), Surface::Nurbs(_)) | (Surface::Nurbs(_), Surface::Plane(_)) => {
             intersect_marching_ssi(a, b, tolerance)
@@ -4651,5 +5385,478 @@ mod cone_cylinder_tests {
                 }
             }
         }
+    }
+}
+
+// ============================================================
+// Torus SSI tests (T-series, 2026-09-02)
+// ============================================================
+
+#[cfg(test)]
+mod torus_plane_tests {
+    use super::*;
+    use crate::{Direction3d, Plane, Point3d, SphereSurface, Surface, TorusSurface};
+
+    fn torus_z() -> TorusSurface {
+        TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0)
+    }
+
+    /// |dist(P, tube-center circle) − r| ≤ eps — the profile-circle
+    /// absolute-residual form (robust near the degenerate azimuths).
+    fn assert_on_torus(p: &Point3d, t: &TorusSurface, eps: f64, label: &str) {
+        let z = p.z * t.axis.z + p.x * t.axis.x + p.y * t.axis.y;
+        let rho = (p.x * p.x + p.y * p.y + p.z * p.z - z * z).sqrt();
+        let d = ((rho - t.major_radius) * (rho - t.major_radius) + z * z).sqrt();
+        assert!(
+            (d - t.minor_radius).abs() <= eps * (1.0 + t.major_radius + t.minor_radius),
+            "{label}: off torus: rho={rho:.9}, z={z:.9}, tube-dist={d:.9} (r={})",
+            t.minor_radius
+        );
+    }
+
+    fn assert_on_plane(p: &Point3d, plane: &Plane, eps: f64, label: &str) {
+        let d = (p.x - plane.origin.x) * plane.normal.x
+            + (p.y - plane.origin.y) * plane.normal.y
+            + (p.z - plane.origin.z) * plane.normal.z;
+        assert!(
+            d.abs() <= eps * (1.0 + 13.0), // engine-bisected boundary points sit at the clamp
+            "{label}: off plane by {d:.3e}"
+        );
+    }
+
+    #[test]
+    fn plane_perp_axis_center_two_circles() {
+        let t = torus_z();
+        let plane = Plane::xy(); // z = 0, normal = Z
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert_eq!(out.len(), 2, "equatorial plane → 2 circles");
+        let mut radii: Vec<f64> = out
+            .iter()
+            .map(|c| {
+                assert_eq!(c.len(), 128, "full-circle sampling convention");
+                c
+            })
+            .map(|c| {
+                let p = c[0];
+                assert!((p.z).abs() <= 1e-9, "circle at z=0");
+                (p.x * p.x + p.y * p.y).sqrt()
+            })
+            .collect();
+        radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((radii[0] - 7.0).abs() <= 1e-9, "inner circle R−r=7, got {}", radii[0]);
+        assert!((radii[1] - 13.0).abs() <= 1e-9, "outer circle R+r=13, got {}", radii[1]);
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "perp/center");
+                assert_on_plane(p, &plane, 1e-9, "perp/center");
+            }
+        }
+    }
+
+    #[test]
+    fn plane_perp_axis_offset_two_circles() {
+        let t = torus_z();
+        // Plane z = 1.5 (normal Z, through (0,0,1.5)).
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 1.5), Direction3d::Z);
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert_eq!(out.len(), 2);
+        let half = (3.0f64 * 3.0 - 1.5 * 1.5).sqrt();
+        let mut radii: Vec<f64> = out
+            .iter()
+            .map(|c| {
+                let p = c[0];
+                assert!((p.z - 1.5).abs() <= 1e-9, "circle at z=1.5, z={}", p.z);
+                (p.x * p.x + p.y * p.y).sqrt()
+            })
+            .collect();
+        radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((radii[0] - (10.0 - half)).abs() <= 1e-9, "inner ρ=10−√6.75");
+        assert!((radii[1] - (10.0 + half)).abs() <= 1e-9, "outer ρ=10+√6.75");
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "perp/offset");
+            }
+        }
+    }
+
+    #[test]
+    fn plane_perp_axis_tangent_one_circle() {
+        let t = torus_z();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 3.0), Direction3d::Z);
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert_eq!(out.len(), 1, "tangent plane → 1 circle at ρ=R, z=r");
+        let p = out[0][0];
+        assert!((p.z - 3.0).abs() <= 1e-9, "tangent circle at z=r=3, z={}", p.z);
+        let rho = (p.x * p.x + p.y * p.y).sqrt();
+        assert!((rho - 10.0).abs() <= 1e-8, "tangent circle ρ=10, got {rho}");
+        for q in &out[0] {
+            assert_on_torus(q, &t, 1e-9, "perp/tangent");
+        }
+    }
+
+    #[test]
+    fn plane_perp_axis_miss_empty() {
+        let t = torus_z();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 5.0), Direction3d::Z);
+        assert!(intersect_torus_plane(&plane, &t, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn plane_containing_axis_two_meridian_circles() {
+        let t = torus_z();
+        // Plane x = 0 (normal X through the origin) contains the Z axis.
+        let plane = Plane::from_origin_and_normal(Point3d::ORIGIN, Direction3d::X);
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert_eq!(out.len(), 2, "axis plane → 2 meridian tube circles");
+        for curve in &out {
+            assert_eq!(curve.len(), 128);
+            for p in curve {
+                assert!(p.x.abs() <= 1e-9, "meridian circle lies in x=0");
+                assert_on_torus(p, &t, 1e-9, "axis-plane");
+                assert_on_plane(p, &plane, 1e-9, "axis-plane");
+            }
+            // Circle centers at (0, ±10, 0), radius 3.
+            let c = (0.0, 10.0, 0.0);
+            let c2 = (0.0, -10.0, 0.0);
+            let dist = |p: &Point3d, c: (f64, f64, f64)| {
+                ((p.x - c.0).powi(2) + (p.y - c.1).powi(2) + (p.z - c.2).powi(2)).sqrt()
+            };
+            let p = curve[0];
+            let ok0 = (dist(&p, c) - 3.0).abs() <= 1e-9;
+            let ok1 = (dist(&p, c2) - 3.0).abs() <= 1e-9;
+            assert!(ok0 || ok1, "meridian circle center (0,±10,0) r=3");
+        }
+    }
+
+    #[test]
+    fn plane_parallel_axis_offset_peanut() {
+        let t = torus_z();
+        // Plane x = 5 (normal X) — parallel to the axis, offset 5 < R−r.
+        let plane = Plane::from_origin_and_normal(Point3d::new(5.0, 0.0, 0.0), Direction3d::X);
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert!(!out.is_empty(), "offset plane cuts the tube → peanut curves");
+        let total: usize = out.iter().map(|c| c.len()).sum();
+        assert!(total >= 64, "sampled densely enough, got {total} pts");
+        for curve in &out {
+            for p in curve {
+                // Boundary points sit at the strict-slack clamp: 1e-7 scale-relative.
+                assert!((p.x - 5.0).abs() <= 1e-7, "in plane x=5, x={:.9}", p.x);
+                assert_on_torus(p, &t, 1e-9, "peanut");
+            }
+        }
+    }
+
+    #[test]
+    fn plane_oblique_invariants() {
+        let t = torus_z();
+        // 45° oblique plane through the center: normal (1,0,1)/√2.
+        let n = Direction3d::new(1.0, 0.0, 1.0).unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::ORIGIN, n);
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert!(!out.is_empty(), "oblique plane through the tube → non-empty");
+        for curve in &out {
+            assert!(curve.len() >= 8, "substantive arc");
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "oblique/torus");
+                assert_on_plane(p, &plane, 1e-9, "oblique/plane");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatcher_routes_both_orders() {
+        let t = Surface::Torus(torus_z());
+        let plane = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::ORIGIN,
+            Direction3d::new(1.0, 0.0, 1.0).unwrap(),
+        ));
+        let out_ab = intersect_surfaces(&t, &plane, 1e-9);
+        let out_ba = intersect_surfaces(&plane, &t, 1e-9);
+        assert!(!out_ab.polylines.is_empty());
+        assert_eq!(
+            out_ab.polylines.len(),
+            out_ba.polylines.len(),
+            "both orders give the same curve count"
+        );
+        let count = |r: &SurfaceSurfaceIntersection| -> usize {
+            r.polylines.iter().map(|c| c.len()).sum()
+        };
+        assert_eq!(count(&out_ab), count(&out_ba), "same total point count");
+        if let Surface::Torus(tor) = &t {
+            if let Surface::Plane(pl) = &plane {
+                for p in out_ab.polylines.iter().flatten() {
+                    assert_on_torus(p, tor, 1e-9, "disp/torus");
+                    assert_on_plane(p, pl, 1e-9, "disp/plane");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_normal_perp_plane() {
+        // Plane with normal −Z at z=1.5 (the B = −1 sign path).
+        let t = torus_z();
+        let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 1.5), Direction3d::new(0.0, 0.0, -1.0).unwrap());
+        let out = intersect_torus_plane(&plane, &t, 1e-9);
+        assert_eq!(out.len(), 2, "−Z normal: same 2 circles");
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "neg-normal");
+                assert!((p.z - 1.5).abs() <= 1e-9);
+            }
+        }
+        let _ = SphereSurface::new(Point3d::ORIGIN, 1.0); // keep import used
+    }
+}
+
+#[cfg(test)]
+mod torus_sphere_tests {
+    use super::*;
+    use crate::{Direction3d, Plane, Point3d, SphereSurface, Surface, TorusSurface};
+
+    fn torus_z() -> TorusSurface {
+        TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0)
+    }
+
+    fn assert_on_torus(p: &Point3d, t: &TorusSurface, eps: f64, label: &str) {
+        let z = p.z * t.axis.z + p.x * t.axis.x + p.y * t.axis.y;
+        let rho = (p.x * p.x + p.y * p.y + p.z * p.z - z * z).sqrt();
+        let d = ((rho - t.major_radius) * (rho - t.major_radius) + z * z).sqrt();
+        assert!(
+            (d - t.minor_radius).abs() <= eps * (1.0 + t.major_radius + t.minor_radius),
+            "{label}: off torus: tube-dist={d:.9} (r={})",
+            t.minor_radius
+        );
+    }
+
+    fn assert_on_sphere(p: &Point3d, c: &Point3d, r: f64, eps: f64, label: &str) {
+        let d = ((p.x - c.x).powi(2) + (p.y - c.y).powi(2) + (p.z - c.z).powi(2)).sqrt();
+        assert!((d - r).abs() <= eps * (1.0 + r), "{label}: off sphere by {:.3e}", (d - r).abs());
+    }
+
+    #[test]
+    fn concentric_two_latitude_circles() {
+        let t = torus_z();
+        // Sphere radius 10 centered at the torus center:
+        // cosφ = (Rs²−R²−r²)/(2Rr) = −0.15 → two latitude circles.
+        let s = SphereSurface::new(Point3d::ORIGIN, 10.0);
+        let out = intersect_torus_sphere(&s, &t, 1e-9);
+        assert!(out.len() >= 2, "concentric → 2 latitude circles, got {}", out.len());
+        let cos_phi: f64 = -0.15;
+        let rho = 10.0 + 3.0 * cos_phi;
+        let z = 3.0 * (1.0f64 - cos_phi * cos_phi).sqrt();
+        for curve in &out {
+            assert!(curve.len() >= 64, "closed loop sampled densely");
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "conc/torus");
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "conc/sphere");
+                let pr = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((pr - rho).abs() <= 1e-8, "latitude ρ={rho:.6}, got {pr:.6}");
+                assert!((p.z.abs() - z).abs() <= 1e-8, "latitude |z|={z:.6}");
+            }
+        }
+    }
+
+    #[test]
+    fn concentric_internal_tangency_single_circle() {
+        let t = torus_z();
+        // Sphere radius R−r = 7: internally tangent at the inner equator.
+        let s = SphereSurface::new(Point3d::ORIGIN, 7.0);
+        let out = intersect_torus_sphere(&s, &t, 1e-9);
+        assert!(!out.is_empty(), "internal tangency → inner equator circle");
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "tang/torus");
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "tang/sphere");
+                let pr = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((pr - 7.0).abs() <= 1e-8, "inner equator ρ=7, got {pr}");
+                assert!(p.z.abs() <= 1e-8, "inner equator z=0");
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_offset_invariants() {
+        let t = torus_z();
+        // Sphere center (8,0,0), radius 4 — crosses the tube region.
+        let s = SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 4.0);
+        let out = intersect_torus_sphere(&s, &t, 1e-9);
+        assert!(!out.is_empty(), "sphere crosses the tube → non-empty");
+        for curve in &out {
+            assert!(curve.len() >= 8, "substantive arc");
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "offset/torus");
+                assert_on_sphere(p, &s.center, s.radius, 1e-9, "offset/sphere");
+            }
+        }
+    }
+
+    #[test]
+    fn sphere_disjoint_and_contained_empty() {
+        let t = torus_z();
+        // Strictly outside the tube (profile distance 20 > r + Rs = 5).
+        let far = SphereSurface::new(Point3d::new(30.0, 0.0, 0.0), 2.0);
+        assert!(intersect_torus_sphere(&far, &t, 1e-9).is_empty(), "disjoint → empty");
+        // Center on the tube-center circle, small radius inside the tube.
+        let in_tube = SphereSurface::new(Point3d::new(10.0, 0.0, 0.0), 1.0);
+        assert!(intersect_torus_sphere(&in_tube, &t, 1e-9).is_empty(), "contained → empty");
+    }
+
+    #[test]
+    fn dispatcher_routes_both_orders() {
+        let t = Surface::Torus(torus_z());
+        let s = Surface::Sphere(SphereSurface::new(Point3d::new(8.0, 0.0, 0.0), 4.0));
+        let out_ab = intersect_surfaces(&t, &s, 1e-9);
+        let out_ba = intersect_surfaces(&s, &t, 1e-9);
+        assert!(!out_ab.polylines.is_empty());
+        assert_eq!(out_ab.polylines.len(), out_ba.polylines.len());
+        let count = |r: &SurfaceSurfaceIntersection| -> usize {
+            r.polylines.iter().map(|c| c.len()).sum()
+        };
+        assert_eq!(count(&out_ab), count(&out_ba));
+        let _ = (Direction3d::X, Plane::xy()); // keep imports used
+    }
+}
+
+#[cfg(test)]
+mod torus_cylinder_tests {
+    use super::*;
+    use crate::{Direction3d, Plane, Point3d, CylinderSurface, Surface, TorusSurface};
+
+    fn torus_z() -> TorusSurface {
+        TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0)
+    }
+
+    fn assert_on_torus(p: &Point3d, t: &TorusSurface, eps: f64, label: &str) {
+        let z = p.z * t.axis.z + p.x * t.axis.x + p.y * t.axis.y;
+        let rho = (p.x * p.x + p.y * p.y + p.z * p.z - z * z).sqrt();
+        let d = ((rho - t.major_radius) * (rho - t.major_radius) + z * z).sqrt();
+        assert!(
+            (d - t.minor_radius).abs() <= eps * (1.0 + t.major_radius + t.minor_radius),
+            "{label}: off torus: tube-dist={d:.9} (r={})",
+            t.minor_radius
+        );
+    }
+
+    fn assert_on_cylinder_axis(
+        p: &Point3d,
+        origin: &Point3d,
+        axis: &Direction3d,
+        radius: f64,
+        eps: f64,
+        label: &str,
+    ) {
+        let dx = p.x - origin.x;
+        let dy = p.y - origin.y;
+        let dz = p.z - origin.z;
+        let ax = dx * axis.x + dy * axis.y + dz * axis.z;
+        let px = dx - ax * axis.x;
+        let py = dy - ax * axis.y;
+        let pz = dz - ax * axis.z;
+        let d = (px * px + py * py + pz * pz).sqrt();
+        assert!(
+            (d - radius).abs() <= eps * (1.0 + radius),
+            "{label}: off cylinder by {:.3e} (radial={d:.9}, R={radius})",
+            (d - radius).abs()
+        );
+    }
+
+    #[test]
+    fn coaxial_two_circles() {
+        let t = torus_z();
+        let cyl = CylinderSurface::new_z(8.0);
+        let out = intersect_torus_cylinder(&cyl, &t, 1e-9);
+        assert_eq!(out.len(), 2, "coaxial R_c=8 → 2 circles z=±√5");
+        let z_exp = (3.0f64 * 3.0 - 4.0).sqrt();
+        for curve in &out {
+            assert_eq!(curve.len(), 128);
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "coax/torus");
+                assert_on_cylinder_axis(p, &Point3d::ORIGIN, &Direction3d::Z, 8.0, 1e-9, "coax/cyl");
+                assert!(p.z.abs() - z_exp.abs() <= 1e-8, "z=±√5");
+            }
+        }
+    }
+
+    #[test]
+    fn coaxial_tangent_one_circle() {
+        let t = torus_z();
+        let cyl_out = CylinderSurface::new_z(13.0);
+        assert_eq!(intersect_torus_cylinder(&cyl_out, &t, 1e-9).len(), 1, "R_c=13 outer tangent");
+        let cyl_in = CylinderSurface::new_z(7.0);
+        assert_eq!(intersect_torus_cylinder(&cyl_in, &t, 1e-9).len(), 1, "R_c=7 inner tangent");
+    }
+
+    #[test]
+    fn coaxial_miss_empty() {
+        let t = torus_z();
+        assert!(intersect_torus_cylinder(&CylinderSurface::new_z(14.0), &t, 1e-9).is_empty());
+        assert!(intersect_torus_cylinder(&CylinderSurface::new_z(6.0), &t, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn parallel_offset_invariants() {
+        let t = torus_z();
+        // Cylinder axis ∥ Z through (5,0,0), radius 3 — cuts the inner
+        // side of the tube. Curves come in equatorial-mirrored pairs.
+        let origin = Point3d::new(5.0, 0.0, 0.0);
+        let cyl = CylinderSurface { origin, axis: Direction3d::Z, radius: 3.0, x_dir: Direction3d::X };
+        let out = intersect_torus_cylinder(&cyl, &t, 1e-9);
+        assert!(!out.is_empty(), "offset cylinder crosses the tube");
+        let total: usize = out.iter().map(|c| c.len()).sum();
+        assert!(total >= 64, "dense sampling, got {total}");
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "offset/torus");
+                assert_on_cylinder_axis(p, &origin, &Direction3d::Z, 3.0, 1e-9, "offset/cyl");
+            }
+        }
+        // Equatorial symmetry: every point must have a mirrored partner.
+        for curve in &out {
+            for p in curve {
+                let mirrored = Point3d::new(p.x, p.y, -p.z);
+                let has_partner = out
+                    .iter()
+                    .any(|c| c.iter().any(|q| q.distance_to(&mirrored) <= 1e-6));
+                assert!(has_partner, "z-mirror partner missing for ({:.4},{:.4},{:.4})", p.x, p.y, p.z);
+            }
+        }
+    }
+
+    #[test]
+    fn perpendicular_axes_analytic_invariants() {
+        let t = torus_z();
+        // Cylinder along X through the origin, radius 3 — perpendicular
+        // axes take the ψ-parametrized twin-pass analytic path.
+        let origin = Point3d::ORIGIN;
+        let cyl = Surface::Cylinder(CylinderSurface {
+            origin,
+            axis: Direction3d::X,
+            radius: 3.0,
+            x_dir: Direction3d::Z,
+        });
+        let out = intersect_surfaces(&cyl, &Surface::Torus(t.clone()), 1e-9);
+        assert!(!out.polylines.is_empty(), "perpendicular cylinder crosses the tube");
+        let total: usize = out.polylines.iter().map(|c| c.len()).sum();
+        assert!(total >= 64, "dense analytic sampling, got {total} pts");
+        for p in out.polylines.iter().flatten() {
+            assert_on_torus(p, &t, 1e-7, "perp/analytic torus");
+            assert_on_cylinder_axis(p, &origin, &Direction3d::X, 3.0, 1e-7, "perp/analytic cyl");
+        }
+    }
+
+    #[test]
+    fn dispatcher_routes_both_orders() {
+        let t = Surface::Torus(torus_z());
+        let cyl = Surface::Cylinder(CylinderSurface::new_z(8.0));
+        let out_ab = intersect_surfaces(&t, &cyl, 1e-9);
+        let out_ba = intersect_surfaces(&cyl, &t, 1e-9);
+        assert_eq!(out_ab.polylines.len(), 2);
+        assert_eq!(out_ab.polylines.len(), out_ba.polylines.len(), "same count both orders");
+        let count = |r: &SurfaceSurfaceIntersection| -> usize {
+            r.polylines.iter().map(|c| c.len()).sum()
+        };
+        assert_eq!(count(&out_ab), count(&out_ba));
+        let _ = Plane::xy(); // keep import used
     }
 }
