@@ -1442,4 +1442,5 @@ MIGRATION_GUIDE.md; фикс-кандидат — BTreeMap/сортировка 
 
 ## Коммит
 
-- (этот коммит) feat(geometry): analytic Cone×Cone + Cone×Cylinder SSI
+- `4991a6d` feat(geometry): analytic Cone×Cone + Cone×Cylinder SSI
+  (4 файла, +1834/−1), запушен в origin/main
