@@ -1577,5 +1577,5 @@ BREP_CORE_FIX_PLAN (предыдущая сессия сброшена до ко
 
 ## Коммит
 
-- `feat(geometry): analytic Torus SSI — Plane/Sphere/Cylinder × Torus`
-  (intersection.rs + boolean.rs + docs), запушен в origin/main
+- `c3846d2` feat(geometry): analytic Torus SSI — Plane/Sphere/Cylinder × Torus
+  (intersection.rs + boolean.rs + docs, +1689/−2), запушен в origin/main
