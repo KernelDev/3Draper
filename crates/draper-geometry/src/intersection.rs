@@ -1503,6 +1503,904 @@ pub fn intersect_cylinder_cylinder(
     result
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// Cone×Cone / Cone×Cylinder — analytic SSI (B1-series, 2026-09-02)
+//
+// Both cones and the cone-vs-cylinder pair reduce to a per-azimuth QUADRATIC
+// in one surface parameter, exactly like cylinder×cylinder:
+//
+//  Cone×Cone (cone A parametrized from its apex, slant t ≥ 0):
+//    p(θ, t) = P_a + t·g_a(θ),  g_a(θ) = sinα·(cosθ·e_x + sinθ·e_y) + cosα·m_a
+//    (m_a = nappe direction, unit; |g_a| = 1). Cone B's nappe constraint
+//    (angle(w, m_b) = β with w = p − P_b) is
+//        (w·m_b)² = cos²β·|w|²,  w·m_b ≥ 0 (nappe side),
+//    which expands to
+//        a(θ)·t² + b(θ)·t + c = 0:
+//        a = gm(θ)² − cos²β            (degree-2 trig),
+//        b = 2(h₀·gm(θ) − cos²β·w₀g(θ)) (degree-1 trig),
+//        c = h₀² − cos²β·|w₀|²          (constant),
+//    with gm(θ) = g_a(θ)·m_b (degree-1), w₀g(θ) = w₀·g_a(θ) (degree-1),
+//    h₀ = w₀·m_b, w₀ = P_a − P_b. Every emitted root lies ON cone A by
+//    construction and ON cone B up to the fp rounding of the quadratic
+//    solve — no marching, no Newton.
+//
+//  Cone×Cylinder (cylinder parametrized by axial t ∈ ℝ):
+//    p(θ, t) = o_c + t·n_c + R·q(θ); the cone nappe constraint gives
+//        a₂·t² + b(θ)·t + c(θ) = 0 with a₂ = (n_c·m)² − cos²α constant,
+//        b degree-1, c degree-2 — the cylinder×cylinder structure.
+//
+//  Sheet constraints (single-nappe cones): t ≥ 0 / w·m ≥ 0 filter the
+//  mirror-nappe roots; boundary crossings of those sheets are curve
+//  endpoints that pass through an APEX (a single point shared by all θ).
+//  Branch arcs are glued at coincident endpoints, which reproduces the
+//  pinch joins (D = 0), a(θ) = 0 crossings (generator-parallel azimuths,
+//  where one root escapes to infinity) and apex pass-throughs.
+//
+//  Degenerate configurations handled by dedicated paths:
+//    • both half-angles ≈ 0 → two cylinders (delegate);
+//    • one half-angle ≈ 0 → cone×cylinder (delegate);
+//    • half-angle ≈ ±π/2 → a plane (delegate to plane×cone / plane×cyl);
+//    • shared apex → common generator RAYS (direction-circle solve on the
+//      unit sphere: two linear constraints d·m_a = cosα, d·m_b = cosβ);
+//    • a(θ) ≡ 0 (parallel axes + equal angles) → the intersection is a
+//      PLANAR CONIC (the homogeneous quadratic parts of the two cone
+//      equations coincide, their difference is linear) → linear root
+//      t(θ) = −c/b(θ), arcs between sheet/clip boundaries.
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Degree-2 trig polynomial v(θ) = k0 + k1·cosθ + s1·sinθ + k2·cos2θ + s2·sin2θ.
+#[derive(Clone, Copy, Debug, Default)]
+struct Trig2 {
+    k0: f64,
+    k1: f64,
+    s1: f64,
+    k2: f64,
+    s2: f64,
+}
+
+impl Trig2 {
+    fn constant(v: f64) -> Self {
+        Trig2 { k0: v, ..Default::default() }
+    }
+
+    /// Degree-1: k0 + k1·cosθ + s1·sinθ.
+    fn linear(k0: f64, k1: f64, s1: f64) -> Self {
+        Trig2 { k0, k1, s1, k2: 0.0, s2: 0.0 }
+    }
+
+    fn eval(&self, theta: f64) -> f64 {
+        let c = theta.cos();
+        let s = theta.sin();
+        let c2 = 2.0 * c * c - 1.0; // cos 2θ
+        let s2 = 2.0 * s * c; // sin 2θ
+        self.k0 + self.k1 * c + self.s1 * s + self.k2 * c2 + self.s2 * s2
+    }
+
+    /// All coefficients negligible against `scale`.
+    fn is_trivial(&self, scale: f64) -> bool {
+        let m = self
+            .k0
+            .abs()
+            .max(self.k1.abs())
+            .max(self.s1.abs())
+            .max(self.k2.abs())
+            .max(self.s2.abs());
+        m <= scale
+    }
+}
+
+/// Apex-based view of one cone nappe.
+///
+/// A `ConeSurface` is a single nappe of an infinite cone:
+/// { P + t·g(θ) : t ≥ 0 } with the unit generator
+/// g(θ) = sinα·(cosθ·e_x + sinθ·e_y) + cosα·m, where m = sign(tan α)·axis
+/// is the nappe direction and α = |half_angle|. `half_angle` ≈ 0 (cylinder)
+/// and ≈ ±π/2 (plane) are rejected and handled by the pair-level paths.
+struct ConeView {
+    apex: Point3d,
+    /// Nappe direction (unit): sign(tan(half_angle)) · axis.
+    m: Vec3d,
+    /// Axis (unit).
+    n: Vec3d,
+    /// Orthonormal frame ⊥ axis (generator azimuth plane).
+    ex: Vec3d,
+    ey: Vec3d,
+    sin_a: f64,
+    cos_a: f64,
+    /// Base radius (scale reference; 0 for expanding cones).
+    radius: f64,
+}
+
+impl ConeView {
+    fn of(cone: &ConeSurface) -> Option<ConeView> {
+        let tan_ha = cone.half_angle.tan();
+        if !tan_ha.is_finite() {
+            return None; // half_angle ≈ ±π/2 — a plane
+        }
+        if tan_ha.abs() < 1e-10 {
+            return None; // half_angle ≈ 0 — a cylinder
+        }
+        let s = tan_ha.signum();
+        let apex = if cone.expanding {
+            Point3d::new(cone.origin.x, cone.origin.y, cone.origin.z)
+        } else {
+            let v_apex = -cone.radius / tan_ha;
+            Point3d::new(
+                cone.origin.x + v_apex * cone.axis.x,
+                cone.origin.y + v_apex * cone.axis.y,
+                cone.origin.z + v_apex * cone.axis.z,
+            )
+        };
+        let n = Vec3d::new(cone.axis.x, cone.axis.y, cone.axis.z);
+        // Re-orthogonalize x_dir against the axis (plane_cone idiom).
+        let raw = Vec3d::new(cone.x_dir.x, cone.x_dir.y, cone.x_dir.z);
+        let dk = raw.dot(&n);
+        let mut ex = Vec3d::new(raw.x - dk * n.x, raw.y - dk * n.y, raw.z - dk * n.z);
+        let ex_len = ex.length();
+        if ex_len < 1e-9 {
+            // x_dir ∥ axis — build any perpendicular direction: n × e_x,
+            // falling back to n × e_y when the axis is parallel to e_x
+            // (n × e_x = 0 there).
+            let mut fb = Vec3d::new(0.0, n.z, -n.y); // n × e_x
+            if fb.length_sq() < 1e-6 {
+                fb = Vec3d::new(-n.z, 0.0, n.x); // n × e_y
+            }
+            let l = fb.length();
+            if l < 1e-12 {
+                return None;
+            }
+            ex = Vec3d::new(fb.x / l, fb.y / l, fb.z / l);
+        } else {
+            ex = Vec3d::new(ex.x / ex_len, ex.y / ex_len, ex.z / ex_len);
+        }
+        let ey = n.cross(&ex);
+        let alpha = cone.half_angle.abs();
+        Some(ConeView {
+            apex,
+            m: Vec3d::new(s * n.x, s * n.y, s * n.z),
+            n,
+            ex,
+            ey,
+            sin_a: alpha.sin(),
+            cos_a: alpha.cos(),
+            radius: cone.radius,
+        })
+    }
+
+    /// Unit generator direction at azimuth θ.
+    fn generator(&self, theta: f64) -> Vec3d {
+        let c = theta.cos();
+        let s = theta.sin();
+        Vec3d::new(
+            self.sin_a * (c * self.ex.x + s * self.ey.x) + self.cos_a * self.m.x,
+            self.sin_a * (c * self.ex.y + s * self.ey.y) + self.cos_a * self.m.y,
+            self.sin_a * (c * self.ex.z + s * self.ey.z) + self.cos_a * self.m.z,
+        )
+    }
+}
+
+/// A `ConeSurface` with half_angle ≈ 0 viewed as a cylinder.
+fn cone_as_cylinder(cone: &ConeSurface) -> CylinderSurface {
+    CylinderSurface {
+        origin: cone.origin,
+        axis: cone.axis,
+        radius: cone.radius,
+        x_dir: cone.x_dir,
+    }
+}
+
+/// A `ConeSurface` with half_angle ≈ ±π/2 viewed as the plane through the
+/// apex perpendicular to the axis.
+fn cone_as_plane(cone: &ConeSurface) -> Plane {
+    let tan_ha = cone.half_angle.tan();
+    let apex = if cone.expanding {
+        cone.origin
+    } else {
+        let v_apex = -cone.radius / tan_ha;
+        Point3d::new(
+            cone.origin.x + v_apex * cone.axis.x,
+            cone.origin.y + v_apex * cone.axis.y,
+            cone.origin.z + v_apex * cone.axis.z,
+        )
+    };
+    Plane::from_origin_and_normal(apex, cone.axis)
+}
+
+/// 1-D θ-domain arc engine shared by the cone-family analytic solvers.
+///
+/// Scans branch-sheeted root validity on a uniform θ grid, extracts
+/// maximal valid runs (circular, wrap-merged), refines run boundaries by
+/// bisection on the boolean validity, samples each run with end-clustered
+/// θ (the sqrt-singularity idiom of sphere×cylinder / cylinder×cylinder),
+/// glues branch arcs at coincident endpoints (pinch joins, a(θ) = 0
+/// crossings, apex pass-throughs) and collapses degenerate micro-loops to
+/// single tangency points.
+struct ThetaArcEngine<'a> {
+    m_scan: usize,
+    n_samples: usize,
+    /// Branch-sheeted roots at θ: [branch+, branch−]; `None` = invalid
+    /// (no real root, off-sheet, or beyond the clip). The quadratic
+    /// discriminant is clamped at zero (cylinder×cylinder convention), and
+    /// a(θ) ≈ 0 azimuths fall back to the single finite linear root.
+    roots_at: &'a dyn Fn(f64) -> [Option<f64>; 2],
+    /// Strict discriminant D(θ) (for the no-valid-θ tangency search).
+    disc_at: &'a dyn Fn(f64) -> f64,
+    /// Point on the parametrized surface at (θ, t).
+    point_at: &'a dyn Fn(f64, f64) -> Point3d,
+    /// Endpoint glue tolerance (spatial).
+    glue_tol: f64,
+    /// Micro-loop collapse extent threshold (spatial).
+    collapse_tol: f64,
+    /// `true` when the equation degenerated to linear (a ≡ 0): skip the
+    /// discriminant tangency search (D = b² ≥ 0 is meaningless there).
+    linear: bool,
+}
+
+impl<'a> ThetaArcEngine<'a> {
+    fn solve(&self) -> Vec<Vec<Point3d>> {
+        let m = self.m_scan;
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let theta_of = |i: usize| -> f64 { two_pi * i as f64 / m as f64 };
+        let step = two_pi / m as f64;
+
+        // ── Branch validity masks ─────────────────────────────────────────
+        let mut valid: [Vec<bool>; 2] = [Vec::with_capacity(m), Vec::with_capacity(m)];
+        for i in 0..m {
+            let roots = (self.roots_at)(theta_of(i));
+            for br in 0..2 {
+                valid[br].push(roots[br].is_some());
+            }
+        }
+
+        if !valid[0].iter().any(|&v| v) && !valid[1].iter().any(|&v| v) {
+            return self.tangency_or_empty();
+        }
+
+        // ── Per-branch runs, boundary bisection, emission ────────────────
+        let mut arcs: Vec<Vec<Point3d>> = Vec::new();
+        for br in 0..2 {
+            let mut runs: Vec<(usize, usize)> = Vec::new();
+            let mut i = 0usize;
+            while i < m {
+                if valid[br][i] {
+                    let mut j = i;
+                    while j < m && valid[br][j] {
+                        j += 1;
+                    }
+                    runs.push((i, j - 1));
+                    i = j;
+                } else {
+                    i += 1;
+                }
+            }
+            if runs.is_empty() {
+                continue;
+            }
+            // Wrap-merge: a run ending at m−1 and a run starting at 0 are
+            // one circular run (θ > 2π is fine — trig is periodic).
+            if runs.len() >= 2 {
+                let first = runs[0];
+                let last = *runs.last().unwrap();
+                if first.0 == 0 && last.1 == m - 1 {
+                    runs.pop();
+                    runs[0] = (last.0, first.1 + m);
+                }
+            }
+
+            for &(s_idx, e_idx) in &runs {
+                let run_len = e_idx - s_idx + 1;
+                let n = self.n_samples;
+                let full_circle = run_len >= m;
+                let mut curve = Vec::with_capacity(n);
+                if full_circle {
+                    // Full circle: uniform sampling, no closure duplicate
+                    // (the cylinder full-circle-loop convention).
+                    let th_lo = theta_of(s_idx % m);
+                    for k in 0..n {
+                        let th = th_lo + two_pi * k as f64 / n as f64;
+                        if let Some(t) = (self.roots_at)(th)[br] {
+                            curve.push((self.point_at)(th, t));
+                        }
+                    }
+                } else {
+                    // Partial arc: bisect both boundaries on the boolean
+                    // validity. The INVALID sample comes first —
+                    // bisect(invalid, valid) keeps the root bracketed and
+                    // converges from inside the arc (cylinder×cylinder
+                    // convention; swapping the arguments converges one grid
+                    // step past the boundary).
+                    // e_idx stays UNWRAPPED for wrap-merged runs
+                    // (θ > 2π is fine — trig is periodic); re-wrapping it
+                    // would make the span negative and drop the arc.
+                    let theta_s = theta_of(s_idx);
+                    let theta_e = theta_of(e_idx);
+                    let th_lo = self.bisect_valid(br, theta_s - step, theta_s);
+                    let th_hi = self.bisect_valid(br, theta_e + step, theta_e);
+                    let span = th_hi - th_lo;
+                    if span <= 1e-12 {
+                        continue; // scan artifact
+                    }
+                    // End-clustered sampling: s(η) = (1 − cos(ηπ))/2 has
+                    // zero derivative at both ends, compensating the
+                    // sqrt-singularity of the roots at pinch boundaries.
+                    for k in 0..n {
+                        let eta = k as f64 / (n - 1) as f64;
+                        let th =
+                            th_lo + span * (1.0 - (eta * std::f64::consts::PI).cos()) / 2.0;
+                        if let Some(t) = (self.roots_at)(th)[br] {
+                            curve.push((self.point_at)(th, t));
+                        }
+                    }
+                }
+                if !curve.is_empty() {
+                    arcs.push(curve);
+                }
+            }
+        }
+
+        // ── Glue branch arcs at coincident endpoints, collapse micro-loops ─
+        let mut result = glue_arcs(arcs, self.glue_tol);
+        for curve in &mut result {
+            if curve.len() >= 2 {
+                let (mn, mx) = bounding_extent(curve);
+                let diag = (mn.0 - mx.0).abs()
+                    + (mn.1 - mx.1).abs()
+                    + (mn.2 - mx.2).abs();
+                if diag <= self.collapse_tol {
+                    *curve = vec![curve[0]];
+                }
+            }
+        }
+        result
+    }
+
+    /// Bisection on the boolean branch validity: `theta_invalid` is on the
+    /// invalid side, `theta_valid` on the valid side; converges to the
+    /// validity boundary (discriminant zero, sheet crossing, or clip).
+    fn bisect_valid(&self, br: usize, theta_invalid: f64, theta_valid: f64) -> f64 {
+        let mut lo = theta_invalid;
+        let mut hi = theta_valid;
+        for _ in 0..60 {
+            let mid = 0.5 * (lo + hi);
+            if (self.roots_at)(mid)[br].is_some() {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        0.5 * (lo + hi)
+    }
+
+    /// No valid azimuth anywhere: either a single tangency point (the
+    /// discriminant MAXIMUM touches zero — golden-section refinement, the
+    /// cylinder×cylinder idiom) or empty.
+    fn tangency_or_empty(&self) -> Vec<Vec<Point3d>> {
+        if self.linear {
+            return vec![]; // linear degenerate, no sheet-valid azimuth — empty
+        }
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let m = self.m_scan;
+        let grid: Vec<f64> = (0..m)
+            .map(|i| (self.disc_at)(two_pi * i as f64 / m as f64))
+            .collect();
+        let argmax = (0..m)
+            .max_by(|&i, &j| grid[i].partial_cmp(&grid[j]).unwrap())
+            .unwrap();
+        let step = two_pi / m as f64;
+        let mut lo = two_pi * argmax as f64 / m as f64 - step;
+        let mut hi = two_pi * argmax as f64 / m as f64 + step;
+        let phi = 0.6180339887498949;
+        let mut x1 = hi - phi * (hi - lo);
+        let mut x2 = lo + phi * (hi - lo);
+        let mut f1 = (self.disc_at)(x1);
+        let mut f2 = (self.disc_at)(x2);
+        for _ in 0..80 {
+            if f1 > f2 {
+                hi = x2;
+                x2 = x1;
+                f2 = f1;
+                x1 = hi - phi * (hi - lo);
+                f1 = (self.disc_at)(x1);
+            } else {
+                lo = x1;
+                x1 = x2;
+                f1 = f2;
+                x2 = lo + phi * (hi - lo);
+                f2 = (self.disc_at)(x2);
+            }
+        }
+        let theta_star = 0.5 * (lo + hi);
+        let d_scale = grid.iter().fold(0.0f64, |acc, &d| acc.max(d.abs())).max(1.0);
+        if (self.disc_at)(theta_star) > -1e-10 * d_scale {
+            // The double root t = −b/2a, checked through the same sheet
+            // filter as regular roots.
+            let roots = (self.roots_at)(theta_star);
+            if let Some(t) = roots[0].or(roots[1]) {
+                return vec![vec![(self.point_at)(theta_star, t)]];
+            }
+        }
+        vec![]
+    }
+}
+
+/// Axis-aligned bounding extent as ((min_x, min_y, min_z), (max_x, max_y, max_z)).
+fn bounding_extent(points: &[Point3d]) -> ((f64, f64, f64), (f64, f64, f64)) {
+    let mut mn = (f64::MAX, f64::MAX, f64::MAX);
+    let mut mx = (f64::MIN, f64::MIN, f64::MIN);
+    for p in points {
+        mn.0 = mn.0.min(p.x);
+        mn.1 = mn.1.min(p.y);
+        mn.2 = mn.2.min(p.z);
+        mx.0 = mx.0.max(p.x);
+        mx.1 = mx.1.max(p.y);
+        mx.2 = mx.2.max(p.z);
+    }
+    (mn, mx)
+}
+
+fn endpoints_close(a: &Point3d, b: &Point3d, tol: f64) -> bool {
+    (a.x - b.x).abs() <= tol
+        && (a.y - b.y).abs() <= tol
+        && (a.z - b.z).abs() <= tol
+}
+
+/// Glue open arcs at coincident endpoints into longer curves / closed
+/// loops. Pinch joins (branch+ end == branch− end at a D = 0 boundary),
+/// a(θ) = 0 crossings (the finite linear root continuous across the
+/// azimuth) and apex pass-throughs all produce coincident arc endpoints.
+/// Duplicated closure vertices are dropped (house convention).
+fn glue_arcs(mut arcs: Vec<Vec<Point3d>>, tol: f64) -> Vec<Vec<Point3d>> {
+    // Drop duplicated closure vertices.
+    for c in &mut arcs {
+        if c.len() >= 2 && endpoints_close(&c[0], c.last().unwrap(), tol) {
+            c.pop();
+        }
+    }
+
+    let mut guard = 0usize;
+    'glue: loop {
+        guard += 1;
+        if guard > 10_000 {
+            break; // pathological input guard
+        }
+        if arcs.len() < 2 {
+            break;
+        }
+        for i in 0..arcs.len() {
+            for j in 0..arcs.len() {
+                if i == j {
+                    continue;
+                }
+                let a = &arcs[i];
+                let b = &arcs[j];
+                if a.is_empty() || b.is_empty() {
+                    continue;
+                }
+                let a_first = &a[0];
+                let a_last = a.last().unwrap();
+                let b_first = &b[0];
+                let b_last = b.last().unwrap();
+
+                let mut merged: Option<Vec<Point3d>> = None;
+                if endpoints_close(a_last, b_first, tol) {
+                    let mut mm = a.clone();
+                    mm.extend_from_slice(&b[1..]);
+                    merged = Some(mm);
+                } else if endpoints_close(a_last, b_last, tol) {
+                    let mut mm = a.clone();
+                    let rev: Vec<Point3d> = b.iter().rev().skip(1).cloned().collect();
+                    mm.extend(rev);
+                    merged = Some(mm);
+                } else if endpoints_close(a_first, b_first, tol) {
+                    let mut mm: Vec<Point3d> = b.iter().rev().skip(1).cloned().collect();
+                    mm.extend_from_slice(a);
+                    merged = Some(mm);
+                } else if endpoints_close(a_first, b_last, tol) {
+                    let mut mm = b.clone();
+                    mm.extend_from_slice(&a[1..]);
+                    merged = Some(mm);
+                }
+                if let Some(mm) = merged {
+                    arcs[i] = mm;
+                    arcs.remove(j);
+                    continue 'glue;
+                }
+            }
+        }
+        break; // no merge in a full pass
+    }
+
+    // A fresh merge may have produced a new closure duplicate.
+    for c in &mut arcs {
+        if c.len() >= 2 && endpoints_close(&c[0], c.last().unwrap(), tol) {
+            c.pop();
+        }
+    }
+    arcs.retain(|c| !c.is_empty());
+    arcs
+}
+
+/// Shared-apex cones: the intersection is the set of common generator RAYS
+/// (directions d on the unit sphere with angle(d, m_a) = α and
+/// angle(d, m_b) = β — two small circles intersecting in ≤ 2 points) or
+/// nothing. Two linear constraints d·m_a = cosα, d·m_b = cosβ leave a
+/// one-dimensional affine solution line d = d_p + λ·(m_a × m_b); |d| = 1
+/// fixes λ.
+fn same_apex_generator_rays(va: &ConeView, vb: &ConeView, scale: f64) -> Vec<Vec<Point3d>> {
+    let u = va.m.cross(&vb.m);
+    let u_len_sq = u.length_sq();
+    if u_len_sq <= 1e-12 {
+        // Parallel nappes: identical cones (infinite intersection) or
+        // strictly nested — nothing usable either way (the same convention
+        // as coaxial identical cylinders).
+        return vec![];
+    }
+    let ma_mb = va.m.dot(&vb.m);
+    let det = 1.0 - ma_mb * ma_mb; // = |u|² for unit m's
+    if det <= 1e-12 {
+        return vec![];
+    }
+    let wa = (va.cos_a - vb.cos_a * ma_mb) / det;
+    let wb = (vb.cos_a - va.cos_a * ma_mb) / det;
+    let d_p = Vec3d::new(
+        wa * va.m.x + wb * vb.m.x,
+        wa * va.m.y + wb * vb.m.y,
+        wa * va.m.z + wb * vb.m.z,
+    );
+    let d_p_len_sq = d_p.length_sq();
+    if d_p_len_sq > 1.0 + 1e-9 {
+        return vec![]; // direction circles disjoint — apices touch only
+    }
+    // d_p·u = 0 (d_p ∈ span(m_a, m_b), u ⊥ both) → λ² = (1 − |d_p|²)/|u|².
+    let lam_sq = ((1.0 - d_p_len_sq) / u_len_sq).max(0.0);
+    let lam = lam_sq.sqrt();
+    let span = 20.0 * scale.max(1.0);
+    let mut rays = Vec::new();
+    for sign in [1.0, -1.0] {
+        if sign < 0.0 && lam_sq <= 1e-18 {
+            continue; // tangent direction circles — a single ray
+        }
+        let d = Vec3d::new(
+            d_p.x + sign * lam * u.x,
+            d_p.y + sign * lam * u.y,
+            d_p.z + sign * lam * u.z,
+        );
+        rays.push(vec![
+            va.apex,
+            Point3d::new(va.apex.x + span * d.x, va.apex.y + span * d.y, va.apex.z + span * d.z),
+        ]);
+    }
+    rays
+}
+
+/// Intersect two cones (analytic, B1-series).
+///
+/// Handles all nappe configurations of two infinite single-nappe cones:
+/// generic non-parallel axes (per-θ quadratic on cone A's generator
+/// slant), parallel axes (the quadratic degenerates gracefully; equal
+/// angles → planar conic via the linear root), coaxial circles, shared
+/// apices (generator rays), tangency (single point), disjoint (empty).
+/// Points lie on both cones to floating-point precision — no marching.
+pub fn intersect_cone_cone(
+    cone_a: &ConeSurface,
+    cone_b: &ConeSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+
+    // Degenerate half-angles → other pair paths.
+    let tan_a = cone_a.half_angle.tan();
+    let tan_b = cone_b.half_angle.tan();
+    let cyl_a = tan_a.is_finite() && tan_a.abs() < 1e-10;
+    let cyl_b = tan_b.is_finite() && tan_b.abs() < 1e-10;
+    let plane_a = !tan_a.is_finite();
+    let plane_b = !tan_b.is_finite();
+
+    if cyl_a && cyl_b {
+        return intersect_cylinder_cylinder(
+            &cone_as_cylinder(cone_a),
+            &cone_as_cylinder(cone_b),
+            tolerance,
+        );
+    }
+    if cyl_a {
+        return intersect_cone_cylinder(cone_b, &cone_as_cylinder(cone_a), tolerance);
+    }
+    if cyl_b {
+        return intersect_cone_cylinder(cone_a, &cone_as_cylinder(cone_b), tolerance);
+    }
+    if plane_a {
+        return intersect_plane_cone(&cone_as_plane(cone_a), cone_b, tolerance);
+    }
+    if plane_b {
+        return intersect_plane_cone(&cone_as_plane(cone_b), cone_a, tolerance);
+    }
+
+    let va = match ConeView::of(cone_a) {
+        Some(v) => v,
+        None => return vec![],
+    };
+    let vb = match ConeView::of(cone_b) {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    let w0 = Vec3d::new(va.apex.x - vb.apex.x, va.apex.y - vb.apex.y, va.apex.z - vb.apex.z);
+    let w0_len = w0.length();
+    let scale = va.radius.max(vb.radius).max(w0_len).max(1.0);
+    if w0_len <= 1e-7 * scale {
+        return same_apex_generator_rays(&va, &vb, scale);
+    }
+
+    // Quadratic coefficients (see the module commentary for the derivation).
+    let h0 = w0.dot(&vb.m);
+    let gm_c = va.ex.dot(&vb.m);
+    let gm_s = va.ey.dot(&vb.m);
+    let gm_k = va.cos_a * va.m.dot(&vb.m);
+    let wg_c = w0.dot(&va.ex);
+    let wg_s = w0.dot(&va.ey);
+    let wg_k = va.cos_a * w0.dot(&va.m);
+    let cos2_b = vb.cos_a * vb.cos_a;
+
+    // a(θ) = gm(θ)² − cos²β — degree-2 trig.
+    let a_poly = {
+        let sin2 = va.sin_a * va.sin_a;
+        let mid = 2.0 * gm_k * va.sin_a;
+        let qc2 = gm_c * gm_c + gm_s * gm_s;
+        Trig2 {
+            k0: gm_k * gm_k + sin2 * 0.5 * qc2 - cos2_b,
+            k1: mid * gm_c,
+            s1: mid * gm_s,
+            k2: sin2 * 0.5 * (gm_c * gm_c - gm_s * gm_s),
+            s2: sin2 * gm_c * gm_s,
+        }
+    };
+    // b(θ) = 2·(h0·gm(θ) − cos²β·w0g(θ)) — degree-1 trig.
+    let b_poly = Trig2::linear(
+        2.0 * (h0 * gm_k - cos2_b * wg_k),
+        2.0 * va.sin_a * (h0 * gm_c - cos2_b * wg_c),
+        2.0 * va.sin_a * (h0 * gm_s - cos2_b * wg_s),
+    );
+    // c — constant.
+    let c_val = h0 * h0 - cos2_b * w0.length_sq();
+
+    let t_clip = 20.0 * scale;
+    let eps_sheet = eps * scale.max(1.0);
+    let a_trivial = a_poly.is_trivial(1e-12);
+
+    let roots_at = |theta: f64| -> [Option<f64>; 2] {
+        let a = a_poly.eval(theta);
+        let b = b_poly.eval(theta);
+        let gm = gm_k + va.sin_a * (gm_c * theta.cos() + gm_s * theta.sin());
+        let check = |t: f64| -> Option<f64> {
+            // A-nappe slant and clip.
+            if t < -eps_sheet || t > t_clip {
+                return None;
+            }
+            // B-nappe side: w·m_b ≥ 0 (mirror-nappe roots rejected).
+            if h0 + t * gm < -eps_sheet {
+                return None;
+            }
+            Some(t.max(0.0))
+        };
+        if a.abs() > 1e-12 {
+            let d = b * b - 4.0 * a * c_val;
+            // STRICT existence for the validity masks: a genuinely negative
+            // discriminant means no root — clamping it to zero would mark
+            // off-surface pinch points as valid (the cylinder×cylinder
+            // solver keeps its masks on a separate strict disc closure for
+            // the same reason). fp-scale slack only.
+            let d_slack = 1e-10 * (d.abs() + b * b + (4.0 * a * c_val).abs() + 1.0);
+            if d < -d_slack {
+                return [None, None];
+            }
+            let d = d.max(0.0);
+            let sq = d.sqrt();
+            let half = -b / (2.0 * a);
+            [check(half + sq / (2.0 * a)), check(half - sq / (2.0 * a))]
+        } else {
+            // a(θ) ≈ 0 — the A-generator is parallel to a B-generator:
+            // one finite root −c/b, the other at infinity. Assign to the
+            // branch that stays continuous across the a = 0 azimuth.
+            let eps_b = 1e-12 * scale;
+            if b.abs() > eps_b {
+                let t = -c_val / b;
+                if b > 0.0 {
+                    [check(t), None]
+                } else {
+                    [None, check(t)]
+                }
+            } else {
+                [None, None]
+            }
+        }
+    };
+    let disc_at = |theta: f64| -> f64 {
+        let a = a_poly.eval(theta);
+        let b = b_poly.eval(theta);
+        b * b - 4.0 * a * c_val
+    };
+    let point_at = |theta: f64, t: f64| -> Point3d {
+        let g = va.generator(theta);
+        Point3d::new(va.apex.x + t * g.x, va.apex.y + t * g.y, va.apex.z + t * g.z)
+    };
+
+    let engine = ThetaArcEngine {
+        m_scan: 720,
+        n_samples: 128,
+        roots_at: &roots_at,
+        disc_at: &disc_at,
+        point_at: &point_at,
+        glue_tol: 1e-6 * scale,
+        collapse_tol: 100.0 * eps * (1.0 + scale),
+        linear: a_trivial,
+    };
+    engine.solve()
+}
+
+/// Intersect a cone with a cylinder (analytic, B1-series).
+///
+/// The cylinder is parametrized by its axial coordinate t ∈ ℝ; the cone
+/// nappe constraint reduces to a quadratic with CONSTANT t² coefficient
+/// and degree-1/degree-2 trig coefficients — the cylinder×cylinder
+/// structure. The cone nappe side (w·m ≥ 0) filters mirror roots; points
+/// lie on both surfaces to floating-point precision.
+pub fn intersect_cone_cylinder(
+    cone: &ConeSurface,
+    cyl: &CylinderSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    if cyl.radius <= eps {
+        return vec![];
+    }
+
+    // Degenerate cone guards.
+    let tan_ha = cone.half_angle.tan();
+    if !tan_ha.is_finite() {
+        return intersect_plane_cylinder(&cone_as_plane(cone), cyl, tolerance);
+    }
+    if tan_ha.abs() < 1e-10 {
+        return intersect_cylinder_cylinder(&cone_as_cylinder(cone), cyl, tolerance);
+    }
+
+    let vc = match ConeView::of(cone) {
+        Some(v) => v,
+        None => return vec![],
+    };
+
+    let n_c = Vec3d::new(cyl.axis.x, cyl.axis.y, cyl.axis.z);
+    // Re-orthogonalize the cylinder frame against its axis.
+    let raw = Vec3d::new(cyl.x_dir.x, cyl.x_dir.y, cyl.x_dir.z);
+    let dk = raw.dot(&n_c);
+    let mut e1 = Vec3d::new(raw.x - dk * n_c.x, raw.y - dk * n_c.y, raw.z - dk * n_c.z);
+    let e1_len = e1.length();
+    if e1_len < 1e-9 {
+        // x_dir ∥ axis — n × e_x, falling back to n × e_y (parallel-to-X axes).
+        let mut fb = Vec3d::new(0.0, n_c.z, -n_c.y); // n × e_x
+        if fb.length_sq() < 1e-6 {
+            fb = Vec3d::new(-n_c.z, 0.0, n_c.x); // n × e_y
+        }
+        let l = fb.length();
+        if l < 1e-12 {
+            return vec![];
+        }
+        e1 = Vec3d::new(fb.x / l, fb.y / l, fb.z / l);
+    } else {
+        e1 = Vec3d::new(e1.x / e1_len, e1.y / e1_len, e1.z / e1_len);
+    }
+    let e2 = n_c.cross(&e1);
+
+    let w0 = Vec3d::new(
+        cyl.origin.x - vc.apex.x,
+        cyl.origin.y - vc.apex.y,
+        cyl.origin.z - vc.apex.z,
+    );
+    let h0 = w0.dot(&vc.m);
+    let nm = n_c.dot(&vc.m);
+    let qm_c = e1.dot(&vc.m);
+    let qm_s = e2.dot(&vc.m);
+    let w0c = w0.dot(&n_c);
+    let w0q_c = w0.dot(&e1);
+    let w0q_s = w0.dot(&e2);
+    let cos2_a = vc.cos_a * vc.cos_a;
+    let r_c = cyl.radius;
+
+    let w0_len = w0.length();
+    let scale = vc.radius.max(r_c).max(w0_len).max(1.0);
+    let t_clip = 20.0 * scale;
+    let eps_sheet = eps * scale.max(1.0);
+
+    // (w·m)² = cos²α·|w|² with w = w0 + t·n_c + R·q(θ):
+    //   a₂·t² + b(θ)·t + c(θ) = 0,
+    //   a₂ = (n_c·m)² − cos²α (constant),
+    //   b(θ) = 2[h0·nm − cos²α·w0c + R·nm·qm(θ)],
+    //   c(θ) = (h0 + R·qm(θ))² − cos²α·(|w0|² + R² + 2R·w0q(θ)).
+    let a2 = nm * nm - cos2_a;
+    let b_poly = Trig2::linear(
+        2.0 * (h0 * nm - cos2_a * w0c),
+        2.0 * r_c * nm * qm_c,
+        2.0 * r_c * nm * qm_s,
+    );
+    let c_poly = {
+        let qm2_half = 0.5 * (qm_c * qm_c + qm_s * qm_s);
+        Trig2 {
+            k0: h0 * h0 - cos2_a * (w0_len * w0_len + r_c * r_c) + r_c * r_c * qm2_half,
+            k1: 2.0 * r_c * (h0 * qm_c - cos2_a * w0q_c),
+            s1: 2.0 * r_c * (h0 * qm_s - cos2_a * w0q_s),
+            k2: r_c * r_c * 0.5 * (qm_c * qm_c - qm_s * qm_s),
+            s2: r_c * r_c * qm_c * qm_s,
+        }
+    };
+    let linear = a2.abs() <= 1e-12; // cylinder axis ∥ cone generator
+
+    let roots_at = |theta: f64| -> [Option<f64>; 2] {
+        let b = b_poly.eval(theta);
+        let c = c_poly.eval(theta);
+        let qm = qm_c * theta.cos() + qm_s * theta.sin();
+        let check = |t: f64| -> Option<f64> {
+            if t.abs() > t_clip {
+                return None;
+            }
+            // Cone nappe side: w·m ≥ 0.
+            if h0 + t * nm + r_c * qm < -eps_sheet {
+                return None;
+            }
+            Some(t)
+        };
+        if a2.abs() > 1e-12 {
+            let d = b * b - 4.0 * a2 * c;
+            // STRICT existence for the validity masks (see cone_cone).
+            let d_slack = 1e-10 * (d.abs() + b * b + (4.0 * a2 * c).abs() + 1.0);
+            if d < -d_slack {
+                return [None, None];
+            }
+            let d = d.max(0.0);
+            let sq = d.sqrt();
+            let half = -b / (2.0 * a2);
+            [check(half + sq / (2.0 * a2)), check(half - sq / (2.0 * a2))]
+        } else {
+            let eps_b = 1e-12 * scale;
+            if b.abs() > eps_b {
+                let t = -c / b;
+                if b > 0.0 {
+                    [check(t), None]
+                } else {
+                    [None, check(t)]
+                }
+            } else {
+                [None, None]
+            }
+        }
+    };
+    let disc_at = |theta: f64| -> f64 {
+        let b = b_poly.eval(theta);
+        let c = c_poly.eval(theta);
+        b * b - 4.0 * a2 * c
+    };
+    let point_at = |theta: f64, t: f64| -> Point3d {
+        let c = theta.cos();
+        let s = theta.sin();
+        Point3d::new(
+            cyl.origin.x + r_c * (c * e1.x + s * e2.x) + t * n_c.x,
+            cyl.origin.y + r_c * (c * e1.y + s * e2.y) + t * n_c.y,
+            cyl.origin.z + r_c * (c * e1.z + s * e2.z) + t * n_c.z,
+        )
+    };
+
+    let engine = ThetaArcEngine {
+        m_scan: 720,
+        n_samples: 128,
+        roots_at: &roots_at,
+        disc_at: &disc_at,
+        point_at: &point_at,
+        glue_tol: 1e-6 * scale,
+        collapse_tol: 100.0 * eps * (1.0 + scale),
+        linear,
+    };
+    engine.solve()
+}
+
 /// General surface-surface intersection dispatcher.
 ///
 /// Audit item 2.1 (2026-07-19): Dispatches to specialized intersection
@@ -1529,6 +2427,13 @@ pub fn intersect_surfaces(
         (Surface::Sphere(s), Surface::Cylinder(c))
         | (Surface::Cylinder(c), Surface::Sphere(s)) => {
             intersect_sphere_cylinder(s, c, tolerance)
+        }
+        (Surface::Cone(a), Surface::Cone(b)) => {
+            intersect_cone_cone(a, b, tolerance)
+        }
+        (Surface::Cone(c), Surface::Cylinder(y))
+        | (Surface::Cylinder(y), Surface::Cone(c)) => {
+            intersect_cone_cylinder(c, y, tolerance)
         }
         (Surface::Plane(_), Surface::Nurbs(_)) | (Surface::Nurbs(_), Surface::Plane(_)) => {
             intersect_marching_ssi(a, b, tolerance)
@@ -3215,6 +4120,535 @@ mod cylinder_cylinder_tests {
         for curve in &out {
             for p in curve {
                 assert_on_cylinder(p, &b, 1e-9, "exactness/b");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cone_cone_tests {
+    use super::*;
+    use crate::surface::{ConeSurface, Surface};
+
+    /// The point is ON the cone's (infinite single) nappe: the angle
+    /// between (p − apex) and the nappe direction equals |half_angle|, on
+    /// the nappe side.
+    fn assert_on_cone(p: &Point3d, cone: &ConeSurface, eps: f64, label: &str) {
+        let tan_ha = cone.half_angle.tan();
+        let (apex, m) = if cone.expanding {
+            (
+                cone.origin,
+                Vec3d::new(cone.axis.x, cone.axis.y, cone.axis.z),
+            )
+        } else {
+            let v_apex = -cone.radius / tan_ha;
+            let s = tan_ha.signum();
+            (
+                Point3d::new(
+                    cone.origin.x + v_apex * cone.axis.x,
+                    cone.origin.y + v_apex * cone.axis.y,
+                    cone.origin.z + v_apex * cone.axis.z,
+                ),
+                Vec3d::new(s * cone.axis.x, s * cone.axis.y, s * cone.axis.z),
+            )
+        };
+        let w = Vec3d::new(p.x - apex.x, p.y - apex.y, p.z - apex.z);
+        let wl = w.length();
+        if wl < 1e-12 {
+            return; // the apex itself
+        }
+        let wm = w.dot(&m);
+        assert!(
+            wm >= -eps * wl,
+            "{label}: point {:?} on the mirror nappe (w·m = {} < 0)",
+            p,
+            wm
+        );
+        // ABSOLUTE residual |w·m − cosα·|w|| ≤ eps·(1 + |w|): the distance
+        // from the nappe in length units. The dimensionless cos-angle form
+        // degrades near the apex (|w| → 0 amplifies fp rounding of the
+        // quadratic solve by 1/|w|); the residual form stays meaningful.
+        let cos_alpha = cone.half_angle.abs().cos();
+        let residual = (wm - cos_alpha * wl).abs();
+        assert!(
+            residual <= eps * (1.0 + wl),
+            "{label}: point {:?} not on cone (residual = {})",
+            p,
+            residual
+        );
+    }
+
+    /// Expanding cone: apex = origin, nappe toward +axis, half-angle ha.
+    fn expanding(origin: Point3d, axis: Direction3d, ha: f64) -> ConeSurface {
+        ConeSurface::new_expanding(origin, axis, ha, Direction3d::X)
+    }
+
+    #[test]
+    fn coaxial_nose_to_nose_same_angle_circle() {
+        // Two 30° cones, apices at z=0 (up) and z=10 (down): radii meet at
+        // z=5 → ONE circle of radius 5·tan(30°).
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(0.0, 0.0, 10.0),
+            Direction3d::new(0.0, 0.0, -1.0).unwrap(),
+            30.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one circle, got {} curves", out.len());
+        let r_expected = 5.0 * 30.0f64.to_radians().tan();
+        for p in &out[0] {
+            assert_on_cone(p, &a, 1e-9, "nose/a");
+            assert_on_cone(p, &b, 1e-9, "nose/b");
+            assert!((p.z - 5.0).abs() < 1e-9, "z = {} vs 5.0", p.z);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!(
+                (r - r_expected).abs() < 1e-9,
+                "radius = {} vs {}",
+                r,
+                r_expected
+            );
+        }
+        assert!(out[0].len() >= 16, "circle sampled densely");
+    }
+
+    #[test]
+    fn coaxial_different_angles_one_circle() {
+        // 40° up from z=0; 20° up from z=−4: r_a = z·tan40, r_b = (z+4)·tan20
+        // cross at z = 4·tan20/(tan40−tan20) ≈ 3.0654, r ≈ 2.5717.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 40.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(0.0, 0.0, -4.0),
+            Direction3d::Z,
+            20.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one circle");
+        let t40 = 40.0f64.to_radians().tan();
+        let t20 = 20.0f64.to_radians().tan();
+        let z_star = 4.0 * t20 / (t40 - t20);
+        let r_star = z_star * t40;
+        for p in &out[0] {
+            assert_on_cone(p, &a, 1e-9, "coax-diff/a");
+            assert_on_cone(p, &b, 1e-9, "coax-diff/b");
+            assert!((p.z - z_star).abs() < 1e-7, "z = {} vs {}", p.z, z_star);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - r_star).abs() < 1e-7, "r = {} vs {}", r, r_star);
+        }
+    }
+
+    #[test]
+    fn coaxial_same_angle_offset_empty() {
+        // Two identical 30° up-cones with apices 2 apart along the axis:
+        // strictly nested — no intersection.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(0.0, 0.0, 2.0),
+            Direction3d::Z,
+            30.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert!(out.is_empty(), "nested cones must not intersect");
+    }
+
+    #[test]
+    fn identical_cones_empty() {
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let out = intersect_cone_cone(&a, &a, 1e-9);
+        assert!(out.is_empty(), "identical cones → empty (infinite intersection)");
+    }
+
+    #[test]
+    fn same_apex_crossing_direction_circles_two_rays() {
+        // 60° up-cone and 45° +X-cone from the same apex: the generator
+        // direction circles (60° around Z, 45° around X; centers 90° apart,
+        // radii sum 105° ≥ 90 ≥ |60−45|) cross in two directions → 2 rays.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 60.0f64.to_radians());
+        let b = expanding(
+            Point3d::ORIGIN,
+            Direction3d::X,
+            45.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert_eq!(out.len(), 2, "expected two rays, got {} curves", out.len());
+        for ray in &out {
+            assert!(ray.len() >= 2, "ray sampled by ≥ 2 points");
+            for p in ray {
+                assert_on_cone(p, &a, 1e-9, "rays/a");
+                assert_on_cone(p, &b, 1e-9, "rays/b");
+            }
+            // Both ray points start AT the shared apex.
+            let d0 = (ray[0].x * ray[0].x + ray[0].y * ray[0].y + ray[0].z * ray[0].z).sqrt();
+            assert!(d0 < 1e-9, "ray must start at the apex");
+        }
+    }
+
+    #[test]
+    fn same_apex_nested_direction_circles_empty() {
+        // 30° up-cone vs 45° X-cone from the same apex: direction circles
+        // (centers 90° apart, radii 30° + 45° = 75° < 90°) do NOT cross —
+        // only the shared apex, which is not a curve → empty.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(Point3d::ORIGIN, Direction3d::X, 45.0f64.to_radians());
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert!(out.is_empty(), "apex-only contact → empty");
+    }
+
+    #[test]
+    fn disjoint_cones_empty() {
+        // Infinite up-cones eventually reach any lateral distance, so
+        // disjointness must be beyond the nappe side: B opens DOWNWARD from
+        // (0,0,−50) (points z ≤ −50) while A opens up (z ≥ 0).
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(0.0, 0.0, -50.0),
+            Direction3d::new(0.0, 0.0, -1.0).unwrap(),
+            30.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert!(out.is_empty(), "opposite nappes apart → empty");
+    }
+
+    #[test]
+    fn parallel_same_angle_planar_conic_arm() {
+        // Two 30° up-cones with apices offset by 1 in X: the intersection
+        // is a planar conic (hyperbola arm) in the plane x = 0.5 through
+        // (0.5, 0, 0.5·cot 30°). The arm escapes to the slant clip.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(1.0, 0.0, 0.0),
+            Direction3d::Z,
+            30.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert!(!out.is_empty(), "offset same-angle cones DO intersect");
+        for curve in &out {
+            assert!(curve.len() >= 2, "conic arm has ≥ 2 points");
+            for p in curve {
+                assert_on_cone(p, &a, 1e-9, "conic/a");
+                assert_on_cone(p, &b, 1e-9, "conic/b");
+                // Coplanarity: the whole conic lies in x = 0.5.
+                assert!((p.x - 0.5).abs() < 1e-7, "conic plane x = {} vs 0.5", p.x);
+            }
+        }
+        // EXACT curve identity: the arm is the hyperbola
+        // (z/0.866)² − (y/0.5)² = 1 in the plane x = 0.5 (derived from
+        // t = secθ on both 30° cones — holds for EVERY point, not just
+        // near the vertex).
+        let s30 = 30.0f64.to_radians().sin();
+        let c30 = 30.0f64.to_radians().cos();
+        for p in out.iter().flat_map(|c| c.iter()) {
+            let hyper = (p.z / c30).powi(2) - (p.y / s30).powi(2);
+            assert!(
+                (hyper - 1.0).abs() < 1e-6,
+                "hyperbola identity: {} vs 1 (p = {:?})",
+                hyper,
+                p
+            );
+        }
+        // Vertex (0.5, 0, 0.5·cot30°): one 128-sample chord step tolerance.
+        let cot30 = 1.0 / 30.0f64.to_radians().tan();
+        let target = Point3d::new(0.5, 0.0, 0.5 * cot30);
+        let nearest = out
+            .iter()
+            .flat_map(|c| c.iter())
+            .min_by(|p, q| {
+                let dp = (p.x - target.x).powi(2) + (p.y - target.y).powi(2) + (p.z - target.z).powi(2);
+                let dq = (q.x - target.x).powi(2) + (q.y - target.y).powi(2) + (q.z - target.z).powi(2);
+                dp.partial_cmp(&dq).unwrap()
+            })
+            .unwrap();
+        let dist = (nearest.x - target.x).hypot(nearest.y - target.y).hypot(nearest.z - target.z);
+        assert!(dist < 0.05, "conic vertex distance {} vs (0.5, 0, 0.866)", dist);
+    }
+
+    #[test]
+    fn perpendicular_axes_generic_invariants() {
+        // 30° up-cone from the origin; 45° +X-cone from (−4, 0, 2): generic
+        // non-parallel configuration — invariants (points on both cones)
+        // rather than an exact curve count.
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(-4.0, 0.0, 2.0),
+            Direction3d::X,
+            45.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert!(!out.is_empty(), "overlapping cones must intersect");
+        let total: usize = out.iter().map(|c| c.len()).sum();
+        assert!(total >= 16, "reasonable sampling, got {} points", total);
+        for curve in &out {
+            assert!(curve.len() >= 2, "every curve ≥ 2 points");
+            for p in curve {
+                assert_on_cone(p, &a, 1e-9, "perp/a");
+                assert_on_cone(p, &b, 1e-9, "perp/b");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_both_orders_symmetry() {
+        let a = expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(-4.0, 0.0, 2.0),
+            Direction3d::X,
+            45.0f64.to_radians(),
+        );
+        let ab = intersect_cone_cone(&a, &b, 1e-9);
+        let ba = intersect_cone_cone(&b, &a, 1e-9);
+        assert!(!ab.is_empty() && !ba.is_empty(), "both orders must intersect");
+        for curve in ab.iter().chain(ba.iter()) {
+            for p in curve {
+                assert_on_cone(p, &a, 1e-9, "sym/a");
+                assert_on_cone(p, &b, 1e-9, "sym/b");
+            }
+        }
+        // Sampling density depends on the parametrized cone; the curve
+        // GEOMETRY does not. Compare total arc lengths (sampling-independent
+        // up to ~1% discretization).
+        let arc_len = |curves: &Vec<Vec<Point3d>>| -> f64 {
+            curves
+                .iter()
+                .map(|c| {
+                    c.windows(2)
+                        .map(|w| {
+                            (w[1].x - w[0].x).hypot(w[1].y - w[0].y).hypot(w[1].z - w[0].z)
+                        })
+                        .sum::<f64>()
+                })
+                .sum()
+        };
+        let l_ab = arc_len(&ab);
+        let l_ba = arc_len(&ba);
+        let l_ref = l_ab.max(l_ba);
+        assert!(
+            (l_ab - l_ba).abs() <= 0.02 * l_ref,
+            "arc lengths differ: {} vs {}",
+            l_ab,
+            l_ba
+        );
+    }
+
+    #[test]
+    fn dispatcher_routes_cone_cone() {
+        // The surface-level dispatcher must route (Cone, Cone) to the
+        // analytic path (exactness is the discriminator: 1e-9 on-surface).
+        let a = Surface::Cone(expanding(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z, 30.0f64.to_radians()));
+        let b = Surface::Cone(expanding(
+            Point3d::new(-4.0, 0.0, 2.0),
+            Direction3d::X,
+            45.0f64.to_radians(),
+        ));
+        let out = intersect_surfaces(&a, &b, 1e-9);
+        assert!(!out.polylines.is_empty());
+        for curve in &out.polylines {
+            if let Surface::Cone(ca) = &a {
+                if let Surface::Cone(cb) = &b {
+                    for p in curve {
+                        assert_on_cone(p, ca, 1e-9, "disp/a");
+                        assert_on_cone(p, cb, 1e-9, "disp/b");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_step_half_angle_circle() {
+        // STEP-style negative semi_angle: new_z(2, −30°) opens DOWNWARD
+        // (apex at z = 2/tan30 ≈ 3.464). A 30° up-cone from z=1 crosses it
+        // at z = (2 + tan30)/(tan30 + tan30·1)... solve 2 − z·tan30 =
+        // (z − 1)·tan30 → z = (2 + tan30)/(2·tan30) ≈ 2.232, r ≈ 0.712.
+        let a = ConeSurface::new_z(2.0, -30.0f64.to_radians());
+        let b = expanding(
+            Point3d::new(0.0, 0.0, 1.0),
+            Direction3d::Z,
+            30.0f64.to_radians(),
+        );
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert_eq!(out.len(), 1, "expected one circle, got {} curves", out.len());
+        let t30 = 30.0f64.to_radians().tan();
+        let z_star = (2.0 + t30) / (2.0 * t30);
+        let r_star = 2.0 - z_star * t30;
+        for p in &out[0] {
+            assert_on_cone(p, &a, 1e-9, "neg/a");
+            assert_on_cone(p, &b, 1e-9, "neg/b");
+            assert!((p.z - z_star).abs() < 1e-7, "z = {} vs {}", p.z, z_star);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - r_star).abs() < 1e-7, "r = {} vs {}", r, r_star);
+        }
+    }
+
+    #[test]
+    fn cylindrical_cones_delegate_to_cylinder_cylinder() {
+        // Two CONICAL_SURFACE entities with semi_angle ≈ 0 are cylinders:
+        // parallel axes, lateral separation 4 < 3 + 3 → two straight lines.
+        let a = ConeSurface::new_z(3.0, 1e-13);
+        let b = ConeSurface::new(Point3d::new(4.0, 0.0, 0.0), Direction3d::Z, 3.0, 1e-13);
+        let out = intersect_cone_cone(&a, &b, 1e-9);
+        assert_eq!(out.len(), 2, "expected two lines (cylinder path)");
+        for line in &out {
+            assert!(line.len() >= 2);
+            for p in line {
+                let dx = p.x;
+                let dy = p.y;
+                let lateral_a = (dx * dx + dy * dy).sqrt();
+                assert!((lateral_a - 3.0).abs() < 1e-9, "on cylinder a");
+                let ex = p.x - 4.0;
+                let lateral_b = (ex * ex + dy * dy).sqrt();
+                assert!((lateral_b - 3.0).abs() < 1e-9, "on cylinder b");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod cone_cylinder_tests {
+    use super::*;
+    use crate::surface::{ConeSurface, CylinderSurface, Surface};
+
+    fn assert_on_cone(p: &Point3d, cone: &ConeSurface, eps: f64, label: &str) {
+        let tan_ha = cone.half_angle.tan();
+        let (apex, m) = if cone.expanding {
+            (
+                cone.origin,
+                Vec3d::new(cone.axis.x, cone.axis.y, cone.axis.z),
+            )
+        } else {
+            let v_apex = -cone.radius / tan_ha;
+            let s = tan_ha.signum();
+            (
+                Point3d::new(
+                    cone.origin.x + v_apex * cone.axis.x,
+                    cone.origin.y + v_apex * cone.axis.y,
+                    cone.origin.z + v_apex * cone.axis.z,
+                ),
+                Vec3d::new(s * cone.axis.x, s * cone.axis.y, s * cone.axis.z),
+            )
+        };
+        let w = Vec3d::new(p.x - apex.x, p.y - apex.y, p.z - apex.z);
+        let wl = w.length();
+        if wl < 1e-12 {
+            return;
+        }
+        let wm = w.dot(&m);
+        assert!(wm >= -eps * wl, "{label}: mirror nappe (w·m = {})", wm);
+        // ABSOLUTE residual (apex-robust — see cone_cone_tests).
+        let cos_alpha = cone.half_angle.abs().cos();
+        let residual = (wm - cos_alpha * wl).abs();
+        assert!(
+            residual <= eps * (1.0 + wl),
+            "{label}: not on cone (residual = {})",
+            residual
+        );
+    }
+
+    fn assert_on_cylinder(p: &Point3d, cyl: &CylinderSurface, eps: f64, label: &str) {
+        let dx = p.x - cyl.origin.x;
+        let dy = p.y - cyl.origin.y;
+        let dz = p.z - cyl.origin.z;
+        let along = dx * cyl.axis.x + dy * cyl.axis.y + dz * cyl.axis.z;
+        let px = dx - along * cyl.axis.x;
+        let py = dy - along * cyl.axis.y;
+        let pz = dz - along * cyl.axis.z;
+        let lateral = (px * px + py * py + pz * pz).sqrt();
+        assert!(
+            (lateral - cyl.radius).abs() < eps,
+            "{label}: lateral = {} vs R = {}",
+            lateral,
+            cyl.radius
+        );
+    }
+
+    #[test]
+    fn coaxial_cone_cylinder_circle() {
+        // 45° up-cone from the origin; cylinder R=1 along +Z: r_cone(z) = z
+        // crosses R=1 at z=1 → ONE circle of radius 1 at z=1.
+        let cone = ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            45.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(1.0);
+        let out = intersect_cone_cylinder(&cone, &cyl, 1e-9);
+        assert_eq!(out.len(), 1, "expected one circle, got {} curves", out.len());
+        for p in &out[0] {
+            assert_on_cone(p, &cone, 1e-9, "coax/a");
+            assert_on_cylinder(p, &cyl, 1e-9, "coax/b");
+            assert!((p.z - 1.0).abs() < 1e-9, "z = {} vs 1.0", p.z);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - 1.0).abs() < 1e-9, "r = {} vs 1.0", r);
+        }
+    }
+
+    #[test]
+    fn cone_cylinder_off_axis_invariants() {
+        // 30° up-cone from the origin; cylinder R=1 along +X from (−5, 1, 0):
+        // generic skew pair — invariants only.
+        let cone = ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            30.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new(
+            Point3d::new(-5.0, 1.0, 0.0),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            1.0,
+        );
+        let out = intersect_cone_cylinder(&cone, &cyl, 1e-9);
+        assert!(!out.is_empty(), "skew pair must intersect");
+        for curve in &out {
+            assert!(curve.len() >= 2);
+            for p in curve {
+                // 1e-8: the quadratic-solve fp rounding at this geometry
+                // scale (~10) is ~3e-9 on the cone residual; the residual
+                // form is apex-robust (the curve ends at the cone apex).
+                assert_on_cone(p, &cone, 1e-8, "skew/cone");
+                assert_on_cylinder(p, &cyl, 1e-8, "skew/cyl");
+            }
+        }
+    }
+
+    #[test]
+    fn cone_cylinder_disjoint_empty() {
+        // An infinite up-cone eventually reaches ANY lateral distance, so
+        // "disjoint" must put the cylinder beyond the nappe side: below the
+        // apex (cone points have z ≥ 0, cylinder points z ∈ [−51, −49]).
+        let cone = ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            30.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, -50.0),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            1.0,
+        );
+        let out = intersect_cone_cylinder(&cone, &cyl, 1e-9);
+        assert!(out.is_empty(), "cylinder below the nappe → empty");
+    }
+
+    #[test]
+    fn dispatcher_routes_cone_cylinder_both_orders() {
+        let cone = Surface::Cone(ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            45.0f64.to_radians(),
+            Direction3d::X,
+        ));
+        let cyl = Surface::Cylinder(CylinderSurface::new_z(1.0));
+        for (a, b) in [(&cone, &cyl), (&cyl, &cone)] {
+            let out = intersect_surfaces(a, b, 1e-9);
+            assert_eq!(out.polylines.len(), 1, "one circle from both orders");
+            if let Surface::Cone(c) = a {
+                if let Surface::Cylinder(y) = b {
+                    for p in &out.polylines[0] {
+                        assert_on_cone(p, c, 1e-9, "disp/cone");
+                        assert_on_cylinder(p, y, 1e-9, "disp/cyl");
+                    }
+                }
             }
         }
     }

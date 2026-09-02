@@ -623,6 +623,15 @@ pub fn intersect_surfaces(
         (Surface::Sphere(s1), Surface::Sphere(s2)) => {
             intersect_sphere_sphere(s1, s2, tol)
         }
+        (Surface::Cone(c1), Surface::Cone(c2)) => {
+            intersect_cone_cone(c1, c2, tol)
+        }
+        (Surface::Cone(c), Surface::Cylinder(y)) => {
+            intersect_cone_cylinder_pair(c, y, tol)
+        }
+        (Surface::Cylinder(y), Surface::Cone(c)) => {
+            intersect_cone_cylinder_pair(c, y, tol)
+        }
         _ => {
             // General case: subdivision/Newton-Raphson
             intersect_surfaces_general(surface_a, surface_b, tol)
@@ -1000,6 +1009,160 @@ fn intersect_cylinder_cylinder(
             }
         })
         .collect()
+}
+
+/// Cone-Cone intersection (B1-series follow-up, 2026-09-02).
+///
+/// Analytic path via
+/// [`draper_geometry::intersection::intersect_cone_cone`]: generic
+/// non-parallel axes → per-θ quadratic on the generator slant of the
+/// parametrized cone (points on both nappes to floating-point precision,
+/// no marching); parallel axes + equal angles → planar conic (linear
+/// root, arms clipped); coaxial configurations → full circles with the
+/// EXACT `Circle` geometry attached; shared apices → common generator
+/// rays; tangency → a single point; disjoint/identical → empty.
+fn intersect_cone_cone(c1: &ConeSurface, c2: &ConeSurface, tol: f64) -> Vec<IntersectionCurve> {
+    let polylines = draper_geometry::intersection::intersect_cone_cone(c1, c2, tol);
+
+    // Exact Circle for the coaxial full-circle case: parallel axes and the
+    // single curve equidistant from the common axis line (through cone A's
+    // apex). Conic arms / quartic loops / rays stay polyline-only.
+    let axes_parallel = {
+        let cx = c1.axis.y * c2.axis.z - c1.axis.z * c2.axis.y;
+        let cy = c1.axis.z * c2.axis.x - c1.axis.x * c2.axis.z;
+        let cz = c1.axis.x * c2.axis.y - c1.axis.y * c2.axis.x;
+        (cx * cx + cy * cy + cz * cz).sqrt() < 1e-6
+    };
+    let axis_origin = cone_apex(c1);
+
+    polylines
+        .into_iter()
+        .filter(|pts| !pts.is_empty())
+        .map(|points| {
+            let curve = if axes_parallel && points.len() >= 8 {
+                coaxial_circle_from_points(&points, &axis_origin, &c1.axis, tol)
+                    .map(Curve3d::Circle)
+            } else {
+                None
+            };
+            IntersectionCurve {
+                points,
+                curve,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: tol,
+            }
+        })
+        .collect()
+}
+
+/// Cone-Cylinder intersection (B1-series follow-up, 2026-09-02).
+///
+/// Analytic path via
+/// [`draper_geometry::intersection::intersect_cone_cylinder`] (the
+/// cylinder parametrized axially — the cylinder×cylinder quadratic
+/// structure with the cone nappe-side sheet filter). Coaxial circles get
+/// the EXACT `Circle` geometry; everything else stays polyline-only.
+fn intersect_cone_cylinder_pair(
+    cone: &ConeSurface,
+    cyl: &CylinderSurface,
+    tol: f64,
+) -> Vec<IntersectionCurve> {
+    let polylines = draper_geometry::intersection::intersect_cone_cylinder(cone, cyl, tol);
+
+    let axes_parallel = {
+        let cx = cone.axis.y * cyl.axis.z - cone.axis.z * cyl.axis.y;
+        let cy = cone.axis.z * cyl.axis.x - cone.axis.x * cyl.axis.z;
+        let cz = cone.axis.x * cyl.axis.y - cone.axis.y * cyl.axis.x;
+        (cx * cx + cy * cy + cz * cz).sqrt() < 1e-6
+    };
+
+    polylines
+        .into_iter()
+        .filter(|pts| !pts.is_empty())
+        .map(|points| {
+            let curve = if axes_parallel && points.len() >= 8 {
+                coaxial_circle_from_points(&points, &cyl.origin, &cyl.axis, tol)
+                    .map(Curve3d::Circle)
+            } else {
+                None
+            };
+            IntersectionCurve {
+                points,
+                curve,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: tol,
+            }
+        })
+        .collect()
+}
+
+/// Cone apex (for the wrapper's circle fit; mirrors the geometry-side
+/// `ConeView` computation).
+fn cone_apex(cone: &ConeSurface) -> Point3d {
+    let tan_ha = cone.half_angle.tan();
+    if cone.expanding || !tan_ha.is_finite() {
+        cone.origin
+    } else {
+        let v_apex = -cone.radius / tan_ha;
+        Point3d::new(
+            cone.origin.x + v_apex * cone.axis.x,
+            cone.origin.y + v_apex * cone.axis.y,
+            cone.origin.z + v_apex * cone.axis.z,
+        )
+    }
+}
+
+/// Fit an exact [`Circle`] to a polyline that is a full circle around the
+/// axis line (origin, axis): the foot of the first point is the center
+/// candidate; every point must project to the same foot (planarity ⊥
+/// axis) and be equidistant from it. Returns `None` for non-circular
+/// polylines (conic arms, quartic loops, rays, micro-slivers).
+fn coaxial_circle_from_points(
+    points: &[Point3d],
+    axis_origin: &Point3d,
+    axis: &Direction3d,
+    tol: f64,
+) -> Option<Circle> {
+    let n = Vec3d::new(axis.x, axis.y, axis.z);
+    let foot = |p: &Point3d| -> Point3d {
+        let dx = p.x - axis_origin.x;
+        let dy = p.y - axis_origin.y;
+        let dz = p.z - axis_origin.z;
+        let d = dx * n.x + dy * n.y + dz * n.z;
+        Point3d::new(
+            axis_origin.x + d * n.x,
+            axis_origin.y + d * n.y,
+            axis_origin.z + d * n.z,
+        )
+    };
+    let center = foot(&points[0]);
+    let v0 = Vec3d::new(
+        points[0].x - center.x,
+        points[0].y - center.y,
+        points[0].z - center.z,
+    );
+    let radius = v0.length();
+    if radius <= tol.max(1e-9) {
+        return None;
+    }
+    let fit_tol = 1e-6 * (1.0 + radius);
+    for p in points.iter().skip(1) {
+        let c = foot(p);
+        if (c.x - center.x).abs() > fit_tol
+            || (c.y - center.y).abs() > fit_tol
+            || (c.z - center.z).abs() > fit_tol
+        {
+            return None; // not planar ⊥ axis → not a coaxial circle
+        }
+        let v = Vec3d::new(p.x - center.x, p.y - center.y, p.z - center.z);
+        if (v.length() - radius).abs() > fit_tol {
+            return None; // not equidistant → conic arm or generic loop
+        }
+    }
+    let normal = Direction3d::new(axis.x, axis.y, axis.z).unwrap_or(Direction3d::Z);
+    Some(Circle::new(center, normal, radius))
 }
 
 /// Cylinder-Sphere intersection (B1-series follow-up, 2026-09-02).
@@ -4558,6 +4721,126 @@ mod tests {
         let empty =
             intersect_surfaces(&Surface::Cylinder(c1), &Surface::Cylinder(far), &tol);
         assert!(empty.is_empty(), "disjoint pair should not intersect");
+    }
+
+    #[test]
+    fn test_cone_cone_coaxial_circle_exact_geometry() {
+        // Nose-to-nose 30° cones from z=0 (up) and z=10 (down): the radii
+        // meet at z=5 → one circle of radius 5·tan30 with the EXACT Circle
+        // geometry attached.
+        let tol = ToleranceContext::new();
+        let c1 = ConeSurface::new_expanding(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            30.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let c2 = ConeSurface::new_expanding(
+            Point3d::new(0.0, 0.0, 10.0),
+            Direction3d::new(0.0, 0.0, -1.0).unwrap(),
+            30.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let curves = intersect_surfaces(&Surface::Cone(c1), &Surface::Cone(c2), &tol);
+        assert_eq!(curves.len(), 1, "expected one circle, got {}", curves.len());
+        let r_expected = 5.0 * 30.0f64.to_radians().tan();
+        match &curves[0].curve {
+            Some(Curve3d::Circle(c)) => {
+                assert!((c.center.z - 5.0).abs() < 1e-9, "center z = {}", c.center.z);
+                assert!(c.center.x.abs() < 1e-9 && c.center.y.abs() < 1e-9);
+                assert!(
+                    (c.radius - r_expected).abs() < 1e-9,
+                    "radius = {} vs {}",
+                    c.radius,
+                    r_expected
+                );
+            }
+            other => panic!("expected exact Circle, got {:?}", other),
+        }
+        for p in &curves[0].points {
+            assert!((p.z - 5.0).abs() < 1e-9, "z = {} vs 5", p.z);
+            let r = (p.x * p.x + p.y * p.y).sqrt();
+            assert!((r - r_expected).abs() < 1e-9, "r = {} vs {}", r, r_expected);
+        }
+    }
+
+    #[test]
+    fn test_cone_cone_generic_polyline_exactness() {
+        // Non-parallel cones (30° up from O; 45° +X from (−4, 0, 2)):
+        // polyline-only (space quartic), every point exact on both nappes.
+        let tol = ToleranceContext::new();
+        let c1 = ConeSurface::new_expanding(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            30.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let c2 = ConeSurface::new_expanding(
+            Point3d::new(-4.0, 0.0, 2.0),
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            45.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let curves = intersect_surfaces(&Surface::Cone(c1), &Surface::Cone(c2), &tol);
+        assert!(!curves.is_empty(), "overlapping cones must intersect");
+        for curve in &curves {
+            // Non-parallel axes → no Circle fit attempted.
+            assert!(curve.curve.is_none(), "generic quartic should be polyline-only");
+            for p in &curve.points {
+                // Cone 1: apex O, nappe +Z, 30°.
+                let wl = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+                let cos1 = p.z / wl;
+                assert!(
+                    (cos1 - 30.0f64.to_radians().cos()).abs() < 1e-9,
+                    "not on cone 1: cos = {}",
+                    cos1
+                );
+                // Cone 2: apex (−4, 0, 2), nappe +X, 45°.
+                let wx = p.x + 4.0;
+                let wy = p.y;
+                let wz = p.z - 2.0;
+                let wl2 = (wx * wx + wy * wy + wz * wz).sqrt();
+                let cos2 = wx / wl2;
+                assert!(
+                    (cos2 - 45.0f64.to_radians().cos()).abs() < 1e-9,
+                    "not on cone 2: cos = {}",
+                    cos2
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_cone_cylinder_coaxial_circle_both_orders() {
+        // 45° up-cone × coaxial R=1 cylinder: one circle at z=1 with the
+        // EXACT Circle geometry — from both dispatch orders.
+        let tol = ToleranceContext::new();
+        let cone = ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            45.0f64.to_radians(),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(1.0);
+        for (a, b) in [
+            (&Surface::Cone(cone.clone()), &Surface::Cylinder(cyl.clone())),
+            (&Surface::Cylinder(cyl), &Surface::Cone(cone)),
+        ] {
+            let curves = intersect_surfaces(a, b, &tol);
+            assert_eq!(curves.len(), 1, "one circle, got {}", curves.len());
+            match &curves[0].curve {
+                Some(Curve3d::Circle(c)) => {
+                    assert!((c.center.z - 1.0).abs() < 1e-9, "center z = {}", c.center.z);
+                    assert!((c.radius - 1.0).abs() < 1e-9, "radius = {}", c.radius);
+                }
+                other => panic!("expected exact Circle, got {:?}", other),
+            }
+            for p in &curves[0].points {
+                assert!((p.z - 1.0).abs() < 1e-9, "z = {} vs 1", p.z);
+                let r = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((r - 1.0).abs() < 1e-9, "r = {} vs 1", r);
+            }
+        }
     }
 
     // ── Property-based tests (proptest) ──
