@@ -1186,7 +1186,15 @@ pub fn triangulate_solid_parallel_arc(
     let face_meshes: Vec<TriangleMesh> = faces
         .par_iter()
         .map(|face| {
-            let mesh = triangulate_face_impl(face, params, &cache);
+            // C5 Stage 7.2: store-first per-face resolution — stage the face
+            // with instance-faithful edges resolved through the solid's
+            // `EdgeStore` before running the immutable-cache triangulator, so
+            // the parallel pipeline (like the sequential one) no longer reads
+            // the per-face `edges` mirrors and works on compacted
+            // (mirror-free) solids. `face.id` is preserved, so cache keys
+            // `(edge_id, face_id)` match the legacy path exactly.
+            let staged = stage_solid_face(solid, face);
+            let mesh = triangulate_face_impl(&staged, params, &cache);
 
             // Progress reporting (lock-free)
             if progress_cb.is_some() {
@@ -1285,7 +1293,14 @@ fn triangulate_solid_sequential(solid: &Solid, params: &TriangulationParams, cac
     let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
     let mut total_face_vertices = 0usize;
     for (face_idx, face) in solid.faces().iter().enumerate() {
-        let mut face_mesh = triangulate_face_with_cache(face, params, cache);
+        // C5 Stage 7.2: store-first per-face resolution — the face is staged
+        // with instance-faithful edges resolved through the solid's
+        // `EdgeStore` (see `triangulate_solid_face_with_cache`), so the
+        // sequential pipeline no longer reads the per-face `edges` mirrors
+        // and works on compacted (mirror-free) solids. Bit-identical to the
+        // legacy mirror path on indexed solids — proven by
+        // `test_solid_pipeline_store_resolved_bit_identical`.
+        let mut face_mesh = triangulate_solid_face_with_cache(solid, face, params, cache);
         // Set triangle_face_ids using SEQUENTIAL INDICES (0, 1, 2, ...)
         // NOT face.id.to_u64(). This ensures consistency between
         // triangulation, face info, tree panel, and model picking.
@@ -1844,9 +1859,24 @@ pub fn triangulate_solid_face_with_cache(
     params: &TriangulationParams,
     cache: &mut EdgeDiscretizationCache,
 ) -> TriangleMesh {
-    let owned = collect_instance_edges(solid, face);
-    let staged = stage_instance_view(face, &owned);
+    let staged = stage_solid_face(solid, face);
     triangulate_face_with_cache(&staged, params, cache)
+}
+
+/// Stage `face` with instance-faithful store-resolved edges (C5 Stage 7.2).
+///
+/// Shared staging helper for the sequential (mutable cache) and parallel
+/// (immutable cache) solid pipelines: resolves the face's edges through the
+/// solid's `EdgeStore` (`Solid::resolve_face_edges` — wire coedges first,
+/// wire-less `edge_ids` second, mirrors as the un-indexed fallback) and
+/// rebuilds the per-face mirror of the STAGED copy from that data. The
+/// source face's `edges` / `edge_ids` fields are never read when the face
+/// is indexed, so compacted (mirror-free) solids stage identically to
+/// mirror-bearing ones. `face.id` is preserved, so edge-discretization
+/// cache keys `(edge_id, face_id)` match the legacy path exactly.
+fn stage_solid_face(solid: &Solid, face: &Face) -> Face {
+    let owned = collect_instance_edges(solid, face);
+    stage_instance_view(face, &owned)
 }
 
 /// Instance-faithful explicit edge list for `face` (C5 Stage 5).

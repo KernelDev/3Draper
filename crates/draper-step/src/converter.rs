@@ -2558,6 +2558,28 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // C5 Stage 7.2: canonical SOLID payload. The void shells joined the
+        // solid AFTER `face_data_list_to_solid` indexed the outer shell, so
+        // re-index once to fold the void faces into the store (Pass 0 keeps
+        // the already-indexed outer identity stable), then compact the
+        // per-face `edges` mirrors wherever the store answers every boundary
+        // reader query (coedge ids of all wires + every `edge_ids` entry).
+        // STEP-loaded solids arrive store-first — the serialized form carries
+        // an empty mirror payload (see `test_serde_compacted_solid_roundtrip`),
+        // and `triangulate_solid` resolves them through the store (Stage 7.2
+        // sequential/parallel staging). Faces the store cannot fully answer
+        // (un-indexable leftovers) keep their mirrors — compaction is
+        // safety-guarded per face, never a hard requirement.
+        solid.index_edges();
+        let compacted = solid.compact_edge_mirrors();
+        if compacted > 0 {
+            log::debug!(
+                "extract_solid_from_brep: compacted edge mirrors on {}/{} faces (store-only payload)",
+                compacted,
+                solid.faces().len()
+            );
+        }
+
         Some(solid)
     }
 

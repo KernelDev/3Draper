@@ -2398,3 +2398,111 @@ store-first (6.x), но конструирование оставалось зе
   re-derive/re-index входом-выходом) — финальная цель
 - Физическое удаление поля `Face.edges` (сериализация уже готова:
   store-only round-trip тест зелёный)
+
+---
+
+# Worklog — C5 Stage 7.2: canonical SOLID payload из STEP + store-first triangulate_solid
+
+**Baseline:** commit `bbc2acc` (после C5 Stage 7.1)
+**Дата:** 2026-09-04
+**Задача:** Пункт «Осталось Stage 7.2+» — STEP-конвертер вызывает
+`compact_edge_mirrors` после `index_edges`; продакшен-пайплайны
+`triangulate_solid` (sequential+parallel) мигрируют на store-first
+staging, чтобы компактед-солиды триангулировались без зеркал.
+
+## Контекст сессии
+
+- Sandbox снова сброшен: Rust toolchain переустановлен (1.98.0 minimal +
+  clippy/rustfmt, PATH в ~/.bashrc); git-конфиги уцелели
+- УРОК ПРОВЕРКИ: локальный клон оказался СТАРЫМ (HEAD=59695be от 31 авг) —
+  «пропавшие» Stage 5–7.1 коммиты живут на origin (были запушены из других
+  sandbox-инстанций). Проверять состояние надо через `git fetch` +
+  `origin/main`, а не только локальное дерево. Сначала локально
+  пере-реализовал Stage 5a explicit-edge API (дубликат d14af6e/5.2) —
+  при push обнаружен fast-forward-конфликт, дубль отброшен через
+  `git reset --hard origin/main` (a6b12d8 остался в reflog)
+- Реальная позиция: после Stage 7.1 (born-indexed + compaction API)
+
+## 1 — Миграция triangulate_solid на store-first staging (mesh)
+
+- `stage_solid_face(solid, face) -> Face` — общий staging-хелпер:
+  `Solid::resolve_face_edges` → `stage_instance_view`; исходные
+  `face.edges`/`face_ids` не читаются у индексированных граней —
+  компактед-солиды стейджатся идентично зеркальным
+- **sequential** (`triangulate_solid_sequential`): пер-гранный вызов
+  `triangulate_face_with_cache(face)` → `triangulate_solid_face_with_cache`
+  (store-first, Stage 5.3-контракт) — производственный sequential-путь
+  больше не читает зеркала
+- **parallel** (`triangulate_solid_parallel_arc`):
+  `triangulate_face_impl(face)` → stage_solid_face + impl —
+  immutable-cache пайплайн тоже mirror-free
+- `triangulate_solid_face_with_cache` отрефакторен на общий хелпер
+- `triangulate_shell` (standalone, без стора) остался зеркальным —
+  это API-контракт Shell-уровня, компакция его не касается
+
+## 2 — Компакция в STEP-конвертере (extract_solid_from_brep)
+
+- После сборки outer+void shells: `solid.index_edges()` (re-index —
+  void-грани присоединились ПОСЛЕ индексации outer-shell в
+  `face_data_list_to_solid`; Pass 0 сохраняет идентичность) →
+  `solid.compact_edge_mirrors()` + debug-лог
+- Путь B (mesh-конверсия, convert()/detailed instances) НЕ тронут —
+  там solid транзиентен, триангуляция идёт от face_data
+- Потребители extract_solids проверены: viewer (VpData::Geometry),
+  wasm (triangulate_solid / add_solid), ffi (store-first list_edges,
+  5.3), json (add_solid) — все совместимы с компактед-пейлоадом
+
+## 3 — seam_junction_regression: контракт тестов → store-first
+
+- 2 теста (synth_cone snap, nist_cylinder keep) читали геометрию seam-рёбер
+  из `face.edges` — с компакцией зеркала пусты. Хелпер
+  `face_has_edge_between` мигрирован на `solid.instance_edges(face)`
+  (Stage 6 mirror re-derivation) — геометрические утверждения неизменны
+
+## 4 — Тесты (crates/draper-step/tests/compacted_solids_test.rs — 3 новых)
+
+- `test_step_solids_arrive_compacted` (nist_cone + cube_with_void):
+  компактед-грани несут edge_ids, каждый coedge id резолвится через
+  `instance_edge`; не-компактед остатки — только mirror-only идентичность
+- `test_compacted_step_solid_triangulates_watertight`: nist_cone
+  watertight (0.00% boundary), brick_thin_hole acceptable
+- `test_compaction_value_neutral_bit_identity` (4 файла, 6 солидов):
+  production `triangulate_solid` (компактед) vs PRE-7.2 пайплайн
+  (re-materialize mirrors через `instance_edges` + старый
+  mirror-читающий пер-гранный цикл) — bit-identical (f64 to_bits);
+  пустые payload-случаи (cube_with_void solid 2 — пустой и ДО 7.2)
+  обязаны оставаться пустыми
+
+## Дебаг-находки
+
+- cube_with_void.stp через extract_solids даёт 3 солида по 1 грани
+  (унаследованная особенность extraction-пути, НЕ регрессия —
+  верифицировано stash-сравнением pre/post: отчёты идентичны)
+- solid 2 файла — пустой меш и до, и после (degenerate-случай)
+
+## Верификация
+
+- draper-mesh: **268 lib + 64 integration** ✅ (после миграции
+  sequential+parallel — бит-идентичность внутренних seq/par тестов
+  сохранена)
+- draper-topology: 218 + 17 + 11 + 3 ✅
+- draper-core: 75 + 2 ✅
+- draper-step: release lib **127/127** (162s) ✅, seam_junction 5/5 ✅
+  (store-first), compacted_solids 3/3 ✅ (новые), integration_test 7 ✅
+  (313s debug), nist_test_suite 19 ✅
+- `cargo check --workspace --lib --exclude draper-testing` — 0 errors
+
+## Осталось (Stage 7.3+)
+
+- viewer (30 `Solid::new` сайтов, construction-писатели 18738/20630) —
+  миграция на `from_shell_indexed`
+- healing.rs внутренние мутации зеркал (shell-scoped) — финальная цель
+- Физическое удаление поля `Face.edges` (serde store-only round-trip уже
+  зелёный; extract_solids теперь поставляет store-only payload)
+- `triangulate_shell` — последний зеркальный mesh-читатель (контракт
+  standalone-Shell)
+
+## Коммит
+
+- `refactor(core): C5 stage 7.2 — canonical STEP payload + store-first
+  solid triangulation` (см. git log)

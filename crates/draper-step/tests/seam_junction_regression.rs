@@ -52,15 +52,22 @@ fn dist(a: &Point3d, b: &Point3d) -> f64 {
     ((a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)).sqrt()
 }
 
-/// Does `face` have an edge whose evaluated endpoints are (unordered)
-/// approximately equal to the given pair?
+/// Does `face` (as owned by `solid`) have an edge whose evaluated
+/// endpoints are (unordered) approximately equal to the given pair?
+///
+/// C5 Stage 7.2: STEP-loaded solids arrive with compacted (empty) `edges`
+/// mirrors, so the edge set is resolved through the solid's `EdgeStore`
+/// (`Solid::instance_edges` — the mirror re-derivation). Un-indexed faces
+/// fall back to their mirrors inside the same call, so both payload shapes
+/// answer identically.
 fn face_has_edge_between(
+    solid: &draper_topology::Solid,
     face: &draper_topology::Face,
     p: &Point3d,
     q: &Point3d,
     tol: f64,
 ) -> bool {
-    for e in &face.edges {
+    for e in solid.instance_edges(face) {
         if let (Some(sp), Some(ep)) = (e.start_point(), e.end_point()) {
             if dist(&sp, p) <= tol && dist(&ep, q) <= tol {
                 return true;
@@ -100,10 +107,10 @@ fn synth_cone_seam_snapped_to_vertex_chord() {
     let mut has_snapped_seam = false;
     let mut has_broken_vertical = false;
     for face in &conical {
-        if face_has_edge_between(face, &p_bottom, &p_top, 1e-6) {
+        if face_has_edge_between(solid, face, &p_bottom, &p_top, 1e-6) {
             has_snapped_seam = true;
         }
-        if face_has_edge_between(face, &p_bottom, &p_broken, 0.1) {
+        if face_has_edge_between(solid, face, &p_bottom, &p_broken, 0.1) {
             has_broken_vertical = true;
         }
     }
@@ -163,11 +170,11 @@ fn nist_cylinder_center_vertex_line_is_kept() {
     let mut has_vertical_seam = false;
     let mut has_snapped_to_center = false;
     for face in &cylindrical {
-        if face_has_edge_between(face, &p_bottom, &p_top, 1e-6) {
+        if face_has_edge_between(solid, face, &p_bottom, &p_top, 1e-6) {
             has_vertical_seam = true;
         }
         // A wrong snap would bend the seam toward the circle center.
-        if face_has_edge_between(face, &p_bottom, &p_center, 0.1) {
+        if face_has_edge_between(solid, face, &p_bottom, &p_center, 0.1) {
             has_snapped_to_center = true;
         }
     }
