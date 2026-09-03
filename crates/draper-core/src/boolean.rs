@@ -38,7 +38,7 @@
 //!   coincident faces.
 
 use draper_geometry::Point3d;
-use draper_topology::{Solid, Shell, Face};
+use draper_topology::{Solid, Shell, Face, Edge};
 
 /// Result of a boolean operation.
 pub type BooleanResult = Result<Solid, String>;
@@ -54,7 +54,10 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            if !face_inside_solid(face, b, /*tolerance=*/ 1e-9) {
+            // C5 Stage 6.4: store-first boundary reads of the OWNER solid
+            // (per-id mirror fallback keeps split results complete).
+            let face_edges = a.resolve_face_edges(face);
+            if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
             }
         }
@@ -62,7 +65,8 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep faces of B that are OUTSIDE A.
     if let Some(ref shell_b) = b.outer_shell {
         for face in &shell_b.faces {
-            if !face_inside_solid(face, a, /*tolerance=*/ 1e-9) {
+            let face_edges = b.resolve_face_edges(face);
+            if !face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
             }
         }
@@ -88,7 +92,9 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            if !face_inside_solid(face, b, /*tolerance=*/ 1e-9) {
+            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            let face_edges = a.resolve_face_edges(face);
+            if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
             }
         }
@@ -96,7 +102,8 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep REVERSED faces of B that are INSIDE A.
     if let Some(ref shell_b) = b.outer_shell {
         for face in &shell_b.faces {
-            if face_inside_solid(face, a, /*tolerance=*/ 1e-9) {
+            let face_edges = b.resolve_face_edges(face);
+            if face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.reversed());
             }
         }
@@ -126,7 +133,9 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep faces of A that are INSIDE B (or on boundary).
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            if face_inside_or_on_solid(face, b, /*tolerance=*/ 1e-9) {
+            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            let face_edges = a.resolve_face_edges(face);
+            if face_inside_or_on_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
             }
         }
@@ -134,7 +143,8 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     // Keep faces of B that are INSIDE A (or on boundary).
     if let Some(ref shell_b) = b.outer_shell {
         for face in &shell_b.faces {
-            if face_inside_or_on_solid(face, a, /*tolerance=*/ 1e-9) {
+            let face_edges = b.resolve_face_edges(face);
+            if face_inside_or_on_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
             }
         }
@@ -151,9 +161,9 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
 /// Like `face_inside_solid`, but also returns true for faces whose
 /// centroid is ON the boundary of `other` (within `tolerance`).
 /// Used by `boolean_intersect` to handle boundary-coincident faces.
-fn face_inside_or_on_solid(face: &Face, other: &Solid, tolerance: f64) -> bool {
+fn face_inside_or_on_solid(face: &Face, face_edges: &[Edge], other: &Solid, tolerance: f64) -> bool {
     let mut sample_points = Vec::new();
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(p) = edge.start_point() {
             sample_points.push(p);
         }
@@ -213,10 +223,10 @@ fn face_inside_or_on_solid(face: &Face, other: &Solid, tolerance: f64) -> bool {
 ///
 /// Returns true if the face's centroid is inside `other` (strictly, with
 /// the given tolerance for boundary cases).
-fn face_inside_solid(face: &Face, other: &Solid, tolerance: f64) -> bool {
+fn face_inside_solid(face: &Face, face_edges: &[Edge], other: &Solid, tolerance: f64) -> bool {
     // Collect edge endpoints as candidate sample points.
     let mut sample_points = Vec::new();
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(p) = edge.start_point() {
             sample_points.push(p);
         }
@@ -452,6 +462,48 @@ mod tests {
             n_faces >= 6,
             "expected ≥6 faces after union (some remain), got {}",
             n_faces
+        );
+    }
+
+    /// C5 Stage 6.4: store-first face classification must not change
+    /// boolean results — the same subtraction with un-indexed (mirror
+    /// reads) and indexed (store reads) inputs produces identical
+    /// topology and volume.
+    #[test]
+    fn test_boolean_indexed_equivalence() {
+        let a_raw = unit_cube_at((0.0, 0.0, 0.0));
+        let b_raw = unit_cube_at((0.5, 0.5, 0.5));
+
+        let mut a_idx = a_raw.clone();
+        a_idx.index_edges();
+        let mut b_idx = b_raw.clone();
+        b_idx.index_edges();
+        assert!(!a_idx.edge_store.is_empty(), "index_edges populated the store");
+
+        let r_raw = boolean_subtract(&a_raw, &b_raw).expect("raw subtract ok");
+        let r_idx = boolean_subtract(&a_idx, &b_idx).expect("indexed subtract ok");
+
+        let faces_raw = r_raw.outer_shell.as_ref().unwrap().faces.len();
+        let faces_idx = r_idx.outer_shell.as_ref().unwrap().faces.len();
+        assert_eq!(faces_raw, faces_idx, "face count must match");
+
+        let wire_fp = |s: &Solid| -> Vec<usize> {
+            s.outer_shell
+                .as_ref()
+                .unwrap()
+                .faces
+                .iter()
+                .map(|f| f.outer_wire.as_ref().map(|w| w.coedges.len()).unwrap_or(0))
+                .collect()
+        };
+        assert_eq!(wire_fp(&r_raw), wire_fp(&r_idx), "wire fingerprint must match");
+
+        let vol_raw = draper_topology::queries::solid_volume(&r_raw);
+        let vol_idx = draper_topology::queries::solid_volume(&r_idx);
+        assert_eq!(
+            vol_raw.to_bits(),
+            vol_idx.to_bits(),
+            "volume must be bit-identical (raw={vol_raw}, idx={vol_idx})"
         );
     }
 

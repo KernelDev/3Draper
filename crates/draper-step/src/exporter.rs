@@ -1058,7 +1058,7 @@ pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) ->
 
     // Emit all shells of the solid
     let outer_shell_id = if let Some(ref shell) = solid.outer_shell {
-        emit_shell(&mut sw, shell)
+        emit_shell(&mut sw, solid, shell)
     } else {
         // Empty solid — emit a placeholder
         let id = sw.alloc_id();
@@ -1070,7 +1070,7 @@ pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) ->
     let inner_shell_ids: Vec<i64> = solid
         .inner_shells
         .iter()
-        .map(|shell| emit_shell(&mut sw, shell))
+        .map(|shell| emit_shell(&mut sw, solid, shell))
         .collect();
 
     // MANIFOLD_SOLID_BREP or BREP_WITH_VOIDS
@@ -1181,10 +1181,15 @@ pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) ->
 }
 
 /// Emit a CLOSED_SHELL and return its ID.
-fn emit_shell(sw: &mut StepWriter, shell: &Shell) -> i64 {
+fn emit_shell(sw: &mut StepWriter, solid: &Solid, shell: &Shell) -> i64 {
     let mut face_ids: Vec<i64> = Vec::with_capacity(shell.faces.len());
 
     for face in &shell.faces {
+        // C5 Stage 6.4: store-first boundary registry — coedge ids resolve
+        // through the owner solid's `EdgeStore` (per-id mirror fallback
+        // keeps un-indexed builder faces complete), so a stale mirror can
+        // no longer leak exported EDGE_CURVE geometry.
+        let face_edges = solid.resolve_face_edges(face);
         // Surface
         let surface_id = if let Some(ref surface) = face.surface {
             sw.emit_surface(surface)
@@ -1200,12 +1205,12 @@ fn emit_shell(sw: &mut StepWriter, shell: &Shell) -> i64 {
         let mut bound_ids: Vec<i64> = Vec::new();
 
         if let Some(ref outer) = face.outer_wire {
-            if let Some(fb_id) = sw.emit_wire_as_bound(outer, &face.edges) {
+            if let Some(fb_id) = sw.emit_wire_as_bound(outer, &face_edges) {
                 bound_ids.push(fb_id);
             }
         }
         for inner in &face.inner_wires {
-            if let Some(fb_id) = sw.emit_wire_as_bound(inner, &face.edges) {
+            if let Some(fb_id) = sw.emit_wire_as_bound(inner, &face_edges) {
                 bound_ids.push(fb_id);
             }
         }
@@ -1434,6 +1439,48 @@ mod tests {
         assert!(step.contains("CLOSED_SHELL"));
         assert!(step.contains("ADVANCED_FACE"));
         assert!(step.contains("PLANE"));
+    }
+
+    /// C5 Stage 6.4: store-first export — a mirror corrupted AFTER
+    /// `index_edges` must not leak into the exported EDGE_CURVE geometry;
+    /// the DATA section stays bit-identical to the clean export.
+    #[test]
+    fn test_export_ignores_stale_mirrors() {
+        use draper_topology::ShapeBuilder;
+        use draper_geometry::Curve3d;
+
+        let base = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+
+        let mut clean = base.clone();
+        clean.index_edges();
+
+        let mut stale = base.clone();
+        stale.index_edges();
+        {
+            let shell = stale.outer_shell.as_mut().unwrap();
+            let edge = &mut shell.faces[0].edges[0];
+            edge.start_vertex_point = Some(draper_geometry::Point3d::new(95.0, 0.0, 0.0));
+            edge.end_vertex_point = Some(draper_geometry::Point3d::new(95.0, 10.0, 0.0));
+            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
+                line.origin = draper_geometry::Point3d::new(95.0, 0.0, 0.0);
+            }
+        }
+
+        let step_clean = export_step(&clean, "stale_check");
+        let step_stale = export_step(&stale, "stale_check");
+
+        // No exported coordinate may carry the corrupted off-box value.
+        assert!(
+            !step_stale.contains("95."),
+            "stale mirror geometry leaked into the export"
+        );
+        // DATA section (id-deterministic) is bit-identical to the clean run.
+        let data = |s: &str| s.split_once("DATA;").map(|(_, rest)| rest.to_string());
+        assert_eq!(
+            data(&step_clean),
+            data(&step_stale),
+            "store-first export must be mirror-staleness-immune"
+        );
     }
 
     #[test]

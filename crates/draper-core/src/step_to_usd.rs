@@ -162,7 +162,9 @@ fn default_camera_for_solids(solids: &[Solid]) -> UsdCamera {
     for solid in solids {
         if let Some(shell) = solid.outer_shell.as_ref() {
             for face in &shell.faces {
-                for edge in &face.edges {
+                // C5 Stage 6.4: store-first boundary reads (per-id mirror
+                // fallback keeps builder faces complete).
+                for edge in solid.resolve_face_edges(face) {
                     if let Some(p) = edge.start_point() {
                         min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
                         max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);

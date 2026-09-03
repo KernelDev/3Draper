@@ -509,11 +509,17 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
     let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
 
-    // Borrow the edge curve from face_a (immutable, then we'll mutate).
-    let edge_curve = {
-        let edge_a = &shell.faces[face_a_idx].edges[edge_a_pos];
-        edge_a.curve.clone()
+    // C5 Stage 6.4: store-first edge geometry — the store's instance view
+    // (alias-following, orientation-correct) is the source of truth; the
+    // construction mirror is the fallback for ids the store does not hold.
+    let edge_a = {
+        let mirror = &shell.faces[face_a_idx].edges[edge_a_pos];
+        solid
+            .edge_store
+            .instance_edge(mirror.id)
+            .unwrap_or_else(|| mirror.clone())
     };
+    let edge_curve = edge_a.curve.clone();
     let edge_curve = edge_curve.ok_or("edge has no curve")?;
 
     // Only LINE edges are supported in this implementation.
@@ -545,7 +551,7 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     };
 
     // Compute the edge length from param_range.
-    let (t_min, t_max) = shell.faces[face_a_idx].edges[edge_a_pos].param_range;
+    let (t_min, t_max) = edge_a.param_range;
     let edge_length = (t_max - t_min).abs();
     if edge_length < 1e-12 {
         return Err("edge has zero length — cannot fillet".to_string());
@@ -756,10 +762,15 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
     let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
 
-    let edge_curve = {
-        let edge_a = &shell.faces[face_a_idx].edges[edge_a_pos];
-        edge_a.curve.clone()
+    // C5 Stage 6.4: store-first edge geometry (see fillet_edge).
+    let edge_a = {
+        let mirror = &shell.faces[face_a_idx].edges[edge_a_pos];
+        solid
+            .edge_store
+            .instance_edge(mirror.id)
+            .unwrap_or_else(|| mirror.clone())
     };
+    let edge_curve = edge_a.curve.clone();
     let edge_curve = edge_curve.ok_or("edge has no curve")?;
 
     let (edge_origin, edge_dir) = match edge_curve {
@@ -787,7 +798,7 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
         )),
     };
 
-    let (t_min, t_max) = shell.faces[face_a_idx].edges[edge_a_pos].param_range;
+    let (t_min, t_max) = edge_a.param_range;
     let edge_length = (t_max - t_min).abs();
     if edge_length < 1e-12 {
         return Err("edge has zero length — cannot chamfer".to_string());

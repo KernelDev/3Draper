@@ -2188,3 +2188,72 @@ worklog: «store параметр или перенос в Solid-методы» 
   sync_edge_mirrors → физическое удаление поля Face.edges
 - Известный угол (унаследован): curve-less preserved canonical + поздний
   зеркальный инстанс с кривой не унифицируются
+
+---
+
+## C5 Stage 6.4 — store-first operation readers + query completeness fix
+
+**Дата**: 2026-09-03
+**Коммит**: (см. git log) refactor(core): C5 stage 6.4 — store-first op readers + orphaned-edge_ids query fix
+
+### 1 — DRY: mesh → `Solid::resolve_face_edges`
+
+- `collect_instance_edges` (draper-mesh/triangulate.rs, Stage 5.3 локальная
+  копия) → тонкая делегация `solid.resolve_face_edges(face)`: одна
+  реализация, один контракт (store-first + per-id mirror fallback +
+  canonical-дедуп wire-less прохода)
+- 268 mesh lib + все integration — бит-идентичность сохранена ✅
+
+### 2 — Store-first читатели операций
+
+- **step_to_usd** (bbox): `solid.resolve_face_edges(face)` вместо зеркал
+- **core/boolean.rs** (`face_inside_solid` / `face_inside_or_on_solid`):
+  трединг `face_edges: &[Edge]` (паттерн 6.2); resolve от ВЛАДЕЛЬЦА грани
+  (a для a-граней, b для b-граней); surface-fallback остаётся face-owned
+- **topology/operations.rs** (`find_adjacent_faces`): матчинг в
+  CANONICAL id-пространстве (`edge_store.canonical_of` обеих сторон) —
+  alias-инстансы общего ребра больше не теряются; un-indexed: identity
+- **core/operations.rs** (fillet_edge/chamfer_edge): геометрия
+  совпавшего ребра (curve, param_range) — store-first через
+  `edge_store.instance_edge` с mirror fallback; позиции матчинга
+  (fi, ei) остаются на зеркалах (id-пространство)
+- **step exporter** (`emit_wire_as_bound`): `emit_shell(sw, solid, shell)`
+  — per-face resolve; стэйл-зеркало больше не утекает в EDGE_CURVE
+
+### 3 — ЛАТЕНТНЫЙ БАГ 6.1 (найден новым тестом): orphaned edge_ids
+
+- Симптом: `solid_volume` = 0 дляsolid'а, чьи грани несут `edge_ids`,
+  а стор пуст/перестроен (клон граней индексированного солида в
+  `Solid::new` — результаты boolean/operations)
+- Причина: `triangulate_solid_for_queries` (queries.rs) использовал
+  STRICT `instance_edges` (Stage 6.1, store-only) — miss = тихий дроп
+  ВСЕГО boundary
+- Фикс: → `solid.resolve_face_edges(face)` (store-first + per-id mirror
+  fallback): для консистентных солидов вывод идентичен, для
+  orphaned-граней — ПОЛНЫЙ
+
+### 4 — Тесты (+2)
+
+- `test_boolean_indexed_equivalence` (core/boolean.rs): box−box
+  overlapping, un-indexed vs indexed входы: face count + wire
+  fingerprint + `solid_volume` BIT-идентичны — тест, который и поймал
+  баг 6.1
+- `test_export_ignores_stale_mirrors` (step/exporter.rs): порча зеркала
+  ПОСЛЕ index_edges → экспорт без 95-координат, DATA-секция
+  бит-идентична чистому прогону
+
+### Верификация
+
+- draper-topology: 212 lib + 17 + 11 + 3 ✅
+- draper-core: **75 lib** (74 + 1) + 2 ✅
+- draper-mesh: 268 + integration ✅; exporter::tests 5/5 ✅
+- `cargo check --workspace --exclude draper-testing` — 0 errors
+- Диск: 5.6G free
+
+### Осталось (Stage 6.5+)
+
+- viewer/app.rs (5 читателей), ffi/wasm/json — ostatки читателей
+- Писатели зеркал: builder/boolean/fillet/chamfer-конструкция +
+  sync_edge_mirrors → физическое удаление поля Face.edges
+- Известный угол (унаследован): curve-less preserved canonical + поздний
+  зеркальный инстанс с кривой не унифицируются

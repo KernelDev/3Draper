@@ -132,22 +132,28 @@ fn surface_param_range_approx(surface: &Surface) -> (f64, f64, f64, f64) {
 /// Find the two faces adjacent to a given edge (identified by edge ID).
 /// Returns face indices in the solid's flattened face list.
 fn find_adjacent_faces(solid: &Solid, edge_id: TopoId) -> Vec<usize> {
+    // C5 Stage 6.4: match in the CANONICAL id space — `edge_id` may name an
+    // instance alias, and shared-edge instances carry different TopoIds per
+    // incident face. Un-indexed solids keep the legacy identity semantics
+    // (`canonical_of` is the identity without aliases).
+    let wanted = solid.edge_store.canonical_of(edge_id);
+    let canonical_of = |id: TopoId| solid.edge_store.canonical_of(id);
     let mut face_indices = Vec::new();
     for (fi, face) in solid.faces().iter().enumerate() {
         // Check if any coedge in the outer wire references this edge
         let mut found = false;
         if let Some(ref wire) = face.outer_wire {
             for coedge in &wire.coedges {
-                if coedge.edge == edge_id {
+                if canonical_of(coedge.edge) == wanted {
                     found = true;
                     break;
                 }
             }
         }
-        // Also check if the edge ID appears in the face's edges list
+        // Also check if the edge id appears in the face's edge list
         if !found {
             for edge in &face.edges {
-                if edge.id == edge_id {
+                if canonical_of(edge.id) == wanted {
                     found = true;
                     break;
                 }

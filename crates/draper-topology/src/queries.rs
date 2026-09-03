@@ -50,8 +50,15 @@ impl QueryMesh {
 fn triangulate_solid_for_queries(solid: &Solid) -> QueryMesh {
     let mut mesh = QueryMesh::new();
     for face in solid.faces() {
-        // C5 Stage 6: instance-faithful store-resolved edges (mirror-free).
-        let edges = solid.instance_edges(face);
+        // C5 Stage 6.4: complete store-first resolution. Stage 6.1 used the
+        // STRICT `instance_edges` here, which silently dropped every edge of
+        // a face carrying `edge_ids` that the solid's (empty/rebuilt) store
+        // does not hold — e.g. faces cloned from an indexed solid into a
+        // fresh `Solid::new` shell (boolean/operation results) — making
+        // `solid_volume` return 0. `resolve_face_edges` keeps the
+        // store-first reads and adds the per-id mirror fallback, so the
+        // boundary list is always COMPLETE.
+        let edges = solid.resolve_face_edges(face);
         let face_mesh = triangulate_face_for_queries(face, &edges);
         mesh.merge(&face_mesh);
     }

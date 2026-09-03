@@ -1851,77 +1851,26 @@ pub fn triangulate_solid_face_with_cache(
 
 /// Instance-faithful explicit edge list for `face` (C5 Stage 5).
 ///
-/// Resolution order:
+/// C5 Stage 6.4: now a thin delegation to `Solid::resolve_face_edges`
+/// (topology crate) — the same resolution order, owned by the topology
+/// crate and shared with the boolean readers (6.2) and healing
+/// re-derivation (6.3):
 ///
 /// 1. **Wire coedges** — each coedge's instance id resolves through the
-///    store (`Solid::resolve_edge`, alias-following with mirror fallback);
-///    the canonical edge is re-keyed to the coedge's instance id and — when
-///    the store recorded the instance as traversing the canonical curve
-///    backwards (`EdgeStore::instance_is_reversed`, populated by
-///    `Solid::index_edges`) — param-reversed via `Edge::reversed()`, so the
-///    staged view reproduces the legacy mirror's traversal exactly.
-/// 2. **Indexed references without a coedge** — simplified primitives keep
-///    boundary edges in `face.edge_ids` but no wire (e.g. the cylinder
-///    lateral face); those resolve through the store directly.
-/// 3. **Un-indexed fallback** — a face with no `edge_ids` and no
-///    store coverage falls back to its `edges` mirrors (the pre-C5
-///    semantics; also the only source for builder faces never passed
-///    through `Solid::index_edges`).
+///    store (`EdgeStore::instance_edge`, alias-following) with per-id
+///    mirror fallback; reversed instances are param-reversed via
+///    `Edge::reversed()`, so the staged view reproduces the legacy
+///    mirror's traversal exactly.
+/// 2. **Indexed references without a coedge** — wire-less `edge_ids`
+///    entries resolve through the store, deduped against the canonicals
+///    already covered by wire instances (strict key space).
+/// 3. **Un-indexed fallback** — a face with no `edge_ids` falls back to
+///    its `edges` mirrors (the pre-C5 semantics; also the only source for
+///    builder faces never passed through `Solid::index_edges`).
 ///
-/// A coedge/reference whose id resolves nowhere is skipped (the legacy
-/// "missing mirror" semantics).
+/// The local Stage 5.3 copy is retired — one implementation, one contract.
 fn collect_instance_edges(solid: &Solid, face: &Face) -> Vec<Edge> {
-    let mut owned: Vec<Edge> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-
-    fn push_resolved(
-        id: TopoId,
-        solid: &Solid,
-        owned: &mut Vec<Edge>,
-        seen: &mut std::collections::HashSet<TopoId>,
-    ) {
-        if !seen.insert(id) {
-            return;
-        }
-        if let Some(edge) = solid.resolve_edge(id) {
-            let instance = if solid.edge_store.instance_is_reversed(id) {
-                edge.reversed()
-            } else {
-                edge.clone()
-            };
-            let mut instance = instance;
-            instance.id = id;
-            owned.push(instance);
-        }
-    }
-
-    // 1. Wire coedges (outer + inner wires)
-    if let Some(ref wire) = face.outer_wire {
-        for coedge in &wire.coedges {
-            push_resolved(coedge.edge, solid, &mut owned, &mut seen);
-        }
-    }
-    for wire in &face.inner_wires {
-        for coedge in &wire.coedges {
-            push_resolved(coedge.edge, solid, &mut owned, &mut seen);
-        }
-    }
-
-    // 2. Indexed references without a coedge (wire-less faces)
-    for &id in &face.edge_ids {
-        push_resolved(id, solid, &mut owned, &mut seen);
-    }
-
-    // 3. Un-indexed fallback: mirrors
-    if face.edge_ids.is_empty() {
-        for edge in &face.edges {
-            if seen.insert(edge.id) {
-                owned.push(edge.clone());
-            }
-        }
-    }
-
-    owned
+    solid.resolve_face_edges(face)
 }
 
 /// Internal implementation: triangulate a face with a read-only cache.
