@@ -833,6 +833,32 @@ impl RuledSurface {
             curve2: Box::new(curve2),
         }
     }
+
+    /// Evaluate the surface and its first partial derivatives at (u, v).
+    ///
+    /// S(u,v) = (1−v)·C1(u) + v·C2(u), so
+    ///   dS/du = (1−v)·C1'(u) + v·C2'(u)
+    ///   dS/dv = C2(u) − C1(u)
+    pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
+        let c1 = self.curve1.point_at(u);
+        let c2 = self.curve2.point_at(u);
+        let d1 = self.curve1.derivative_at(u);
+        let d2 = self.curve2.derivative_at(u);
+
+        let w = 1.0 - v;
+        let point = Point3d::new(
+            w * c1.x + v * c2.x,
+            w * c1.y + v * c2.y,
+            w * c1.z + v * c2.z,
+        );
+        let du = Vec3d::new(
+            w * d1.x + v * d2.x,
+            w * d1.y + v * d2.y,
+            w * d1.z + v * d2.z,
+        );
+        let dv = Vec3d::new(c2.x - c1.x, c2.y - c1.y, c2.z - c1.z);
+        SurfaceDerivatives { point, du, dv }
+    }
 }
 
 /// NURBS surface.
@@ -1987,6 +2013,13 @@ impl Surface {
     }
 
     /// Get the surface normal at (u, v).
+    ///
+    /// All extended surface types use ANALYTICAL derivatives (audit item
+    /// «numeric normal_at for Revolution/Extrusion» — closed 2026-09-03):
+    /// only `Plane/Cylinder/Cone/Sphere/Torus` keep their hand-derived
+    /// closed forms, everything else derives the tangent plane exactly
+    /// instead of forward differences (eps=1e-7 lost ~7 digits and picked
+    /// up noise near parametric seams).
     pub fn normal_at(&self, u: f64, v: f64) -> Direction3d {
         match self {
             Surface::Plane(p) => p.normal_at(u, v),
@@ -1999,15 +2032,28 @@ impl Surface {
                 let derivs = nurbs.derivatives_at(u, v);
                 derivs.normal()
             }
-            _ => {
-                // Numerical differentiation fallback for Revolution, Extrusion
-                let eps = 1e-7;
-                let p0 = self.point_at(u, v);
-                let pu = self.point_at(u + eps, v);
-                let pv = self.point_at(u, v + eps);
-                let du = Vec3d::new(pu.x - p0.x, pu.y - p0.y, pu.z - p0.z);
-                let dv = Vec3d::new(pv.x - p0.x, pv.y - p0.y, pv.z - p0.z);
-                du.cross(&dv).normalize().unwrap_or(Direction3d::Z)
+            Surface::Revolution(rev) => {
+                // Chain-rule derivatives (same path as `Surface::derivatives_at`).
+                rev.derivatives_at(u, v).normal()
+            }
+            Surface::Extrusion(ext) => {
+                // dS/du = P'(u), dS/dv = D — exact.
+                ext.derivatives_at(u, v).normal()
+            }
+            Surface::Offset(o) => {
+                // Offset construction preserves the Gauss map: the shape
+                // operator W is a tangent-plane endomorphism, so
+                // S_u = (I − d·W)·B_u stays in the base's tangent plane —
+                // the offset's tangent plane, and hence its normal, at
+                // (u, v) equals the base surface's exactly (for
+                // non-regressive offsets |d|·κ < 1; at cusps the base
+                // normal is still the canonical answer).
+                o.base.normal_at(u, v)
+            }
+            Surface::Ruled(r) => {
+                // S(u,v) = (1−v)·C1(u) + v·C2(u) — analytic partials, see
+                // `RuledSurface::derivatives_at`.
+                r.derivatives_at(u, v).normal()
             }
         }
     }
@@ -2445,12 +2491,14 @@ impl Surface {
     /// Compute the surface point and first partial derivatives at (u, v).
     ///
     /// For NURBS surfaces, uses the NurbsSurface::derivatives_at method.
+    /// For Revolution/Extrusion/Ruled, uses their analytic derivatives.
     /// For all other surface types, uses central finite differences.
     pub fn derivatives_at(&self, u: f64, v: f64) -> SurfaceDerivatives {
         match self {
             Surface::Nurbs(nurbs) => nurbs.derivatives_at(u, v),
             Surface::Revolution(r) => r.derivatives_at(u, v),
             Surface::Extrusion(e) => e.derivatives_at(u, v),
+            Surface::Ruled(r) => r.derivatives_at(u, v),
             _ => {
                 // Fallback to numerical central differences for surface types
                 // that don't yet have analytical derivatives.
@@ -3233,6 +3281,247 @@ mod tests {
                 assert!((ders.dv.x - 0.0).abs() < 1e-12, "dS/dv.x should be 0");
                 assert!((ders.dv.y - 0.0).abs() < 1e-12, "dS/dv.y should be 0");
                 assert!((ders.dv.z - 1.0).abs() < 1e-12, "dS/dv.z should be 1");
+            }
+        }
+    }
+
+    // ─── Analytical normal_at tests (audit: numeric normal_at closed) ──
+
+    /// Direction3d doesn't expose a dot helper in all builds — compute
+    /// directly. Returns the dot product of two directions.
+    fn dir_dot(a: &Direction3d, b: &Direction3d) -> f64 {
+        a.x * b.x + a.y * b.y + a.z * b.z
+    }
+
+    #[test]
+    fn test_revolution_normal_at_matches_equivalent_cylinder() {
+        // Revolution of a vertical line at radius 2 around Z IS a cylinder —
+        // the analytic normal must equal the cylinder's closed-form outward
+        // normal (same orientation convention: dS/du × dS/dv).
+        let profile = Curve3d::Line(Line::new(
+            Point3d::new(2.0, 0.0, 0.0),
+            Direction3d::Z,
+        ));
+        let surface = Surface::Revolution(RevolutionSurface::new(
+            profile, Direction3d::Z, Point3d::ORIGIN,
+        ));
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(2.0));
+
+        for &u in &[0.1_f64, 0.7, 1.9, 3.0, 5.5] {
+            for &v in &[0.25_f64, 1.0, 2.5] {
+                let n_rev = surface.normal_at(u, v);
+                let n_cyl = cylinder.normal_at(u, v);
+                let dot = dir_dot(&n_rev, &n_cyl);
+                assert!(
+                    dot > 1.0 - 1e-9,
+                    "revolution normal ({:.9},{:.9},{:.9}) != cylinder ({:.9},{:.9},{:.9}) at (u={}, v={}), dot={}",
+                    n_rev.x, n_rev.y, n_rev.z, n_cyl.x, n_cyl.y, n_cyl.z, u, v, dot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_revolution_normal_at_matches_derivatives_cross() {
+        // normal_at must be consistent with the public derivatives_at
+        // (n = dS/du × dS/dv) — a curved profile (circle) exercises the
+        // full chain-rule path.
+        let profile = Curve3d::Circle(Circle::new_xy(
+            Point3d::new(3.0, 0.0, 0.0),
+            1.0,
+        ));
+        let surface = Surface::Revolution(RevolutionSurface::new(
+            profile, Direction3d::Z, Point3d::ORIGIN,
+        ));
+
+        for &u in &[0.3_f64, 1.2, 2.8, 4.4] {
+            for &v in &[0.3_f64, 1.6, 4.7] {
+                let n = surface.normal_at(u, v);
+                let d = surface.derivatives_at(u, v);
+                let cross = d.du.cross(&d.dv).normalize();
+                assert!(cross.is_some(), "derivatives cross degenerate at ({}, {})", u, v);
+                let expected = cross.unwrap();
+                let dot = dir_dot(&n, &expected);
+                assert!(
+                    dot > 1.0 - 1e-12,
+                    "normal_at != du×dv at (u={}, v={}): dot={:.15}",
+                    u, v, dot
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_extrusion_normal_at_matches_derivatives_cross() {
+        // Extrusion of a circle: normal_at must equal dS/du × dS/dv and be
+        // perpendicular to the extrusion direction.
+        let profile = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.5));
+        let surface = Surface::Extrusion(ExtrusionSurface::new(profile, Direction3d::Z));
+
+        for &u in &[0.2_f64, 1.1, 2.6, 5.0] {
+            for &v in &[0.0_f64, 0.7, 2.2] {
+                let n = surface.normal_at(u, v);
+                let d = surface.derivatives_at(u, v);
+                let cross = d.du.cross(&d.dv).normalize();
+                assert!(cross.is_some(), "derivatives cross degenerate at ({}, {})", u, v);
+                let expected = cross.unwrap();
+                let dot = dir_dot(&n, &expected);
+                assert!(dot > 1.0 - 1e-12, "normal_at != du×dv at (u={}, v={})", u, v);
+                // Perpendicular to the extrusion direction (Z).
+                assert!(n.z.abs() < 1e-12, "extrusion normal must be ⊥ D, n.z={}", n.z);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ruled_derivatives_match_numerical() {
+        // Bilinear-ish patch: ruled surface between two different circles.
+        let c1 = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
+        let c2 = Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 2.0), 2.5));
+        let surface = Surface::Ruled(RuledSurface::new(c1, c2));
+
+        let eps = 1e-6;
+        for &u in &[0.2_f64, 1.0, 2.4, 4.9] {
+            for &v in &[0.15_f64, 0.5, 0.85] {
+                let analytical = surface.derivatives_at(u, v);
+
+                let p_u_plus = surface.point_at(u + eps, v);
+                let p_u_minus = surface.point_at(u - eps, v);
+                let p_v_plus = surface.point_at(u, v + eps);
+                let p_v_minus = surface.point_at(u, v - eps);
+
+                let num_du_x = (p_u_plus.x - p_u_minus.x) / (2.0 * eps);
+                let num_du_y = (p_u_plus.y - p_u_minus.y) / (2.0 * eps);
+                let num_du_z = (p_u_plus.z - p_u_minus.z) / (2.0 * eps);
+                let num_dv_x = (p_v_plus.x - p_v_minus.x) / (2.0 * eps);
+                let num_dv_y = (p_v_plus.y - p_v_minus.y) / (2.0 * eps);
+                let num_dv_z = (p_v_plus.z - p_v_minus.z) / (2.0 * eps);
+
+                let du_err = ((analytical.du.x - num_du_x).powi(2)
+                    + (analytical.du.y - num_du_y).powi(2)
+                    + (analytical.du.z - num_du_z).powi(2)).sqrt();
+                let dv_err = ((analytical.dv.x - num_dv_x).powi(2)
+                    + (analytical.dv.y - num_dv_y).powi(2)
+                    + (analytical.dv.z - num_dv_z).powi(2)).sqrt();
+
+                assert!(du_err < 1e-6, "Ruled dS/du mismatch at ({}, {}): err={:.2e}", u, v, du_err);
+                assert!(dv_err < 1e-6, "Ruled dS/dv mismatch at ({}, {}): err={:.2e}", u, v, dv_err);
+
+                // The analytic point must equal point_at exactly (same formula).
+                let p = surface.point_at(u, v);
+                assert_eq!(analytical.point, p);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ruled_normal_at_matches_derivatives_cross() {
+        let c1 = Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0));
+        let c2 = Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 2.0), 2.5));
+        let surface = Surface::Ruled(RuledSurface::new(c1, c2));
+
+        for &u in &[0.4_f64, 1.7, 3.3] {
+            for &v in &[0.2_f64, 0.5, 0.9] {
+                let n = surface.normal_at(u, v);
+                let d = surface.derivatives_at(u, v);
+                let cross = d.du.cross(&d.dv).normalize();
+                assert!(cross.is_some(), "derivatives cross degenerate at ({}, {})", u, v);
+                let dot = dir_dot(&n, &cross.unwrap());
+                assert!(dot > 1.0 - 1e-12, "normal_at != du×dv at (u={}, v={})", u, v);
+            }
+        }
+    }
+
+    #[test]
+    fn test_offset_normal_equals_base_normal() {
+        // Offsetting preserves the Gauss map: the offset's normal at (u, v)
+        // equals the base's, exactly.
+        let base = Surface::Cylinder(CylinderSurface::new_z(2.0));
+        let offset = Surface::Offset(OffsetSurface {
+            base: Box::new(base.clone()),
+            distance: 0.5,
+        });
+
+        for &u in &[0.3_f64, 1.4, 2.9, 4.8] {
+            for &v in &[0.25_f64, 1.0, 3.0] {
+                let n_off = offset.normal_at(u, v);
+                let n_base = base.normal_at(u, v);
+                let dot = dir_dot(&n_off, &n_base);
+                assert!(
+                    dot > 1.0 - 1e-12,
+                    "offset normal != base normal at (u={}, v={}), dot={:.15}",
+                    u, v, dot
+                );
+            }
+        }
+
+        // And the offset surface really is at radius 2.5.
+        let p = offset.point_at(0.0, 0.0);
+        let r = (p.x * p.x + p.y * p.y).sqrt();
+        assert!((r - 2.5).abs() < 1e-9, "offset point_at radius {}, expected 2.5", r);
+    }
+
+    #[test]
+    fn test_normal_at_analytic_matches_numerical_cross() {
+        // The analytic normals must agree with the (now legacy) numeric
+        // cross-product path to ~1e-6 direction accuracy on smooth points.
+        let cases: Vec<Surface> = vec![
+            // Revolution of a circle → torus-like self-intersecting-free patch.
+            Surface::Revolution(RevolutionSurface::new(
+                Curve3d::Circle(Circle::new_xy(Point3d::new(3.0, 0.0, 0.0), 1.0)),
+                Direction3d::Z,
+                Point3d::ORIGIN,
+            )),
+            // Extrusion of a circle.
+            Surface::Extrusion(ExtrusionSurface::new(
+                Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.5)),
+                Direction3d::Z,
+            )),
+            // Ruled between two circles.
+            Surface::Ruled(RuledSurface::new(
+                Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0)),
+                Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 2.0), 2.5)),
+            )),
+        ];
+
+        let eps = 1e-6;
+        for (case_idx, surface) in cases.iter().enumerate() {
+            for &u in &[0.5_f64, 1.3, 2.7, 4.1] {
+                for &v in &[0.3_f64, 0.6, 1.1] {
+                    let n = surface.normal_at(u, v);
+
+                    // Numeric tangent plane via central differences,
+                    // divided by the step so the vectors are O(1) before
+                    // the cross product (tiny raw differences would
+                    // underflow Direction3d::normalize's threshold).
+                    let p_u_minus = surface.point_at(u - eps, v);
+                    let p_v_minus = surface.point_at(u, v - eps);
+                    let p_u_plus = surface.point_at(u + eps, v);
+                    let p_v_plus = surface.point_at(u, v + eps);
+                    let du = Vec3d::new(
+                        (p_u_plus.x - p_u_minus.x) / (2.0 * eps),
+                        (p_u_plus.y - p_u_minus.y) / (2.0 * eps),
+                        (p_u_plus.z - p_u_minus.z) / (2.0 * eps),
+                    );
+                    let dv = Vec3d::new(
+                        (p_v_plus.x - p_v_minus.x) / (2.0 * eps),
+                        (p_v_plus.y - p_v_minus.y) / (2.0 * eps),
+                        (p_v_plus.z - p_v_minus.z) / (2.0 * eps),
+                    );
+                    let cross = du.cross(&dv).normalize();
+                    assert!(
+                        cross.is_some(),
+                        "numeric normal degenerate at case {} (u={}, v={})",
+                        case_idx, u, v
+                    );
+                    let expected = cross.unwrap();
+                    let dot = dir_dot(&n, &expected);
+                    assert!(
+                        dot > 1.0 - 1e-6,
+                        "case {}: analytic normal ({:.7},{:.7},{:.7}) vs numeric dot={:.9} at (u={}, v={})",
+                        case_idx, n.x, n.y, n.z, dot, u, v
+                    );
+                }
             }
         }
     }

@@ -1675,3 +1675,83 @@ BREP_CORE_FIX_PLAN (предыдущая сессия сброшена до ко
 
 - (см. git log) fix(mesh): C5 stage 5.2 follow-up — canonical-store
   staging contract + STEP-converter migration
+
+---
+
+# Worklog — geometry: аналитический normal_at для расширенных поверхностей (2026-09-03)
+
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `d8e1f67` (после C5 Stage 5.2 follow-up)
+**Задача:** пункт «Осталось» из сессии Torus SSI — `Surface::normal_at`
+для Revolution/Extrusion (и заодно Ruled/Offset) численно, при том что
+аналитика уже существовала
+
+## Восстановление сессии (сбой sandbox №3 в ряду)
+
+- Локальный клон стоял на `59695be`, предыдущие summary утверждали
+  «Stage 5 потерян» — ФАЛЬШИВО: коммиты дошли до origin (21 коммит:
+  Stage 5 d14af6e/7f992fa, follow-up'ы, этап D/D5, B1 SSI-серия,
+  Torus SSI, Stage 5.2 follow-up d8e1f67)
+- **Урок (повторный):** при push-отклонении после сбоя sandbox — НЕ
+  пере-делать работу, а `git fetch` и сравнить origin; локальный
+  клон может быть старее пуши павших сессий
+- Сессионный дубль Stage 5.1 (FaceView с Deref-затенением) отброшен
+  через reset; remote-дизайн (`stage_face_view` + `restage_instance`
+  direction-guard) полнее — покрыт canonical-store контракт и миграции
+  потребителей. Уникальных дельт у дубля не было
+
+## Фикс: Surface::normal_at (surface.rs)
+
+- Убран численный fallback (forward differences, eps=1e-7 — потеря
+  ~7 цифр, шум у параметрических швов) для расширенных типов:
+  - `Revolution` → `derivatives_at(u,v).normal()` (chain-rule, тот же
+    путь, что enum-`derivatives_at` уже использовал)
+  - `Extrusion` → `derivatives_at(u,v).normal()` (dS/du = P'(u),
+    dS/dv = D)
+  - `Ruled` → NEW `RuledSurface::derivatives_at`:
+    dS/du = (1−v)·C1'(u) + v·C2'(u), dS/dv = C2(u) − C1(u);
+    подключён и в enum-`derivatives_at` (был численный)
+  - `Offset` → `base.normal_at(u,v)` — ТОЧНО по теореме о сохранении
+    гауссовой карты: оператор формы — эндоморфизм касательной
+    плоскости, S_u = (I − d·W)·B_u остаётся в касательной плоскости
+    базы → нормаль офсета = нормаль базы (для |d|·κ < 1)
+- Аналитических производных для Offset НЕ добавлено (нужны вторые
+  производные базы) — normal_at через базу точен без них
+
+## Тесты (+7, surface.rs::tests)
+
+1. `test_revolution_normal_at_matches_equivalent_cylinder` — вращение
+   вертикальной линии = цилиндр: нормали совпадают (dot > 1−1e-9),
+   конвенция ориентации dS/du × dS/dv = outward подтверждена
+2. `test_revolution_normal_at_matches_derivatives_cross` — консистентность
+   двух публичных API (круговой профиль, dot > 1−1e-12)
+3. `test_extrusion_normal_at_matches_derivatives_cross` + ⊥ D
+4. `test_ruled_derivatives_match_numerical` — новая аналитика Ruled vs
+   центральные разности (1e-6) + point_at идентичен
+5. `test_ruled_normal_at_matches_derivatives_cross`
+6. `test_offset_normal_equals_base_normal` — dot > 1−1e-12 +
+   радиус офсета 2.5 у point_at
+7. `test_normal_at_analytic_matches_numerical_cross` — все 3 типа
+   против численного креста (центральные разности, делённые на шаг)
+
+## Верификация
+
+- draper-geometry: **210 lib** (203 + 7) + 59 + 5 + 7 + 83 + 5 ✅
+- draper-mesh: 268 + все integration ✅
+- draper-topology: 199 + 17 + 11 ✅; draper-core: 74 + 2 ✅
+- `cargo check --workspace --exclude draper-testing` (lib + bins) —
+  0 errors
+- **draper-step release: 126/126 ✅ (171s)**
+- Диск: 4.9G free
+
+## Осталось (актуальное)
+
+- SSI-пробелы: Torus×Cone, Torus×Torus (степень 8), Cylinder×Torus
+  skew (quartic в tan(φ/2)) — на marching
+- Недетерминизм all_files_test (HashMap-порядок)
+- Stage 6 (удаление поля Face.edges) — отложено осознанно
+
+## Коммит
+
+- (см. git log) feat(geometry): analytic normal_at for
+  Revolution/Extrusion/Ruled/Offset
