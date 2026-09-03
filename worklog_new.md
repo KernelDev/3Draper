@@ -2583,3 +2583,63 @@ store-first потребители видят спроецированную г�
 
 - (см. git log: refactor(viewer): C5 stage 7.3 — born-indexed construction
   + Project re-index)
+
+# Worklog — C5 Stage 7.4a: triangulate_shell удалён (последний зеркальный mesh-читатель)
+
+**Baseline:** commit `4f8def7` (после C5 Stage 7.3)
+**Дата:** 2026-09-04
+**Задача:** решение по пункту «triangulate_shell — последний зеркальный
+mesh-читатель, standalone-контракт» из остатка 7.3+.
+
+## Решение: удаление dead API
+
+- `triangulate_shell` + приватный хелпер `shell_bounding_box` **удалены**
+  из `crates/draper-mesh/src/triangulate.rs`
+- Обоснование: **ноль вызовов** во всём workspace (включая draper-testing
+  source, examples, tools — grep-верификация), т.е. dead public API;
+  функция читала `face.edges` standalone-Shell-граней — прямой блокер
+  финального удаления поля. Замена для standalone-Shell сценария
+  (если понадобится): `Solid::from_shell_indexed(shell.clone())` +
+  `triangulate_solid` — store-first путь, идентичный по качеству
+  (включая adaptive-tolerance dedup)
+- `triangulate_compound` СОХРАНЁН — делегирует в `triangulate_solid`
+  (store-first с 7.2), зеркал не читает
+- Импорты `Shell`/`TopoId` очищены (стали unused после удаления)
+
+## Аудит остаточных `face.edges` в draper-mesh (production-код)
+
+- `stage_face_view` (1710): `edges.len() == face.edges.len()` —
+  length-branch staging-контракта Stage 5.3 («Replacement/Parallel»
+  семантика) — санкционировано
+- cylinder/cone no-wire fallback (3114, 4286): читают зеркала
+  STAGED-грани (производные данные, построенные `stage_instance_view`
+  из store-resolved рёбер) — не исходные зеркала источника
+- `triangulate_face_with_boundary*` (6253): тестовая утилита,
+  face-construction — санкционировано
+- **Вывод: mesh-crate больше НЕ содержит читателей исходных зеркал** —
+  последним был triangulate_shell
+
+## Верификация
+
+- `cargo check -p draper-mesh --lib` — 0 errors, 4 warnings
+  (все предсуществующие)
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors
+- draper-mesh полный сьют: **332 passed / 0 failed** (268 lib + 64
+  integration — бейслайн 7.2 сохранён, удаление ничего не сломало)
+- draper-json + ffi: 23 ✅; topology + core: 326 ✅ (прогон 7.3, код
+  этих крейтов не менялся)
+
+## Осталось (Stage 7.4b+ — финальная стадия C5)
+
+- **healing working-set redesign** — единственный крупный блокер
+  физического удаления `Face.edges`: ~25 shell-scoped mirror-обращений
+  в healing.rs (чтения/мутации между re-derivation входа и терминальным
+  `index_edges` + `sync_edge_mirrors`). Требует рабочего-представления
+  (staged faces) вместо зеркал источника — самый крупный этап
+- После healing: физическое удаление поля (serde store-only уже зелёный,
+  extract_solids/viewer/builder/boolean/mesh готовы)
+
+## Коммит
+
+- (см. git log: refactor(mesh): C5 stage 7.4a — remove dead
+  triangulate_shell)

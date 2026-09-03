@@ -23,7 +23,7 @@ use draper_geometry::{
     ConeSurface, NurbsSurface,
     ToleranceContext,
 };
-use draper_topology::{Face, Wire, Edge, Solid, Shell, Compound, TopoId};
+use draper_topology::{Face, Wire, Edge, Solid, Compound};
 // WASM-compatible Instant: on native uses std::time::Instant,
 // on wasm32 uses web_time::Instant (backed by performance.now()).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1606,55 +1606,6 @@ fn solid_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
         return (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0));
     }
     (min, max)
-}
-
-/// Compute the bounding box of a Shell from its face surfaces and edge vertices.
-fn shell_bounding_box(shell: &Shell) -> (Point3d, Point3d) {
-    let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
-    let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
-    let mut has_points = false;
-
-    for face in &shell.faces {
-        for edge in &face.edges {
-            if edge.degenerate { continue; }
-            if let Some(p) = edge.start_point() {
-                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
-                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
-                has_points = true;
-            }
-            if let Some(p) = edge.end_point() {
-                min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
-                max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
-                has_points = true;
-            }
-        }
-    }
-
-    if !has_points {
-        return (Point3d::ORIGIN, Point3d::new(1.0, 1.0, 1.0));
-    }
-    (min, max)
-}
-
-/// Triangulate a shell into a triangle mesh (topology-first approach).
-pub fn triangulate_shell(shell: &Shell, params: &TriangulationParams) -> TriangleMesh {
-    let mut mesh = TriangleMesh::new();
-    // Compute adaptive tolerance from shell bounding box
-    let (bmin, bmax) = shell_bounding_box(shell);
-    let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(&bmin, &bmax, EDGE_SAMPLES);
-    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
-    // Tolerance-based dedup: same strategy as sequential solid path.
-    // Bit-exact-only dedup misses near-identical vertices from different
-    // STEP EDGE_CURVEs that are geometrically the same boundary. The adaptive
-    // tolerance (1 PPM of model scale) catches these near-misses without
-    // collapsing genuinely distinct features.
-    let mut dedup_map = crate::mesh::VertexDedupMap::with_tolerance(adaptive_tol);
-    for face in &shell.faces {
-        let face_mesh = triangulate_face_with_cache(face, params, &mut cache);
-        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
-    }
-    filter_degenerate_triangles(&mut mesh, 1e-10);
-    mesh
 }
 
 /// Triangulate a compound into a triangle mesh.
