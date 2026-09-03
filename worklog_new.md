@@ -2007,3 +2007,100 @@ sandbox (коммиты d14af6e/7f992fa не существуют в истор�
 
 - (см. git log) refactor(core): C5 stage 6.1 — mirror-free
   validation/queries via EdgeStore instances
+
+---
+
+# Worklog — C5 Stage 6.2: mirror-free boolean readers (store-first threading) (2026-09-03)
+
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `cbd49ae` (после C5 Stage 6.1 — mirror-free validation/queries)
+**Задача:** пункт «Осталось (Stage 6.2+)» — читатели boolean.rs (12 сайтов:
+boundary sampling с автономными гранями) переводятся на store-first
+instance-edges, трединг от solid-aware входов
+
+## Среда
+
+- Sandbox сброшен и в этот раз: Rust 1.98.0 переустановлен (rustup),
+  локальный клон отставал от origin/main на 24 коммита — ЛОКАЛЬНАЯ
+  верификация git недостаточна: Stage 5.2/5.3/6.1 предыдущих сессий
+  ВЫЖИЛИ на GitHub (fetch показал d14af6e..cbd49ae). Локальная переделка
+  Stage 5.1 сохранена в ветке `redo/stage5-slice1` (8ea9396), сброс на
+  origin/main. Урок: после сброса sandbox — `git fetch` ДО выводов о
+  состоянии
+- Инвентаризация читателей boolean.rs: 431 (is_point_in_face_boundary),
+  2569 (split_planar_face), 2834 (split_general_face), 3398 (cylinder
+  v-range), 3565/3716 (split_planar_face_shared: boundary + сегменты),
+  3873 (was_face_split), 3904/3948-53 (replace_matching_edges: matching +
+  post-write coedge fix), 4112 (compute_face_uv_range)
+
+## 1 — resolve_face_edges (ключевая семантика Stage 6.2)
+
+`Solid::instance_edges` (Stage 6.1) БРОСАЕТ id'ы, которых нет в store —
+для split-результатов (свежие TopoId) это тихая потеря рёбер. Новый
+private-хелпер boolean.rs:
+
+- **store-first per-id**: коedge'и (instance-ключи) + wire-less edge_ids
+  (canonical-ключи, с seen_canonicals-дедупом как в instance_edges)
+  резолвятся через `EdgeStore::instance_edge`; промах → fallback на
+  конструкционное зеркало `face.edge_by_id(id)` — список всегда ПОЛОН
+- непроиндексированные грани (edge_ids пуст) → зеркала целиком
+  (поведение не меняется для builder-солидов)
+
+## 2 — Трединг face_edges: &[Edge]
+
+- `classify_point` (pub, сигнатура та же): per-face resolve →
+  `count_ray_face_intersections` → `is_point_in_face_boundary`
+- `split_face` (pub, +face_edges) → `split_planar_face` /
+  `split_general_face`
+- `split_face_with_shared_edges` (+face_edges) →
+  `split_planar_face_shared` / `split_cylinder_face_multi_shared`
+- `classify_face_robust` (+face_edges) → `compute_face_uv_range`
+  (face-параметр удалён — грань больше не нужна); `was_face_split`
+  (face-параметр удалён); `replace_matching_edges`: matching-проход по
+  face_edges → сборка new_edges → запись face.edges один раз (функция
+  остаётся санкционированным писателем зеркал результатных граней;
+  post-write coedge-fix 3948-53 сохранён — читает уже обновлённые
+  зеркала)
+- `is_solid_inside_solid`: внутренний per-face resolve
+- `boolean_operation`: Step-3 сплиты (faces_a/faces_b, resolve от
+  solid_a/solid_b) + Step-4 классификация/was_split/replace_matching
+- Удалён мёртвый код (0 вызовов): `split_face_with_shared_edge`,
+  `classify_face_relative_to_solid`, `compute_face_centroid`
+
+## 3 — Тесты (+5, boolean::tests)
+
+- `resolve_face_edges`: un-indexed → зеркала; indexed → store-backed,
+  полнота по коedge-ключам; fresh-id (симуляция split-результата) →
+  полнота через per-id mirror fallback
+- **stale-mirror payoff**: зеркало испорчено ПОСЛЕ index_edges (+5
+  сдвиг линии) → resolve возвращает STORE-версию геометрии — источник
+  истины побеждает
+- `test_boolean_indexed_equivalence`: box(100×80×50) − cylinder(∅40,
+  h100) с непроиндексированными vs проиндексированными входами: face
+  count, per-face wire fingerprint, `solid_volume` **бит-идентичен**
+  (прецедент 6.1: to_bits-сравнение)
+
+## Верификация
+
+- draper-topology: **207 lib** (202 + 5) + 17 + 11 + 3 ✅
+- draper-mesh: 268 + все integration ✅; draper-core: 74 + 2 ✅
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors
+- Диск: 5.6G free (incremental отключён)
+
+## Осталось (Stage 6.3+)
+
+- healing.rs (33 сайта, Shell-уровень без стора — дизайн: store параметр
+  или перенос в Solid-методы)
+- core/operations.rs (18), viewer/app.rs (5 читателей), ffi/wasm/json,
+  step exporter (`emit_wire_as_bound(outer, &face.edges)`)
+- mesh `collect_instance_edges` → делегирование `Solid::instance_edges`
+  (DRY)
+- Писатели зеркал: builder/boolean/fillet/chamfer-конструкция +
+  sync_edge_mirrors → физическое удаление поля Face.edges
+- Известный угол (унаследован): curve-less preserved canonical + поздний
+  зеркальный инстанс с кривой не унифицируются
+
+## Коммит
+
+- (см. git log) refactor(core): C5 stage 6.2 — mirror-free boolean
+  readers via store-first instance edges

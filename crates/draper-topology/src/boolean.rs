@@ -80,6 +80,70 @@ pub enum PointClassification {
     OnBoundary,
 }
 
+/// Resolve the instance-faithful edge list of a face for boundary reads
+/// (C5 Stage 6.2 — boolean readers migrate off `Face.edges` mirrors).
+///
+/// Store-first: ids held by the solid's `EdgeStore` resolve to store
+/// instances (the single source of truth — healing fixes included).
+/// Ids the store does NOT hold — fresh `TopoId`s of faces produced by
+/// earlier splits in the same boolean, or un-indexed builder faces —
+/// fall back to the face's construction mirrors per-id, so the returned
+/// list is always COMPLETE for geometry sampling.
+///
+/// Key space follows `Solid::instance_edges`: wire coedges reference
+/// instance ids; wire-less `face.edge_ids` reference canonical ids.
+fn resolve_face_edges(solid: &Solid, face: &Face) -> Vec<Edge> {
+    if face.edge_ids.is_empty() {
+        return face.edges.clone();
+    }
+    let mut resolved: Vec<Edge> = Vec::new();
+    let mut seen_ids: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
+    let mut seen_canonicals: std::collections::HashSet<TopoId> =
+        std::collections::HashSet::new();
+
+    // 1. Wire coedges — instance id space.
+    if let Some(ref wire) = face.outer_wire {
+        for coedge in &wire.coedges {
+            push_resolved(solid, face, coedge.edge, &mut resolved, &mut seen_ids, &mut seen_canonicals);
+        }
+    }
+    for wire in &face.inner_wires {
+        for coedge in &wire.coedges {
+            push_resolved(solid, face, coedge.edge, &mut resolved, &mut seen_ids, &mut seen_canonicals);
+        }
+    }
+
+    // 2. Wire-less / unreferenced edge_ids — canonical id space.
+    for &id in &face.edge_ids {
+        if !seen_ids.contains(&id) && !seen_canonicals.contains(&solid.edge_store.canonical_of(id)) {
+            push_resolved(solid, face, id, &mut resolved, &mut seen_ids, &mut seen_canonicals);
+        }
+    }
+    resolved
+}
+
+/// Per-id resolution for [`resolve_face_edges`]: store instance first,
+/// construction mirror fallback, canonical-id bookkeeping for the
+/// wire-less pass.
+fn push_resolved(
+    solid: &Solid,
+    face: &Face,
+    id: TopoId,
+    resolved: &mut Vec<Edge>,
+    seen_ids: &mut std::collections::HashSet<TopoId>,
+    seen_canonicals: &mut std::collections::HashSet<TopoId>,
+) {
+    if !seen_ids.insert(id) {
+        return;
+    }
+    seen_canonicals.insert(solid.edge_store.canonical_of(id));
+    if let Some(instance) = solid.edge_store.instance_edge(id) {
+        resolved.push(instance);
+    } else if let Some(mirror) = face.edge_by_id(id) {
+        resolved.push(mirror.clone());
+    }
+}
+
 /// Classify a point as inside, outside, or on the boundary of a solid.
 ///
 /// Uses ray casting: cast a ray from the point in an arbitrary direction,
@@ -107,7 +171,10 @@ pub fn classify_point(solid: &Solid, point: &Point3d, tol_ctx: &ToleranceContext
 
     if let Some(ref shell) = solid.outer_shell {
         for face in &shell.faces {
-            let count = count_ray_face_intersections(&ray_origin, &ray_dir, face, tol);
+            // C5 Stage 6.2: boundary reads are store-first with per-id
+            // mirror fallback (split results / un-indexed faces stay complete).
+            let face_edges = resolve_face_edges(solid, face);
+            let count = count_ray_face_intersections(&ray_origin, &ray_dir, face, &face_edges, tol);
             intersection_count += count;
         }
     }
@@ -198,7 +265,13 @@ fn is_point_on_face(point: &Point3d, face: &Face, tol: f64) -> bool {
 }
 
 /// Count how many times a ray (origin + t*direction, t > 0) intersects a face.
-fn count_ray_face_intersections(origin: &Point3d, direction: &Direction3d, face: &Face, tol: f64) -> u32 {
+fn count_ray_face_intersections(
+    origin: &Point3d,
+    direction: &Direction3d,
+    face: &Face,
+    face_edges: &[Edge],
+    tol: f64,
+) -> u32 {
     let surface = match &face.surface {
         Some(s) => s,
         None => return 0,
@@ -226,7 +299,7 @@ fn count_ray_face_intersections(origin: &Point3d, direction: &Direction3d, face:
                 origin.y + t * direction.y,
                 origin.z + t * direction.z,
             );
-            if is_point_in_face_boundary(&hit, face, tol) { 1 } else { 0 }
+            if is_point_in_face_boundary(&hit, face, face_edges, tol) { 1 } else { 0 }
         }
         Surface::Sphere(sphere) => {
             // Ray-sphere intersection
@@ -253,7 +326,7 @@ fn count_ray_face_intersections(origin: &Point3d, direction: &Direction3d, face:
                     origin.y + t1 * direction.y,
                     origin.z + t1 * direction.z,
                 );
-                if is_point_in_face_boundary(&hit, face, tol) {
+                if is_point_in_face_boundary(&hit, face, face_edges, tol) {
                     count += 1;
                 }
             }
@@ -263,7 +336,7 @@ fn count_ray_face_intersections(origin: &Point3d, direction: &Direction3d, face:
                     origin.y + t2 * direction.y,
                     origin.z + t2 * direction.z,
                 );
-                if is_point_in_face_boundary(&hit, face, tol) {
+                if is_point_in_face_boundary(&hit, face, face_edges, tol) {
                     count += 1;
                 }
             }
@@ -279,7 +352,7 @@ fn count_ray_face_intersections(origin: &Point3d, direction: &Direction3d, face:
                     let dy = p.y - origin.y;
                     let dz = p.z - origin.z;
                     let t = dx * direction.x + dy * direction.y + dz * direction.z;
-                    t > tol && is_point_in_face_boundary(p, face, tol)
+                    t > tol && is_point_in_face_boundary(p, face, face_edges, tol)
                 })
                 .count() as u32
         }
@@ -406,7 +479,7 @@ fn moller_trumbore(
 }
 
 /// Check if a point (already known to be on the surface) is within the face's boundary.
-fn is_point_in_face_boundary(point: &Point3d, face: &Face, tol: f64) -> bool {
+fn is_point_in_face_boundary(point: &Point3d, face: &Face, face_edges: &[Edge], tol: f64) -> bool {
     // If the face has no outer wire, it's an infinite face — always true
     let outer_wire = match &face.outer_wire {
         Some(w) => w,
@@ -426,9 +499,10 @@ fn is_point_in_face_boundary(point: &Point3d, face: &Face, tol: f64) -> bool {
         None => return false,
     };
 
-    // Collect edge points for polygon check
+    // Collect edge points for polygon check (C5 Stage 6.2: from the
+    // resolved instance-faithful list, not the face's mirrors).
     let mut polygon_points: Vec<Point3d> = Vec::new();
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             let (t_min, t_max) = edge.param_range;
             let n_samples = 10;
@@ -2522,6 +2596,7 @@ pub struct SplitFaceResult {
 /// split the face into two or more sub-faces along the curve.
 pub fn split_face(
     face: &Face,
+    face_edges: &[Edge],
     intersection_points: &[Point3d],
     tol_ctx: &ToleranceContext,
 ) -> BooleanResult<SplitFaceResult> {
@@ -2545,12 +2620,12 @@ pub fn split_face(
 
     match surface {
         Surface::Plane(plane) => {
-            split_planar_face(face, plane, intersection_points, tol)
+            split_planar_face(face, face_edges, plane, intersection_points, tol)
         }
         _ => {
             // For non-planar faces, use a simplified approach:
             // Create two faces with the intersection curve as a shared boundary
-            split_general_face(face, intersection_points, tol)
+            split_general_face(face, face_edges, intersection_points, tol)
         }
     }
 }
@@ -2558,6 +2633,7 @@ pub fn split_face(
 /// Split a planar face along an intersection curve.
 fn split_planar_face(
     face: &Face,
+    face_edges: &[Edge],
     plane: &Plane,
     intersection_points: &[Point3d],
     tol: f64,
@@ -2565,8 +2641,10 @@ fn split_planar_face(
     // Get the face's boundary polygon — use ONLY the edge endpoints (vertices)
     // not intermediate samples. This keeps the polygon simple (4 vertices for
     // a rectangle) and ensures split faces have minimal edges.
+    // C5 Stage 6.2: boundary reads come from the resolved instance-faithful
+    // edge list, not the face's mirrors.
     let mut boundary: Vec<Point3d> = Vec::new();
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             let (t_min, _t_max) = edge.param_range;
             // Use just the start point of each edge (end point = start of next)
@@ -2766,6 +2844,7 @@ fn find_closest_boundary_point(point: &(f64, f64), boundary: &[(f64, f64)]) -> u
 /// with the curve stored as an additional edge for future processing.
 fn split_general_face(
     face: &Face,
+    face_edges: &[Edge],
     intersection_points: &[Point3d],
     tol: f64,
 ) -> BooleanResult<SplitFaceResult> {
@@ -2831,7 +2910,8 @@ fn split_general_face(
     }
 
     // Collect the face's boundary points (3D + UV).
-    let boundary_3d: Vec<Point3d> = face.edges.iter()
+    // C5 Stage 6.2: from the resolved instance-faithful edge list.
+    let boundary_3d: Vec<Point3d> = face_edges.iter()
         .filter_map(|e| e.start_vertex_point)
         .collect();
     if boundary_3d.len() < 3 {
@@ -3146,12 +3226,17 @@ pub fn boolean_operation(
             // Face A uses pcurve_a (PCurve on surface A)
             all_pcurves.push(si.pcurve_a.clone());
         }
+        // C5 Stage 6.2: split readers consume the resolved instance-faithful
+        // edge list (store-first for input-solid faces; split pieces carry
+        // fresh ids and resolve via their construction mirrors).
+        let face_edges = resolve_face_edges(solid_a, &faces_a[face_a_idx]);
         let split_result = split_face_with_shared_edges(
             &faces_a[face_a_idx],
             &all_points,
             &all_edges,
             &all_pcurves,
             tol_ctx,
+            &face_edges,
         )?;
         if split_result.faces.len() > 1 {
             let mut new_indices = Vec::new();
@@ -3184,12 +3269,14 @@ pub fn boolean_operation(
             // Face B uses pcurve_b (PCurve on surface B)
             all_pcurves.push(si.pcurve_b.clone());
         }
+        let face_edges = resolve_face_edges(solid_b, &faces_b[face_b_idx]);
         let split_result = split_face_with_shared_edges(
             &faces_b[face_b_idx],
             &all_points,
             &all_edges,
             &all_pcurves,
             tol_ctx,
+            &face_edges,
         )?;
         if split_result.faces.len() > 1 {
             let mut new_indices = Vec::new();
@@ -3212,7 +3299,10 @@ pub fn boolean_operation(
     let mut result_faces: Vec<Face> = Vec::new();
 
     for face in &faces_a {
-        let classification = classify_face_robust(face, solid_b, tol_ctx);
+        // C5 Stage 6.2: classification reads store-first edges of the
+        // face's OWNING solid (clones keep the source key space).
+        let face_edges = resolve_face_edges(solid_a, face);
+        let classification = classify_face_robust(face, solid_b, tol_ctx, &face_edges);
         match op {
             BooleanOp::Union | BooleanOp::Subtract => {
                 if classification != FaceClassification::Inside {
@@ -3230,7 +3320,8 @@ pub fn boolean_operation(
     }
 
     for face in &faces_b {
-        let classification = classify_face_robust(face, solid_a, tol_ctx);
+        let face_edges = resolve_face_edges(solid_b, face);
+        let classification = classify_face_robust(face, solid_a, tol_ctx, &face_edges);
         match op {
             BooleanOp::Union => {
                 if classification != FaceClassification::Inside {
@@ -3251,11 +3342,11 @@ pub fn boolean_operation(
                     // cylinder cap disks that are fully embedded in A) are
                     // INTERNAL faces that close the cavity — they must be
                     // discarded to produce a proper through-hole.
-                    let was_split = was_face_split(face, &shared_intersections);
+                    let was_split = was_face_split(&face_edges, &shared_intersections);
                     if was_split {
                         let mut reversed = face.reversed();
                         reversed.forward = !reversed.forward;
-                        replace_matching_edges(&mut reversed, &shared_intersections);
+                        replace_matching_edges(&mut reversed, &shared_intersections, &face_edges);
                         result_faces.push(reversed);
                     }
                 }
@@ -3265,7 +3356,7 @@ pub fn boolean_operation(
                     || classification == FaceClassification::OnBoundary
                 {
                     let mut cloned = face.clone();
-                    replace_matching_edges(&mut cloned, &shared_intersections);
+                    replace_matching_edges(&mut cloned, &shared_intersections, &face_edges);
                     result_faces.push(cloned);
                 }
             }
@@ -3283,19 +3374,6 @@ pub fn boolean_operation(
     Ok(Solid::new(shell))
 }
 
-/// Split a face along an intersection curve, using a SHARED edge that is
-/// also used by the adjacent face's split. This ensures both split faces
-/// reference the same edge ID, producing watertight meshes.
-fn split_face_with_shared_edge(
-    face: &Face,
-    intersection_points: &[Point3d],
-    shared_edge: &Edge,
-    pcurve: Option<&Curve2d>,
-    tol_ctx: &ToleranceContext,
-) -> BooleanResult<SplitFaceResult> {
-    split_face_with_shared_edges(face, intersection_points, &[shared_edge.clone()], &[pcurve.cloned()], tol_ctx)
-}
-
 /// Split a face with multiple shared edges (for faces intersected by multiple curves).
 /// Each shared edge may have an associated PCurve on this face's surface.
 fn split_face_with_shared_edges(
@@ -3304,6 +3382,7 @@ fn split_face_with_shared_edges(
     shared_edges: &[Edge],
     pcurves: &[Option<Curve2d>],
     tol_ctx: &ToleranceContext,
+    face_edges: &[Edge],
 ) -> BooleanResult<SplitFaceResult> {
     let tol = tol_ctx.coincidence_tolerance();
 
@@ -3326,12 +3405,12 @@ fn split_face_with_shared_edges(
         Surface::Plane(plane) => {
             // For plane faces, use the first shared edge + PCurve
             let pc = pcurves.first().and_then(|p| p.clone());
-            split_planar_face_shared(face, plane, intersection_points, &shared_edges[0], pc, tol)
+            split_planar_face_shared(face, face_edges, plane, intersection_points, &shared_edges[0], pc, tol)
         }
         Surface::Cylinder(cyl) => {
             // For cylinder faces, pass ALL shared edges so the inner band
             // can use the correct shared edge for each boundary circle
-            split_cylinder_face_multi_shared(face, cyl, intersection_points, shared_edges, tol)
+            split_cylinder_face_multi_shared(face, face_edges, cyl, intersection_points, shared_edges, tol)
         }
         _ => {
             // For other non-planar faces: add each shared edge as a hole
@@ -3360,6 +3439,7 @@ fn split_face_with_shared_edges(
 /// ensuring watertight topology with the adjacent planar faces.
 fn split_cylinder_face_multi_shared(
     face: &Face,
+    face_edges: &[Edge],
     cyl: &CylinderSurface,
     intersection_points: &[Point3d],
     shared_edges: &[Edge],
@@ -3393,9 +3473,10 @@ fn split_cylinder_face_multi_shared(
     v_edges.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // Get the cylinder height range from existing edges
+    // (C5 Stage 6.2: from the resolved instance-faithful edge list)
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             let (t_min, t_max) = edge.param_range;
             let n = 10;
@@ -3552,6 +3633,7 @@ fn split_cylinder_face_multi_shared(
 /// for both faces → watertight mesh.
 fn split_planar_face_shared(
     face: &Face,
+    face_edges: &[Edge],
     plane: &Plane,
     intersection_points: &[Point3d],
     shared_edge: &Edge,
@@ -3561,8 +3643,10 @@ fn split_planar_face_shared(
     // Get the face's boundary polygon — use ONLY the edge endpoints (vertices)
     // not intermediate samples. This keeps the polygon simple (4 vertices for
     // a rectangle) and ensures split faces have minimal edges.
+    // C5 Stage 6.2: boundary reads come from the resolved instance-faithful
+    // edge list, not the face's mirrors.
     let mut boundary: Vec<Point3d> = Vec::new();
-    for edge in &face.edges {
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             let (t_min, _t_max) = edge.param_range;
             // Use just the start point of each edge (end point = start of next)
@@ -3713,7 +3797,7 @@ fn split_planar_face_shared(
             } else {
                 // Find which original edge this segment belongs to
                 let mut found_id = None;
-                for orig_edge in &face.edges {
+                for orig_edge in face_edges {
                     if let Some(ref curve) = orig_edge.curve {
                         let (t_min, t_max) = orig_edge.param_range;
                         let n_samples = 30;
@@ -3867,10 +3951,12 @@ fn split_planar_face_shared(
 /// Unsplit faces that are entirely inside the other solid are internal
 /// faces (e.g., cylinder cap disks) and should be discarded for Subtract.
 fn was_face_split(
-    face: &Face,
+    face_edges: &[Edge],
     shared_intersections: &[SharedIntersection],
 ) -> bool {
-    for edge in &face.edges {
+    // C5 Stage 6.2: matching runs on the resolved instance-faithful
+    // edge list, not the face's mirrors.
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             for si in shared_intersections {
                 if let Some(ref shared_curve) = si.shared_edge.curve {
@@ -3900,11 +3986,18 @@ fn was_face_split(
 fn replace_matching_edges(
     face: &mut Face,
     shared_intersections: &[SharedIntersection],
+    face_edges: &[Edge],
 ) {
-    for edge in &mut face.edges {
+    // C5 Stage 6.2: the matching pass runs on the RESOLVED instance-faithful
+    // edge list (store-first), builds the new mirror list, and writes it
+    // back once. The mirrors of result faces are construction data — this
+    // function remains their sanctioned writer.
+    let mut new_edges: Vec<Edge> = Vec::with_capacity(face_edges.len());
+    for edge in face_edges {
+        let mut replacement = edge.clone();
         if let Some(ref curve) = edge.curve {
             // Check if this edge geometrically matches any shared intersection edge
-            for si in shared_intersections {
+            'shared: for si in shared_intersections {
                 if let Some(ref shared_curve) = si.shared_edge.curve {
                     // Compare by sampling: if the first few points match, they're the same curve
                     let n = 5;
@@ -3921,23 +4014,15 @@ fn replace_matching_edges(
                     }
                     if all_match {
                         // Replace this edge with the shared edge (same ID)
-                        *edge = si.shared_edge.clone();
-                        // Also update the outer_wire's coedge to reference the shared edge ID
-                        if let Some(ref mut wire) = face.outer_wire {
-                            for _coedge in &mut wire.coedges {
-                                // Check if this coedge referenced the old edge ID
-                                // (we can't know the old ID anymore, so we check all coedges)
-                                // Actually, the coedge.edge should still point to the old edge ID
-                                // We need to update it to the shared edge ID
-                                // But we don't know which coedge to update without tracking the old ID
-                            }
-                        }
-                        break;
+                        replacement = si.shared_edge.clone();
+                        break 'shared;
                     }
                 }
             }
         }
+        new_edges.push(replacement);
     }
+    face.edges = new_edges;
 
     // Also update the outer_wire coedges to match the new edge IDs
     if let Some(ref mut wire) = face.outer_wire {
@@ -3966,6 +4051,7 @@ fn classify_face_robust(
     face: &Face,
     solid: &Solid,
     tol_ctx: &ToleranceContext,
+    face_edges: &[Edge],
 ) -> FaceClassification {
     let surface = match &face.surface {
         Some(s) => s,
@@ -3974,7 +4060,7 @@ fn classify_face_robust(
 
     let (u_min, u_max, v_min, v_max) = surface_param_range(surface);
     let (u_min, u_max, v_min, v_max) =
-        compute_face_uv_range(face, surface, u_min, u_max, v_min, v_max);
+        compute_face_uv_range(face_edges, surface, u_min, u_max, v_min, v_max);
 
     // Sample a grid of points and classify each
     let n = 5;
@@ -4033,69 +4119,9 @@ enum FaceClassification {
     OnBoundary,
 }
 
-/// Classify a face as inside, outside, or on the boundary of a solid.
-///
-/// Uses the face centroid and ray casting.
-fn classify_face_relative_to_solid(
-    face: &Face,
-    solid: &Solid,
-    tol_ctx: &ToleranceContext,
-) -> FaceClassification {
-    // Compute face centroid
-    let centroid = compute_face_centroid(face);
-
-    if centroid.is_none() {
-        return FaceClassification::Outside;
-    }
-    let centroid = centroid.unwrap();
-
-    // Use point classification
-    match classify_point(solid, &centroid, tol_ctx) {
-        PointClassification::Inside => FaceClassification::Inside,
-        PointClassification::Outside => FaceClassification::Outside,
-        PointClassification::OnBoundary => FaceClassification::OnBoundary,
-    }
-}
-
-/// Compute the centroid of a face.
-fn compute_face_centroid(face: &Face) -> Option<Point3d> {
-    let surface = face.surface.as_ref()?;
-
-    // Sample the surface and compute centroid
-    let (u_min, u_max, v_min, v_max) = surface_param_range(surface);
-
-    // Try to use the face's boundary to determine the UV range
-    let (u_min, u_max, v_min, v_max) =
-        compute_face_uv_range(face, surface, u_min, u_max, v_min, v_max);
-
-    let n = 10;
-    let mut sum = Point3d::ORIGIN;
-    let mut count = 0;
-
-    for i in 0..n {
-        for j in 0..n {
-            let u = u_min + (u_max - u_min) * (i as f64 / n as f64);
-            let v = v_min + (v_max - v_min) * (j as f64 / n as f64);
-            let p = surface.point_at(u, v);
-            sum = Point3d::new(sum.x + p.x, sum.y + p.y, sum.z + p.z);
-            count += 1;
-        }
-    }
-
-    if count == 0 {
-        return None;
-    }
-
-    Some(Point3d::new(
-        sum.x / count as f64,
-        sum.y / count as f64,
-        sum.z / count as f64,
-    ))
-}
-
 /// Compute the UV range of a face from its boundary edges.
 fn compute_face_uv_range(
-    face: &Face,
+    face_edges: &[Edge],
     surface: &Surface,
     default_u_min: f64,
     default_u_max: f64,
@@ -4109,7 +4135,8 @@ fn compute_face_uv_range(
 
     let mut found_bounds = false;
 
-    for edge in &face.edges {
+    // C5 Stage 6.2: UV bounds from the resolved instance-faithful list.
+    for edge in face_edges {
         if let Some(ref curve) = edge.curve {
             let (t_min, t_max) = edge.param_range;
             let n = 10;
@@ -4217,9 +4244,11 @@ fn is_solid_inside_solid(solid_a: &Solid, solid_b: &Solid, tol_ctx: &ToleranceCo
 
     for face in &shell.faces {
         if let Some(ref surface) = face.surface {
+            // C5 Stage 6.2: store-first reads with per-id mirror fallback.
+            let face_edges = resolve_face_edges(solid_a, face);
             let (u_min, u_max, v_min, v_max) = surface_param_range(surface);
             let (u_min, u_max, v_min, v_max) =
-                compute_face_uv_range(face, surface, u_min, u_max, v_min, v_max);
+                compute_face_uv_range(&face_edges, surface, u_min, u_max, v_min, v_max);
 
             for i in 0..5 {
                 for j in 0..5 {
@@ -4590,7 +4619,7 @@ mod tests {
             Point3d::new(5.0, 0.0, 0.0),
         ];
 
-        let result = split_face(&face, &intersection, &tol_ctx);
+        let result = split_face(&face, &face.edges, &intersection, &tol_ctx);
         assert!(result.is_ok(), "Face splitting should succeed");
     }
 
@@ -5349,4 +5378,207 @@ mod tests {
                 assert!((c - 3.0).abs() < 1e-9, "on cylinder, radial={c:.9}");
             }
         }
+    }
+
+    // ---- C5 Stage 6.2: store-first boolean readers ----
+
+    #[test]
+    fn test_resolve_face_edges_unindexed_mirrors() {
+        // Un-indexed builder solid: edge_ids empty → the construction
+        // mirrors ARE the resolution (unchanged behavior).
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let face = &solid.faces()[0];
+        assert!(face.edge_ids.is_empty(), "builder faces are un-indexed");
+        let edges = resolve_face_edges(&solid, face);
+        assert_eq!(
+            edges.len(),
+            face.edges.len(),
+            "un-indexed resolution must return every mirror"
+        );
+        let mirror_ids: std::collections::HashSet<TopoId> =
+            face.edges.iter().map(|e| e.id).collect();
+        for e in &edges {
+            assert!(mirror_ids.contains(&e.id), "resolved id must be a mirror id");
+        }
+    }
+
+    #[test]
+    fn test_resolve_face_edges_store_first() {
+        // Indexed solid: coedge ids resolve through the store.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+        let face = solid.faces()[0].clone();
+        assert!(!face.edge_ids.is_empty(), "index_edges populates edge_ids");
+
+        let edges = resolve_face_edges(&solid, &face);
+        let mut coedge_ids = std::collections::HashSet::new();
+        if let Some(ref wire) = face.outer_wire {
+            for coedge in &wire.coedges {
+                coedge_ids.insert(coedge.edge);
+            }
+        }
+        for wire in &face.inner_wires {
+            for coedge in &wire.coedges {
+                coedge_ids.insert(coedge.edge);
+            }
+        }
+        assert_eq!(
+            edges.len(),
+            coedge_ids.len(),
+            "one resolved entry per distinct coedge id (complete, no dups)"
+        );
+        for e in &edges {
+            let store_view = solid.edge_store.instance_edge(e.id);
+            assert!(
+                store_view.is_some(),
+                "indexed resolution must be store-backed (id {:?})",
+                e.id
+            );
+        }
+    }
+
+    #[test]
+    fn test_resolve_face_edges_fresh_id_fallback() {
+        // Split-result faces carry fresh TopoIds that no store holds —
+        // the per-id mirror fallback keeps the list COMPLETE.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+        let face = solid.faces()[0].clone();
+
+        // Simulate a split result: re-key every boundary instance to a
+        // fresh id (coedge + mirror + edge_ids stay consistent).
+        let by_id: std::collections::HashMap<TopoId, Edge> =
+            face.edges.iter().map(|e| (e.id, e.clone())).collect();
+        let mut split_face = face.clone();
+        let mut fresh_ids: Vec<TopoId> = Vec::new();
+        let mut new_mirrors: Vec<Edge> = Vec::new();
+        {
+            let wire = split_face.outer_wire.as_mut().unwrap();
+            for coedge in wire.coedges.iter_mut() {
+                let original = by_id
+                    .get(&coedge.edge)
+                    .expect("coedge id must have a mirror");
+                let fresh = TopoId::new();
+                let mut rekeyed = original.clone();
+                rekeyed.id = fresh;
+                coedge.edge = fresh;
+                fresh_ids.push(fresh);
+                new_mirrors.push(rekeyed);
+            }
+        }
+        split_face.edges = new_mirrors;
+        split_face.edge_ids = fresh_ids.clone();
+
+        let edges = resolve_face_edges(&solid, &split_face);
+        assert_eq!(
+            edges.len(),
+            fresh_ids.len(),
+            "fresh-id faces must resolve completely via mirrors"
+        );
+        let resolved_ids: std::collections::HashSet<TopoId> =
+            edges.iter().map(|e| e.id).collect();
+        for id in &fresh_ids {
+            assert!(resolved_ids.contains(id), "fresh id {:?} must resolve", id);
+        }
+        assert!(
+            edges.iter().filter(|e| e.curve.is_some()).count() == edges.len(),
+            "resolved entries must carry curve data"
+        );
+    }
+
+    #[test]
+    fn test_resolve_face_edges_ignores_stale_mirrors() {
+        // The store is the source of truth: a mirror corrupted AFTER
+        // indexing must NOT leak into boundary reads.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+
+        // Corrupt the first face's first mirror: offset the line origin.
+        let target_id = {
+            let shell = solid.outer_shell.as_mut().unwrap();
+            let edge = &mut shell.faces[0].edges[0];
+            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
+                line.origin = Point3d::new(
+                    line.origin.x + 5.0,
+                    line.origin.y + 5.0,
+                    line.origin.z + 5.0,
+                );
+            }
+            shell.faces[0].edges[0].id
+        };
+
+        let face = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved = resolve_face_edges(&solid, face);
+        let r = resolved
+            .iter()
+            .find(|e| e.id == target_id)
+            .expect("instance must resolve");
+        match &r.curve {
+            Some(Curve3d::Line(ref l)) => {
+                let stale_origin = l.origin;
+                assert!(
+                    ((stale_origin.x - 5.0).abs() > 1e-9)
+                        || ((stale_origin.y - 5.0).abs() > 1e-9)
+                        || ((stale_origin.z - 5.0).abs() > 1e-9),
+                    "store geometry must win over the stale (+5 offset) mirror"
+                );
+            }
+            other => panic!("expected a line curve, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn test_boolean_indexed_equivalence() {
+        // Store-first reads must not change boolean results: the same
+        // subtraction with un-indexed (mirror reads) and indexed
+        // (store reads) inputs produces identical topology and volume.
+        let tol = ToleranceContext::from_model_scale(133.0);
+        let box_plain = ShapeBuilder::make_box(100.0, 80.0, 50.0);
+        let cyl_plain = ShapeBuilder::make_cylinder(20.0, 100.0);
+
+        let mut box_indexed = box_plain.clone();
+        box_indexed.index_edges();
+        let mut cyl_indexed = cyl_plain.clone();
+        cyl_indexed.index_edges();
+
+        let r_plain = boolean_subtract(&box_plain, &cyl_plain, &tol)
+            .expect("plain subtract must succeed");
+        let r_indexed = boolean_subtract(&box_indexed, &cyl_indexed, &tol)
+            .expect("indexed subtract must succeed");
+
+        assert_eq!(
+            r_plain.faces().len(),
+            r_indexed.faces().len(),
+            "face count must match"
+        );
+
+        let fingerprint = |s: &Solid| -> Vec<Vec<usize>> {
+            s.faces()
+                .iter()
+                .map(|f| {
+                    let mut v: Vec<usize> = Vec::new();
+                    if let Some(w) = &f.outer_wire {
+                        v.push(w.coedges.len());
+                    }
+                    for w in &f.inner_wires {
+                        v.push(w.coedges.len());
+                    }
+                    v.sort_unstable();
+                    v
+                })
+                .collect()
+        };
+        assert_eq!(
+            fingerprint(&r_plain),
+            fingerprint(&r_indexed),
+            "per-face wire fingerprint must match"
+        );
+
+        let vol_plain = crate::queries::solid_volume(&r_plain);
+        let vol_indexed = crate::queries::solid_volume(&r_indexed);
+        assert_eq!(
+            vol_plain.to_bits(),
+            vol_indexed.to_bits(),
+            "volumes must be bit-identical: {vol_plain} vs {vol_indexed}"
+        );
     }
