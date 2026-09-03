@@ -2695,7 +2695,7 @@ impl ViewerApp {
         // UV grid of the NURBS patch.
         let face = Face::new_surface_only(surface_for_solid);
         let shell = Shell::new(vec![face]);
-        let solid = Solid::new(shell);
+        let solid = Solid::from_shell_indexed(shell);
         (mesh, solid)
     }
 
@@ -14619,7 +14619,7 @@ fn solid_from_detailed_instance(inst: &DetailedMeshInstance) -> Solid {
         .iter()
         .map(|fi| Face::new_surface_only(fi.surface.clone()))
         .collect();
-    Solid::new(Shell::new(faces))
+    Solid::from_shell_indexed(Shell::new(faces))
 }
 
 /// Compute the UV breakdown for every face of a solid.
@@ -18742,7 +18742,7 @@ fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
     }
 
     let shell = Shell::new_closed(faces);
-    draper_topology::Solid::new(shell)
+    draper_topology::Solid::from_shell_indexed(shell)
 }
 
 /// VP helper: evaluate the graph and return the result solid.
@@ -20165,7 +20165,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20200,7 +20200,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20245,7 +20245,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !faces.is_empty() {
                                     let shell = Shell::new_closed(faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -20319,7 +20319,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     ) { faces.push(f); }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20342,7 +20342,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20363,7 +20363,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             ];
                             if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
                                 let shell = Shell::new_closed(vec![f]);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 changed = true;
                             }
                         }
@@ -20395,7 +20395,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20438,7 +20438,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20653,6 +20653,13 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                 }
                                 let _ = direction; // Direction-based projection would use ray-plane intersection.
+                                // C5 Stage 7.3: the mirror mutations above leave the cloned
+                                // solid's EdgeStore carrying the PRE-projection canonical
+                                // geometry. Re-index so store-first consumers
+                                // (triangulate_solid, boundary readers) see the projected
+                                // result — the sanctioned mutate -> index_edges pairing
+                                // (cf. ShapeBuilder::transform_solid).
+                                s.index_edges();
                                 results.insert(node.id, VpData::Geometry(Box::new(s)));
                                 changed = true;
                             }
@@ -20679,7 +20686,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                     if !shells.is_empty() {
                                         let shell = Shell::new(shells);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -20707,7 +20714,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !shells.is_empty() {
                                     let shell = Shell::new(shells);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -20733,7 +20740,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !shells.is_empty() {
                                     let shell = Shell::new(shells);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -21168,7 +21175,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::new(shell);
+                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),
@@ -21323,11 +21330,11 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 let mut parts: Vec<VpData> = Vec::new();
                                 if !faces_a.is_empty() {
-                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::new(
+                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_shell_indexed(
                                         draper_topology::Shell::new(faces_a)))));
                                 }
                                 if !faces_b.is_empty() {
-                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::new(
+                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_shell_indexed(
                                         draper_topology::Shell::new(faces_b)))));
                                 }
                                 if parts.is_empty() { parts.push(VpData::Surface(Box::new(surf))); }
@@ -21381,7 +21388,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::new(shell);
+                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),
@@ -21605,7 +21612,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts) { faces.push(f); }
                                     if !faces.is_empty() {
                                         let rib_shell = Shell::new_closed(faces);
-                                        let rib_solid = Solid::new(rib_shell);
+                                        let rib_solid = Solid::from_shell_indexed(rib_shell);
                                         let scale = vp_solid_scale(&solid).max(vp_solid_scale(&rib_solid));
                                         let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
                                         match draper_topology::boolean::boolean_union(&solid, &rib_solid, &tol_ctx) {
@@ -22001,7 +22008,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !all_faces.is_empty() {
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -22031,7 +22038,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             ];
                             if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
                                 let shell = Shell::new_closed(vec![f]);
-                                let solid = Solid::new(shell);
+                                let solid = Solid::from_shell_indexed(shell);
                                 let plane = draper_geometry::Plane::from_origin_and_normal(
                                     Point3d::new(origin[0], origin[1], origin[2]),
                                     draper_geometry::Direction3d::Z,
@@ -22072,7 +22079,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts[..n]) { faces.push(f); }
                                 if !faces.is_empty() {
                                     let shell = Shell::new_closed(faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -22145,7 +22152,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     let _ = (radius, segments); // already used
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                         changed = true;
                                     }
                                 }
@@ -22198,7 +22205,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 changed = true;
                             }
                         }
@@ -22230,7 +22237,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 changed = true;
                             }
                         }
@@ -22264,7 +22271,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 changed = true;
                             }
                         }
@@ -22301,7 +22308,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 changed = true;
                             }
                         }
@@ -22414,7 +22421,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !all_faces.is_empty() {
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                     changed = true;
                                 }
                             }
@@ -22446,7 +22453,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         all_faces.extend(shell.faces.iter().cloned());
                                     }
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::new(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
                                 } else {
                                     results.insert(node.id, VpData::Geometry(Box::new(s)));
                                 }
@@ -22776,7 +22783,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::new(shell);
+                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),

@@ -2506,3 +2506,80 @@ staging, чтобы компактед-солиды триангулировал
 
 - `refactor(core): C5 stage 7.2 — canonical STEP payload + store-first
   solid triangulation` (см. git log)
+
+# Worklog — C5 Stage 7.3: viewer construction-writers → born-indexed
+
+**Baseline:** commit `afd5deb` (после C5 Stage 7.2)
+**Дата:** 2026-09-04
+**Задача:** первый пункт «Осталось Stage 7.3+» — viewer: 30 `Solid::new`
+construction-сайтов → `from_shell_indexed`; мутация зеркал в Project-ноде
+VP-графа получает re-index (store-consistency).
+
+## Контекст сессии
+
+- Sandbox сброшен ЕЩЁ РАЗ (третий раз в истории C5): toolchain переустановлен
+  (rustup 1.98.1 minimal + clippy + rustfmt, PATH в ~/.bashrc). Локальный
+  клон снова оказался позади origin — fetch показал 59695be..afd5deb
+  (Stage 5.3–7.2 жили на origin)
+- Локально был пере-реализован дубль Stage 5.1 (explicit-edges mesh API +
+  FaceView + 5 тестов, коммит 9fe3f1f) — при push обнаружен
+  fast-forward-конфликт, дубль отброшен `git reset --hard origin/main`;
+  резервная ветка `stage5.1-local-backup` оставлена локально для сравнения.
+  УРОК (повтор третьего уровня): проверять `git fetch` + origin/main ДО
+  любой реализации — параллельные сессии пушат на тот же remote
+- Бейслайн 7.2 верифицирован локально после reset: mesh+topology+core
+  **658 passed / 0 failed** (соответствует цифрам Stage 7.2)
+
+## 1 — viewer: 30 × `Solid::new` → `Solid::from_shell_indexed` (app.rs)
+
+Все construction-сайты (VP-граф evaluator: Extrude/Revolve/Sweep/Loft/
+Array×3/Box/Sphere/… ноды, solid_from_detailed_instance, NURBS-preview
+surface-solid, mesh→solid конвертер 14622/18745) теперь рождают солид
+СРАЗУ индексированным: `Solid::new(shell)` → `Solid::from_shell_indexed(shell)`
+(= new + index_edges, Stage 7.1 API). Свежие viewer-солиды прибывают с
+населённым EdgeStore + canonical edge_ids — store-first потребители
+(7.2 triangulate_solid, 6.x boundary readers) больше не деградируют в
+mirror-fallback на viewer-пайплайне.
+
+Мультистрочные вызовы (21326/21330) покрыты тем же токен-реплейсом;
+`face.edges = vec![…]` (18740) — ОСТАВЛЕН: construction-семантика
+(зеркала = первичные данные свежих граней до регистрации; from_shell_indexed
+регистрирует их сразу после сборки).
+
+## 2 — Project-нода VP-графа: mutate → re-index
+
+Проекция вершин на плоскость мутировала только зеркала клона солида —
+клонированный EdgeStore оставался со СТАРЫМИ (до-проекцией) каноническими
+копиями. Добавлен `s.index_edges()` после мутаций (санкционированный
+паттерн `mutate → index_edges`, см. `ShapeBuilder::transform_solid`):
+store-first потребители видят спроецированную геометрию.
+
+## Верификация
+
+- `cargo check -p draper-viewer` — 0 errors (199 warnings — все
+  предсуществующие unused-import/var в 21k-строчном app.rs, не связаны
+  с изменением)
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors
+- draper-json + draper-ffi: 23 ✅; draper-topology + draper-core: 326 ✅
+  (from_shell_indexed поведение покрыто topology-сьютами Stage 7.1)
+- draper-viewer тестов нет (интеграционный egui-бинарь; wasm-test-харнесс
+  сломан ДО наших изменений — задокументировано в Stage 6.5)
+
+## Осталось (Stage 7.4+)
+
+- healing.rs внутренние зеркальные записи: production-сайты — только ДВА
+  construction-писателя (merge_faces 1555, gap-fill face 2664); остальные
+  найденные сайты (3072, 3478, 3495) — в #[cfg(test)] тестах. Путь:
+  перенести construction в from_shell_indexed-обёртку heal-результата
+- `triangulate_shell` — единственный оставшийся зеркальный mesh-читатель;
+  ВЫЗОВОВ В ПРОДАКШЕНЕ НЕТ (dead public API, standalone-Shell контракт —
+  зеркала там первичные данные). Решение для финальной стадии: оставить
+  как задокументированный standalone-контракт ИЛИ удалить API
+- Физическое удаление поля `Face.edges` (после healing + решения по
+  triangulate_shell): serde store-only round-trip зелёный, extract_solids
+  поставляет store-only payload, все читатели store-first
+
+## Коммит
+
+- (см. git log: refactor(viewer): C5 stage 7.3 — born-indexed construction
+  + Project re-index)
