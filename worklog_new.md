@@ -2299,7 +2299,7 @@ worklog: «store параметр или перенос в Solid-методы» 
 ## C5 Stage 7.1 — born-indexed construction + compaction API
 
 **Дата**: 2026-09-03
-**Коммит**: (см. git log) feat(core): C5 stage 7.1 — born-indexed construction + mirror compaction API
+**Коммит**: `72e86cd` feat(core): C5 stage 7.1 — born-indexed construction + mirror compaction API
 
 ### Проблема (Stage 7 entry-audit)
 
