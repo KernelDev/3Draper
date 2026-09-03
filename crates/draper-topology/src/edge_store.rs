@@ -591,6 +591,47 @@ impl EdgeStore {
     pub fn same_edge(&self, a: TopoId, b: TopoId) -> bool {
         !self.is_empty() && self.canonical_of(a) == self.canonical_of(b)
     }
+
+    /// Transform every canonical edge curve in place (C5 Stage 7.1).
+    ///
+    /// Used by `ShapeBuilder::transform_solid` so MIRROR-FREE (compacted)
+    /// faces keep correct geometry after a transform: their edge payload
+    /// lives only here, and `index_edges` Pass 0 re-seeds the rebuilt
+    /// store from these (already transformed) canonical copies. For faces
+    /// still carrying mirrors the re-index scan replaces the store from
+    /// the transformed mirrors anyway — transforming here is harmless and
+    /// keeps the two paths consistent.
+    pub fn transform_curves(&mut self, transform: &draper_geometry::Transform) {
+        for edge in self.edges.values_mut() {
+            if let Some(ref mut curve) = edge.curve {
+                *curve = curve.transform(transform);
+            }
+        }
+    }
+}
+
+/// Compaction-safety check for one face (C5 Stage 7.1,
+/// [`Solid::compact_edge_mirrors`]).
+///
+/// `true` when clearing `face.edges` loses nothing: the face is indexed,
+/// and every id the store-first boundary readers would query for this
+/// face — wire coedge ids (outer + inner), every `edge_ids` entry, and
+/// every mirror id (appended-after-indexing edges carry mirror-only
+/// identity) — resolves through `solid.edge_store.instance_edge`.
+fn face_compactable(solid: &Solid, face: &Face) -> bool {
+    if face.edges.is_empty() || face.edge_ids.is_empty() {
+        return false; // nothing to clear / identity is mirror-only
+    }
+    let mut needed: Vec<TopoId> = Vec::with_capacity(face.edge_ids.len() + face.edges.len());
+    if let Some(ref wire) = face.outer_wire {
+        needed.extend(wire.coedges.iter().map(|ce| ce.edge));
+    }
+    for wire in &face.inner_wires {
+        needed.extend(wire.coedges.iter().map(|ce| ce.edge));
+    }
+    needed.extend(face.edge_ids.iter().copied());
+    needed.extend(face.edges.iter().map(|e| e.id));
+    needed.iter().all(|&id| solid.edge_store.instance_edge(id).is_some())
 }
 
 impl Solid {
@@ -855,6 +896,79 @@ impl Solid {
         if self.edge_store.is_empty() {
             self.index_edges();
         }
+    }
+
+    /// Born-indexed solid constructor (C5 Stage 7.1).
+    ///
+    /// [`Solid::new`] leaves the store empty and every face un-indexed
+    /// (`edge_ids` empty): edge identity then lives ONLY in the per-face
+    /// `edges` mirrors, and every store-first consumer silently degrades
+    /// to the mirror fallback. This constructor closes that gap at the
+    /// source: assemble the shell AND run [`Solid::index_edges`] in one
+    /// step, so freshly constructed solids arrive with a populated
+    /// `EdgeStore` and canonical `Face.edge_ids` on every face — shared
+    /// edges (same `step_entity_id` or the same geometric key) carry the
+    /// SAME canonical id in every incident face from birth.
+    ///
+    /// Native construction entry points (primitive builders, boolean
+    /// result assembly) should prefer this over `Solid::new`. Paths that
+    /// mutate geometry afterwards (e.g. `transform_solid`) must re-index,
+    /// because the store's canonical copies capture the pre-mutation
+    /// geometry — see `ShapeBuilder::transform_solid` for the sanctioned
+    /// `transform → index_edges` pairing.
+    pub fn from_shell_indexed(shell: Shell) -> Self {
+        let mut solid = Solid::new(shell);
+        solid.index_edges();
+        solid
+    }
+
+    /// Compact this solid to the store-only ("Stage 5 end-state") form
+    /// (C5 Stage 7.1): clear `Face.edges` mirrors wherever the store can
+    /// answer every boundary read the solid itself would perform.
+    ///
+    /// A face is compacted only when it is SAFE to clear:
+    ///
+    /// - `face.edge_ids` is non-empty (the face has been indexed), AND
+    /// - every id the store-first readers would query — the wire coedge
+    ///   ids (outer + inner) plus every `edge_ids` entry — resolves
+    ///   through `EdgeStore::instance_edge`, AND
+    /// - every mirror id also resolves through the store, so no
+    ///   appended-after-indexing edge (mirror-only identity) is lost.
+    ///
+    /// Un-indexed faces (identity lives in the mirrors), partially
+    /// resolvable faces and mirror-free faces are left untouched, which
+    /// makes the operation idempotent and conservatively safe. After
+    /// compaction, [`Solid::resolve_face_edges`] /
+    /// [`Solid::instance_edges`] / [`Solid::face_edges`] return exactly
+    /// the same values as before (they prefer the store already; the
+    /// mirrors were only a fallback), and re-running
+    /// [`Solid::index_edges`] preserves the identity through the
+    /// mirror-free preservation pass (Pass 0).
+    ///
+    /// Returns the number of faces whose mirrors were cleared. This is
+    /// the API the final C5 stage uses to flip solids — including their
+    /// serialized form — to the store-only representation.
+    pub fn compact_edge_mirrors(&mut self) -> usize {
+        // Pass 1 (read-only): decide per face. A single mutable walk would
+        // fight the borrow checker against `self.edge_store`, so the
+        // resolvability decision is pre-computed; `faces()` and
+        // `faces_mut()` enumerate in the SAME order (outer shell, then
+        // inner shells), so positional matching below is exact.
+        let compactable: Vec<bool> = self
+            .faces()
+            .iter()
+            .map(|face| face_compactable(self, face))
+            .collect();
+
+        // Pass 2 (mutating): clear the mirrors of the marked faces.
+        let mut cleared = 0usize;
+        for (i, face) in self.faces_mut().iter_mut().enumerate() {
+            if compactable.get(i).copied().unwrap_or(false) {
+                face.edges.clear();
+                cleared += 1;
+            }
+        }
+        cleared
     }
 
     /// Propagate unambiguous edge fixes across instances of the same shared
@@ -1977,6 +2091,41 @@ mod tests {
         assert_eq!(rebuilt.start_vertex_point, expected_start);
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serde_compacted_solid_roundtrip() {
+        // C5 Stage 7.1: a compacted (store-only) solid round-trips with
+        // EMPTY mirrors and resolves identically — the final C5 payload
+        // form, now reachable through `Solid::compact_edge_mirrors`.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        assert_eq!(solid.compact_edge_mirrors(), 6);
+        let reference: Vec<Vec<Edge>> = solid
+            .faces()
+            .iter()
+            .map(|f| solid.resolve_face_edges(f))
+            .collect();
+
+        let json = serde_json::to_string(&solid).expect("serialize compacted solid");
+        let loaded: Solid = serde_json::from_str(&json).expect("deserialize compacted solid");
+
+        for (face, expected) in loaded.faces().iter().zip(reference.iter()) {
+            assert!(face.edges.is_empty(), "mirrors stay empty after round-trip");
+            let resolved = loaded.resolve_face_edges(face);
+            assert_eq!(
+                resolved.len(),
+                expected.len(),
+                "store-only resolution must be complete after round-trip"
+            );
+            for (r, e) in resolved.iter().zip(expected.iter()) {
+                assert!(
+                    edges_shape_equal(r, e),
+                    "edge {:?} must resolve identically after round-trip",
+                    r.id
+                );
+            }
+        }
+    }
+
     #[test]
     fn test_index_edges_preserves_mirror_free_store() {
         let mut solid = opposite_shared_solid();
@@ -2094,11 +2243,18 @@ mod tests {
 
     #[test]
     fn test_resolve_face_edges_unindexed_mirrors() {
-        // Un-indexed builder solid: edge_ids empty → the construction
-        // mirrors ARE the resolution (unchanged behavior).
-        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        // Un-indexed solid: edge_ids empty → the construction mirrors ARE
+        // the resolution (unchanged behavior). C5 Stage 7.1 made builder
+        // solids born-indexed, so the legacy state is simulated explicitly
+        // (wipe edge_ids + store) — the fallback path itself is unchanged
+        // and still load-bearing for pre-Stage-7.1 deserialized payloads.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        for face in solid.faces_mut() {
+            face.edge_ids.clear();
+        }
+        solid.edge_store = EdgeStore::new();
         let face = &solid.faces()[0];
-        assert!(face.edge_ids.is_empty(), "builder faces are un-indexed");
+        assert!(face.edge_ids.is_empty(), "faces are un-indexed");
         let edges = solid.resolve_face_edges(face);
         assert_eq!(
             edges.len(),
@@ -2235,6 +2391,204 @@ mod tests {
             }
             other => panic!("expected a line curve, got {:?}", other.is_some()),
         }
+    }
+
+    // ---- C5 Stage 7.1: born-indexed construction + compaction ----
+
+    /// Discretization-faithful edge equality: same id, same parametric
+    /// segment, same flags and the same curve SHAPE (sampled at both
+    /// segment endpoints). Orientation-sensitive fields (forward,
+    /// vertex order) are compared as unordered endpoint pairs, because a
+    /// store-reconstructed reversed instance legitimately swaps them.
+    fn edges_shape_equal(a: &Edge, b: &Edge) -> bool {
+        if a.id != b.id
+            || a.degenerate != b.degenerate
+            || (a.tolerance - b.tolerance).abs() > 1e-12
+        {
+            return false;
+        }
+        let same_range = a.param_range == b.param_range;
+        let swapped_range = (a.param_range.1, a.param_range.0) == b.param_range;
+        if !same_range && !swapped_range {
+            return false;
+        }
+        let (as_, ae) = match (a.start_point(), a.end_point()) {
+            (Some(s), Some(e)) => (s, e),
+            _ => return b.start_point().is_none() && b.end_point().is_none(),
+        };
+        let (bs, be) = match (b.start_point(), b.end_point()) {
+            (Some(s), Some(e)) => (s, e),
+            _ => return false, // a has sample points, b does not → different shapes
+        };
+        let close = |p: &Point3d, q: &Point3d| {
+            (p.x - q.x).abs() < 1e-9
+                && (p.y - q.y).abs() < 1e-9
+                && (p.z - q.z).abs() < 1e-9
+        };
+        (close(&as_, &bs) && close(&ae, &be)) || (close(&as_, &be) && close(&ae, &bs))
+    }
+
+    #[test]
+    fn test_born_indexed_builder_solid() {
+        // C5 Stage 7.1: `Solid::from_shell_indexed` primitives arrive with
+        // a populated store + canonical edge_ids on every face.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        assert!(!solid.edge_store.is_empty(), "box is born-indexed");
+        let faces = solid.faces();
+        assert!(
+            faces.iter().all(|f| !f.edge_ids.is_empty()),
+            "every face carries canonical edge_ids"
+        );
+        // 6 faces × 4 edges = 24 instances; 12 canonical shared segments.
+        let total_instances: usize = faces.iter().map(|f| f.edge_ids.len()).sum();
+        assert_eq!(total_instances, 24);
+        assert_eq!(
+            solid.edge_store.len(),
+            12,
+            "geometric dedup must unify the 24 instances into 12 shared edges"
+        );
+        // Each box edge is incident to exactly two faces — the shared id
+        // appears in exactly two edge_ids lists.
+        for &id in &faces[0].edge_ids {
+            let incident = faces
+                .iter()
+                .filter(|f| f.edge_ids.contains(&id))
+                .count();
+            assert_eq!(incident, 2, "edge {:?} must be shared by 2 faces", id);
+        }
+    }
+
+    #[test]
+    fn test_born_indexed_resolution_shape_identical() {
+        // Store-resolved boundary must be shape-identical to the
+        // construction mirrors (same ids in wire order, same segments,
+        // same sampled geometry) — value-neutrality of born-indexing.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        for face in solid.faces() {
+            let resolved = solid.resolve_face_edges(face);
+            assert_eq!(
+                resolved.len(),
+                face.edges.len(),
+                "resolution must be complete for every face"
+            );
+            for (r, m) in resolved.iter().zip(face.edges.iter()) {
+                assert!(
+                    edges_shape_equal(r, m),
+                    "resolved edge {:?} must be shape-equal to its mirror",
+                    r.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_born_indexed_transform_no_stale_store() {
+        // transform_solid re-indexes: the store must reflect POST-transform
+        // geometry, or store-first readers sample stale pre-transform
+        // curves. make_box_at(10, …) places the box at x ∈ [10, 12].
+        let solid = ShapeBuilder::make_box_at(10.0, 0.0, 0.0, 2.0, 2.0, 2.0);
+        for face in solid.faces() {
+            for edge in solid.resolve_face_edges(face) {
+                for p in [edge.start_point(), edge.end_point()].into_iter().flatten() {
+                    assert!(
+                        p.x > 9.0,
+                        "store-resolved point x={} is stale (box lives at x≥10)",
+                        p.x
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_compact_edge_mirrors_store_only() {
+        // Compaction clears mirrors where the store answers everything;
+        // resolution before/after must be identical.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let before: Vec<(Vec<TopoId>, Vec<Edge>)> = solid
+            .faces()
+            .iter()
+            .map(|f| {
+                (
+                    f.edge_ids.clone(),
+                    solid.resolve_face_edges(f),
+                )
+            })
+            .collect();
+
+        let cleared = solid.compact_edge_mirrors();
+        assert_eq!(cleared, 6, "every box face is compactable");
+        for face in solid.faces() {
+            assert!(face.edges.is_empty(), "mirrors cleared (store-only face)");
+        }
+
+        let after: Vec<(Vec<TopoId>, Vec<Edge>)> = solid
+            .faces()
+            .iter()
+            .map(|f| {
+                (
+                    f.edge_ids.clone(),
+                    solid.resolve_face_edges(f),
+                )
+            })
+            .collect();
+        assert_eq!(before.len(), after.len());
+        for ((ids_b, edges_b), (ids_a, edges_a)) in before.iter().zip(after.iter()) {
+            assert_eq!(ids_b, ids_a, "canonical edge_ids survive compaction");
+            assert_eq!(edges_b.len(), edges_a.len());
+            for (eb, ea) in edges_b.iter().zip(edges_a.iter()) {
+                assert!(
+                    edges_shape_equal(eb, ea),
+                    "resolution changed after compaction for edge {:?}",
+                    ea.id
+                );
+            }
+        }
+
+        // Idempotent: nothing left to clear.
+        assert_eq!(solid.compact_edge_mirrors(), 0);
+
+        // Re-indexing a store-only solid preserves identity (Pass 0).
+        solid.index_edges();
+        assert_eq!(solid.edge_store.len(), 12, "12 canonical edges preserved");
+        let after_reindex: Vec<Vec<TopoId>> = solid
+            .faces()
+            .iter()
+            .map(|f| f.edge_ids.clone())
+            .collect();
+        for ((ids_b, _), ids_a) in before.iter().zip(after_reindex.iter()) {
+            assert_eq!(ids_b, ids_a, "re-index must not wipe store-only identity");
+        }
+    }
+
+    #[test]
+    fn test_compact_edge_mirrors_leaves_unindexed() {
+        // Un-indexed faces keep their mirrors — identity is mirror-only.
+        let mut solid = solid_of(vec![square_face(&[Some(123)])]);
+        assert_eq!(solid.compact_edge_mirrors(), 0);
+        assert!(
+            !solid.faces()[0].edges.is_empty(),
+            "un-indexed face mirrors must survive compaction"
+        );
+    }
+
+    #[test]
+    fn test_compact_edge_mirrors_rejects_orphaned_mirror() {
+        // An edge appended AFTER indexing (mirror-only identity) blocks
+        // compaction of its face — clearing would lose the payload.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let orphan = line_edge(
+            Point3d::new(0.0, 0.0, -5.0),
+            Point3d::new(1.0, 0.0, -5.0),
+            None,
+        );
+        solid.faces_mut()[0].edges.push(orphan);
+        let cleared = solid.compact_edge_mirrors();
+        assert_eq!(cleared, 5, "only the 5 clean faces are compacted");
+        assert!(
+            !solid.faces()[0].edges.is_empty(),
+            "the face with the orphaned mirror keeps its mirrors"
+        );
     }
 
 }

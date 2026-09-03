@@ -3016,11 +3016,18 @@ mod tests {
         );
     }
 
-    /// Un-indexed builder solids keep the legacy behavior: mirrors ARE the
-    /// input, no re-derivation message appears.
+    /// Un-indexed solids keep the legacy behavior: mirrors ARE the input,
+    /// no re-derivation message appears. (C5 Stage 7.1 made builder solids
+    /// born-indexed, so the legacy state is simulated explicitly — the
+    /// fallback remains load-bearing for pre-Stage-7.1 payloads and
+    /// standalone `Solid::new` assembly.)
     #[test]
     fn test_heal_solid_un_indexed_fallback() {
-        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        for face in box_solid.faces_mut() {
+            face.edge_ids.clear();
+        }
+        box_solid.edge_store = EdgeStore::new();
         assert!(box_solid.edge_store.is_empty());
         let params = HealingParams {
             fix_normals: false,
@@ -3772,15 +3779,23 @@ mod tests {
         let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
 
         // Set one edge's tolerance very high (simulating a vertex with large tolerance)
-        // and all others to small values
-        if let Some(ref mut shell) = box_solid.outer_shell {
-            let first_face = &mut shell.faces[0];
-            // Set the first edge to a large tolerance
-            if !first_face.edges.is_empty() {
-                first_face.edges[0].tolerance = 1e-3;
+        // and all others to small values.
+        //
+        // C5 Stage 7.1: builder solids are born-indexed, so the edge fix
+        // goes through the SANCTIONED mutation flow — mutate the CANONICAL
+        // store edge, then sync the per-face mirrors. Direct mirror writes
+        // are construction-path only (the store-first healing input
+        // re-derives mirrors from the store and would discard them).
+        {
+            let edge_id = box_solid.faces()[0].edges[0].id;
+            if let Some(edge) = box_solid.edge_store.get_mut(edge_id) {
+                edge.tolerance = 1e-3;
             }
-            // Set the face tolerance to a small value
-            first_face.tolerance = 1e-8;
+            box_solid.sync_edge_mirrors();
+        }
+        // Set the face tolerance to a small value
+        if let Some(ref mut shell) = box_solid.outer_shell {
+            shell.faces[0].tolerance = 1e-8;
         }
 
         let params = HealingParams {

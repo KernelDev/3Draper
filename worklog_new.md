@@ -2293,3 +2293,108 @@ worklog: «store параметр или перенос в Solid-методы» 
   крупный этап: сериализация, все конструкторы)
 - Известный угол (унаследован): curve-less preserved canonical + поздний
   зеркальный инстанс с кривой не унифицируются
+
+---
+
+## C5 Stage 7.1 — born-indexed construction + compaction API
+
+**Дата**: 2026-09-03
+**Коммит**: (см. git log) feat(core): C5 stage 7.1 — born-indexed construction + mirror compaction API
+
+### Проблема (Stage 7 entry-audit)
+
+Базельная проверка HEAD=6af49ee (Stage 6.5): все ЧИТАТЕЛИ границ ушли в
+store-first (6.x), но конструирование оставалось зеркальным:
+- `Solid::new` НЕ индексирует — каждый свежий solid (builder/boolean
+  fallback) прибывает с ПУСТЫМ стором и пустыми `edge_ids`: идентичность
+  живёт только в зеркалах, все store-first потребители молча деградируют
+  до mirror-fallback
+- 78 сайтов `Solid::new` в кодовой базе; builder (7 примитивов),
+  core/boolean (3 результата), topology/boolean (2 fallback-пути) —
+  lib-коды, не индексирующие результат
+
+### 1 — API (edge_store.rs)
+
+- **`Solid::from_shell_indexed(shell)`** — born-indexed конструктор:
+  сборка + `index_edges` одним шагом. Свежие solid'ы прибывают с
+  populated стором и каноническими `edge_ids` на каждой грани: общие
+  рёбра (тот же step_entity_id / та же геометрическая геометрия) несут
+  ОДИН канонический id в обеих гранях с рождения
+- **`Solid::compact_edge_mirrors() -> usize`** — компакция в store-only
+  («Stage 5 end-state»): очищает `face.edges` там, где стор отвечает на
+  ВСЕ запросы читателей (coedge id всех wire'ов + все `edge_ids` + все
+  зеркальные id — защита от orphaned-мутаций после индексации).
+  Идемпотентна; un-indexed грани не тронуты; re-index сохраняет
+  идентичность через Pass 0
+- **`EdgeStore::transform_curves(&Transform)`** — трансформ
+  канонических кривых (payload зеркально-свободных граней)
+
+### 2 — Адопция born-indexed (lib-сайты)
+
+- **builder.rs**: все 7 примитивов (box/cylinder/sphere/cone/torus/
+  revolution/extrusion) → `from_shell_indexed`
+- **core/boolean.rs**: union/subtract/intersect результаты
+- **topology/boolean.rs**: split-результат (3310) + disjoint-union
+  fallback (4133) — клоны граней несут orphaned edge_ids входного стора;
+  re-index восстанавливает живую идентичность
+
+### 3 — LATENT: stale-store после трансформа/мутаций (найден аудитом 7.1)
+
+Симптом: `transform_solid` (builder + core) трансформировал поверхности
+и зеркала, но НЕ стор — после born-indexing store-first читатели
+семплировали ДО-трансформную геометрию. Аналогично fillet/chamfer
+мутировали зеркала in-place без re-index.
+
+Фиксы:
+- `ShapeBuilder::transform_solid` + core `transform_solid`:
+  transform зеркал → `edge_store.transform_curves` (для compacted) →
+  `index_edges` (rebuild)
+- `fillet_edge`/`chamfer_edge`: `drop(shell); solid.index_edges()` в
+  конце — стор отслеживает ПОСТ-филет топологию (заменили рёбра с
+  fresh id + добавили wire-less грань)
+
+### 4 — Тесты (7 новых + 3 мигрированы)
+
+- `test_born_indexed_builder_solid`: box = 24 инстанса / 12 канонических
+  (геометрический дедуп), каждое ребро ровно в 2 гранях
+- `test_born_indexed_resolution_shape_identical`: resolve_face_edges
+  shape-идентичен зеркалам (id + сегмент + семпл-точки, ориентация как
+  неупорядоченная пара) — value-нейтральность born-indexing
+- `test_born_indexed_transform_no_stale_store`: make_box_at(10,…) —
+  все store-resolved точки x>9 (ловит stale-store)
+- `test_compact_edge_mirrors_store_only`: 6/6 граней компактны,
+  резолюция идентична до/после, идемпотентность, re-index Pass 0
+  сохраняет идентичность
+- `test_compact_edge_mirrors_leaves_unindexed` / `_rejects_orphaned_mirror`:
+  guard-условия компакции
+- `test_serde_compacted_solid_roundtrip`: store-only solid сериализуется
+  с ПУСТЫМИ зеркалами и резолвится идентично после round-trip —
+  финальная C5 payload-форма
+- Мигрированы под новый контракт: `test_resolve_face_edges_unindexed_mirrors`
+  (легаси-состояние симулируется явно), `test_heal_solid_un_indexed_fallback`
+  (аналогично), `test_propagate_tolerances_upward` (санкционированный
+  флоу: `edge_store.get_mut` + `sync_edge_mirrors` вместо прямой записи
+  в зеркала — store-first healing input её отбрасывает)
+
+### Верификация
+
+- draper-topology: **222 lib (serde)** + 17 + 11 + 3 ✅
+- draper-core: 75 + 2 ✅ (fillet/chamfer re-index)
+- draper-mesh: 268 + все integration ✅ — бит-идентичность триангуляции
+  сохранена (разрешение builder-solid'ов перешло с зеркал на стор,
+  значения идентичны: same-id клоны → self-canonical)
+- draper-json 10 ✅, draper-ffi 13 ✅, draper-cam 17 ✅
+- `cargo check --workspace --exclude draper-testing` — 0 errors;
+  draper-step `--tests --features serde` ✅
+- Диск: 3.9G free, incremental чист
+
+### Осталось (Stage 7.2+)
+
+- STEP-конвертер: вызвать `compact_edge_mirrors` после index_edges —
+  canonical SOLID payload из STEP
+- viewer (30 `Solid::new` сайтов, construction-писатели 18738/20630) —
+  миграция на `from_shell_indexed`
+- healing.rs внутренние мутации зеркал (shell-scoped, инкапсулированы
+  re-derive/re-index входом-выходом) — финальная цель
+- Физическое удаление поля `Face.edges` (сериализация уже готова:
+  store-only round-trip тест зелёный)

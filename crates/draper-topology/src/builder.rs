@@ -51,7 +51,9 @@ impl ShapeBuilder {
         ];
 
         let shell = Shell::new_closed(faces);
-        Solid::new(shell)
+        // C5 Stage 7.1: born-indexed — the store and canonical edge_ids
+        // exist from construction (shared box edges dedup by geometric key).
+        Solid::from_shell_indexed(shell)
     }
 
     /// Create a box at a specific position (min corner).
@@ -161,7 +163,9 @@ impl ShapeBuilder {
         lateral_face.edges = vec![bottom_edge, top_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, lateral_face]);
-        Solid::new(shell)
+        // C5 Stage 7.1: born-indexed — bottom/top circle edges are shared
+        // between the disk faces and the (wire-less) lateral face.
+        Solid::from_shell_indexed(shell)
     }
 
     /// Create a cylinder at a specific position.
@@ -185,7 +189,9 @@ impl ShapeBuilder {
         let face = Face::new(Surface::Sphere(sphere_surface), wire);
 
         let shell = Shell::new_closed(vec![face]);
-        Solid::new(shell)
+        // C5 Stage 7.1: born-indexed (no-op for edge-less faces, but keeps
+        // the constructor contract uniform across primitives).
+        Solid::from_shell_indexed(shell)
     }
 
     /// Create a cone.
@@ -226,7 +232,9 @@ impl ShapeBuilder {
         lateral_face.edges = vec![bottom_edge];
 
         let shell = Shell::new_closed(vec![bottom_face, lateral_face]);
-        Solid::new(shell)
+        // C5 Stage 7.1: born-indexed — the bottom circle edge is shared
+        // between the disk face and the (wire-less) lateral face.
+        Solid::from_shell_indexed(shell)
     }
 
     /// Create a torus.
@@ -289,7 +297,7 @@ impl ShapeBuilder {
         face.edges = vec![edge_v];
 
         let shell = Shell::new_closed(vec![face]);
-        Solid::new(shell)
+        Solid::from_shell_indexed(shell)
     }
 
     /// Create a solid of revolution by revolving a profile curve around the Z axis.
@@ -318,10 +326,20 @@ impl ShapeBuilder {
         let wire = Wire::new(vec![]);
         let face = Face::new(ext_surface, wire);
         let shell = Shell::new_closed(vec![face]);
-        Solid::new(shell)
+        Solid::from_shell_indexed(shell)
     }
 
     /// Transform a solid (apply transformation to all geometry).
+    ///
+    /// C5 Stage 7.1: transforms the surface, the mirror edge curves AND the
+    /// canonical store curves, then re-indexes. The store pass is what keeps
+    /// MIRROR-FREE (compacted) faces correct: their edge payload lives only
+    /// in the store, and `index_edges` Pass 0 re-seeds the rebuilt store
+    /// from these already-transformed canonical copies. Re-indexing is not
+    /// optional for mirror-carrying faces either — born-indexed primitives
+    /// hold pre-transform canonicals in the store, and without the rebuild
+    /// every store-first reader (mesh, queries, exporters) would sample
+    /// stale curves after a transform.
     pub fn transform_solid(solid: &mut Solid, transform: &Transform) {
         if let Some(ref mut shell) = solid.outer_shell {
             for face in &mut shell.faces {
@@ -337,6 +355,11 @@ impl ShapeBuilder {
                 }
             }
         }
+        // Transform the canonical store curves (mirror-free faces).
+        solid.edge_store.transform_curves(transform);
+        // Rebuild identity: fresh dedup from the transformed mirrors;
+        // Pass 0 preserves the (transformed) store edges of mirror-free faces.
+        solid.index_edges();
     }
 
     /// Create a polygonal face from a list of 3D points.

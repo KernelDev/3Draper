@@ -317,8 +317,14 @@ pub struct Face {
     /// `Solid::face_edges` / `Solid::resolve_edge` (or `Face::edge_by_id`
     /// for standalone faces) and MUTATE via `edge_store.get_mut` + sync —
     /// direct writes to this field only stay valid for face-construction
-    /// paths followed by `Solid::index_edges`. Full removal is the Stage 5
-    /// serde+API migration.
+    /// paths followed by `Solid::index_edges`.
+    ///
+    /// C5 Stage 7.1 (2026-09-03): native construction is born-indexed
+    /// (`Solid::from_shell_indexed` populates the store + `edge_ids` from
+    /// assembly), and [`Solid::compact_edge_mirrors`] can clear this field
+    /// entirely where the store answers every boundary read (store-only
+    /// solids — the serialized end-state form). Physical removal of the
+    /// field remains the final C5 stage.
     pub edges: Vec<Edge>,
     /// Canonical edge references into the owning Solid's `EdgeStore` (C5).
     /// Populated by `Solid::index_edges` — a shared edge carries the SAME

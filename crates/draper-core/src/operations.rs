@@ -22,6 +22,12 @@ use draper_topology::{CoEdge, Compound, Edge, Face, Shell, Solid, TopoId, Wire};
 ///
 /// This is the foundation operation: translate/rotate/scale/mirror all call
 /// this with the appropriate Transform.
+///
+/// C5 Stage 7.1: the solid's canonical `EdgeStore` curves are transformed
+/// too (they are the ONLY payload of mirror-free/compacted faces), and the
+/// store is re-indexed afterwards — born-indexed solids carry pre-transform
+/// canonicals, and without the rebuild every store-first reader (mesh,
+/// queries, exporters) would sample stale curves after a transform.
 pub fn transform_solid(solid: &mut Solid, transform: &Transform) {
     if let Some(ref mut shell) = solid.outer_shell {
         transform_shell(shell, transform);
@@ -29,6 +35,11 @@ pub fn transform_solid(solid: &mut Solid, transform: &Transform) {
     for shell in &mut solid.inner_shells {
         transform_shell(shell, transform);
     }
+    // Transform the canonical store curves (mirror-free faces)…
+    solid.edge_store.transform_curves(transform);
+    // …then rebuild identity from the transformed mirrors (Pass 0 keeps
+    // the transformed store edges of mirror-free faces).
+    solid.index_edges();
 }
 
 /// Apply a transform to every geometric entity in a compound (assembly).
@@ -689,6 +700,13 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     // Add the fillet face to the shell.
     shell.faces.push(fillet_face);
 
+    // C5 Stage 7.1: the mutation replaced mirror edges (fresh ids) and
+    // appended a wire-less face — re-index so the store and edge_ids track
+    // the POST-fillet topology. Without this, born-indexed inputs keep a
+    // stale store and store-first readers sample the pre-fillet geometry.
+    drop(shell);
+    solid.index_edges();
+
     Ok(())
 }
 
@@ -938,6 +956,11 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     chamfer_face.forward = true;
 
     shell.faces.push(chamfer_face);
+
+    // C5 Stage 7.1: see fillet_edge — re-index after the in-place mirror
+    // mutation so the store tracks the POST-chamfer topology.
+    drop(shell);
+    solid.index_edges();
 
     Ok(())
 }

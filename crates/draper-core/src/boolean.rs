@@ -77,7 +77,10 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    Ok(Solid::new(shell))
+    // C5 Stage 7.1: born-indexed result — cloned faces carry orphaned
+    // edge_ids from the INPUT store; re-indexing re-derives identity from
+    // the mirrors so every store-first consumer sees a live store.
+    Ok(Solid::from_shell_indexed(shell))
 }
 
 /// Boolean subtraction: subtract solid B from solid A.
@@ -114,7 +117,8 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    Ok(Solid::new(shell))
+    // C5 Stage 7.1: born-indexed result (see boolean_union).
+    Ok(Solid::from_shell_indexed(shell))
 }
 
 /// Boolean intersection: keep only the overlap of A and B.
@@ -155,7 +159,8 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    Ok(Solid::new(shell))
+    // C5 Stage 7.1: born-indexed result (see boolean_union).
+    Ok(Solid::from_shell_indexed(shell))
 }
 
 /// Like `face_inside_solid`, but also returns true for faces whose

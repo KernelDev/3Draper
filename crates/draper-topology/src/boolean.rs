@@ -3307,7 +3307,10 @@ pub fn boolean_operation(
 
     // Step 5: Connect faces into a new closed shell
     let shell = Shell::new_closed(result_faces);
-    Ok(Solid::new(shell))
+    // C5 Stage 7.1: born-indexed result — result faces carry fresh split
+    // edge ids; indexing unifies their identity (shared split edges,
+    // seam double-use) so the mesh-level edge cache dedups discretizations.
+    Ok(Solid::from_shell_indexed(shell))
 }
 
 /// Split a face with multiple shared edges (for faces intersected by multiple curves).
@@ -4130,7 +4133,9 @@ fn handle_no_intersection(
             }
             // Create a compound-like solid with both shells
             let shell = Shell::new_closed(all_faces);
-            Ok(Solid::new(shell))
+            // C5 Stage 7.1: born-indexed result — cloned faces carry
+            // orphaned edge_ids from the input stores.
+            Ok(Solid::from_shell_indexed(shell))
         }
         BooleanOp::Subtract => {
             if a_in_b {
