@@ -162,15 +162,22 @@ pub fn validate_brep(solid: &Solid, config: &TopologyValidationConfig) -> Topolo
     // global fallback keeps answering regardless of which id a caller
     // holds. Un-indexed solids fall back to the mirror instance — the
     // pre-C5 behavior.
-    let mut edge_map: HashMap<TopoId, &Edge> = HashMap::new();
+    //
+    // C5 Stage 6: the iteration source is `Solid::instance_edges` —
+    // instance-faithful OWNED edges resolved from the store — so indexed
+    // faces are read mirror-free (the Stage 5 end-state), while un-indexed
+    // faces keep the wholesale mirror fallback. Vertex ids now come from
+    // the instance-faithful orientation (canonical vertices, swapped when
+    // the instance runs the canonical curve backwards) — the identity-
+    // correct count for aliased instances.
+    let mut edge_map: HashMap<TopoId, Edge> = HashMap::new();
     let mut vertex_set: HashSet<TopoId> = HashSet::new();
     for shell in &shells {
         for face in &shell.faces {
-            for edge in &face.edges {
-                let resolved: &Edge = solid.edge_store.get(edge.id).unwrap_or(edge);
-                edge_map.entry(edge.id).or_insert(resolved);
+            for edge in solid.instance_edges(face) {
                 let canonical = solid.edge_store.canonical_of(edge.id);
-                edge_map.entry(canonical).or_insert(resolved);
+                edge_map.entry(edge.id).or_insert_with(|| edge.clone());
+                edge_map.entry(canonical).or_insert_with(|| edge.clone());
                 if let Some(vid) = edge.vertex_start {
                     vertex_set.insert(vid);
                 }
@@ -205,14 +212,16 @@ pub fn validate_brep(solid: &Solid, config: &TopologyValidationConfig) -> Topolo
     // The end vertex of coedge[i] should match the start vertex of coedge[i+1].
     for shell in &shells {
         for face in &shell.faces {
+            // C5 Stage 6: per-face instance-faithful edges (store-resolved).
+            let face_edges = solid.instance_edges(face);
             // Check outer wire
             if let Some(ref wire) = face.outer_wire {
-                let bad = check_wire_edge_orientation(wire, face, &edge_map);
+                let bad = check_wire_edge_orientation(wire, &face_edges, &edge_map);
                 edges_with_bad_orientation += bad;
             }
             // Check inner wires
             for wire in &face.inner_wires {
-                let bad = check_wire_edge_orientation(wire, face, &edge_map);
+                let bad = check_wire_edge_orientation(wire, &face_edges, &edge_map);
                 edges_with_bad_orientation += bad;
             }
         }
@@ -366,7 +375,8 @@ pub fn validate_tolerance_consistency(solid: &Solid) -> ToleranceConsistencyRepo
                 }
             }
 
-            for edge in &face.edges {
+            // C5 Stage 6: store-resolved instance-faithful edges (mirror-free).
+            for edge in solid.instance_edges(face) {
                 let edge_tol = edge.tolerance;
 
                 // Check 2: edge tolerance ≤ face tolerance
@@ -428,10 +438,13 @@ pub fn validate_tolerance_consistency(solid: &Solid) -> ToleranceConsistencyRepo
 
 /// Check that consecutive coedges in a wire connect properly.
 /// Returns the number of orientation issues found.
+///
+/// C5 Stage 6: the per-face edge map comes from the caller (store-resolved
+/// `Solid::instance_edges`) instead of `face.edges`.
 fn check_wire_edge_orientation(
     wire: &Wire,
-    face: &Face,
-    edge_map: &HashMap<TopoId, &Edge>,
+    face_edges: &[Edge],
+    edge_map: &HashMap<TopoId, Edge>,
 ) -> usize {
     let n = wire.coedges.len();
     if n < 2 {
@@ -439,16 +452,22 @@ fn check_wire_edge_orientation(
     }
 
     let mut bad_count = 0;
-    let face_edge_map: HashMap<TopoId, &Edge> = face.edges.iter().map(|e| (e.id, e)).collect();
-    let effective_edge_map = if face_edge_map.is_empty() { edge_map } else { &face_edge_map };
+    // Per-face map (store-resolved instances) takes priority; the global
+    // map answers for faces without local edge data. Values are borrowed
+    // from whichever source wins.
+    let effective_edge_map: HashMap<TopoId, &Edge> = if face_edges.is_empty() {
+        edge_map.iter().map(|(&k, v)| (k, v)).collect()
+    } else {
+        face_edges.iter().map(|e| (e.id, e)).collect()
+    };
 
     for i in 0..n {
         let j = (i + 1) % n;
         let ce_i = &wire.coedges[i];
         let ce_j = &wire.coedges[j];
 
-        let end_pt_i = get_coedge_end_point_from(ce_i, effective_edge_map);
-        let start_pt_j = get_coedge_start_point_from(ce_j, effective_edge_map);
+        let end_pt_i = get_coedge_end_point_from(ce_i, &effective_edge_map);
+        let start_pt_j = get_coedge_start_point_from(ce_j, &effective_edge_map);
 
         match (end_pt_i, start_pt_j) {
             (Some(pi), Some(pj)) => {
@@ -466,8 +485,8 @@ fn check_wire_edge_orientation(
             }
             (None, _) | (_, None) => {
                 // Can't determine geometric points — try vertex IDs
-                let end_vid_i = get_coedge_end_vertex_from(ce_i, effective_edge_map);
-                let start_vid_j = get_coedge_start_vertex_from(ce_j, effective_edge_map);
+                let end_vid_i = get_coedge_end_vertex_from(ce_i, &effective_edge_map);
+                let start_vid_j = get_coedge_start_vertex_from(ce_j, &effective_edge_map);
                 if let (Some(vi), Some(vj)) = (end_vid_i, start_vid_j) {
                     if vi != vj {
                         bad_count += 1;
@@ -488,7 +507,7 @@ fn check_wire_edge_orientation(
 
 /// Get the start 3D point for a coedge using the provided edge map.
 fn get_coedge_start_point_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId, &'a Edge>) -> Option<Point3d> {
-    let edge = edge_map.get(&coedge.edge)?;
+    let edge = *edge_map.get(&coedge.edge)?;
     if coedge.forward {
         edge.start_point()
     } else {
@@ -498,7 +517,7 @@ fn get_coedge_start_point_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId
 
 /// Get the end 3D point for a coedge using the provided edge map.
 fn get_coedge_end_point_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId, &'a Edge>) -> Option<Point3d> {
-    let edge = edge_map.get(&coedge.edge)?;
+    let edge = *edge_map.get(&coedge.edge)?;
     if coedge.forward {
         edge.end_point()
     } else {
@@ -507,8 +526,8 @@ fn get_coedge_end_point_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId, 
 }
 
 /// Get the start vertex TopoId for a coedge using the provided edge map.
-fn get_coedge_start_vertex_from(coedge: &CoEdge, edge_map: &HashMap<TopoId, &Edge>) -> Option<TopoId> {
-    let edge = edge_map.get(&coedge.edge)?;
+fn get_coedge_start_vertex_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId, &'a Edge>) -> Option<TopoId> {
+    let edge = *edge_map.get(&coedge.edge)?;
     if coedge.forward {
         edge.vertex_start
     } else {
@@ -517,8 +536,8 @@ fn get_coedge_start_vertex_from(coedge: &CoEdge, edge_map: &HashMap<TopoId, &Edg
 }
 
 /// Get the end vertex TopoId for a coedge using the provided edge map.
-fn get_coedge_end_vertex_from(coedge: &CoEdge, edge_map: &HashMap<TopoId, &Edge>) -> Option<TopoId> {
-    let edge = edge_map.get(&coedge.edge)?;
+fn get_coedge_end_vertex_from<'a>(coedge: &CoEdge, edge_map: &'a HashMap<TopoId, &'a Edge>) -> Option<TopoId> {
+    let edge = *edge_map.get(&coedge.edge)?;
     if coedge.forward {
         edge.vertex_end
     } else {
@@ -545,52 +564,68 @@ fn get_coedge_end_vertex_from(coedge: &CoEdge, edge_map: &HashMap<TopoId, &Edge>
 pub fn heal_dangling_edges(solid: &mut Solid, tolerance: f64) -> usize {
     let mut healed = 0;
 
-    // Collect all edges with their face and wire locations
+    // ── Immutable analysis phase (C5 Stage 6: store-resolved, mirror-free) ──
+    // Phase 1: coedge counts by instance id + Phase 2: geometric index of
+    // instance-faithful edges (`Solid::instance_edges` — coedge instance
+    // keys for wired faces, canonical keys for wire-less ones). The
+    // per-face edge lists are cached for the mutation phase below so the
+    // `&mut shell` borrow never overlaps the store reads.
+    let (edge_coedge_count, edge_endpoints, face_edges_by_index, dangling_ids) = {
+        let shell = match solid.outer_shell.as_ref() {
+            Some(s) => s,
+            None => return 0,
+        };
+
+        // Phase 1: Build edge → coedge_count
+        let mut edge_coedge_count: HashMap<TopoId, usize> = HashMap::new();
+        for face in &shell.faces {
+            if let Some(ref wire) = face.outer_wire {
+                for coedge in &wire.coedges {
+                    *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
+                }
+            }
+            for wire in &face.inner_wires {
+                for coedge in &wire.coedges {
+                    *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
+                }
+            }
+        }
+
+        // Find dangling edges (1 coedge in closed shell)
+        if !shell.closed {
+            return 0; // No healing needed for open shells
+        }
+
+        let dangling_ids: Vec<TopoId> = edge_coedge_count.iter()
+            .filter(|(_, &count)| count == 1)
+            .map(|(&id, _)| id)
+            .collect();
+
+        if dangling_ids.is_empty() {
+            return 0;
+        }
+
+        // Phase 2: Build a geometric index of all edges (start/end points)
+        let mut edge_endpoints: HashMap<TopoId, (Point3d, Point3d)> = HashMap::new();
+        let mut face_edges_by_index: Vec<Vec<Edge>> = Vec::with_capacity(shell.faces.len());
+        for face in &shell.faces {
+            let edges = solid.instance_edges(face);
+            for edge in &edges {
+                if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
+                    edge_endpoints.entry(edge.id).or_insert((sp, ep));
+                }
+            }
+            face_edges_by_index.push(edges);
+        }
+
+        (edge_coedge_count, edge_endpoints, face_edges_by_index, dangling_ids)
+    };
+
+    // ── Phase 3 (mutation): For each dangling edge, find a matching partner ──
     let shell = match solid.outer_shell.as_mut() {
         Some(s) => s,
         None => return 0,
     };
-
-    // Phase 1: Build edge → (coedge_count, face_indices)
-    let mut edge_coedge_count: HashMap<TopoId, usize> = HashMap::new();
-    for face in &shell.faces {
-        if let Some(ref wire) = face.outer_wire {
-            for coedge in &wire.coedges {
-                *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
-            }
-        }
-        for wire in &face.inner_wires {
-            for coedge in &wire.coedges {
-                *edge_coedge_count.entry(coedge.edge).or_insert(0) += 1;
-            }
-        }
-    }
-
-    // Find dangling edges (1 coedge in closed shell)
-    if !shell.closed {
-        return 0; // No healing needed for open shells
-    }
-
-    let dangling_ids: Vec<TopoId> = edge_coedge_count.iter()
-        .filter(|(_, &count)| count == 1)
-        .map(|(&id, _)| id)
-        .collect();
-
-    if dangling_ids.is_empty() {
-        return 0;
-    }
-
-    // Phase 2: Build a geometric index of all edges (start/end points)
-    let mut edge_endpoints: HashMap<TopoId, (Point3d, Point3d)> = HashMap::new();
-    for face in &shell.faces {
-        for edge in &face.edges {
-            if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
-                edge_endpoints.entry(edge.id).or_insert((sp, ep));
-            }
-        }
-    }
-
-    // Phase 3: For each dangling edge, find a matching partner
     let tol_sq = tolerance * tolerance;
     for dangling_id in &dangling_ids {
         let (d_start, d_end) = match edge_endpoints.get(dangling_id) {
@@ -632,15 +667,25 @@ pub fn heal_dangling_edges(solid: &mut Solid, tolerance: f64) -> usize {
         if let Some((match_id, reversed)) = best_match {
             // Add a coedge referencing the dangling edge's TopoId in the face
             // that contains the matching edge.
-            for face in &mut shell.faces {
-                let face_has_match = face.edges.iter().any(|e| e.id == match_id);
+            for (face_i, face) in shell.faces.iter_mut().enumerate() {
+                // C5 Stage 6: membership check via the cached store-resolved
+                // instance list (coedge ids + wire-less canonical ids) —
+                // `face.edges` is not consulted for indexed faces.
+                let face_has_match = face_edges_by_index
+                    .get(face_i)
+                    .map(|edges| edges.iter().any(|e| e.id == match_id))
+                    .unwrap_or(false);
                 if !face_has_match {
                     continue;
                 }
 
                 // Find which wire contains the matching edge and add a coedge
                 // for the dangling edge in that wire.
-                let added = add_coedge_for_edge_in_face(face, *dangling_id, !reversed);
+                let face_edges = face_edges_by_index
+                    .get(face_i)
+                    .map(|v| v.as_slice())
+                    .unwrap_or(&[]);
+                let added = add_coedge_for_edge_in_face(face, *dangling_id, !reversed, face_edges);
                 if added {
                     healed += 1;
                     break;
@@ -664,7 +709,15 @@ pub fn heal_dangling_edges(solid: &mut Solid, tolerance: f64) -> usize {
 /// matches the new coedge's start vertex. If no matching position is
 /// found (e.g., wire is empty or has no vertex info), the coedge is
 /// appended at the end as a fallback.
-fn add_coedge_for_edge_in_face(face: &mut Face, edge_id: TopoId, forward: bool) -> bool {
+///
+/// C5 Stage 6: edge lookups use the caller-provided instance-faithful list
+/// (store-resolved by `heal_dangling_edges`) instead of `face.edges`.
+fn add_coedge_for_edge_in_face(
+    face: &mut Face,
+    edge_id: TopoId,
+    forward: bool,
+    face_edges: &[Edge],
+) -> bool {
     let mut new_coedge = CoEdge::new(edge_id, forward);
 
     // Try to find curve_2d from the target edge's face
@@ -674,7 +727,7 @@ fn add_coedge_for_edge_in_face(face: &mut Face, edge_id: TopoId, forward: bool) 
 
     // Look up the edge's start/end vertex points so we can find the
     // correct insertion position in the wire's end-to-start chain.
-    let (edge_start_pt, edge_end_pt) = face.edges.iter()
+    let (edge_start_pt, edge_end_pt) = face_edges.iter()
         .find(|e| e.id == edge_id)
         .map(|e| (e.start_vertex_point, e.end_vertex_point))
         .unwrap_or((None, None));
@@ -692,7 +745,7 @@ fn add_coedge_for_edge_in_face(face: &mut Face, edge_id: TopoId, forward: bool) 
             let mut best_pos: Option<usize> = None;
             for (i, coedge) in wire.coedges.iter().enumerate() {
                 // Look up this coedge's end vertex point
-                let coedge_end_pt = face.edges.iter()
+                let coedge_end_pt = face_edges.iter()
                     .find(|e| e.id == coedge.edge)
                     .and_then(|e| {
                         if coedge.forward {

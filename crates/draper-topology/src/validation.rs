@@ -61,12 +61,12 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
         return errors;
     }
 
-    if let Some(ref mut shell) = solid.outer_shell {
+    if let Some(ref shell) = solid.outer_shell {
         if shell.faces.is_empty() {
             errors.push(ValidationError::EmptyShell);
         }
 
-        for face in &mut shell.faces {
+        for face in &shell.faces {
             if face.surface.is_none() {
                 errors.push(ValidationError::MissingGeometry);
             }
@@ -76,31 +76,54 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
                     errors.push(ValidationError::DegenerateFace);
                 }
             }
+        }
+    }
 
-            // Check edges for degeneracy
-            for edge in &mut face.edges {
+    // Check edges for degeneracy.
+    //
+    // C5 Stage 6: detection runs over store-resolved instance-faithful
+    // edges and marking goes through the canonical `EdgeStore` entry
+    // (`store.get_mut`) + `sync_edge_mirrors` — the `heal_solid` pattern —
+    // instead of per-face mirror mutation. Works on mirror-free (Stage 5
+    // end-state) solids, and a shared degenerate edge is flagged once
+    // canonically for every incident face.
+    solid.index_edges();
+
+    let mut degenerate_ids: Vec<TopoId> = Vec::new();
+    if let Some(ref shell) = solid.outer_shell {
+        for face in &shell.faces {
+            for edge in solid.instance_edges(face) {
                 if !edge.degenerate {
-                    if let Some(ref curve) = edge.curve {
-                        if curve.is_degenerate(edge.tolerance) {
-                            edge.degenerate = true;
-                            errors.push(ValidationError::DegenerateEdge(edge.id));
-                        }
+                    let is_degen = if let Some(ref curve) = edge.curve {
+                        curve.is_degenerate(edge.tolerance)
                     } else {
                         // No curve geometry — check if start and end are coincident
                         if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
                             let dx = sp.x - ep.x;
                             let dy = sp.y - ep.y;
                             let dz = sp.z - ep.z;
-                            if (dx * dx + dy * dy + dz * dz) < edge.tolerance * edge.tolerance {
-                                edge.degenerate = true;
-                                errors.push(ValidationError::DegenerateEdge(edge.id));
-                            }
+                            (dx * dx + dy * dy + dz * dz) < edge.tolerance * edge.tolerance
+                        } else {
+                            false
                         }
+                    };
+                    if is_degen {
+                        degenerate_ids.push(edge.id);
                     }
                 }
             }
         }
     }
+
+    for id in degenerate_ids {
+        if let Some(canonical) = solid.edge_store.get_mut(id) {
+            if !canonical.degenerate {
+                canonical.degenerate = true;
+                errors.push(ValidationError::DegenerateEdge(id));
+            }
+        }
+    }
+    let _synced = solid.sync_edge_mirrors();
 
     errors
 }
@@ -130,7 +153,8 @@ pub fn validate_solid_readonly(solid: &Solid) -> Vec<ValidationError> {
                 }
             }
 
-            for edge in &face.edges {
+            // C5 Stage 6: store-resolved instance-faithful edges (mirror-free).
+            for edge in solid.instance_edges(face) {
                 if edge.degenerate {
                     errors.push(ValidationError::DegenerateEdge(edge.id));
                 } else if let Some(ref curve) = edge.curve {
@@ -186,12 +210,14 @@ pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
     // indexing.
     solid.index_edges();
 
-    // Detection pass (read-only over mirror instances — they carry the
-    // instance ids coedges reference).
+    // Detection pass (C5 Stage 6: store-resolved instance-faithful edges —
+    // coedge instance ids for wired faces, canonical ids for wire-less ones;
+    // works with mirrors cleared entirely). The ids feed the canonical
+    // mutation pass below (`get_mut` follows aliases).
     let mut degenerate_ids: Vec<TopoId> = Vec::new();
     if let Some(ref shell) = solid.outer_shell {
         for face in &shell.faces {
-            for edge in &face.edges {
+            for edge in solid.instance_edges(face) {
                 if !edge.degenerate {
                     let is_degen = if let Some(ref curve) = edge.curve {
                         curve.is_degenerate(edge.tolerance)
@@ -471,7 +497,7 @@ pub fn validate_topology(solid: &Solid, config: &TopologyValidationConfig) -> To
         .collect();
 
     for shell in &shells {
-        validate_shell_internal(shell, config, &mut report);
+        validate_shell_internal(shell, solid, config, &mut report);
     }
 
     report
@@ -480,6 +506,7 @@ pub fn validate_topology(solid: &Solid, config: &TopologyValidationConfig) -> To
 /// Validate a single shell with the given config.
 fn validate_shell_internal(
     shell: &Shell,
+    solid: &Solid,
     config: &TopologyValidationConfig,
     report: &mut TopologyValidationReport,
 ) {
@@ -511,7 +538,8 @@ fn validate_shell_internal(
             }
         }
         // Check for degenerate edges
-        for edge in &face.edges {
+        // (C5 Stage 6: store-resolved instance-faithful edges — mirror-free.)
+        for edge in solid.instance_edges(face) {
             if edge.degenerate {
                 report.add(ValidationIssue::info(
                     "DegenerateEdge",
@@ -524,7 +552,7 @@ fn validate_shell_internal(
 
     // Build the edge-to-coedge map for topology checks
     let edge_coedge_map = build_edge_coedge_map(shell);
-    let edge_map = build_edge_map(shell);
+    let edge_map = build_edge_map_store(solid, shell);
 
     // 3.4.1 Shell Closure
     if config.check_shell_closure {
@@ -553,7 +581,7 @@ fn validate_shell_internal(
 
     // 3.4.6 Loop Orientation
     if config.check_loop_orientation {
-        check_loop_orientation(shell, report);
+        check_loop_orientation(shell, &edge_map, report);
     }
 
     // 3.4.7 Geometric Consistency
@@ -615,11 +643,18 @@ fn build_edge_coedge_map(shell: &Shell) -> HashMap<TopoId, Vec<CoedgeInfo>> {
 }
 
 /// Build a map from edge TopoId → Edge object (first occurrence in the shell).
-fn build_edge_map(shell: &Shell) -> HashMap<TopoId, Edge> {
+///
+/// C5 Stage 6: entries resolve through the solid's canonical `EdgeStore` —
+/// instance-faithful OWNED edges (`Solid::instance_edges`): wire coedge
+/// references produce INSTANCE-id keys (the pre-C5 key space consumers
+/// look up), wire-less `edge_ids` references produce canonical-id keys.
+/// Un-indexed faces fall back to their mirrors, so the legacy behavior is
+/// preserved wholesale. The map stays correct with mirrors cleared.
+fn build_edge_map_store(solid: &Solid, shell: &Shell) -> HashMap<TopoId, Edge> {
     let mut map: HashMap<TopoId, Edge> = HashMap::new();
     for face in &shell.faces {
-        for edge in &face.edges {
-            map.entry(edge.id).or_insert_with(|| edge.clone());
+        for edge in solid.instance_edges(face) {
+            map.entry(edge.id).or_insert(edge);
         }
     }
     map
@@ -1082,7 +1117,11 @@ fn get_coedge_end_point(coedge: &CoEdge, edge_map: &HashMap<TopoId, Edge>) -> Op
 
 /// Check that the outer wire winds counter-clockwise and inner wires wind clockwise
 /// (when viewed from outside the surface).
-fn check_loop_orientation(shell: &Shell, report: &mut TopologyValidationReport) {
+fn check_loop_orientation(
+    shell: &Shell,
+    edge_map: &HashMap<TopoId, Edge>,
+    report: &mut TopologyValidationReport,
+) {
     for face in &shell.faces {
         let surface = match face.surface {
             Some(ref s) => s,
@@ -1092,7 +1131,7 @@ fn check_loop_orientation(shell: &Shell, report: &mut TopologyValidationReport) 
         // Check outer wire
         if let Some(ref wire) = face.outer_wire {
             if wire.coedges.len() >= 3 {
-                let winding = compute_wire_winding_3d(wire, surface, face);
+                let winding = compute_wire_winding_3d(wire, surface, edge_map, face.forward);
                 match winding {
                     WindingDirection::Clockwise => {
                         report.add(ValidationIssue::warning(
@@ -1117,7 +1156,7 @@ fn check_loop_orientation(shell: &Shell, report: &mut TopologyValidationReport) 
         // Check inner wires
         for wire in &face.inner_wires {
             if wire.coedges.len() >= 3 {
-                let winding = compute_wire_winding_3d(wire, surface, face);
+                let winding = compute_wire_winding_3d(wire, surface, edge_map, face.forward);
                 match winding {
                     WindingDirection::CounterClockwise => {
                         report.add(ValidationIssue::warning(
@@ -1151,13 +1190,18 @@ enum WindingDirection {
 
 /// Compute the winding direction of a wire by projecting onto the face's surface
 /// and computing the signed area in UV space.
-fn compute_wire_winding_3d(wire: &Wire, surface: &Surface, face: &Face) -> WindingDirection {
-    // Collect 3D points from the wire's coedges using the face's edge map
-    let edge_map: HashMap<TopoId, Edge> = face.edges.iter().map(|e| (e.id, e.clone())).collect();
-
+///
+/// C5 Stage 6: the edge map comes from the caller (`build_edge_map_store`,
+/// store-resolved) instead of being rebuilt from `face.edges`.
+fn compute_wire_winding_3d(
+    wire: &Wire,
+    surface: &Surface,
+    edge_map: &HashMap<TopoId, Edge>,
+    face_forward: bool,
+) -> WindingDirection {
     let mut points_3d: Vec<Point3d> = Vec::new();
     for coedge in &wire.coedges {
-        if let Some(pt) = get_coedge_start_point(coedge, &edge_map) {
+        if let Some(pt) = get_coedge_start_point(coedge, edge_map) {
             points_3d.push(pt);
         }
     }
@@ -1181,7 +1225,7 @@ fn compute_wire_winding_3d(wire: &Wire, surface: &Surface, face: &Face) -> Windi
 
     // In standard UV space, positive signed area = CCW, negative = CW
     // But we need to account for the face's forward flag
-    let effective_area = if face.forward { signed_area } else { -signed_area };
+    let effective_area = if face_forward { signed_area } else { -signed_area };
 
     if effective_area > 0.0 {
         WindingDirection::CounterClockwise

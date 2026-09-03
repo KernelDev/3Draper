@@ -50,27 +50,29 @@ impl QueryMesh {
 fn triangulate_solid_for_queries(solid: &Solid) -> QueryMesh {
     let mut mesh = QueryMesh::new();
     for face in solid.faces() {
-        let face_mesh = triangulate_face_for_queries(face);
+        // C5 Stage 6: instance-faithful store-resolved edges (mirror-free).
+        let edges = solid.instance_edges(face);
+        let face_mesh = triangulate_face_for_queries(face, &edges);
         mesh.merge(&face_mesh);
     }
     mesh
 }
 
 /// Triangulate a single face for analytical queries.
-fn triangulate_face_for_queries(face: &Face) -> QueryMesh {
+fn triangulate_face_for_queries(face: &Face, edges: &[Edge]) -> QueryMesh {
     let surface = match &face.surface {
         Some(s) => s,
         None => return QueryMesh::new(),
     };
 
     match surface {
-        Surface::Plane(plane) => triangulate_planar_face_query(face, plane),
-        Surface::Cylinder(cyl) => triangulate_cylinder_face_query(face, cyl),
-        Surface::Sphere(sphere) => triangulate_sphere_face_query(face, sphere),
-        Surface::Cone(cone) => triangulate_cone_face_query(face, cone),
+        Surface::Plane(plane) => triangulate_planar_face_query(face, edges, plane),
+        Surface::Cylinder(cyl) => triangulate_cylinder_face_query(face, edges, cyl),
+        Surface::Sphere(sphere) => triangulate_sphere_face_query(sphere),
+        Surface::Cone(cone) => triangulate_cone_face_query(face, edges, cone),
         _ => {
             // Fallback: try to sample the surface on a grid
-            triangulate_generic_face_query(face, surface)
+            triangulate_generic_face_query(face, edges, surface)
         }
     }
 }
@@ -78,12 +80,15 @@ fn triangulate_face_for_queries(face: &Face) -> QueryMesh {
 /// Collect boundary points from a face's outer wire.
 /// For straight edges, only keeps the start point to avoid redundant
 /// collinear points. The end point of the last edge closes the loop.
-fn collect_boundary_points(face: &Face) -> Vec<Point3d> {
+fn collect_boundary_points(face: &Face, edges: &[Edge]) -> Vec<Point3d> {
     let mut points = Vec::new();
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            // C5 Stage 4: encapsulated mirror lookup (see Face::edge_by_id).
-            if let Some(edge) = face.edge_by_id(coedge.edge) {
+            // C5 Stage 6: lookup in the caller-provided instance-faithful
+            // list (store-resolved by `triangulate_solid_for_queries` —
+            // keyed by the coedge instance ids) instead of `face.edge_by_id`
+            // scanning the mirrors.
+            if let Some(edge) = edges.iter().find(|e| e.id == coedge.edge) {
                 if edge.degenerate {
                     continue;
                 }
@@ -178,8 +183,8 @@ fn deduplicate_points(points: &mut Vec<Point3d>) {
     *points = unique;
 }
 
-fn triangulate_planar_face_query(face: &Face, _plane: &Plane) -> QueryMesh {
-    let boundary = collect_boundary_points(face);
+fn triangulate_planar_face_query(face: &Face, edges: &[Edge], _plane: &Plane) -> QueryMesh {
+    let boundary = collect_boundary_points(face, edges);
     if boundary.len() < 3 {
         return QueryMesh::new();
     }
@@ -201,9 +206,9 @@ fn triangulate_planar_face_query(face: &Face, _plane: &Plane) -> QueryMesh {
     mesh
 }
 
-fn triangulate_cylinder_face_query(face: &Face, cyl: &CylinderSurface) -> QueryMesh {
+fn triangulate_cylinder_face_query(face: &Face, edges: &[Edge], cyl: &CylinderSurface) -> QueryMesh {
     // Determine v range from edges
-    let (v_min, v_max) = compute_cylinder_v_range(face, cyl);
+    let (v_min, v_max) = compute_cylinder_v_range(edges, cyl);
     let n_u = 64;
     let n_v = 16;
 
@@ -236,11 +241,11 @@ fn triangulate_cylinder_face_query(face: &Face, cyl: &CylinderSurface) -> QueryM
     mesh
 }
 
-fn compute_cylinder_v_range(face: &Face, cyl: &CylinderSurface) -> (f64, f64) {
+fn compute_cylinder_v_range(edges: &[Edge], cyl: &CylinderSurface) -> (f64, f64) {
     let mut v_min = 0.0_f64;
     let mut v_max = 0.0_f64;
     let mut initialized = false;
-    for edge in &face.edges {
+    for edge in edges {
         for i in 0..32 {
             let t = i as f64 / 32.0;
             if let Some(p) = edge.point_at(t) {
@@ -263,7 +268,7 @@ fn compute_cylinder_v_range(face: &Face, cyl: &CylinderSurface) -> (f64, f64) {
     (v_min, v_max)
 }
 
-fn triangulate_sphere_face_query(_face: &Face, sphere: &SphereSurface) -> QueryMesh {
+fn triangulate_sphere_face_query(sphere: &SphereSurface) -> QueryMesh {
     let n_u = 64;
     let n_v = 32;
     let mut mesh = QueryMesh::new();
@@ -301,8 +306,8 @@ fn triangulate_sphere_face_query(_face: &Face, sphere: &SphereSurface) -> QueryM
     mesh
 }
 
-fn triangulate_cone_face_query(face: &Face, cone: &ConeSurface) -> QueryMesh {
-    let (v_min, v_max) = compute_cone_v_range(face, cone);
+fn triangulate_cone_face_query(face: &Face, edges: &[Edge], cone: &ConeSurface) -> QueryMesh {
+    let (v_min, v_max) = compute_cone_v_range(edges, cone);
     let n_u = 64;
     let n_v = 16;
     let mut mesh = QueryMesh::new();
@@ -335,11 +340,11 @@ fn triangulate_cone_face_query(face: &Face, cone: &ConeSurface) -> QueryMesh {
     mesh
 }
 
-fn compute_cone_v_range(face: &Face, cone: &ConeSurface) -> (f64, f64) {
+fn compute_cone_v_range(edges: &[Edge], cone: &ConeSurface) -> (f64, f64) {
     let mut v_min = 0.0_f64;
     let mut v_max = 0.0_f64;
     let mut initialized = false;
-    for edge in &face.edges {
+    for edge in edges {
         for i in 0..32 {
             let t = i as f64 / 32.0;
             if let Some(p) = edge.point_at(t) {
@@ -362,9 +367,9 @@ fn compute_cone_v_range(face: &Face, cone: &ConeSurface) -> (f64, f64) {
     (v_min, v_max)
 }
 
-fn triangulate_generic_face_query(face: &Face, surface: &Surface) -> QueryMesh {
+fn triangulate_generic_face_query(face: &Face, edges: &[Edge], surface: &Surface) -> QueryMesh {
     // Try to collect boundary points for a rough triangulation
-    let boundary = collect_boundary_points(face);
+    let boundary = collect_boundary_points(face, edges);
     if boundary.len() >= 3 {
         // Assume planar-ish — fan triangulate
         let mut mesh = QueryMesh::new();

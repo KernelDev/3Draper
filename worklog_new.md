@@ -1882,3 +1882,128 @@ sandbox (коммиты d14af6e/7f992fa не существуют в истор�
 
 - перебейзнут на 8fe8c3f; хэш см. `git log` (refactor(core): C5 stage
   5.3 — instance orientation in EdgeStore + mirror-free store path)
+
+---
+
+# Worklog — C5 Stage 6.1: mirror-free validation/queries (read-path migration) (2026-09-03)
+
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `220828d` (после C5 Stage 5.3 — instance orientation in EdgeStore)
+**Задача:** первый под-шаг Stage 6 («физически выпилить поле Face.edges»):
+перевод валидации/запросов/healing-потребителей на store-путь — работа
+без зеркал становится контрактом, верифицируемым регрессионно
+
+## Статус входа
+
+- HEAD = 220828d, пуш синхронен с origin/main, дерево чистое
+- Stage 5.1–5.3 завершены (explicit-edge mesh API + canonical-store staging
+  + instance orientation in EdgeStore); блокер Stage 6 снят
+- Инвентаризация `face.edges`: ~180 использований; концентраты —
+  healing (33), edge_store (21 — легитимная механика), core/operations (18),
+  boolean (16), triangulate (16 — Stage 5 API), validation/validator (27),
+  builder (10 — легитимные создатели)
+
+## 1 — Примитивы топологии (edge_store.rs)
+
+- **`EdgeStore::instance_edge(instance_id) -> Option<Edge>`** — идиома
+  Stage 5.3 из mesh (`resolve → reversed()? → re-key на instance id`),
+  поднятая в topology: каноническое ребро с ориентацией инстанса
+- **`Solid::instance_edges(face) -> Vec<Edge>`** — instance-faithful список
+  STRICT-политики ключей: (1) коedge'и проводов → instance-id ключи
+  (pre-C5 пространство ключей потребителей); (2) edge_ids без коedge
+  (wire-less грани) → canonical-id ключи; (3) un-indexed → зеркала целиком.
+  Дубликатов canonical-ключей для проводных shared-рёбер НЕТ —
+  целые-карты потребители (vertex-count, Euler) видят ровно один entry
+  на инстанс, как в зеркалах. НЕ читает `face.edges` при непустых edge_ids
+- **Serde: `instance_reversed` в on-wire формате** (`Vec<(TopoId, bool)>`,
+  только true-флаги, `#[serde(default)]` → legacy-пейлоады грузятся
+  losslessly). До этого флаг терялся при round-trip → mirror-free solid
+  не мог восстановить ориентацию инстансов
+- **`index_edges` Pass 0 — preservation mirror-free состояний**: грани с
+  пустыми зеркалами и непустыми edge_ids более НЕ стирают store при
+  ре-индексации (прежнее поведение: `self.edge_store = store` с пустым
+  сканом = потеря сериализованной идентичности). Сохранённые канонические
+  рёбра ре-сеются + регистрируют identity-ключи (step/geom), зеркальные
+  инстансы того же shared-ребра дедуплицируются в них
+- **Pass 1a/1a' — перенос флагов и алиасов**: instance_reversed для
+  не-отсканированных инстансов (коedge-only на очищенных гранях,
+  self-canonical); алиасы старого стора для инстансов без свежего скана
+  (fresh dedup побеждает). Pass 1b пере-выводит и перезаписывает при
+  наличии зеркал — мутировавшие зеркала выигрывают
+
+## 2 — Миграция потребителей (validation.rs / validator.rs / queries.rs)
+
+- `validate_solid` (mut): heal_solid-паттерн — index_edges → детекция по
+  instance_edges → `get_mut` (каноническая метка дегенерации) →
+  sync_edge_mirrors; shared дегенерат помечается один раз канонически
+- `validate_solid_readonly`, `validate_topology` (per-shell degenerate
+  check), `validate_brep` (edge_map + vertex_set), 
+  `validate_tolerance_consistency`, `heal_solid` (детекция): итерация по
+  `solid.instance_edges(face)`
+- `build_edge_map(shell)` → **`build_edge_map_store(solid, shell)`** —
+  та же семантика ключей (instance ids), значения из стора; un-indexed —
+  зеркальный fallback
+- `check_loop_orientation`/`compute_wire_winding_3d`: edge_map тредится
+  сверху (не пересобирается из face.edges); сигнатура
+  `compute_wire_winding_3d(wire, surface, edge_map, face_forward)`
+- `heal_dangling_edges`: реструктурирован в две фазы — (a) неизменяемый
+  анализ (coedge counts + геометрический индекс по instance_edges, кэш
+  per-face списков), (b) мутация (add_coedge с переданным списком).
+  Заимствования store/`&mut shell` более не конфликтуют
+- queries: `triangulate_solid_for_queries` резолвит instance_edges per
+  face, слайс тредится через triangulate_face_for_queries →
+  planar/cylinder/cone/generic → collect_boundary_points /
+  compute_*_v_range. `face.edge_by_id(coedge.edge)` заменён на lookup
+  в переданном списке
+
+## 3 — Тесты
+
+- **edge_store unit (+5)**: `test_instance_edge_rebuilds_orientation`
+  (reversed/forward инстансы — идентичная последовательность точек +
+  поля), `test_serde_roundtrip_preserves_instance_reversed`,
+  `test_index_edges_preserves_mirror_free_store` (store/aliases/edge_ids/
+  by_step_id/флаги выживают при ре-индексации очищенного solid'а),
+  `test_instance_edges_strict_key_space` (коedge→instance, wire-less→
+  canonical, un-indexed→mirrors)
+- **Интеграционные (`tests/mirror_free_validation_test.rs`, +3)**:
+  box / cylinder / sphere / box−cylinder (алиасы + reversed-инстансы):
+  - валидационные отчёты (validate_brep с counters+sorted issues,
+    validate_topology, validate_tolerance_consistency,
+    validate_solid_readonly) с зеркалами == с полностью очищенными
+    зеркалами — ПОЭЛЕМЕНТНО
+  - validate_solid (mut) + heal_solid: одинаковые errors/fixes +
+    сохранность стора (Pass 0)
+  - analytical queries (volume/area/bbox) бит-идентичны
+  (HashMap-недетерминизм insertion-order обходится sorted-fingerprint)
+
+## Верификация
+
+- draper-topology: **205 lib** (+serde) / 202 (default) + 17 + 11 +
+  **3 новых** ✅
+- draper-mesh: 268 + все integration (вкл. 13 explicit-edge) ✅
+- draper-core: 74 + 2 ✅; draper-geometry: 210 ✅; draper-json: 13 ✅
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors;
+  `cargo check -p draper-step --tests --features serde` — 0 errors
+- Диск: 4.2G free, incremental почищен
+
+## Осталось (Stage 6.2+)
+
+- Читатели boolean.rs (topology, 12 сайтов: boundary sampling с
+  автономными гранями) — трединг instance-edges от solid-aware входов
+- healing.rs (33 сайта, Shell-уровень без стора — дизайн: store параметр
+  или перенос в Solid-методы)
+- core/operations.rs (18), viewer/app.rs (5 читателей), ffi/wasm/json,
+  step exporter (`emit_wire_as_bound(outer, &face.edges)`)
+- mesh `collect_instance_edges` → делегирование `Solid::instance_edges`
+  (DRY; mesh-версия дополнительно кладёт canonical-дубликаты — инертны
+  для триангуляции, но семантика ключей отличается от strict-политики)
+- Физическое удаление поля `Face.edges` после обнуления писателей
+  (builder/boolean/fillet/chamfer-конструкция + sync_edge_mirrors)
+- Известный угол (унаследован): curve-less preserved canonical + поздний
+  зеркальный инстанс с кривой не унифицируются (нет geom-ключа на
+  preserved стороне)
+
+## Коммит
+
+- (см. git log) refactor(core): C5 stage 6.1 — mirror-free
+  validation/queries via EdgeStore instances

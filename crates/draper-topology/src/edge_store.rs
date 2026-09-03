@@ -365,6 +365,14 @@ mod serde_impl {
         aliases: Vec<(TopoId, TopoId)>,
         /// (STEP entity id, canonical TopoId) index pairs.
         by_step_id: Vec<(i64, TopoId)>,
+        /// (instance TopoId, reversed) orientation flags (C5 Stage 6).
+        /// Only `true` flags are stored — `false` is the un-recorded default,
+        /// so legacy payloads (field absent) load losslessly. Without this
+        /// field the serialized store would lose instance traversal
+        /// directions, and a mirror-free (Stage 5 end-state) solid could not
+        /// rebuild instance-faithful edges after a round-trip.
+        #[serde(default)]
+        instance_reversed: Vec<(TopoId, bool)>,
     }
 
     impl From<&EdgeStore> for EdgeStoreData {
@@ -377,7 +385,13 @@ mod serde_impl {
             let mut by_step_id: Vec<(i64, TopoId)> =
                 store.by_step_id.iter().map(|(&k, &v)| (k, v)).collect();
             by_step_id.sort();
-            Self { edges, aliases, by_step_id }
+            let mut instance_reversed: Vec<(TopoId, bool)> = store
+                .instance_reversed
+                .iter()
+                .map(|(&k, &v)| (k, v))
+                .collect();
+            instance_reversed.sort();
+            Self { edges, aliases, by_step_id, instance_reversed }
         }
     }
 
@@ -398,6 +412,11 @@ mod serde_impl {
             }
             for (step_id, canonical) in data.by_step_id {
                 store.by_step_id.entry(step_id).or_insert(canonical);
+            }
+            for (instance, reversed) in data.instance_reversed {
+                if reversed {
+                    store.instance_reversed.insert(instance, true);
+                }
             }
             store
         }
@@ -460,6 +479,33 @@ impl EdgeStore {
             .get(&id)
             .copied()
             .unwrap_or(false)
+    }
+
+    /// Instance-faithful OWNED edge for `instance_id` (C5 Stage 6 building
+    /// block): the canonical edge resolved through aliases, re-keyed to the
+    /// instance id, and reversed when [`EdgeStore::instance_is_reversed`]
+    /// recorded that the instance traverses the canonical curve backwards.
+    ///
+    /// This reproduces the per-face mirror instance (`face.edges[i]`) from
+    /// store data alone — the same idiom the C5 Stage 5.3 mesh path uses
+    /// (`collect_instance_edges`), promoted into the topology crate so
+    /// validation / queries / healing consumers can rebuild instances
+    /// without consulting mirrors. Orientation-INDEPENDENT fields
+    /// (`degenerate`, `tolerance`, `step_entity_id`, `curve`) come from the
+    /// canonical edge; orientation-dependent ones (`param_range`, `forward`,
+    /// vertex ids/points) reflect the recorded instance direction.
+    ///
+    /// Returns `None` when the id is unknown to the store (un-indexed
+    /// solids) — callers fall back to `Face::edge_by_id` / mirrors there.
+    pub fn instance_edge(&self, instance_id: TopoId) -> Option<Edge> {
+        let edge = self.get(instance_id)?;
+        let mut instance = if self.instance_is_reversed(instance_id) {
+            edge.reversed()
+        } else {
+            edge.clone()
+        };
+        instance.id = instance_id;
+        Some(instance)
     }
 
     /// Resolve an edge id (instance or canonical) to its canonical TopoId.
@@ -558,6 +604,14 @@ impl Solid {
     ///
     /// Non-breaking: per-face `Face.edges` mirrors are left untouched, so all
     /// existing consumers behave exactly as before.
+    ///
+    /// C5 Stage 6: mirror-free faces (cleared mirrors — the Stage 5 end-state
+    /// of serialized store-only solids) are PRESERVED: their `edge_ids`
+    /// references resolve through the old store and re-seed the new one, so
+    /// re-indexing no longer wipes the serialized identity. Orientation flags
+    /// recorded for instances without mirrors (wire-less or coedge-only)
+    /// carry over; Pass 1b re-derives them deterministically wherever mirrors
+    /// are still present.
     pub fn index_edges(&mut self) -> EdgeDedupReport {
         let mut store = EdgeStore::new();
         let mut report = EdgeDedupReport::default();
@@ -568,6 +622,70 @@ impl Solid {
         // Per-face canonical id lists, parallel to shells/faces order.
         let mut face_edge_ids: Vec<Vec<TopoId>> = Vec::new();
 
+        // ── Pass 0 (C5 Stage 6): preserve mirror-free faces ────────
+        // Faces whose mirrors were cleared carry their identity in
+        // `edge_ids`; rebuilding from mirrors alone would wipe the store.
+        // Pre-seed the new store with the preserved canonical edges and
+        // register their identity keys so mirror instances of the same
+        // shared edge dedup into them. Known corner: a curve-less preserved
+        // canonical followed by a mirror with a curve does NOT unify (no
+        // geometric key on the preserved side) — same limitation as the
+        // Pass 1 curve-upgrade ordering.
+        let mut preserved_face_ids: HashMap<(usize, usize), Vec<TopoId>> = HashMap::new();
+        // Orientation flags recorded for instances that have no mirrors to
+        // re-derive from (carried over before Pass 1b).
+        let carried_flags: Vec<(TopoId, bool)> = self
+            .edge_store
+            .instance_reversed
+            .iter()
+            .map(|(&k, &v)| (k, v))
+            .collect();
+        // Aliases of the OLD store — carried over after Pass 1 for instance
+        // ids that were NOT freshly scanned (mirror-free references, e.g.
+        // coedge ids on a cleared face), so `get(instance_id)` keeps
+        // resolving for store-only consumers.
+        let carried_aliases: Vec<(TopoId, TopoId)> = self.edge_store.iter_aliases().collect();
+        {
+            let mut shells_ref: Vec<&Shell> = Vec::new();
+            if let Some(ref shell) = self.outer_shell {
+                shells_ref.push(shell);
+            }
+            for shell in &self.inner_shells {
+                shells_ref.push(shell);
+            }
+            for (shell_i, shell) in shells_ref.iter().enumerate() {
+                for (face_i, face) in shell.faces.iter().enumerate() {
+                    if !face.edges.is_empty() || face.edge_ids.is_empty() {
+                        continue; // normal face — scanned from mirrors below
+                    }
+                    let mut ids = Vec::with_capacity(face.edge_ids.len());
+                    for &id in &face.edge_ids {
+                        let Some(preserved) = self.edge_store.get(id) else {
+                            continue; // unresolvable reference — drop it
+                        };
+                        let canonical_id = self.edge_store.canonical_of(id);
+                        if store.get_canonical(canonical_id).is_none() {
+                            let mut entry = preserved.clone();
+                            entry.id = canonical_id;
+                            if let Some(step_id) = entry.step_entity_id {
+                                seen_step.insert(step_id, canonical_id);
+                                store.by_step_id.insert(step_id, canonical_id);
+                            }
+                            if let Some(key) = geom_edge_key(&entry) {
+                                seen_geom.insert(key, canonical_id);
+                            }
+                            store.edges.insert(canonical_id, entry);
+                        }
+                        ids.push(canonical_id);
+                        report.total_instances += 1;
+                    }
+                    if !ids.is_empty() {
+                        preserved_face_ids.insert((shell_i, face_i), ids);
+                    }
+                }
+            }
+        }
+
         // ── Pass 1: collect canonical edges + alias map ──────────────────
         let mut shells: Vec<&mut Shell> = Vec::new();
         if let Some(ref mut shell) = self.outer_shell {
@@ -576,10 +694,20 @@ impl Solid {
         for shell in &mut self.inner_shells {
             shells.push(shell);
         }
-        for shell in shells.iter_mut() {
-            for face in shell.faces.iter_mut() {
+        // Instance ids freshly scanned from mirrors — their aliases are
+        // re-derived below; only UN-scanned ids get the old-store aliases
+        // carried over (fresh dedup wins).
+        let mut scanned_instance_ids: std::collections::HashSet<TopoId> =
+            std::collections::HashSet::new();
+        for (shell_i, shell) in shells.iter_mut().enumerate() {
+            for (face_i, face) in shell.faces.iter_mut().enumerate() {
+                if let Some(ids) = preserved_face_ids.get(&(shell_i, face_i)) {
+                    face_edge_ids.push(ids.clone());
+                    continue;
+                }
                 let mut canonical_ids = Vec::with_capacity(face.edges.len());
                 for edge in &face.edges {
+                    scanned_instance_ids.insert(edge.id);
                     report.total_instances += 1;
                     let canonical_id = if let Some(step_id) = edge.step_entity_id {
                         match seen_step.get(&step_id) {
@@ -632,6 +760,28 @@ impl Solid {
                     }
                 }
                 face_edge_ids.push(canonical_ids);
+            }
+        }
+
+        // ── Pass 1a: carry over orientation flags for mirror-free ────
+        // instances (coedge-only references on cleared faces, self-canonical
+        // edges). Pass 1b re-derives and OVERRIDES these wherever mirrors are
+        // still present, so mutated mirrors win.
+        for (instance, reversed) in carried_flags {
+            if reversed {
+                store.set_instance_reversed(instance, true);
+            }
+        }
+
+        // ── Pass 1a': carry over aliases for un-scanned instances ──────
+        // Mirror-free references (coedge ids on cleared faces) resolve via
+        // these carried aliases; instances freshly scanned from mirrors keep
+        // their freshly derived alias (fresh dedup wins).
+        for (instance, canonical) in carried_aliases {
+            if !scanned_instance_ids.contains(&instance)
+                && store.get_canonical(canonical).is_some()
+            {
+                store.add_alias(instance, canonical);
             }
         }
 
@@ -863,6 +1013,77 @@ impl Solid {
         } else {
             face.edges.iter().collect()
         }
+    }
+
+    /// Instance-faithful OWNED edge list of `face`, keyed in the INSTANCE id
+    /// space (C5 Stage 6 read API — mirror-free validation/queries/healing).
+    ///
+    /// Unlike [`Solid::face_edges`] (canonical values under `edge_ids`
+    /// keys), this rebuilds per-face instances the way the mirrors encoded
+    /// them, using only store data:
+    ///
+    /// 1. Wire coedges (outer + inner): `coedge.edge` resolves through the
+    ///    store and is re-keyed to the coedge's instance id, reversed when
+    ///    `EdgeStore::instance_is_reversed` marked the instance as running
+    ///    the canonical curve backwards.
+    /// 2. `edge_ids` entries whose canonical id no coedge of this face
+    ///    resolves to (wire-less faces, e.g. the lateral face of a
+    ///    cylinder): the canonical edge, keyed by the canonical id — the
+    ///    Stage 6 id space for wire-less references.
+    ///
+    /// Faces that were never indexed (`edge_ids` empty) fall back to their
+    /// per-face mirrors — the pre-C5 semantics. The list NEVER reads
+    /// `face.edges` when `edge_ids` is non-empty, so it stays correct on
+    /// mirror-free (Stage 5 end-state) solids and ignores mirror drift.
+    ///
+    /// This is the topology-crate twin of draper-mesh's
+    /// `collect_instance_edges` (Stage 5.3), with a STRICT key-space policy:
+    /// no canonical-keyed duplicates for wired shared edges, so whole-map
+    /// consumers (vertex-counting, Euler characteristic) see exactly one
+    /// entry per instance, as the mirrors did.
+    pub fn instance_edges(&self, face: &Face) -> Vec<Edge> {
+        if face.edge_ids.is_empty() {
+            return face.edges.clone();
+        }
+        let mut owned: Vec<Edge> = Vec::new();
+        let mut seen_ids: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
+        let mut seen_canonicals: std::collections::HashSet<TopoId> =
+            std::collections::HashSet::new();
+
+        let mut push_instance = |id: TopoId| {
+            if !seen_ids.insert(id) {
+                return;
+            }
+            if let Some(instance) = self.edge_store.instance_edge(id) {
+                seen_canonicals.insert(self.edge_store.canonical_of(id));
+                owned.push(instance);
+            }
+        };
+
+        // 1. Wire coedges — instance id space.
+        if let Some(ref wire) = face.outer_wire {
+            for coedge in &wire.coedges {
+                push_instance(coedge.edge);
+            }
+        }
+        for wire in &face.inner_wires {
+            for coedge in &wire.coedges {
+                push_instance(coedge.edge);
+            }
+        }
+
+        // 2. Wire-less / unreferenced edge_ids — canonical id space.
+        for &id in &face.edge_ids {
+            if !seen_canonicals.contains(&id) {
+                if let Some(instance) = self.edge_store.instance_edge(id) {
+                    if seen_ids.insert(id) {
+                        owned.push(instance);
+                    }
+                }
+            }
+        }
+
+        owned
     }
 
     /// Propagate canonical edge field fixes onto the per-face `edges`
@@ -1605,5 +1826,200 @@ mod tests {
             loaded.edge_store.find_by_step_id(70).is_some(),
             "rebuilt store indexes STEP ids"
         );
+    }
+
+    // ============================================================
+    // C5 Stage 6.1 — instance_edge / instance_edges / preservation
+    // ============================================================
+
+    /// Two faces share STEP edge 70; face B's instance runs it backwards.
+    fn opposite_shared_solid() -> Solid {
+        let face_a = square_face(&[Some(70)]);
+        let mut face_b = square_face(&[]);
+        let mut reversed_instance = line_edge(
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(0.0, 0.0, 0.0),
+            Some(70),
+        );
+        reversed_instance.id = TopoId::new();
+        face_b.edges = vec![reversed_instance];
+        solid_of(vec![face_a, face_b])
+    }
+
+    #[test]
+    fn test_instance_edge_rebuilds_orientation() {
+        let mut solid = opposite_shared_solid();
+        solid.index_edges();
+
+        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        let mirror_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].clone();
+        assert!(
+            solid.edge_store.instance_is_reversed(instance_b),
+            "fixture: opposite-direction instance must be flagged"
+        );
+
+        // The store rebuilds the instance's traversal from store data alone:
+        // re-keyed id + swapped orientation + identical point sequence.
+        let rebuilt = solid.edge_store.instance_edge(instance_b).unwrap();
+        assert_eq!(rebuilt.id, instance_b, "re-keyed to the instance id");
+        assert_eq!(rebuilt.start_vertex_point, mirror_b.start_vertex_point);
+        assert_eq!(rebuilt.end_vertex_point, mirror_b.end_vertex_point);
+        for i in 0..=8 {
+            let t = i as f64 / 8.0;
+            let expected = mirror_b.point_at(t).expect("mirror point");
+            let actual = rebuilt.point_at(t).expect("rebuilt point");
+            let d = expected.distance_to(&actual);
+            assert!(d < 1e-12, "point_at({t}) diverged by {d}");
+        }
+
+        // The forward (first-occurrence) instance rebuilds field-identically.
+        let instance_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].id;
+        let mirror_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].clone();
+        let rebuilt_a = solid.edge_store.instance_edge(instance_a).unwrap();
+        assert_eq!(rebuilt_a.id, instance_a);
+        assert_eq!(rebuilt_a.param_range, mirror_a.param_range);
+        assert_eq!(rebuilt_a.curve.is_some(), mirror_a.curve.is_some());
+        assert_eq!(rebuilt_a.start_vertex_point, mirror_a.start_vertex_point);
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_serde_roundtrip_preserves_instance_reversed() {
+        let mut solid = opposite_shared_solid();
+        solid.index_edges();
+        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        assert!(solid.edge_store.instance_is_reversed(instance_b));
+
+        let json = serde_json::to_string(&solid).expect("serialize");
+        let loaded: Solid = serde_json::from_str(&json).expect("deserialize");
+
+        // C5 Stage 6: the orientation flag is part of the on-wire format —
+        // a mirror-free solid rebuilt from this payload keeps correct
+        // instance traversal directions.
+        assert!(
+            loaded.edge_store.instance_is_reversed(instance_b),
+            "instance_reversed flag lost in round-trip"
+        );
+        let rebuilt = loaded.edge_store.instance_edge(instance_b).unwrap();
+        let expected_start = solid
+            .edge_store
+            .instance_edge(instance_b)
+            .unwrap()
+            .start_vertex_point;
+        assert_eq!(rebuilt.start_vertex_point, expected_start);
+    }
+
+    #[test]
+    fn test_index_edges_preserves_mirror_free_store() {
+        let mut solid = opposite_shared_solid();
+        let report = solid.index_edges();
+        assert_eq!(report.deduplicated, 1);
+
+        let store_len_before = solid.edge_store.len();
+        let alias_before: Vec<(TopoId, TopoId)> =
+            solid.edge_store.iter_aliases().collect();
+        assert!(!alias_before.is_empty());
+
+        // Clear every mirror (the Stage 5 end-state).
+        for face in solid.outer_shell.as_mut().unwrap().faces.iter_mut() {
+            face.edges.clear();
+        }
+        let edge_ids_before: Vec<Vec<TopoId>> = solid
+            .outer_shell
+            .as_ref()
+            .unwrap()
+            .faces
+            .iter()
+            .map(|f| f.edge_ids.clone())
+            .collect();
+
+        // Re-index: must PRESERVE the serialized store (Pass 0) instead of
+        // wiping it by rebuilding from the (now absent) mirrors.
+        solid.index_edges();
+        assert_eq!(
+            solid.edge_store.len(),
+            store_len_before,
+            "store must survive re-indexing of a mirror-free solid"
+        );
+        let alias_after: Vec<(TopoId, TopoId)> = solid.edge_store.iter_aliases().collect();
+        assert_eq!(alias_before.len(), alias_after.len());
+        assert_eq!(
+            solid
+                .outer_shell
+                .as_ref()
+                .unwrap()
+                .faces
+                .iter()
+                .map(|f| f.edge_ids.clone())
+                .collect::<Vec<_>>(),
+            edge_ids_before,
+            "face edge_ids must survive re-indexing"
+        );
+        assert!(
+            solid.edge_store.find_by_step_id(70).is_some(),
+            "by_step_id index must survive re-indexing"
+        );
+
+        // The read APIs still answer, and instance orientation is carried
+        // over for the mirror-free instances (Pass 1a flag carry-over).
+        let instance_b = alias_before[0].0;
+        assert!(
+            solid.edge_store.instance_is_reversed(instance_b)
+                || solid.edge_store.instance_is_reversed(alias_before[0].1),
+            "orientation flags must carry over the rebuild"
+        );
+        let face = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let edges = solid.instance_edges(face);
+        assert!(!edges.is_empty(), "instance_edges must answer mirror-free");
+        assert!(solid.resolve_edge(edges[0].id).is_some());
+    }
+
+    #[test]
+    fn test_instance_edges_strict_key_space() {
+        // Wired face: instance ids come from coedges, NOT duplicated under
+        // canonical keys — whole-map consumers see one entry per instance.
+        let mut face_a = square_face(&[Some(70)]);
+        let mut face_b = square_face(&[]);
+        let mut reversed_instance = line_edge(
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(0.0, 0.0, 0.0),
+            Some(70),
+        );
+        reversed_instance.id = TopoId::new();
+        face_b.edges = vec![reversed_instance];
+        // Wire face_a around its shared edge instance.
+        let shared_a = face_a.edges[0].id;
+        face_a.outer_wire = Some(Wire::new(vec![CoEdge::new(shared_a, true)]));
+
+        let mut solid = solid_of(vec![face_a, face_b]);
+        solid.index_edges();
+
+        let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let edges = solid.instance_edges(fa);
+        assert_eq!(edges.len(), 1, "one coedge → one instance");
+        assert_eq!(edges[0].id, shared_a, "keyed by the coedge instance id");
+
+        // Wire-less face: canonical-keyed entries.
+        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let edges_b = solid.instance_edges(fb);
+        assert_eq!(edges_b.len(), 1);
+        assert_eq!(
+            edges_b[0].id,
+            solid.edge_store.canonical_of(
+                solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id
+            ),
+            "wire-less reference keyed by the canonical id"
+        );
+
+        // Un-indexed face: wholesale mirror fallback.
+        let raw = square_face(&[Some(123)]);
+        let raw_solid = solid_of(vec![raw.clone()]);
+        let edges_raw = raw_solid.instance_edges(&raw_solid
+            .outer_shell
+            .as_ref()
+            .unwrap()
+            .faces[0]);
+        assert_eq!(edges_raw.len(), raw.edges.len());
+        assert_eq!(edges_raw[0].id, raw.edges[0].id);
     }
 }
