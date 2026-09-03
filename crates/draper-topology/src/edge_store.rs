@@ -142,6 +142,21 @@ pub struct GeomEdgeKey {
     endpoints: [i64; 6],
 }
 
+/// Direction test between two geometrically identical edges: does `a`
+/// traverse the shared curve opposite to `b`? Endpoint-pair comparison —
+/// robust to small numerical noise, `false` for closed curves
+/// (start == end, direction ambiguous) and curve-less instances.
+fn edges_opposite_direction(a: &Edge, b: &Edge) -> bool {
+    match (a.start_point(), a.end_point(), b.start_point(), b.end_point()) {
+        (Some(a0), Some(a1), Some(b0), Some(b1)) => {
+            let same = a0.distance_to(&b0) + a1.distance_to(&b1);
+            let opposite = a0.distance_to(&b1) + a1.distance_to(&b0);
+            opposite < same
+        }
+        _ => false,
+    }
+}
+
 /// Compute the geometric identity key of an edge (see module docs).
 pub fn geom_edge_key(edge: &Edge) -> Option<GeomEdgeKey> {
     let curve = edge.curve.as_ref()?;
@@ -313,6 +328,17 @@ pub struct EdgeStore {
     aliases: HashMap<TopoId, TopoId>,
     /// STEP entity id → canonical TopoId.
     by_step_id: HashMap<i64, TopoId>,
+    /// Instance TopoId → `true` when the instance's traversal runs OPPOSITE
+    /// to the canonical edge's curve direction (C5 Stage 5).
+    ///
+    /// `Solid::index_edges` compares each mirror's endpoint pair against the
+    /// canonical edge's: reversed instances (e.g. the box builder creates the
+    /// shared segment edge in each face's wire order) record `true` here, so
+    /// store-only consumers can rebuild an instance-faithful oriented edge
+    /// as `canonical.reversed()` re-keyed to the instance id. Absent entry
+    /// (or `false`) = same direction. Closed curves (start == end) and
+    /// curve-less instances are direction-ambiguous and record `false`.
+    instance_reversed: HashMap<TopoId, bool>,
 }
 
 // ============================================================
@@ -414,6 +440,26 @@ impl EdgeStore {
         if instance_id != canonical_id {
             self.aliases.insert(instance_id, canonical_id);
         }
+    }
+
+    /// Record the traversal orientation of `instance_id` relative to its
+    /// canonical edge (C5 Stage 5). `true` = opposite direction.
+    pub fn set_instance_reversed(&mut self, instance_id: TopoId, reversed: bool) {
+        if reversed {
+            self.instance_reversed.insert(instance_id, true);
+        } else {
+            self.instance_reversed.remove(&instance_id);
+        }
+    }
+
+    /// Traversal orientation of an edge id (instance or canonical) relative
+    /// to its canonical edge: `true` = the instance runs the canonical curve
+    /// backwards (C5 Stage 5). Un-recorded ids are forward.
+    pub fn instance_is_reversed(&self, id: TopoId) -> bool {
+        self.instance_reversed
+            .get(&id)
+            .copied()
+            .unwrap_or(false)
     }
 
     /// Resolve an edge id (instance or canonical) to its canonical TopoId.
@@ -586,6 +632,25 @@ impl Solid {
                     }
                 }
                 face_edge_ids.push(canonical_ids);
+            }
+        }
+
+        // ── Pass 1b: record instance orientations (C5 Stage 5) ────────
+        // Done after the whole first pass so every canonical (including
+        // curve upgrades from later mirrors) is final when compared
+        // against. First occurrences (canonical == instance) are forward
+        // by construction.
+        for shell in shells.iter() {
+            for face in &shell.faces {
+                for edge in &face.edges {
+                    let canonical_id = store.canonical_of(edge.id);
+                    let reversed = canonical_id != edge.id
+                        && store
+                            .get_canonical(canonical_id)
+                            .map(|canon| edges_opposite_direction(edge, canon))
+                            .unwrap_or(false);
+                    store.set_instance_reversed(edge.id, reversed);
+                }
             }
         }
 
@@ -779,24 +844,25 @@ impl Solid {
     }
 
     /// Instance-faithful edge list of `face`, resolved through the canonical
-    /// store (C5 Stage 4 read API).
+    /// store (C5 Stage 4 read API, Stage 5: mirror-free).
     ///
-    /// Element `i` corresponds to face instance `i` (parallel to
-    /// `face.edges`): if the face has been indexed and the store still holds
-    /// that edge, the CANONICAL edge is returned — shared edges from
-    /// adjacent faces compare equal by pointer. Un-indexed or drifted
-    /// entries fall back to the mirror entry, so behavior never regresses
-    /// for builder-created or post-mutation faces.
+    /// When the face carries indexed `edge_ids`, they are the AUTHORITATIVE
+    /// reference list: entries resolve through the canonical store, so
+    /// shared edges from adjacent faces compare equal by pointer. The
+    /// per-face `edges` mirror may be cleared entirely (the Stage 5
+    /// end-state) or drift after mutation — both keep working, with the
+    /// mirror consulted only as a per-id fallback for un-indexed or
+    /// appended edges. A face with no `edge_ids` (never indexed, e.g. a
+    /// builder-created standalone face) falls back to its mirrors wholesale.
     pub fn face_edges<'s>(&'s self, face: &'s Face) -> Vec<&'s Edge> {
-        let store = &self.edge_store;
-        let n = face.edges.len();
-        let indexed = n > 0 && face.edge_ids.len() == n;
-        (0..n)
-            .map(|i| match indexed {
-                true => store.get(face.edge_ids[i]).unwrap_or(&face.edges[i]),
-                false => &face.edges[i],
-            })
-            .collect()
+        if !face.edge_ids.is_empty() {
+            face.edge_ids
+                .iter()
+                .filter_map(|&id| self.edge_store.get(id).or_else(|| face.edge_by_id(id)))
+                .collect()
+        } else {
+            face.edges.iter().collect()
+        }
     }
 
     /// Propagate canonical edge field fixes onto the per-face `edges`

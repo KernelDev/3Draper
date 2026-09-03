@@ -1027,10 +1027,12 @@ impl EdgeDiscretizationCache {
 
         // Collect all distinct circle edges (by cache key) with their radius + axis.
         // node_meta: (cache_key, radius, axis_key)
+        // C5 Stage 5: store-resolved edge lists — circle grouping works with
+        // cleared per-face mirrors (canonical store entries carry the curves).
         let mut node_index: HashMap<EdgeCacheKey, usize> = HashMap::new();
         let mut node_meta: Vec<(EdgeCacheKey, f64, AxisKey)> = Vec::new();
         for face in solid.faces() {
-            for edge in &face.edges {
+            for edge in solid.face_edges(face) {
                 if edge.degenerate { continue; }
                 let circle = match &edge.curve {
                     Some(Curve3d::Circle(c)) => c,
@@ -1063,7 +1065,7 @@ impl EdgeDiscretizationCache {
             }
             // (axis_key, node ids in this face on that axis)
             let mut face_axis_members: HashMap<AxisKey, Vec<usize>> = HashMap::new();
-            for edge in &face.edges {
+            for edge in solid.face_edges(face) {
                 if edge.degenerate { continue; }
                 let circle = match &edge.curve {
                     Some(Curve3d::Circle(c)) => c,
@@ -1700,8 +1702,12 @@ impl EdgeDiscretizationCache {
         }
 
         // Single pass: discretize all edges (3D points only)
+        // C5 Stage 5: store-resolved edge list — the pre-population loop no
+        // longer reads the per-face mirrors, so it works on mirror-free
+        // solids (the Stage 5 end-state) and resolves shared edges to their
+        // canonical cache entries.
         for face in solid.faces() {
-            for edge in &face.edges {
+            for edge in solid.face_edges(face) {
                 if edge.degenerate { continue; }
                 let key = EdgeCacheKey::from_edge(edge);
                 self.topo_id_to_key.insert(edge.id, key);
@@ -1776,7 +1782,7 @@ impl EdgeDiscretizationCache {
         // First pass: discretize all edges (3D points only)
         for face in solid.faces() {
             if let Some(ref _surface) = face.surface {
-                for edge in &face.edges {
+                for edge in solid.face_edges(face) {
                     if edge.degenerate { continue; }
                     let key = EdgeCacheKey::from_edge(edge);
                     self.topo_id_to_key.insert(edge.id, key);

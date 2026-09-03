@@ -17,7 +17,9 @@
 
 use draper_mesh::{
     triangulate_face, triangulate_face_with_edges, triangulate_face_with_edges_and_cache,
-    EdgeDiscretizationCache, TriangulationParams,
+    triangulate_solid, triangulate_solid_face_with_cache, validate_watertight,
+    EdgeDiscretizationCache, TriangleMesh, TriangulationParams, VertexDedupMap,
+    filter_degenerate_triangles,
 };
 use draper_topology::builder::ShapeBuilder;
 use draper_topology::{Face, Solid, TopoId};
@@ -344,4 +346,215 @@ fn test_stage_view_replacement_contract_defines_id_space() {
     let empty = stage_face_view(face, &[]);
     assert!(empty.edges.is_empty());
     assert!(empty.edge_ids.is_empty());
+}
+
+
+// ---------------------------------------------------------------------------
+// C5 Stage 5.3 (mirror-free store path) — instance orientation in EdgeStore
+//
+// `triangulate_solid_face_with_cache` resolves edges through the canonical
+// store: the canonical geometry is re-keyed to each coedge's instance id and
+// param-reversed when `EdgeStore::instance_reversed` records the instance as
+// traversing the canonical curve backwards. This keeps the legacy traversal
+// bit-identically WITHOUT consulting the per-face mirrors — the mirrors
+// become optional plumbing (removable end-state).
+// ---------------------------------------------------------------------------
+
+/// EDGE_SAMPLES from `draper_mesh::triangulate` (not publicly exported).
+const SOLID_EDGE_SAMPLES: usize = 20;
+
+/// max_samples passed to `with_adaptive_tolerance` by the solid pipeline.
+const SOLID_ADAPTIVE_SAMPLES: usize = 64;
+
+fn test_solids() -> Vec<Solid> {
+    vec![
+        ShapeBuilder::make_box(100.0, 80.0, 50.0),
+        ShapeBuilder::make_cylinder(20.0, 100.0),
+    ]
+}
+
+/// Assert two meshes are identical down to the bit: same vertex/triangle
+/// counts, bit-equal coordinates, identical triangle indices.
+fn assert_meshes_bit_identical(a: &TriangleMesh, b: &TriangleMesh, ctx: &str) {
+    assert_eq!(
+        a.vertices.len(),
+        b.vertices.len(),
+        "{ctx}: vertex count {} vs {}",
+        a.vertices.len(),
+        b.vertices.len()
+    );
+    assert_eq!(
+        a.triangles.len(),
+        b.triangles.len(),
+        "{ctx}: triangle count {} vs {}",
+        a.triangles.len(),
+        b.triangles.len()
+    );
+    for (i, (va, vb)) in a.vertices.iter().zip(b.vertices.iter()).enumerate() {
+        assert_eq!(va.x.to_bits(), vb.x.to_bits(), "{ctx}: vertex {i} x");
+        assert_eq!(va.y.to_bits(), vb.y.to_bits(), "{ctx}: vertex {i} y");
+        assert_eq!(va.z.to_bits(), vb.z.to_bits(), "{ctx}: vertex {i} z");
+    }
+    for (i, (ta, tb)) in a.triangles.iter().zip(b.triangles.iter()).enumerate() {
+        assert_eq!(ta, tb, "{ctx}: triangle {i}: {ta:?} vs {tb:?}");
+    }
+}
+
+/// Replicate the legacy `solid_bounding_box` scan through the store-first
+/// read API (`Solid::face_edges`).
+fn solid_bbox(solid: &Solid) -> (draper_geometry::Point3d, draper_geometry::Point3d) {
+    let mut min = draper_geometry::Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut max = draper_geometry::Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    let mut has_points = false;
+    for face in solid.faces() {
+        for edge in solid.face_edges(face) {
+            if edge.degenerate {
+                continue;
+            }
+            for p in [edge.start_point(), edge.end_point()].into_iter().flatten() {
+                min.x = min.x.min(p.x);
+                min.y = min.y.min(p.y);
+                min.z = min.z.min(p.z);
+                max.x = max.x.max(p.x);
+                max.y = max.y.max(p.y);
+                max.z = max.z.max(p.z);
+                has_points = true;
+            }
+        }
+    }
+    if !has_points {
+        return (
+            draper_geometry::Point3d::ORIGIN,
+            draper_geometry::Point3d::new(1.0, 1.0, 1.0),
+        );
+    }
+    (min, max)
+}
+
+/// Manual replication of the sequential solid pipeline with the per-face
+/// call swapped for the store-resolved mirror-free entry point.
+fn explicit_solid_mesh(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+    let (bmin, bmax) = solid_bbox(solid);
+    let mut cache =
+        EdgeDiscretizationCache::with_adaptive_tolerance(&bmin, &bmax, SOLID_ADAPTIVE_SAMPLES);
+    cache.set_chord_tolerance_override(Some(params.max_deviation));
+    cache.pre_populate_for_solid(solid, SOLID_EDGE_SAMPLES);
+
+    let adaptive_tol = cache.adaptive_tolerance().merge_tolerance();
+    let mut mesh = TriangleMesh::new();
+    let mut dedup_map = VertexDedupMap::with_tolerance(adaptive_tol);
+    for (face_idx, face) in solid.faces().iter().enumerate() {
+        let mut face_mesh = triangulate_solid_face_with_cache(solid, face, params, &mut cache);
+        let face_tri_count = face_mesh.triangles.len();
+        face_mesh.triangle_face_ids = Some(vec![face_idx as u64; face_tri_count]);
+        mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+    }
+    filter_degenerate_triangles(&mut mesh, 1e-10);
+    mesh
+}
+
+/// Clone a solid and CLEAR every per-face `edges` mirror, keeping the
+/// indexed `edge_ids` and the `EdgeStore` — the Stage 5 end-state.
+fn mirror_free_clone(solid: &Solid) -> Solid {
+    let mut clone = solid.clone();
+    for face in clone.faces_mut() {
+        assert!(
+            !face.edge_ids.is_empty(),
+            "test premise: solid must be indexed before cloning"
+        );
+        std::mem::take(&mut face.edges);
+    }
+    clone
+}
+
+#[test]
+fn test_solid_pipeline_store_resolved_bit_identical() {
+    for (si, mut solid) in test_solids().into_iter().enumerate() {
+        solid.ensure_edge_store();
+        let params = TriangulationParams::default();
+
+        let reference = triangulate_solid(&solid, &params);
+        let explicit = explicit_solid_mesh(&solid, &params);
+        assert_meshes_bit_identical(
+            &reference,
+            &explicit,
+            &format!("solid {si} full pipeline (store-resolved mirror-free edges)"),
+        );
+    }
+}
+
+#[test]
+fn test_mirror_free_endstate_bit_identical() {
+    for (si, mut solid) in test_solids().into_iter().enumerate() {
+        solid.ensure_edge_store();
+        let params = TriangulationParams::default();
+
+        let reference = triangulate_solid(&solid, &params);
+
+        let mirror_free = mirror_free_clone(&solid);
+        for face in mirror_free.faces() {
+            assert!(face.edges.is_empty());
+            assert!(!face.edge_ids.is_empty());
+        }
+
+        let explicit = explicit_solid_mesh(&mirror_free, &params);
+        assert_meshes_bit_identical(
+            &reference,
+            &explicit,
+            &format!("solid {si} mirror-free end-state"),
+        );
+    }
+}
+
+#[test]
+fn test_store_path_watertight_and_canonical_ptr_identity() {
+    for (si, mut solid) in test_solids().into_iter().enumerate() {
+        solid.ensure_edge_store();
+        let params = TriangulationParams::default();
+
+        let mesh = explicit_solid_mesh(&solid, &params);
+        let report = validate_watertight(&mesh, false);
+        assert!(
+            report.is_watertight(),
+            "solid {si}: store-path mesh is not watertight: {} boundary edges, {} non-manifold",
+            report.boundary_edge_count,
+            report.non_manifold_edge_count
+        );
+
+        // Stage 4 contract kept: a shared edge resolves to the SAME
+        // canonical &Edge from both incident faces (pointer equality).
+        let faces = solid.faces();
+        let mut found_shared = 0usize;
+        for i in 0..faces.len() {
+            for j in (i + 1)..faces.len() {
+                let ea = solid.face_edges(faces[i]);
+                let eb = solid.face_edges(faces[j]);
+                for a in &ea {
+                    for b in &eb {
+                        if a.id == b.id {
+                            assert!(
+                                std::ptr::eq(*a, *b),
+                                "solid {si}: shared edge resolved to different canonical edges"
+                            );
+                            found_shared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            found_shared > 0,
+            "solid {si}: expected at least one shared edge to check pointer identity"
+        );
+
+        // Mirror-free face_edges: still returns the full reference list.
+        let mirror_free = mirror_free_clone(&solid);
+        for (orig, cleared) in solid.faces().iter().zip(mirror_free.faces().iter()) {
+            assert_eq!(
+                solid.face_edges(orig).len(),
+                mirror_free.face_edges(cleared).len(),
+                "face_edges length changed after clearing mirrors"
+            );
+        }
+    }
 }

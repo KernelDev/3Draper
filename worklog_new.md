@@ -1755,3 +1755,130 @@ BREP_CORE_FIX_PLAN (предыдущая сессия сброшена до ко
 
 - (см. git log) feat(geometry): analytic normal_at for
   Revolution/Extrusion/Ruled/Offset
+
+# Worklog — C5 Stage 5.1: explicit-edge mesh API (переделка после сброса sandbox)
+
+**Дата:** 2026-09-03
+**Агент:** Main Agent (Super Z)
+**Baseline:** commit `59695be` (после C5 Stage 4)
+**Задача:** C5 Stage 5, под-шаг 1 — standalone mesh API с явной передачей
+рёбер (`triangulate_face_with_edges[_and_cache]`), decoupling от
+`Face.edges`. Предыдущая реализация Stage 5 потеряна при перезагрузке
+sandbox (коммиты d14af6e/7f992fa не существуют в истории) — сделана заново
+с нуля и глубже.
+
+## Среда
+
+- Sandbox снова сброшен: cargo/rustc отсутствовали, Rust 1.98.0
+  (rustup stable, minimal profile) переустановлен; репозиторий и правки
+  сохранились (примонтированный том), `core.fileMode false` уже в config
+- Диск: rootfs 9.9 GB, после тестов ~5.2 GB свободно, incremental почищен
+
+## Реализация — mesh (crates/draper-mesh)
+
+- `stage_face_view(face, edges) -> Face`: лёгкая копия грани, собираемая
+  ПОЛЕВО-поле (surface/wires/forward/tolerance/id) + явный список рёбер;
+  `Face.edges`/`edge_ids` источника НЕ читаются — пустые/устаревшие/
+  отравленные зеркала не влияют. `face.id` сохранён → ключи кэша
+  `(edge_id, face_id)` совпадают с legacy → бит-идентичность по построению
+- Публичный API Stage 5:
+  - `triangulate_face_with_edges(face, &[&Edge], params)` — локальный кэш
+  - `triangulate_face_with_edges_and_cache(face, &[&Edge], params, cache)` —
+    разделяемый кэш; контракт: подача собственных зеркал грани воспроизводит
+    `triangulate_face[_with_cache]` бит-в-бит
+  - `triangulate_solid_face_with_cache(solid, face, params, cache)` —
+    consumer entry point: store-first резолюция рёбер
+- `collect_instance_edges(solid, face)`: instance-faithful список —
+  (1) коedge'и проводов → `Solid::resolve_edge` (alias-following),
+  canonical re-key на instance id + `Edge::reversed()` если store пометил
+  инстанс как встречный; (2) `face.edge_ids` без коedge (wire-less грани,
+  напр. латеральная грань цилиндра); (3) fallback на зеркала для
+  неиндексированных граней
+- `solid_bounding_box` → `solid.face_edges` (store-resolved)
+
+## Реализация — edge_cache (crates/draper-mesh)
+
+- 4 цикла `face.edges` → `solid.face_edges(face)`:
+  `pre_compute_circle_n_face_groups` (2), `pre_populate_for_solid`,
+  `pre_populate_for_solid_full` — pre-population кэша работает на
+  solid'ах без зеркал (circle-grouping и NURBS-grid'ы — из канонических
+  рёбер стора)
+
+## Реализация — topology (crates/draper-topology)
+
+- **`EdgeStore.instance_reversed: HashMap<TopoId, bool>`** — ключевая
+  находка переделки: инстанс shared-рёбра может обходить каноническую
+  кривую встречно (билдер бокса создаёт shared-сегмент в порядке обхода
+  каждой грани). Без записи ориентации store-only триангуляция даёт
+  неверный порядок boundary (12 vs 14 треугольников — поймано тестом)
+- `index_edges` Pass 1b: для каждого зеркала canonical (из alias-карты)
+  сравнивается endpoint-парой (`edges_opposite_direction`: сумма
+  дистанций same vs opposite — робастно, замкнутые кривые/без кривой →
+  false); `set_instance_reversed`/`instance_is_reversed` — публичные
+- `Solid::face_edges`: теперь истинно store-first — при непустых
+  `edge_ids` они авторитетны (зеркала могут быть очищены полностью —
+  Stage 5 end-state), per-id fallback `face.edge_by_id`; без `edge_ids` —
+  зеркала целиком (неиндексированные грани)
+
+## Ребейз поверх origin/main (2026-09-03, вторая половина сессии)
+
+- Push отклонён: на remote — ПАРАЛЛЕЛЬНАЯ работа другого агента поверх
+  «потерянного» d14af6e (он был запушен до сброса sandbox!): этап D
+  (482029b, fallback removal), C5 stage 5.2 follow-up (d8e1f67 —
+  canonical-store staging + STEP-converter migration), SSI-фичи
+- Мой коммит 27a2169 перебейзнут на 8fe8c3f: их `stage_face_view`
+  (pub, two-contract: parallel/replacement + restage_instance с
+  direction guard) остался каноничным; мои `collect_instance_edges`,
+  `triangulate_solid_face_with_cache` и приватная полевая постановка
+  `stage_instance_view` добавлены рядом — два подхода комплементарны:
+  их parallel-contract черпает pairing из зеркал, мой — из
+  `instance_reversed` стора (работает при очищенных зеркалах)
+- Тест-файл смержен: их 10 тестов + мои 3 уникальных (пересекающиеся
+  с их equivalent_to_mirrors / shared_cache_watertight отброшены) = 13
+
+## Тесты — edge_explicit_api_test.rs (10 их + 3 моих)
+
+1. (их) mirror/explicit equivalence, shared-cache watertight contribution,
+   empty-edges degradation, no-mutation, api-surface, canonical-store
+   resolution, curved bit-identity, full-solid watertight, stage-view
+   parallel/replacement contracts
+2. `test_solid_pipeline_store_resolved_bit_identical` — ручная реплика
+   sequential-пайплайна (`pre_populate_for_solid` + merge_dedup +
+   filter_degenerate) на `triangulate_solid_face_with_cache` ==
+   `triangulate_solid` бит-в-бит
+3. `test_mirror_free_endstate_bit_identical` — клон solid'а с ПОЛНОСТЬЮ
+   очищенными `face.edges` (edge_ids + store живы) == оригинал бит-в-бит:
+   зеркала уже опциональная сантехника
+4. `test_store_path_watertight_and_canonical_ptr_identity` —
+   watertight-валидация (boundary=0, non-manifold=0), ptr-equality
+   shared-рёбер через `face_edges` (Stage 4 контракт сохранён),
+   `face_edges` на mirror-free-клоне возвращает полный список
+
+## Верификация (после ребейза, на слитом состоянии)
+
+- draper-mesh: **268 lib** + integration ✅ (вкл. 13 explicit-edge:
+  10 из d8e1f67 + 3 моих)
+- draper-topology: **199** + 17 + 11 ✅ (вкл. их serde-тесты 5.1)
+- draper-core: 74 + 2 ✅; draper-geometry: 210+59+5+7+83 ✅
+- draper-json: 5+13 ✅
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors;
+  `cargo check -p draper-step --tests` — 0 errors
+
+## Осталось (Stage 6 — удаление поля Face.edges)
+
+- Serde EdgeStore уже сделан на remote (d14af6e, Stage 5.1); миграция
+  viewer/subd/wasm/json/ffi/converter — тоже (d14af6e 5.3 + d8e1f67);
+  их запись помечает Stage 6 «отложено осознанно» — теперь блокер
+  снят: ориентация инстансов живёт в сторе (`instance_reversed`),
+  `triangulate_solid_face_with_cache` + mirror-free endstate
+  протестированы. Осталось: перевести ОСТАЛЬНЫХ потребителей reading
+  `face.edges` ( этап-D-остатки, boolean, healing, валидация) на
+  store-путь и физически выпилить поле
+- Известный угол: curve-upgrade канонического ребра после Pass 1b
+  (первый curve-less инстанс + поздний инстанс с кривой) может дать
+  устаревшую ориентацию ранних инстансов — учесть при миграции STEP-путей
+
+## Коммит
+
+- перебейзнут на 8fe8c3f; хэш см. `git log` (refactor(core): C5 stage
+  5.3 — instance orientation in EdgeStore + mirror-free store path)
