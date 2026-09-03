@@ -80,70 +80,6 @@ pub enum PointClassification {
     OnBoundary,
 }
 
-/// Resolve the instance-faithful edge list of a face for boundary reads
-/// (C5 Stage 6.2 — boolean readers migrate off `Face.edges` mirrors).
-///
-/// Store-first: ids held by the solid's `EdgeStore` resolve to store
-/// instances (the single source of truth — healing fixes included).
-/// Ids the store does NOT hold — fresh `TopoId`s of faces produced by
-/// earlier splits in the same boolean, or un-indexed builder faces —
-/// fall back to the face's construction mirrors per-id, so the returned
-/// list is always COMPLETE for geometry sampling.
-///
-/// Key space follows `Solid::instance_edges`: wire coedges reference
-/// instance ids; wire-less `face.edge_ids` reference canonical ids.
-fn resolve_face_edges(solid: &Solid, face: &Face) -> Vec<Edge> {
-    if face.edge_ids.is_empty() {
-        return face.edges.clone();
-    }
-    let mut resolved: Vec<Edge> = Vec::new();
-    let mut seen_ids: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
-    let mut seen_canonicals: std::collections::HashSet<TopoId> =
-        std::collections::HashSet::new();
-
-    // 1. Wire coedges — instance id space.
-    if let Some(ref wire) = face.outer_wire {
-        for coedge in &wire.coedges {
-            push_resolved(solid, face, coedge.edge, &mut resolved, &mut seen_ids, &mut seen_canonicals);
-        }
-    }
-    for wire in &face.inner_wires {
-        for coedge in &wire.coedges {
-            push_resolved(solid, face, coedge.edge, &mut resolved, &mut seen_ids, &mut seen_canonicals);
-        }
-    }
-
-    // 2. Wire-less / unreferenced edge_ids — canonical id space.
-    for &id in &face.edge_ids {
-        if !seen_ids.contains(&id) && !seen_canonicals.contains(&solid.edge_store.canonical_of(id)) {
-            push_resolved(solid, face, id, &mut resolved, &mut seen_ids, &mut seen_canonicals);
-        }
-    }
-    resolved
-}
-
-/// Per-id resolution for [`resolve_face_edges`]: store instance first,
-/// construction mirror fallback, canonical-id bookkeeping for the
-/// wire-less pass.
-fn push_resolved(
-    solid: &Solid,
-    face: &Face,
-    id: TopoId,
-    resolved: &mut Vec<Edge>,
-    seen_ids: &mut std::collections::HashSet<TopoId>,
-    seen_canonicals: &mut std::collections::HashSet<TopoId>,
-) {
-    if !seen_ids.insert(id) {
-        return;
-    }
-    seen_canonicals.insert(solid.edge_store.canonical_of(id));
-    if let Some(instance) = solid.edge_store.instance_edge(id) {
-        resolved.push(instance);
-    } else if let Some(mirror) = face.edge_by_id(id) {
-        resolved.push(mirror.clone());
-    }
-}
-
 /// Classify a point as inside, outside, or on the boundary of a solid.
 ///
 /// Uses ray casting: cast a ray from the point in an arbitrary direction,
@@ -173,7 +109,7 @@ pub fn classify_point(solid: &Solid, point: &Point3d, tol_ctx: &ToleranceContext
         for face in &shell.faces {
             // C5 Stage 6.2: boundary reads are store-first with per-id
             // mirror fallback (split results / un-indexed faces stay complete).
-            let face_edges = resolve_face_edges(solid, face);
+            let face_edges = solid.resolve_face_edges(face);
             let count = count_ray_face_intersections(&ray_origin, &ray_dir, face, &face_edges, tol);
             intersection_count += count;
         }
@@ -3229,7 +3165,7 @@ pub fn boolean_operation(
         // C5 Stage 6.2: split readers consume the resolved instance-faithful
         // edge list (store-first for input-solid faces; split pieces carry
         // fresh ids and resolve via their construction mirrors).
-        let face_edges = resolve_face_edges(solid_a, &faces_a[face_a_idx]);
+        let face_edges = solid_a.resolve_face_edges(&faces_a[face_a_idx]);
         let split_result = split_face_with_shared_edges(
             &faces_a[face_a_idx],
             &all_points,
@@ -3269,7 +3205,7 @@ pub fn boolean_operation(
             // Face B uses pcurve_b (PCurve on surface B)
             all_pcurves.push(si.pcurve_b.clone());
         }
-        let face_edges = resolve_face_edges(solid_b, &faces_b[face_b_idx]);
+        let face_edges = solid_b.resolve_face_edges(&faces_b[face_b_idx]);
         let split_result = split_face_with_shared_edges(
             &faces_b[face_b_idx],
             &all_points,
@@ -3301,7 +3237,7 @@ pub fn boolean_operation(
     for face in &faces_a {
         // C5 Stage 6.2: classification reads store-first edges of the
         // face's OWNING solid (clones keep the source key space).
-        let face_edges = resolve_face_edges(solid_a, face);
+        let face_edges = solid_a.resolve_face_edges(face);
         let classification = classify_face_robust(face, solid_b, tol_ctx, &face_edges);
         match op {
             BooleanOp::Union | BooleanOp::Subtract => {
@@ -3320,7 +3256,7 @@ pub fn boolean_operation(
     }
 
     for face in &faces_b {
-        let face_edges = resolve_face_edges(solid_b, face);
+        let face_edges = solid_b.resolve_face_edges(face);
         let classification = classify_face_robust(face, solid_a, tol_ctx, &face_edges);
         match op {
             BooleanOp::Union => {
@@ -4245,7 +4181,7 @@ fn is_solid_inside_solid(solid_a: &Solid, solid_b: &Solid, tol_ctx: &ToleranceCo
     for face in &shell.faces {
         if let Some(ref surface) = face.surface {
             // C5 Stage 6.2: store-first reads with per-id mirror fallback.
-            let face_edges = resolve_face_edges(solid_a, face);
+            let face_edges = solid_a.resolve_face_edges(face);
             let (u_min, u_max, v_min, v_max) = surface_param_range(surface);
             let (u_min, u_max, v_min, v_max) =
                 compute_face_uv_range(&face_edges, surface, u_min, u_max, v_min, v_max);
@@ -5377,153 +5313,6 @@ mod tests {
                 let c = (p.y * p.y + p.z * p.z).sqrt();
                 assert!((c - 3.0).abs() < 1e-9, "on cylinder, radial={c:.9}");
             }
-        }
-    }
-
-    // ---- C5 Stage 6.2: store-first boolean readers ----
-
-    #[test]
-    fn test_resolve_face_edges_unindexed_mirrors() {
-        // Un-indexed builder solid: edge_ids empty → the construction
-        // mirrors ARE the resolution (unchanged behavior).
-        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        let face = &solid.faces()[0];
-        assert!(face.edge_ids.is_empty(), "builder faces are un-indexed");
-        let edges = resolve_face_edges(&solid, face);
-        assert_eq!(
-            edges.len(),
-            face.edges.len(),
-            "un-indexed resolution must return every mirror"
-        );
-        let mirror_ids: std::collections::HashSet<TopoId> =
-            face.edges.iter().map(|e| e.id).collect();
-        for e in &edges {
-            assert!(mirror_ids.contains(&e.id), "resolved id must be a mirror id");
-        }
-    }
-
-    #[test]
-    fn test_resolve_face_edges_store_first() {
-        // Indexed solid: coedge ids resolve through the store.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-        let face = solid.faces()[0].clone();
-        assert!(!face.edge_ids.is_empty(), "index_edges populates edge_ids");
-
-        let edges = resolve_face_edges(&solid, &face);
-        let mut coedge_ids = std::collections::HashSet::new();
-        if let Some(ref wire) = face.outer_wire {
-            for coedge in &wire.coedges {
-                coedge_ids.insert(coedge.edge);
-            }
-        }
-        for wire in &face.inner_wires {
-            for coedge in &wire.coedges {
-                coedge_ids.insert(coedge.edge);
-            }
-        }
-        assert_eq!(
-            edges.len(),
-            coedge_ids.len(),
-            "one resolved entry per distinct coedge id (complete, no dups)"
-        );
-        for e in &edges {
-            let store_view = solid.edge_store.instance_edge(e.id);
-            assert!(
-                store_view.is_some(),
-                "indexed resolution must be store-backed (id {:?})",
-                e.id
-            );
-        }
-    }
-
-    #[test]
-    fn test_resolve_face_edges_fresh_id_fallback() {
-        // Split-result faces carry fresh TopoIds that no store holds —
-        // the per-id mirror fallback keeps the list COMPLETE.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-        let face = solid.faces()[0].clone();
-
-        // Simulate a split result: re-key every boundary instance to a
-        // fresh id (coedge + mirror + edge_ids stay consistent).
-        let by_id: std::collections::HashMap<TopoId, Edge> =
-            face.edges.iter().map(|e| (e.id, e.clone())).collect();
-        let mut split_face = face.clone();
-        let mut fresh_ids: Vec<TopoId> = Vec::new();
-        let mut new_mirrors: Vec<Edge> = Vec::new();
-        {
-            let wire = split_face.outer_wire.as_mut().unwrap();
-            for coedge in wire.coedges.iter_mut() {
-                let original = by_id
-                    .get(&coedge.edge)
-                    .expect("coedge id must have a mirror");
-                let fresh = TopoId::new();
-                let mut rekeyed = original.clone();
-                rekeyed.id = fresh;
-                coedge.edge = fresh;
-                fresh_ids.push(fresh);
-                new_mirrors.push(rekeyed);
-            }
-        }
-        split_face.edges = new_mirrors;
-        split_face.edge_ids = fresh_ids.clone();
-
-        let edges = resolve_face_edges(&solid, &split_face);
-        assert_eq!(
-            edges.len(),
-            fresh_ids.len(),
-            "fresh-id faces must resolve completely via mirrors"
-        );
-        let resolved_ids: std::collections::HashSet<TopoId> =
-            edges.iter().map(|e| e.id).collect();
-        for id in &fresh_ids {
-            assert!(resolved_ids.contains(id), "fresh id {:?} must resolve", id);
-        }
-        assert!(
-            edges.iter().filter(|e| e.curve.is_some()).count() == edges.len(),
-            "resolved entries must carry curve data"
-        );
-    }
-
-    #[test]
-    fn test_resolve_face_edges_ignores_stale_mirrors() {
-        // The store is the source of truth: a mirror corrupted AFTER
-        // indexing must NOT leak into boundary reads.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-
-        // Corrupt the first face's first mirror: offset the line origin.
-        let target_id = {
-            let shell = solid.outer_shell.as_mut().unwrap();
-            let edge = &mut shell.faces[0].edges[0];
-            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
-                line.origin = Point3d::new(
-                    line.origin.x + 5.0,
-                    line.origin.y + 5.0,
-                    line.origin.z + 5.0,
-                );
-            }
-            shell.faces[0].edges[0].id
-        };
-
-        let face = &solid.outer_shell.as_ref().unwrap().faces[0];
-        let resolved = resolve_face_edges(&solid, face);
-        let r = resolved
-            .iter()
-            .find(|e| e.id == target_id)
-            .expect("instance must resolve");
-        match &r.curve {
-            Some(Curve3d::Line(ref l)) => {
-                let stale_origin = l.origin;
-                assert!(
-                    ((stale_origin.x - 5.0).abs() > 1e-9)
-                        || ((stale_origin.y - 5.0).abs() > 1e-9)
-                        || ((stale_origin.z - 5.0).abs() > 1e-9),
-                    "store geometry must win over the stale (+5 offset) mirror"
-                );
-            }
-            other => panic!("expected a line curve, got {:?}", other.is_some()),
         }
     }
 

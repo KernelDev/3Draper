@@ -2104,3 +2104,87 @@ private-хелпер boolean.rs:
 
 - (см. git log) refactor(core): C5 stage 6.2 — mirror-free boolean
   readers via store-first instance edges
+
+---
+
+## C5 Stage 6.3 — store-first healing input (healing.rs)
+
+**Дата**: 2026-09-03
+**Коммит**: (см. git log) refactor(core): C5 stage 6.3 — store-first healing input via mirror re-derivation
+
+### Контекст
+
+Stage 6.2 закрыл boolean-читателей. Оставался healing.rs — 33 сайта
+`face.edges` на Shell-уровне БЕЗ стора. Дизайн-развилка из прошлого
+worklog: «store параметр или перенос в Solid-методы» — выбран НИ ТО, ни
+другое: пайплайн-функции контрактуально Shell-scoped (обслуживают и
+автономные shells из STEP-импорта без стора), поэтому истина стора
+впрыскивается ОДИН РАЗ на границе `heal_solid`.
+
+### 1 — Продвижение resolve-хелпера в `Solid`
+
+- `Solid::resolve_face_edges(&self, face) -> Vec<Edge>` (edge_store.rs,
+  impl Solid) — публичный Stage 6.3 API; логика дословно перенесена из
+  приватного boolean-хелпера 6.2 (store-first per-id + mirror fallback,
+  wire-order, completeness)
+- boolean.rs: приватные `resolve_face_edges`/`push_resolved` удалены,
+  6 call-сайтов → `solid.resolve_face_edges(face)`
+- 4 юнит-теста resolve перенесены boolean::tests → edge_store::tests
+  (тесты живут с методом)
+
+### 2 — `heal_solid`: re-derivation pre-pass
+
+- `heal_shell` → тонкая обёртка (clone) + `heal_shell_owned(mut Shell)`
+  (пайплайн без клонирования; двойной клон в heal_solid устранён)
+- `rederive_edge_mirrors(source: &Solid, shell: &mut Shell) -> usize`:
+  per-position resolve `store.instance_edge(mirror.id)` → замена ТОЛЬКО
+  при геометрическом расхождении (`mirror_matches_instance`)
+- Сравнение нарочно orientation/representation-INSENSITIVE:
+  неупорядоченная пара endpoints + tolerance/degenerate/step_id/curve-presence;
+  `param_range`/`forward`/vertex-ids исключены — у reversed-instance
+  зеркал легитимна face-local параметризация (свой Line origin, свой
+  param space), field-by-field НЕ равная store-view при том же сегменте
+- Здоровые зеркала не переписываются (idempotence), стэйл —
+  «store wins» (payload = полная instance view: swapped param,
+  flipped forward, canonical vertex order)
+- Свежие id (split-результаты) и un-indexed builder-грани — mirror
+  fallback (полнота списка сохранена)
+- Сообщение отчёта: "Re-derived N edge mirror(s) ..."
+
+### 3 — Тесты (+5 healing, 4 перенесено)
+
+- `test_heal_solid_store_first_input` — stale-mirror payoff: порча
+  зеркала ПОСЛЕ index_edges (+85 сдвиг endpoints+curve) → решения
+  пайплайна (gaps_closed/holes/merged) и канонический store-фингерпринт
+  BIT-идентичны чистому прогону; сообщение Re-derived присутствует
+- `test_heal_solid_un_indexed_fallback` — builder-solid без стора:
+  зеркала = вход, нет сообщения, gaps_closed=12 (baseline 6.2-эпохи)
+- `test_heal_solid_fresh_id_completeness` — re-keyed грань (симуляция
+  split) → полнота списка через 6 граней × 4 рёбра, нет сообщения
+- `test_heal_solid_rederive_idempotent` — indexed+synced → 0 замен,
+  тишина в отчёте
+- `test_rederive_preserves_reversed_instance_orientation` — алиased
+  mirror: порча endpoints → replaced на store instance view (forward/
+  param_range/vertex-ids = swapped-представление, НЕ canonical-view);
+  healthy зеркала не тронуты (changed == 1)
+
+### Верификация
+
+- draper-topology: **212 lib** (207 + 5) + 17 + 11 + 3 ✅
+- draper-mesh: 268 + все integration ✅; draper-core: 74 + 2 ✅
+- `cargo check --workspace --exclude draper-testing` — 0 errors;
+  draper-step `--tests --features serde` ✅; draper-viewer ✅
+- Диск: 5.6G free
+
+### Осталось (Stage 6.4+)
+
+- core/operations.rs (18 сайтов) — читатели операций (fillet/chamfer/
+  shell/draft) на `Solid::resolve_face_edges`
+- viewer/app.rs (5 читателей), ffi/wasm/json, step exporter
+  (`emit_wire_as_bound(outer, &face.edges)`)
+- mesh `collect_instance_edges` → делегирование `Solid::instance_edges`
+  (DRY)
+- Писатели зеркал: builder/boolean/fillet/chamfer-конструкция +
+  sync_edge_mirrors → физическое удаление поля Face.edges
+- Известный угол (унаследован): curve-less preserved canonical + поздний
+  зеркальный инстанс с кривой не унифицируются

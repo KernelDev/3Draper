@@ -6,6 +6,20 @@
 //! healing operations that can fix gaps, fill holes, stitch edges,
 //! repair normal orientations, and remove small features.
 //!
+//! # C5 edge-store contract (Stage 6.3)
+//!
+//! The pipeline functions are contractually **Shell-scoped**: they take
+//! `&mut Shell` and also serve standalone shells (e.g. mid-import STEP
+//! shells) that own no edge store. Instead of threading a store through
+//! every helper, the store's truth is injected at the `heal_solid`
+//! boundary: the working copy's `Face::edges` mirrors are re-derived
+//! from the input solid's `EdgeStore` (`rederive_edge_mirrors`) before
+//! the pipeline runs, so all mirror reads below start from canonical
+//! geometry even when the input mirrors went stale after `index_edges`.
+//! Healing itself remains a sanctioned mirror WRITER — it restructures
+//! topology — and `heal_solid` re-indexes the store from the healed
+//! mirrors afterwards, restoring the store-as-source-of-truth invariant.
+//!
 //! # Operations
 //!
 //! - **Gap closing** (3.1.2): merge boundary edges within `tolerance * gap_factor`
@@ -313,7 +327,22 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 
     // Heal outer shell
     let outer_shell = if let Some(ref shell) = solid.outer_shell {
-        let (healed_shell, shell_report) = heal_shell(shell, params, false);
+        // C5 Stage 6.3 — store-first healing input: re-derive the working
+        // copy's edge mirrors from the input solid's `EdgeStore` before the
+        // pipeline runs, so every Shell-level mirror read below (33 sites:
+        // stitching, gap closing, merging, adjacency, sampling) starts from
+        // the store's canonical geometry even when the input mirrors went
+        // stale after `index_edges`. Ids the store does not hold (fresh
+        // split results, un-indexed builder faces) keep their mirrors.
+        let mut shell = shell.clone();
+        let rederived = rederive_edge_mirrors(solid, &mut shell);
+        if rederived > 0 {
+            report.add_msg(format!(
+                "Re-derived {} edge mirror(s) from the edge store (store-first healing input)",
+                rederived
+            ));
+        }
+        let (healed_shell, shell_report) = heal_shell_owned(shell, params, false);
         merge_report(&mut report, &shell_report);
         Some(healed_shell)
     } else {
@@ -327,7 +356,15 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
         .inner_shells
         .iter()
         .map(|shell| {
-            let (healed, r) = heal_shell(shell, params, true);
+            let mut shell = shell.clone();
+            let rederived = rederive_edge_mirrors(solid, &mut shell);
+            if rederived > 0 {
+                report.add_msg(format!(
+                    "Re-derived {} edge mirror(s) from the edge store (store-first healing input)",
+                    rederived
+                ));
+            }
+            let (healed, r) = heal_shell_owned(shell, params, true);
             merge_report(&mut report, &r);
             healed
         })
@@ -495,8 +532,17 @@ pub fn tolerant_stitch(shell: &mut Shell, tolerance: f64) -> usize {
 /// material (i.e., TOWARD the centroid of the shell), which is the opposite
 /// of the outer shell heuristic (normals point AWAY from centroid).
 pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) -> (Shell, HealingReport) {
+    heal_shell_owned(shell.clone(), params, is_void_shell)
+}
+
+/// Owned-entry healing pipeline — [`heal_shell`] clones, `heal_solid`
+/// hands over its re-derived working copy directly (C5 Stage 6.3).
+fn heal_shell_owned(
+    mut shell: Shell,
+    params: &HealingParams,
+    is_void_shell: bool,
+) -> (Shell, HealingReport) {
     let mut report = HealingReport::default();
-    let mut shell = shell.clone();
 
     // 0. Propagate tolerances (must run first — correct tolerances are
     //    needed for all subsequent operations)
@@ -542,6 +588,74 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) ->
     }
 
     (shell, report)
+}
+
+/// C5 Stage 6.3 — re-derive a shell's edge mirrors from a solid's edge
+/// store (store-first healing input).
+///
+/// Per-position resolution: each mirror keeps its slot (order and length
+/// preserved) but its payload is replaced by `EdgeStore::instance_edge`
+/// for its own id — the alias-following, orientation-correct instance
+/// view of the canonical edge. Mirrors whose id the store does not know
+/// (fresh `TopoId`s from splits, un-indexed builder faces) are left
+/// untouched, so the working list stays COMPLETE.
+///
+/// This is the healing-side twin of `Solid::resolve_face_edges`: instead
+/// of threading a store through every Shell-level helper (the pipeline
+/// functions are contractually Shell-scoped — they also serve standalone
+/// shells from STEP import that have no store yet), the store's truth is
+/// injected once at the `heal_solid` boundary and the pipeline keeps
+/// operating on mirrors, which now are DERIVED data. After the pipeline,
+/// `heal_solid` re-indexes the store from the healed mirrors anyway.
+///
+/// Returns the number of mirrors whose GEOMETRY actually differed from
+/// the store view — those (and only those) are replaced by the store
+/// instance. Mirrors that already agree with the store are kept VERBATIM:
+/// reversed-instance mirrors legitimately carry a face-local curve
+/// representation (own `Line` origin, own param space) that differs
+/// field-by-field from the store's instance view while describing the
+/// same segment — rewriting healthy representations would change healing
+/// outcomes on healthy solids and is not the store's job.
+fn rederive_edge_mirrors(source: &Solid, shell: &mut Shell) -> usize {
+    if source.edge_store.is_empty() {
+        return 0;
+    }
+    let mut updated = 0usize;
+    for face in shell.faces.iter_mut() {
+        for edge in face.edges.iter_mut() {
+            let Some(instance) = source.edge_store.instance_edge(edge.id) else {
+                continue; // unknown id — keep the construction mirror
+            };
+            if !mirror_matches_instance(edge, &instance) {
+                *edge = instance; // stale mirror — the store wins
+                updated += 1;
+            }
+        }
+    }
+    updated
+}
+
+/// Geometry-level comparison behind [`rederive_edge_mirrors`]'s change
+/// count. The check is deliberately ORIENTATION-INSENSITIVE and
+/// REPRESENTATION-INSENSITIVE: a healthy reversed-instance mirror holds
+/// the same segment as the store's instance view, expressed in its own
+/// curve parameterization (swapped endpoints, own `Line` object), so the
+/// endpoint pair is compared as an unordered set and `param_range` /
+/// `forward` / vertex ids are excluded as representation-coupled fields.
+/// Deep curve equality is approximated by endpoint coordinates plus curve
+/// presence; a corrupted curve interior with intact endpoints is the
+/// known (documented) blind spot of the counting — the overwrite itself
+/// always installs the full store instance.
+fn mirror_matches_instance(mirror: &Edge, instance: &Edge) -> bool {
+    let same_orientation = mirror.start_vertex_point == instance.start_vertex_point
+        && mirror.end_vertex_point == instance.end_vertex_point;
+    let swapped_orientation = mirror.start_vertex_point == instance.end_vertex_point
+        && mirror.end_vertex_point == instance.start_vertex_point;
+    (same_orientation || swapped_orientation)
+        && mirror.tolerance == instance.tolerance
+        && mirror.degenerate == instance.degenerate
+        && mirror.step_entity_id == instance.step_entity_id
+        && mirror.curve.is_some() == instance.curve.is_some()
 }
 
 // ============================================================
@@ -2816,6 +2930,245 @@ mod tests {
         if let Some(ref shell) = healed.outer_shell {
             assert_eq!(shell.faces.len(), 6);
         }
+    }
+
+    // ---- C5 Stage 6.3: store-first healing input ----
+
+    /// Canonical-edge fingerprint of a healed solid's store: bits of every
+    /// orientation-independent field, keyed by canonical id (ids are stable
+    /// across clones of the same builder solid, so fingerprints of two
+    /// independently healed clones are directly comparable).
+    fn store_fingerprint(solid: &Solid) -> Vec<(TopoId, [u64; 6])> {
+        let mut entries: Vec<(TopoId, [u64; 6])> = solid
+            .edge_store
+            .iter()
+            .map(|e| {
+                let pts = (
+                    e.start_vertex_point.unwrap_or(Point3d::ORIGIN),
+                    e.end_vertex_point.unwrap_or(Point3d::ORIGIN),
+                );
+                (
+                    e.id,
+                    [
+                        pts.0.x.to_bits(),
+                        pts.0.y.to_bits(),
+                        pts.0.z.to_bits(),
+                        pts.1.x.to_bits(),
+                        pts.1.y.to_bits(),
+                        pts.1.z.to_bits(),
+                    ],
+                )
+            })
+            .collect();
+        entries.sort_by_key(|(id, _)| *id);
+        entries
+    }
+
+    /// Stale-mirror payoff: a mirror corrupted AFTER `index_edges` must not
+    /// leak into the healed output — the pipeline reads the STORE's truth.
+    #[test]
+    fn test_heal_solid_store_first_input() {
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let base = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+
+        // Clean reference: index, then heal.
+        let mut clean = base.clone();
+        clean.index_edges();
+        let (healed_clean, report_clean) = heal_solid(&clean, &params);
+
+        // Corrupted: index (store snapshot taken), THEN mutate mirrors.
+        let mut corrupt = base.clone();
+        corrupt.index_edges();
+        {
+            let shell = corrupt.outer_shell.as_mut().unwrap();
+            let edge = &mut shell.faces[0].edges[0];
+            // Shift the endpoint pair far off the box — a false gap for
+            // close_gaps / tolerant_stitch if mirrors were read.
+            edge.start_vertex_point = Some(Point3d::new(95.0, 0.0, 0.0));
+            edge.end_vertex_point = Some(Point3d::new(95.0, 10.0, 0.0));
+            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
+                line.origin = Point3d::new(95.0, 0.0, 0.0);
+            }
+        }
+        let (healed_corrupt, report_corrupt) = heal_solid(&corrupt, &params);
+
+        // The re-derivation must have kicked in and reported itself.
+        assert!(
+            report_corrupt
+                .messages
+                .iter()
+                .any(|m| m.contains("Re-derived")),
+            "stale mirrors must trigger the store-first re-derivation message"
+        );
+        // And the healing decisions must be identical to the clean run:
+        // the corrupted mirror never reached the pipeline.
+        assert_eq!(report_corrupt.gaps_closed, report_clean.gaps_closed);
+        assert_eq!(report_corrupt.holes_filled, report_clean.holes_filled);
+        assert_eq!(report_corrupt.faces_merged, report_clean.faces_merged);
+        // Store truth: canonical vertex geometry is BIT-identical.
+        assert_eq!(
+            store_fingerprint(&healed_clean),
+            store_fingerprint(&healed_corrupt),
+            "post-index mirror corruption must not leak into healed geometry"
+        );
+    }
+
+    /// Un-indexed builder solids keep the legacy behavior: mirrors ARE the
+    /// input, no re-derivation message appears.
+    #[test]
+    fn test_heal_solid_un_indexed_fallback() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        assert!(box_solid.edge_store.is_empty());
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&box_solid, &params);
+        assert!(!report
+            .messages
+            .iter()
+            .any(|m| m.contains("Re-derived")));
+        // Regression baseline from test_heal_clean_box.
+        assert_eq!(report.gaps_closed, 12);
+        if let Some(ref shell) = healed.outer_shell {
+            assert_eq!(shell.faces.len(), 6);
+        }
+    }
+
+    /// Fresh ids the store does not know (split-result faces) keep their
+    /// construction mirrors — the working list stays complete through heal.
+    #[test]
+    fn test_heal_solid_fresh_id_completeness() {
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+        // Re-key one face's boundary to fresh ids (simulated split result).
+        let face = solid.faces()[0].clone();
+        let by_id: std::collections::HashMap<TopoId, Edge> =
+            face.edges.iter().map(|e| (e.id, e.clone())).collect();
+        {
+            let shell = solid.outer_shell.as_mut().unwrap();
+            let target = &mut shell.faces[0];
+            let mut new_mirrors: Vec<Edge> = Vec::new();
+            let wire = target.outer_wire.as_mut().unwrap();
+            for coedge in wire.coedges.iter_mut() {
+                let original = by_id.get(&coedge.edge).unwrap();
+                let fresh = TopoId::new();
+                let mut rekeyed = original.clone();
+                rekeyed.id = fresh;
+                coedge.edge = fresh;
+                new_mirrors.push(rekeyed);
+            }
+            target.edge_ids = new_mirrors.iter().map(|e| e.id).collect();
+            target.edges = new_mirrors;
+        }
+
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&solid, &params);
+        // No store resolution possible for the fresh face — no message.
+        assert!(!report
+            .messages
+            .iter()
+            .any(|m| m.contains("Re-derived")));
+        // The box topology survives; every face still carries 4 edges.
+        if let Some(ref shell) = healed.outer_shell {
+            assert_eq!(shell.faces.len(), 6);
+            for face in &shell.faces {
+                assert_eq!(face.edges.len(), 4, "face edge list must stay complete");
+            }
+        }
+    }
+
+    /// Idempotence: on an already-indexed, synced solid the re-derivation
+    /// changes nothing and stays silent.
+    #[test]
+    fn test_heal_solid_rederive_idempotent() {
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+        solid.sync_edge_mirrors();
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (_healed, report) = heal_solid(&solid, &params);
+        assert!(
+            !report.messages.iter().any(|m| m.contains("Re-derived")),
+            "mirrors equal to store instances must not be counted as re-derived"
+        );
+    }
+
+    /// Reversed instances: a stale (moved-endpoint) mirror is replaced by
+    /// the store's ORIENTATION-CORRECT instance view — swapped param range,
+    /// flipped `forward`, canonical vertex order — while healthy reversed
+    /// mirrors keep their face-local representation untouched.
+    #[test]
+    fn test_rederive_preserves_reversed_instance_orientation() {
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        solid.index_edges();
+
+        // Find a mirror that is an aliased (non-canonical) instance —
+        // shared-edge copies in later faces.
+        let mut found: Option<(usize, usize)> = None;
+        let shell = solid.outer_shell.as_ref().unwrap();
+        'outer: for (fi, face) in shell.faces.iter().enumerate() {
+            for (ei, edge) in face.edges.iter().enumerate() {
+                let canonical = solid.edge_store.canonical_of(edge.id);
+                if canonical != edge.id {
+                    found = Some((fi, ei));
+                    break 'outer;
+                }
+            }
+        }
+        let (fi, ei) = match found {
+            Some(x) => x,
+            None => panic!("indexed box must contain aliased shared-edge instances"),
+        };
+        let mirror_id = shell.faces[fi].edges[ei].id;
+        let store_view = solid
+            .edge_store
+            .instance_edge(mirror_id)
+            .expect("alias must resolve");
+        let canonical = solid
+            .edge_store
+            .get(mirror_id)
+            .expect("canonical must exist")
+            .clone();
+        // The instance view must really be the reversed representation.
+        assert_ne!(store_view.forward, canonical.forward);
+        assert_eq!(
+            store_view.param_range,
+            (canonical.param_range.1, canonical.param_range.0)
+        );
+
+        // Corrupt that mirror's endpoints post-index (real staleness:
+        // geometry moved, off the box).
+        {
+            let shell = solid.outer_shell.as_mut().unwrap();
+            let edge = &mut shell.faces[fi].edges[ei];
+            edge.start_vertex_point = Some(Point3d::new(95.0, 0.0, 0.0));
+            edge.end_vertex_point = Some(Point3d::new(95.0, 10.0, 0.0));
+        }
+
+        // Re-derive on a working clone — exactly the healthy mirrors plus
+        // the one stale copy: only the stale one may be touched.
+        let mut working = solid.outer_shell.as_ref().unwrap().clone();
+        let changed = rederive_edge_mirrors(&solid, &mut working);
+        assert_eq!(changed, 1, "only the corrupted mirror is re-derived");
+        let rederived = &working.faces[fi].edges[ei];
+        // Geometry restored from the store...
+        assert_eq!(rederived.start_vertex_point, store_view.start_vertex_point);
+        assert_eq!(rederived.end_vertex_point, store_view.end_vertex_point);
+        // ...and orientation fields come from the STORE's instance view
+        // (reversed relative to the canonical), not the canonical's view.
+        assert_eq!(rederived.forward, store_view.forward);
+        assert_eq!(rederived.param_range, store_view.param_range);
+        assert_eq!(rederived.vertex_start, store_view.vertex_start);
+        assert_eq!(rederived.vertex_end, store_view.vertex_end);
     }
 
     /// Test that healing fixes flipped normals.
