@@ -2257,3 +2257,39 @@ worklog: «store параметр или перенос в Solid-методы» 
   sync_edge_mirrors → физическое удаление поля Face.edges
 - Известный угол (унаследован): curve-less preserved canonical + поздний
   зеркальный инстанс с кривой не унифицируются
+
+---
+
+## C5 Stage 6.5 — остаточные читатели: viewer / ffi / wasm / json
+
+**Дата**: 2026-09-03
+**Коммит**: (см. git log) refactor(binders): C5 stage 6.5 — store-first viewer/ffi/wasm/json boundary readers
+
+### Сайты
+
+- **viewer/app.rs** (`compute_solid_uv_breakdown_with_detailed`): UV-полилинии
+  (outer+inner wires) через `solid.resolve_face_edges(face)` — hoist на
+  уровень face-loop. Комментарий Stage 5 «INTENTIONAL instance-mirror read»
+  устарел: resolve_face_edges INSTANCE-FAITHFUL (re-key к coedge id,
+  orientation-correct через instance_edge) — контракт направления
+  полилиний сохранён, стэйл-зеркала не утекают
+- **ffi/extended.rs** (edge_info): per-face resolve
+- **wasm/main_bindings.rs** (edge_info): per-face resolve
+- **json/api.rs** (edge_info): per-face resolve
+- Писатели зеркал (viewer 18738/20630, wasm tests) не тронуты —
+  construction-семантика, остаются до финальной стадии
+
+### Верификация
+
+- `cargo check --workspace --exclude draper-testing` — 0 errors
+- draper-json 10 ✅, draper-ffi 13 ✅; wasm cargo-test сломан ДО наших
+  изменений (tests-модуль под wasm-bindgen-test — проверено на HEAD)
+- Диск: 5.6G free
+
+### Осталось (Stage 7 = финальная стадия C5)
+
+- Писатели зеркал: builder/boolean/fillet/chamfer-конструкция +
+  sync_edge_mirrors → физическое удаление поля Face.edges (самый
+  крупный этап: сериализация, все конструкторы)
+- Известный угол (унаследован): curve-less preserved canonical + поздний
+  зеркальный инстанс с кривой не унифицируются

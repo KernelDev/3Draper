@@ -763,7 +763,9 @@ pub extern "C" fn draper_solid_list_edges(
         }
     } else if let Some(shell) = solid.outer_shell.as_ref() {
         for (fi, face) in shell.faces.iter().enumerate() {
-            for edge in &face.edges {
+            // C5 Stage 6.5: store-first boundary reads (per-id mirror
+            // fallback keeps builder faces complete).
+            for edge in solid.resolve_face_edges(face) {
                 let id = edge.id.to_u64();
                 let curve_type = match &edge.curve {
                     None => "None".to_string(),

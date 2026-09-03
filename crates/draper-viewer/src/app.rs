@@ -14669,6 +14669,13 @@ fn compute_solid_uv_breakdown_with_detailed(
         let v_periodic = surface.is_v_periodic();
         let mut outer_polylines: Vec<Vec<(f64, f64)>> = Vec::new();
 
+        // C5 Stage 6.5: store-first INSTANCE-FAITHFUL resolution —
+        // `resolve_face_edges` re-keys store instances to the coedge ids
+        // (orientation-correct via `EdgeStore::instance_edge`), so the
+        // Stage-5 polyline-direction contract is preserved while stale
+        // mirrors can no longer leak sampling geometry.
+        let face_edges = solid.resolve_face_edges(face);
+
         // ─── Prefer FaceInfo from DetailedMeshInstance when available ────
         // The FaceInfo has the ACTUAL outer/inner boundary polylines and
         // uv_triangles produced by the STEP converter — these reflect the
@@ -14702,12 +14709,7 @@ fn compute_solid_uv_breakdown_with_detailed(
 
         if let Some(ow) = face.outer_wire.as_ref() {
             if !ow.coedges.is_empty() {
-                // C5 Stage 5: INTENTIONAL instance-mirror read — `sample_wire_polyline`
-                // resolves edges by coedge INSTANCE ids (idiom `Face::edge_by_id`);
-                // mirrors are the instance-keyed geometry. Resolving through the
-                // canonical store would flip polyline direction (instance
-                // param_range vs canonical).
-                let pts3d = sample_wire_polyline(ow, &face.edges, samples_per_edge);
+                let pts3d = sample_wire_polyline(ow, &face_edges, samples_per_edge);
                 let uv_raw: Vec<(f64, f64)> = pts3d
                     .iter()
                     .map(|p| surface.project_point(p))
@@ -14792,7 +14794,7 @@ fn compute_solid_uv_breakdown_with_detailed(
             }
         }
         for iw in &face.inner_wires {
-            let pts3d = sample_wire_polyline(iw, &face.edges, samples_per_edge);
+            let pts3d = sample_wire_polyline(iw, &face_edges, samples_per_edge);
             let uv_raw: Vec<(f64, f64)> = pts3d
                 .iter()
                 .map(|p| surface.project_point(p))

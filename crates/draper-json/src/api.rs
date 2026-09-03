@@ -1142,7 +1142,8 @@ impl JsonApi {
             }
         } else if let Some(shell) = solid.outer_shell.as_ref() {
             for (fi, face) in shell.faces.iter().enumerate() {
-                for edge in &face.edges {
+                // C5 Stage 6.5: store-first boundary reads.
+                for edge in solid.resolve_face_edges(face) {
                     let id = edge.id.to_u64();
                     let curve_type = curve_type_of(edge.curve.as_ref());
                     edge_info.entry(id)
