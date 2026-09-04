@@ -2917,3 +2917,40 @@ validate_and_fix, включая invalid_param_ranges (0/0 на box).
 
 - Физическое удаление поля `Face.edges` + serde-миграция
 - Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
+
+# Worklog — сессия 2026-09-04 (sync): локальная копия отставала от remote на 39 коммитов
+
+**Дата:** 2026-09-04 (вторая сессия суток)
+**Baseline:** origin/main `58f324a`
+
+## Что произошло
+
+- Sandbox снова сброшен; локальный клон восстановился на `59695be` (C5
+  Stage 4), хотя remote уже содержал Stage 5–7.5 целиком
+- По неверной оценке «Stage 5 потерян» локально была сделана ПОВТОРНАЯ
+  реализация Stage 5.1 (commit bddda81, branch backup-stage51-rework):
+  `triangulate_face_with_edges[_and_cache]` + `stage_face_view` + 6 тестов
+- Push отвергнут (non-fast-forward) → fetch показал 39 коммитов удалённой
+  работы: d14af6e (Stage 5 — тот же API, тот же подход), 5.2/5.3
+  follow-ups, Этап D, аналитические SSI (B1-final, Sphere×*, Cylinder×*,
+  Cone×*, Torus), 6.1–6.5 store-first читатели, 7.1–7.5 (born-indexed
+  construction, compaction, mirror-free healing/construction)
+- Локальный дубль отброшен (`git reset --hard origin/main`), branch
+  `backup-stage51-rework` сохранён для справки
+- Integrity-check после reset: topology 225+31 ✅, core 75+2 ✅ —
+  соответствует worklog'у remote
+
+## Урок (усилен)
+
+**ВСЕГДА `git fetch origin` + сравнение `HEAD..origin/main` ДО начала
+работы после sandbox-reload.** Локальное состояние ненадёжно; remote —
+истина. Дважды за сутки «потерянная» работа оказывалась запушенной.
+
+## Следующий шаг (подтверждён по remote-worklog)
+
+«Осталось (Stage 7.5)»: физическое удаление поля `Face.edges` +
+serde-миграция; viewer-wire smoke-check. Dry-run удаления поля:
+64 ошибки в topology (boolean 14, edge_store 20, builder 10, healing 10,
+operations 7, entity 2) + ~19 mesh-сайтов + ~22 core + 27 step —
+мосты-легаси, которые 7.x уже заменил store-first путями. Mesh-staging
+(`stage_instance_view`) требует явного носителя (`StagedFace` с Deref).
