@@ -846,13 +846,14 @@ mod tests {
             CoEdge::new(id01, false),
         ];
         let mut bottom_wire = Wire::new(bottom_coedges);
+        let mut bottom_w: Vec<Edge> = Vec::new();
         bottom_wire.closed = true;
         let plane_bottom = Plane::from_origin_and_normal(
             Point3d::new(0.0, 0.0, -hz),
             Direction3d::new(0.0, 0.0, -1.0).unwrap(),
         );
-        let mut bottom_face = Face::new(Surface::Plane(plane_bottom), bottom_wire);
-        bottom_face.edges = vec![e01.clone(), e12.clone(), e23.clone(), e30.clone()];
+        let bottom_face = Face::new(Surface::Plane(plane_bottom), bottom_wire);
+        bottom_w = vec![e01.clone(), e12.clone(), e23.clone(), e30.clone()];
 
         // Top face (+Z normal)
         let top_coedges = vec![
@@ -862,13 +863,14 @@ mod tests {
             CoEdge::new(id74, true),
         ];
         let mut top_wire = Wire::new(top_coedges);
+        let mut top_w: Vec<Edge> = Vec::new();
         top_wire.closed = true;
         let plane_top = Plane::from_origin_and_normal(
             Point3d::new(0.0, 0.0, hz),
             Direction3d::Z,
         );
-        let mut top_face = Face::new(Surface::Plane(plane_top), top_wire);
-        top_face.edges = vec![e45.clone(), e56.clone(), e67.clone(), e74.clone()];
+        let top_face = Face::new(Surface::Plane(plane_top), top_wire);
+        top_w = vec![e45.clone(), e56.clone(), e67.clone(), e74.clone()];
 
         // Front face (-Y normal)
         let front_coedges = vec![
@@ -878,13 +880,14 @@ mod tests {
             CoEdge::new(id04, false),
         ];
         let mut front_wire = Wire::new(front_coedges);
+        let mut front_w: Vec<Edge> = Vec::new();
         front_wire.closed = true;
         let plane_front = Plane::from_origin_and_normal(
             Point3d::new(0.0, -hy, 0.0),
             Direction3d::new(0.0, -1.0, 0.0).unwrap(),
         );
-        let mut front_face = Face::new(Surface::Plane(plane_front), front_wire);
-        front_face.edges = vec![e01.clone(), e15.clone(), e45.clone(), e04.clone()];
+        let front_face = Face::new(Surface::Plane(plane_front), front_wire);
+        front_w = vec![e01.clone(), e15.clone(), e45.clone(), e04.clone()];
 
         // Back face (+Y normal)
         let back_coedges = vec![
@@ -894,13 +897,14 @@ mod tests {
             CoEdge::new(id26, false),
         ];
         let mut back_wire = Wire::new(back_coedges);
+        let mut back_w: Vec<Edge> = Vec::new();
         back_wire.closed = true;
         let plane_back = Plane::from_origin_and_normal(
             Point3d::new(0.0, hy, 0.0),
             Direction3d::new(0.0, 1.0, 0.0).unwrap(),
         );
-        let mut back_face = Face::new(Surface::Plane(plane_back), back_wire);
-        back_face.edges = vec![e23.clone(), e37.clone(), e67.clone(), e26.clone()];
+        let back_face = Face::new(Surface::Plane(plane_back), back_wire);
+        back_w = vec![e23.clone(), e37.clone(), e67.clone(), e26.clone()];
 
         // Left face (-X normal)
         let left_coedges = vec![
@@ -910,13 +914,14 @@ mod tests {
             CoEdge::new(id37, false),
         ];
         let mut left_wire = Wire::new(left_coedges);
+        let mut left_w: Vec<Edge> = Vec::new();
         left_wire.closed = true;
         let plane_left = Plane::from_origin_and_normal(
             Point3d::new(-hx, 0.0, 0.0),
             Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
         );
-        let mut left_face = Face::new(Surface::Plane(plane_left), left_wire);
-        left_face.edges = vec![e30.clone(), e04.clone(), e74.clone(), e37.clone()];
+        let left_face = Face::new(Surface::Plane(plane_left), left_wire);
+        left_w = vec![e30.clone(), e04.clone(), e74.clone(), e37.clone()];
 
         // Right face (+X normal)
         let right_coedges = vec![
@@ -926,18 +931,22 @@ mod tests {
             CoEdge::new(id15, false),
         ];
         let mut right_wire = Wire::new(right_coedges);
+        let mut right_w: Vec<Edge> = Vec::new();
         right_wire.closed = true;
         let plane_right = Plane::from_origin_and_normal(
             Point3d::new(hx, 0.0, 0.0),
             Direction3d::X,
         );
-        let mut right_face = Face::new(Surface::Plane(plane_right), right_wire);
-        right_face.edges = vec![e12.clone(), e26.clone(), e56.clone(), e15.clone()];
+        let right_face = Face::new(Surface::Plane(plane_right), right_wire);
+        right_w = vec![e12.clone(), e26.clone(), e56.clone(), e15.clone()];
 
         let shell = Shell::new_closed(vec![
             bottom_face, top_face, front_face, back_face, left_face, right_face,
         ]);
-        Solid::new(shell)
+        let working = vec![
+            bottom_w, top_w, front_w, back_w, left_w, right_w,
+        ];
+        Solid::from_edges_only(shell, working)
     }
 
     /// Test 5.2.5: validate a proper box — should be clean.
@@ -1107,14 +1116,14 @@ mod tests {
             CoEdge::new(e_a3.id, true),
             CoEdge::new(e_a4.id, true),
         ]);
-        let mut face_a = Face::new(
+        let face_a = Face::new(
             Surface::Plane(Plane::from_origin_and_normal(
                 Point3d::new(0.5, 0.5, 0.0),
                 Direction3d::Z,
             )),
             wire_a,
         );
-        face_a.edges = vec![e_shared_a, e_a2, e_a3, e_a4];
+        let a_w = vec![e_shared_a, e_a2, e_a3, e_a4];
 
         let wire_b = Wire::new(vec![
             CoEdge::new(idb1, true),
@@ -1122,26 +1131,24 @@ mod tests {
             CoEdge::new(e_b3.id, true),
             CoEdge::new(e_b4.id, true),
         ]);
-        let mut face_b = Face::new(
+        let face_b = Face::new(
             Surface::Plane(Plane::from_origin_and_normal(
                 Point3d::new(0.5, 0.0, 0.5),
                 Direction3d::new(0.0, -1.0, 0.0).unwrap(),
             )),
             wire_b,
         );
-        face_b.edges = vec![e_shared_b, e_b2, e_b3, e_b4];
+        let b_w = vec![e_shared_b, e_b2, e_b3, e_b4];
 
-        let mut solid = Solid::new(Shell::new_closed(vec![face_a, face_b]));
+        let mut solid = Solid::from_edges_only(Shell::new_closed(vec![face_a, face_b]), vec![a_w, b_w]);
 
-        // Un-indexed (empty store): every instance counts separately — the
-        // pre-C5 semantics; all 8 edges report as dangling.
-        let raw = validate_brep(&solid, &TopologyValidationConfig::default());
-        assert_eq!(raw.dangling_edges, 8, "instance-level counting: 8 × count=1");
-        assert_eq!(raw.edge_count, 8);
+        // (C5 7.6b: the un-indexed raw phase is structurally gone — the
+        // solid is born store-first; the pre-C5 instance-level counting
+        // state can no longer be constructed through the public API.)
 
         // Indexed: the two step-900 instances unify → 2 coedges, not
         // dangling; the 6 other edges remain single-use.
-        solid.index_edges();
+        // (7.6b: born store-first)
         let canonical = validate_brep(&solid, &TopologyValidationConfig::default());
         assert_eq!(
             canonical.dangling_edges, 6,

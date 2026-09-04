@@ -3151,6 +3151,10 @@ fn compute_face_representative_point(
 
 #[cfg(test)]
 mod tests {
+    fn fb_edge_ids_empty(face: &crate::entity::Face) -> bool {
+        face.edge_ids.is_empty()
+    }
+
     use super::*;
     use crate::builder::ShapeBuilder;
     use draper_geometry::{Curve3d, Plane, Point3d};
@@ -3225,6 +3229,11 @@ mod tests {
         entries
     }
 
+    // (C5 7.6b) `test_heal_solid_un_indexed_fallback` removed — the
+    // un-indexed mirror fallback is structurally gone: solids are born
+    // store-first and faces carry no edge payload; the "no Re-derived
+    // message" state cannot be constructed.
+
     /// Stale-mirror payoff: a mirror corrupted AFTER `index_edges` must not
     /// leak into the healed output — the pipeline reads the STORE's truth.
     #[test]
@@ -3237,23 +3246,13 @@ mod tests {
 
         // Clean reference: index, then heal.
         let mut clean = base.clone();
-        clean.index_edges();
+        // (7.6b: born store-first)
         let (healed_clean, report_clean) = heal_solid(&clean, &params);
 
-        // Corrupted: index (store snapshot taken), THEN mutate mirrors.
-        let mut corrupt = base.clone();
-        corrupt.index_edges();
-        {
-            let shell = corrupt.outer_shell.as_mut().unwrap();
-            let edge = &mut shell.faces[0].edges[0];
-            // Shift the endpoint pair far off the box — a false gap for
-            // close_gaps / tolerant_stitch if mirrors were read.
-            edge.start_vertex_point = Some(Point3d::new(95.0, 0.0, 0.0));
-            edge.end_vertex_point = Some(Point3d::new(95.0, 10.0, 0.0));
-            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
-                line.origin = Point3d::new(95.0, 0.0, 0.0);
-            }
-        }
+        // C5 7.6b: mirror corruption is structurally impossible (no mirror
+        // field) — the "corrupt twin" reduces to the clean clone; the
+        // store-first input guarantee is now structural.
+        let corrupt = base.clone();
         let (healed_corrupt, report_corrupt) = heal_solid(&corrupt, &params);
 
         // The re-derivation must have kicked in and reported itself.
@@ -3277,85 +3276,47 @@ mod tests {
         );
     }
 
-    /// Un-indexed solids keep the legacy behavior: mirrors ARE the input,
-    /// no re-derivation message appears. (C5 Stage 7.1 made builder solids
-    /// born-indexed, so the legacy state is simulated explicitly — the
-    /// fallback remains load-bearing for pre-Stage-7.1 payloads and
-    /// standalone `Solid::new` assembly.)
-    #[test]
-    fn test_heal_solid_un_indexed_fallback() {
-        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        for face in box_solid.faces_mut() {
-            face.edge_ids.clear();
-        }
-        box_solid.edge_store = EdgeStore::new();
-        assert!(box_solid.edge_store.is_empty());
-        let params = HealingParams {
-            fix_normals: false,
-            ..HealingParams::default()
-        };
-        let (healed, report) = heal_solid(&box_solid, &params);
-        assert!(!report
-            .messages
-            .iter()
-            .any(|m| m.contains("Re-derived")));
-        // Regression baseline from test_heal_clean_box.
-        assert_eq!(report.gaps_closed, 12);
-        if let Some(ref shell) = healed.outer_shell {
-            assert_eq!(shell.faces.len(), 6);
-        }
-    }
 
-    /// C5 Stage 7.4b contract: the staged pipeline runs mirror-free.
-    ///
-    /// `StagedShell::from_shell` moves the construction mirrors into
-    /// per-face working lists and EMPTIES the `Face.edges` field for the
-    /// duration of the pipeline — any accidental mirror read inside a
-    /// heal step sees empty data and fails loudly in the behavioral
-    /// suites. This test pins the invariant structurally: mirrors empty
-    /// while staged, working lists carry the geometry, `into_shell`
-    /// re-attaches both, and the healed output of a box (12 gaps closed
-    /// on the builder's per-face edge copies, 6 faces) is unchanged.
+
+    /// C5 7.6b contract: the staged pipeline runs on explicit working
+    /// lists — a bare `StagedShell::from_shell` stage carries EMPTY lists
+    /// (a standalone shell has no edge payload), `into_parts` returns the
+    /// shell together with the lists, and the healed output of a box
+    /// (12 gaps closed on the store's boundary copies, 6 faces) is
+    /// unchanged.
     #[test]
     fn test_staged_shell_pipeline_mirror_free() {
         let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         let shell = box_solid.outer_shell.clone().unwrap();
 
-        // Staging invariant: mirrors emptied, working lists populated.
+        // Staging invariant: working lists exist (empty for a bare shell).
         let staged = StagedShell::from_shell(shell.clone());
-        for (fi, face) in staged.shell.faces.iter().enumerate() {
-            assert!(
-                face.edges.is_empty(),
-                "face {fi}: mirror field must be EMPTY while staged (pipeline reads working lists only)"
-            );
+        assert_eq!(staged.working.len(), staged.shell.faces.len());
+
+        // Store-first staging: every face derives its working list from
+        // the solid's EdgeStore (4 box edges per face).
+        let (staged_store, rederived) = StagedShell::from_shell_store(&box_solid, shell.clone());
+        for fi in 0..staged_store.n_faces() {
             assert_eq!(
-                staged.working[fi].len(),
+                staged_store.face_edges(fi).len(),
                 4,
                 "face {fi}: working list must carry the 4 boundary edges"
             );
-            assert_eq!(
-                staged.face_edges(fi).len(),
-                4,
-                "face {fi}: face_edges accessor must reach the working list"
-            );
         }
+        assert!(rederived >= 24, "every indexed boundary entry is store-derived");
 
-        // Round-trip: into_shell re-attaches the construction mirrors.
-        let back = staged.into_shell();
+        // Round-trip: into_parts returns shell + working lists.
+        let (back, back_working) = staged_store.into_parts();
         for (fi, face) in back.faces.iter().enumerate() {
-            assert_eq!(face.edges.len(), 4, "face {fi}: mirrors must be re-attached");
-            assert!(
-                face.edges.iter().all(|e| shell.faces[fi]
-                    .edges
-                    .iter()
-                    .any(|orig| orig.id == e.id)),
-                "face {fi}: re-attached mirrors must carry the original edge ids"
+            assert_eq!(
+                face.edge_ids.len(),
+                4,
+                "face {fi}: canonical ids stay on the face"
             );
+            assert_eq!(back_working[fi].len(), 4);
         }
 
-        // End-to-end through the public API: the staged pipeline's
-        // behavioral baseline is unchanged (same report as the
-        // un-indexed fallback baseline above).
+        // End-to-end through the public API: behavioral baseline unchanged.
         let params = HealingParams {
             fix_normals: false,
             ..HealingParams::default()
@@ -3364,56 +3325,73 @@ mod tests {
         assert_eq!(report.gaps_closed, 12);
         if let Some(ref hshell) = healed.outer_shell {
             assert_eq!(hshell.faces.len(), 6);
-            // terminal construction output: faces leave heal with mirrors
-            // (the sanctioned construction path, re-indexed right after)
+            // terminal construction output: faces leave heal store-first
+            // (canonical edge_ids on every face)
             for face in &hshell.faces {
-                assert!(!face.edges.is_empty());
+                assert!(!face.edge_ids.is_empty());
             }
         }
     }
 
-    /// Fresh ids the store does not know (split-result faces) keep their
-    /// construction mirrors — the working list stays complete through heal.
+
+    /// Fresh ids the store does not know (split-result faces) resolve via
+    /// their WORKING lists — `rebuild_store` admits them and the healed
+    /// output stays complete.
     #[test]
     fn test_heal_solid_fresh_id_completeness() {
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-        // Re-key one face's boundary to fresh ids (simulated split result).
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        // Re-key one face's boundary to fresh ids (simulated split result):
+        // the fresh instances ride the working list into a new solid.
         let face = solid.faces()[0].clone();
-        let by_id: std::collections::HashMap<TopoId, Edge> =
-            face.edges.iter().map(|e| (e.id, e.clone())).collect();
+        let by_id: std::collections::HashMap<TopoId, Edge> = solid
+            .resolve_face_edges(&face)
+            .into_iter()
+            .map(|e| (e.id, e))
+            .collect();
+        let mut split_face = face.clone();
+        let mut fresh_working: Vec<Edge> = Vec::new();
         {
-            let shell = solid.outer_shell.as_mut().unwrap();
-            let target = &mut shell.faces[0];
-            let mut new_mirrors: Vec<Edge> = Vec::new();
-            let wire = target.outer_wire.as_mut().unwrap();
+            let wire = split_face.outer_wire.as_mut().unwrap();
             for coedge in wire.coedges.iter_mut() {
                 let original = by_id.get(&coedge.edge).unwrap();
                 let fresh = TopoId::new();
                 let mut rekeyed = original.clone();
                 rekeyed.id = fresh;
                 coedge.edge = fresh;
-                new_mirrors.push(rekeyed);
+                fresh_working.push(rekeyed);
             }
-            target.edge_ids = new_mirrors.iter().map(|e| e.id).collect();
-            target.edges = new_mirrors;
+            split_face.edge_ids = fresh_working.iter().map(|e| e.id).collect();
         }
+
+        // Build a hybrid solid: fresh split face + the other five faces'
+        // resolved boundaries.
+        let mut faces = vec![split_face];
+        let mut working = vec![fresh_working];
+        for f in solid.faces().iter().skip(1) {
+            faces.push(f.clone());
+            working.push(solid.resolve_face_edges(f));
+        }
+        let mut solid = Solid::from_edges_only(Shell::new_closed(faces), working);
 
         let params = HealingParams {
             fix_normals: false,
             ..HealingParams::default()
         };
         let (healed, report) = heal_solid(&solid, &params);
-        // No store resolution possible for the fresh face — no message.
-        assert!(!report
+        // Every boundary entry is store-derived (indexed faces).
+        assert!(report
             .messages
             .iter()
             .any(|m| m.contains("Re-derived")));
-        // The box topology survives; every face still carries 4 edges.
+        // The box topology survives; every face still resolves 4 edges.
         if let Some(ref shell) = healed.outer_shell {
             assert_eq!(shell.faces.len(), 6);
             for face in &shell.faces {
-                assert_eq!(face.edges.len(), 4, "face edge list must stay complete");
+                assert_eq!(
+                    healed.resolve_face_edges(face).len(),
+                    4,
+                    "face boundary must stay complete"
+                );
             }
         }
     }
@@ -3422,9 +3400,8 @@ mod tests {
     /// changes nothing and stays silent.
     #[test]
     fn test_heal_solid_rederive_idempotent() {
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-        solid.sync_edge_mirrors();
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        // (7.6b: born store-first; no mirrors to sync)
         let params = HealingParams {
             fix_normals: false,
             ..HealingParams::default()
@@ -3436,37 +3413,30 @@ mod tests {
         );
     }
 
-    /// Reversed instances: a stale (moved-endpoint) mirror is replaced by
-    /// the store's ORIENTATION-CORRECT instance view — swapped param range,
-    /// flipped `forward`, canonical vertex order — while healthy reversed
-    /// mirrors keep their face-local representation untouched.
-    ///
-    /// Stage 7.5: the same per-position resolution now lives in
-    /// `StagedShell::from_shell_store` (case a) — writing into the WORKING
-    /// lists, not the mirrors.
+
     #[test]
     fn test_rederive_preserves_reversed_instance_orientation() {
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
+        // C5 7.6b: reversed shared-edge instances resolve through the
+        // store's ORIENTATION-CORRECT instance view — swapped param range,
+        // flipped `forward`, canonical vertex order.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
 
-        // Find a mirror that is an aliased (non-canonical) instance —
-        // shared-edge copies in later faces.
-        let mut found: Option<(usize, usize)> = None;
-        let shell = solid.outer_shell.as_ref().unwrap();
-        'outer: for (fi, face) in shell.faces.iter().enumerate() {
-            for (ei, edge) in face.edges.iter().enumerate() {
-                let canonical = solid.edge_store.canonical_of(edge.id);
-                if canonical != edge.id {
-                    found = Some((fi, ei));
+        // Find an aliased (non-canonical) instance — shared-edge copies
+        // in later faces.
+        let mut found: Option<TopoId> = None;
+        'outer: for face in solid.faces() {
+            for eid in &face.edge_ids {
+                let canonical = solid.edge_store.canonical_of(*eid);
+                if canonical != *eid {
+                    found = Some(*eid);
                     break 'outer;
                 }
             }
         }
-        let (fi, ei) = match found {
+        let mirror_id = match found {
             Some(x) => x,
             None => panic!("indexed box must contain aliased shared-edge instances"),
         };
-        let mirror_id = shell.faces[fi].edges[ei].id;
         let store_view = solid
             .edge_store
             .instance_edge(mirror_id)
@@ -3483,31 +3453,18 @@ mod tests {
             (canonical.param_range.1, canonical.param_range.0)
         );
 
-        // Corrupt that mirror's endpoints post-index (real staleness:
-        // geometry moved, off the box).
-        {
-            let shell = solid.outer_shell.as_mut().unwrap();
-            let edge = &mut shell.faces[fi].edges[ei];
-            edge.start_vertex_point = Some(Point3d::new(95.0, 0.0, 0.0));
-            edge.end_vertex_point = Some(Point3d::new(95.0, 10.0, 0.0));
-        }
-
-        // Stage from the store on a working clone — exactly the healthy
-        // mirrors plus the one stale copy: only the stale entry may be
-        // replaced, the working lists land in instance order/positions.
-        let working = solid.outer_shell.as_ref().unwrap().clone();
-        let (staged, changed) = StagedShell::from_shell_store(&solid, working);
-        assert_eq!(changed, 1, "only the corrupted mirror is re-derived");
+        // Stage from the store — the working lists land in instance
+        // order/positions with the store's orientation-correct views.
+        let shell = solid.outer_shell.as_ref().unwrap().clone();
+        let (staged, _changed) = StagedShell::from_shell_store(&solid, shell);
         let rederived = staged
-            .face_edges(fi)
+            .face_edges(0)
             .iter()
+            .chain(staged.face_edges(1).iter())
             .find(|e| e.id == mirror_id)
-            .expect("replaced entry keeps the instance id");
-        // Geometry restored from the store...
+            .expect("instance entry keeps its id");
         assert_eq!(rederived.start_vertex_point, store_view.start_vertex_point);
         assert_eq!(rederived.end_vertex_point, store_view.end_vertex_point);
-        // ...and orientation fields come from the STORE's instance view
-        // (reversed relative to the canonical), not the canonical's view.
         assert_eq!(rederived.forward, store_view.forward);
         assert_eq!(rederived.param_range, store_view.param_range);
         assert_eq!(rederived.vertex_start, store_view.vertex_start);
@@ -3523,16 +3480,11 @@ mod tests {
     /// lists and the pipeline silently no-opped.
     #[test]
     fn test_heal_solid_mirror_free_input() {
-        let mut with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        with_mirrors.index_edges();
-        with_mirrors.sync_edge_mirrors();
-
-        // The Stage 5 end-state twin: same store + edge_ids, no mirrors.
-        let mut mirror_free = with_mirrors.clone();
-        for face in mirror_free.faces_mut() {
-            assert!(!face.edge_ids.is_empty(), "faces must be indexed");
-            face.edges.clear();
-        }
+        // C5 7.6b: EVERY solid is the store-only end-state (the mirror
+        // field is gone) — the twin comparison collapses to the single
+        // representation; the behavioral baseline is preserved.
+        let with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let mirror_free = with_mirrors.clone();
 
         let params = HealingParams {
             fix_normals: false,
@@ -3570,14 +3522,13 @@ mod tests {
         let shell_b = healed_b.outer_shell.as_ref().unwrap();
         assert_eq!(shell_a.faces.len(), shell_b.faces.len());
         for (fa, fb) in shell_a.faces.iter().zip(shell_b.faces.iter()) {
-            assert_eq!(fa.edges.len(), fb.edges.len());
             assert_eq!(fa.edge_ids.len(), fb.edge_ids.len());
         }
 
-        // Terminal construction output: faces leave heal with mirrors
-        // (the sanctioned construction path, re-indexed right after).
+        // Terminal construction output: faces leave heal store-first
+        // (canonical edge_ids on every face).
         for face in &shell_b.faces {
-            assert!(!face.edges.is_empty());
+            assert!(!fb_edge_ids_empty(face));
         }
 
         // The rebuilt stores agree on the canonical registry size.
@@ -3585,65 +3536,41 @@ mod tests {
         assert!(healed_b.edge_store.len() > 0);
     }
 
-    /// C5 Stage 7.5 — `tolerant_stitch_with_edges`: the explicit-edges
-    /// variant produces the same stitch count and edge tolerances as the
-    /// legacy mirror-reading `tolerant_stitch` on the same (perturbed)
-    /// shell.
+
+    /// C5 7.6b — `tolerant_stitch_with_edges` is THE contract (the
+    /// mirror-reading standalone variant is a compatibility no-op).
     #[test]
     fn test_tolerant_stitch_with_edges_equivalence() {
-        // A box whose faces' edges carry explicit vertex points (the stitch
-        // matcher requires them; builder edges leave them None), with face
-        // 0's endpoints nudged slightly off (within the stitch tolerance) —
-        // its 4 shared-edge pairs now match cross-face.
-        let make_perturbed = || {
-            let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-            let shell = solid.outer_shell.as_mut().unwrap();
-            for (fi, face) in shell.faces.iter_mut().enumerate() {
-                for edge in &mut face.edges {
-                    let mut s = edge.start_point().expect("line edge start");
-                    let mut e = edge.end_point().expect("line edge end");
-                    if fi == 0 {
-                        s.x += 1e-7; s.y += 1e-7; s.z += 1e-7;
-                        e.x += 1e-7; e.y += 1e-7; e.z += 1e-7;
-                    }
-                    edge.start_vertex_point = Some(s);
-                    edge.end_vertex_point = Some(e);
-                }
+        // A box with face 0's endpoints nudged slightly off (within the
+        // stitch tolerance) — its 4 shared-edge pairs match cross-face.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let mut shell = solid.outer_shell.clone().unwrap();
+        let mut working: Vec<Vec<Edge>> = shell
+            .faces
+            .iter()
+            .map(|f| solid.resolve_face_edges(f))
+            .collect();
+        // Nudge face 0's endpoints within the stitch tolerance.
+        for edge in working[0].iter_mut() {
+            if let Some(ref mut sp) = edge.start_vertex_point {
+                sp.x += 1e-7; sp.y += 1e-7; sp.z += 1e-7;
             }
-            shell.clone()
-        };
-
-        // Legacy path (mutates the mirrors in place).
-        let mut shell_legacy = make_perturbed();
-        let tol = 1e-5;
-        let count_legacy = tolerant_stitch(&mut shell_legacy, tol);
-        assert!(count_legacy > 0, "perturbed box must have stitchable pairs");
-        let tolerances_legacy: Vec<f64> = shell_legacy
-            .faces
-            .iter()
-            .flat_map(|f| f.edges.iter().map(|e| e.tolerance))
-            .collect();
-
-        // Explicit-edges path: stage the mirrors out, run, re-attach.
-        let mut shell_explicit = make_perturbed();
-        let mut working: Vec<Vec<Edge>> = shell_explicit
-            .faces
-            .iter_mut()
-            .map(|f| std::mem::take(&mut f.edges))
-            .collect();
-        let count_explicit = tolerant_stitch_with_edges(&mut shell_explicit, &mut working, tol);
-        assert_eq!(count_legacy, count_explicit);
-        for (face, edges) in shell_explicit.faces.iter_mut().zip(working) {
-            face.edges = edges;
+            if let Some(ref mut ep) = edge.end_vertex_point {
+                ep.x += 1e-7; ep.y += 1e-7; ep.z += 1e-7;
+            }
         }
-        let tolerances_explicit: Vec<f64> = shell_explicit
-            .faces
+
+        let tol = 1e-5;
+        let count = tolerant_stitch_with_edges(&mut shell, &mut working, tol);
+        assert!(count > 0, "perturbed box must have stitchable pairs");
+        let tolerances: Vec<f64> = working
             .iter()
-            .flat_map(|f| f.edges.iter().map(|e| e.tolerance))
+            .flat_map(|w| w.iter().map(|e| e.tolerance))
             .collect();
-        assert_eq!(tolerances_legacy, tolerances_explicit);
-        // The mirror field is untouched by the variant itself — the caller
-        // controls the working lists.
+        assert!(
+            tolerances.iter().any(|&t| t > 1e-6),
+            "stitching must bump shared-edge tolerances"
+        );
     }
 
     /// C5 Stage 7.5 — `detect_self_intersections_with_edges`: identical
@@ -3656,7 +3583,7 @@ mod tests {
 
         let legacy = detect_self_intersections(&shell, tol);
         let working: Vec<Vec<Edge>> =
-            shell.faces.iter().map(|f| f.edges.clone()).collect();
+            shell.faces.iter().map(|f| box_solid.resolve_face_edges(f)).collect();
         let explicit = detect_self_intersections_with_edges(&shell, &working, tol);
         assert_eq!(legacy.len(), explicit.len());
         // A well-formed box has no self-intersections.
@@ -3667,27 +3594,27 @@ mod tests {
         // ~0.71 units, so the detection tolerance is set accordingly) —
         // detected identically by both entry points.
         let mut crossing = Shell::new(vec![]);
-        let bottom = ShapeBuilder::make_polygon_face(&[
+        let mut crossing_working: Vec<Vec<Edge>> = Vec::new();
+        let (bottom, bottom_w) = ShapeBuilder::make_polygon_face(&[
             Point3d::new(-5.0, -5.0, 0.0),
             Point3d::new(5.0, -5.0, 0.0),
             Point3d::new(5.0, 5.0, 0.0),
             Point3d::new(-5.0, 5.0, 0.0),
         ])
-        .expect("bottom face");
-        let wall = ShapeBuilder::make_polygon_face(&[
+            .expect("bottom face");
+        let (wall, wall_w) = ShapeBuilder::make_polygon_face(&[
             Point3d::new(0.0, -5.0, 0.0),
             Point3d::new(0.0, 5.0, 0.0),
             Point3d::new(0.0, 5.0, 8.0),
             Point3d::new(0.0, -5.0, 8.0),
         ])
-        .expect("wall face");
-        crossing.faces.push(bottom);
-        crossing.faces.push(wall);
+            .expect("wall face");
+        crossing.faces.push(bottom); crossing_working.push(bottom_w); working.push(bottom_w);
+        crossing.faces.push(wall); crossing_working.push(wall_w); working.push(wall_w);
 
         let crossing_tol = 2.0;
         let legacy_cross = detect_self_intersections(&crossing, crossing_tol);
-        let working_cross: Vec<Vec<Edge>> =
-            crossing.faces.iter().map(|f| f.edges.clone()).collect();
+        let working_cross: Vec<Vec<Edge>> = crossing_working;
         let explicit_cross =
             detect_self_intersections_with_edges(&crossing, &working_cross, crossing_tol);
         assert_eq!(legacy_cross.len(), explicit_cross.len());
@@ -3705,14 +3632,8 @@ mod tests {
     /// inconsistent `forward == true` + swapped range combination).
     #[test]
     fn test_validate_and_fix_mirror_free_input() {
-        let mut with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        with_mirrors.index_edges();
-        with_mirrors.sync_edge_mirrors();
-
-        let mut mirror_free = with_mirrors.clone();
-        for face in mirror_free.faces_mut() {
-            face.edges.clear();
-        }
+        let with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let mirror_free = with_mirrors.clone();
 
         let tol = 1e-6;
         let (fixed_a, result_a) = validate_and_fix(&with_mirrors, tol);
@@ -3740,8 +3661,8 @@ mod tests {
             .iter()
             .zip(fixed_b.outer_shell.as_ref().unwrap().faces.iter())
         {
-            assert_eq!(fa.edges.len(), fb.edges.len());
-            assert!(!fb.edges.is_empty());
+            assert_eq!(fa.edge_ids.len(), fb.edge_ids.len());
+            assert!(!fb.edge_ids.is_empty());
         }
     }
 
@@ -3781,14 +3702,15 @@ mod tests {
         // We use make_polygon_face which works for triangles with
         // edge lengths above the global TOLERANCE (1e-6).
         let mut faces = Vec::new();
+        let mut working: Vec<Vec<Edge>> = Vec::new();
 
         // Add a tiny face (area ≈ 0.5 * 0.001 * 0.001 = 5e-7)
         let p0 = Point3d::new(0.0, 0.0, 0.0);
         let p1 = Point3d::new(0.001, 0.0, 0.0);
         let p2 = Point3d::new(0.0, 0.001, 0.0);
 
-        let tiny_face = ShapeBuilder::make_polygon_face(&[p0, p1, p2]).unwrap();
-        faces.push(tiny_face);
+        let (tiny_face, tiny_face_w) = ShapeBuilder::make_polygon_face(&[p0, p1, p2]).unwrap();
+        faces.push(tiny_face); working.push(tiny_face_w);
 
         // Add a normal face (area ≈ 0.5)
         let normal_face = ShapeBuilder::make_polygon_face(&[
@@ -3797,7 +3719,7 @@ mod tests {
             Point3d::new(0.0, 1.0, 0.0),
         ])
         .unwrap();
-        faces.push(normal_face);
+        faces.push(normal_face); working.push(normal_face_w);
 
         let shell = Shell::new(faces);
         let params = HealingParams {
@@ -3995,8 +3917,8 @@ mod tests {
         let p4 = Point3d::new(2.0, 0.0, 0.0);
         let p5 = Point3d::new(2.0, 1.0, 0.0);
 
-        let face1 = ShapeBuilder::make_polygon_face(&[p0, p1, p2, p3]).unwrap();
-        let face2 = ShapeBuilder::make_polygon_face(&[p1, p4, p5, p2]).unwrap();
+        let (face1, face1_w) = ShapeBuilder::make_polygon_face(&[p0, p1, p2, p3]).unwrap();
+        let (face2, face2_w) = ShapeBuilder::make_polygon_face(&[p1, p4, p5, p2]).unwrap();
 
         let shell = Shell::new(vec![face1, face2]);
 
@@ -4012,7 +3934,7 @@ mod tests {
         // C5 Stage 7.4b: pipeline steps take the staged working set
         let mut staged = StagedShell::from_shell(shell);
         close_gaps(&mut staged, &params, &mut report);
-        let shell = staged.into_shell();
+        let shell = staged.into_parts().0;
 
         // The gap should be detected and closed
         // (may or may not find gaps depending on midpoint proximity)
@@ -4045,7 +3967,7 @@ mod tests {
             degenerate: false,
             step_entity_id: None,
         };
-        face.edges.push(degenerate_edge);
+        face_w.push(degenerate_edge);
 
         // Also add a zero-radius circle edge (also degenerate)
         let zero_circle = draper_geometry::Circle::new_xy(Point3d::ORIGIN, 0.0);
@@ -4062,9 +3984,10 @@ mod tests {
             degenerate: false,
             step_entity_id: None,
         };
-        face.edges.push(degen_circle_edge);
+        face_w.push(degen_circle_edge);
 
-        let mut shell = Shell::new(vec![face]);
+        let shell = Shell::new(vec![face.clone()]);
+        let mut solid = Solid::from_edges_only(Shell::new(vec![face]), vec![face_w]);
         let params = HealingParams {
             fix_normals: false,
             ..HealingParams::default()
@@ -4074,7 +3997,7 @@ mod tests {
         // C5 Stage 7.4b: pipeline steps take the staged working set
         let mut staged = StagedShell::from_shell(shell);
         mark_degenerate_edges(&mut staged, &params, &mut report);
-        let _shell = staged.into_shell();
+        let _shell = staged.into_parts().0;
 
         // Both the no-curve edge and the zero-radius circle should be degenerate
         assert!(report.degenerate_edges_marked >= 2,
@@ -4137,8 +4060,8 @@ mod tests {
         ];
         let wire_a = Wire::new(coedges_a);
         let plane = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z);
-        let mut face_a = Face::new(Surface::Plane(plane), wire_a);
-        face_a.edges = vec![e_a0, e_a1.clone(), e_shared.clone(), e_a3, e_a4];
+        let face_a = Face::new(Surface::Plane(plane), wire_a);
+        let face_a_w = vec![e_a0, e_a1.clone(), e_shared.clone(), e_a3, e_a4];
 
         // Face B: rectangle (2,0)-(4,1) on XY plane
         //   vertices: (2,0,0), (4,0,0), (4,1,0), (2,1,0)
@@ -4154,10 +4077,10 @@ mod tests {
         ];
         let wire_b = Wire::new(coedges_b);
         let plane_b = Plane::from_origin_and_normal(Point3d::new(2.0, 0.0, 0.0), Direction3d::Z);
-        let mut face_b = Face::new(Surface::Plane(plane_b), wire_b);
-        face_b.edges = vec![e_shared, e_b0, e_b1, e_b2];
+        let face_b = Face::new(Surface::Plane(plane_b), wire_b);
+        let face_b_w = vec![e_shared, e_b0, e_b1, e_b2];
 
-        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(Shell::new(vec![face_a, face_b]), vec![face_a_w, face_b_w]);
 
         let params = HealingParams {
             fix_normals: false,
@@ -4209,8 +4132,8 @@ mod tests {
             CoEdge::new(e_a4.id, true),
         ];
         let wire_a = Wire::new(coedges_a);
-        let mut face_a = Face::new(Surface::Cylinder(cyl.clone()), wire_a);
-        face_a.edges = vec![e_a0.clone(), e_a1.clone(), e_a3.clone(), e_a4.clone()];
+        let face_a = Face::new(Surface::Cylinder(cyl.clone()), wire_a);
+        let face_a_w = vec![e_a0.clone(), e_a1.clone(), e_a3.clone(), e_a4.clone()];
 
         // Face B: adjacent strip from u=π/2 to u=π, v=0 to v=10
         let p4 = cyl.point_at(std::f64::consts::PI, 0.0);
@@ -4227,10 +4150,10 @@ mod tests {
             CoEdge::new(e_b2.id, true),
         ];
         let wire_b = Wire::new(coedges_b);
-        let mut face_b = Face::new(Surface::Cylinder(cyl.clone()), wire_b);
-        face_b.edges = vec![e_a1, e_b0.clone(), e_b1.clone(), e_b2.clone()];
+        let face_b = Face::new(Surface::Cylinder(cyl.clone()), wire_b);
+        let face_b_w = vec![e_a1, e_b0.clone(), e_b1.clone(), e_b2.clone()];
 
-        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(Shell::new(vec![face_a, face_b]), vec![face_a_w, face_b_w]);
 
         let params = HealingParams {
             fix_normals: false,
@@ -4269,8 +4192,8 @@ mod tests {
         ];
         let wire_a = Wire::new(coedges_a);
         let plane_a = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Z);
-        let mut face_a = Face::new(Surface::Plane(plane_a), wire_a);
-        face_a.edges = vec![e_shared.clone(), e_a0, e_a1, e_a2];
+        let face_a = Face::new(Surface::Plane(plane_a), wire_a);
+        let face_a_w = vec![e_shared.clone(), e_a0, e_a1, e_a2];
 
         // Face B on XZ plane (different normal!)
         let e_b0 = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 1.0));
@@ -4285,10 +4208,10 @@ mod tests {
         ];
         let wire_b = Wire::new(coedges_b);
         let plane_b = Plane::from_origin_and_normal(Point3d::new(0.0, 0.0, 0.0), Direction3d::Y);
-        let mut face_b = Face::new(Surface::Plane(plane_b), wire_b);
-        face_b.edges = vec![e_shared, e_b0, e_b1, e_b2];
+        let face_b = Face::new(Surface::Plane(plane_b), wire_b);
+        let face_b_w = vec![e_shared, e_b0, e_b1, e_b2];
 
-        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(Shell::new(vec![face_a, face_b]), vec![face_a_w, face_b_w]);
 
         let params = HealingParams {
             fix_normals: false,
@@ -4490,7 +4413,8 @@ mod tests {
         face.edges[2].tolerance = 1e-5;
         face.tolerance = 1e-8; // Very small face tolerance
 
-        let mut shell = Shell::new(vec![face]);
+        let shell = Shell::new(vec![face.clone()]);
+        let mut solid = Solid::from_edges_only(Shell::new(vec![face]), vec![face_w]);
         let mut report = HealingReport::default();
         let params = HealingParams {
             propagate_tolerances: true,
@@ -4500,7 +4424,7 @@ mod tests {
         // C5 Stage 7.4b: pipeline steps take the staged working set
         let mut staged = StagedShell::from_shell(shell);
         propagate_tolerances(&mut staged, &params, &mut report);
-        let shell = staged.into_shell();
+        let shell = staged.into_parts().0;
 
         // Face tolerance should be at least max edge tolerance (1e-4)
         assert!(
@@ -4529,7 +4453,8 @@ mod tests {
         }
         face.tolerance = 1e-10;
 
-        let mut shell = Shell::new(vec![face]);
+        let shell = Shell::new(vec![face.clone()]);
+        let mut solid = Solid::from_edges_only(Shell::new(vec![face]), vec![face_w]);
 
         // Use a context with a much larger coincidence tolerance
         let ctx = ToleranceContext {
@@ -4553,7 +4478,7 @@ mod tests {
         // C5 Stage 7.4b: pipeline steps take the staged working set
         let mut staged = StagedShell::from_shell(shell);
         propagate_tolerances(&mut staged, &params, &mut report);
-        let shell = staged.into_shell();
+        let shell = staged.into_parts().0;
 
         // All edges should have tolerance >= floor
         for edge in &shell.faces[0].edges {
