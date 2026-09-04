@@ -59,9 +59,11 @@ fn main() {
                 .inner_wires
                 .iter()
                 .map(|w| {
+                    // (C5 7.6b: store-resolved ids — Face has no edge
+                    // mirrors; the store answers coedge resolution.)
                     w.coedges
                         .iter()
-                        .filter(|c| face.edge_by_id(c.edge).is_some())
+                        .filter(|c| solid.edge_store.instance_edge(c.edge).is_some())
                         .count()
                 })
                 .collect::<Vec<_>>();

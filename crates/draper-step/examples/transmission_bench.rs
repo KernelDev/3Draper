@@ -15,7 +15,7 @@
 
 use draper_mesh::triangulate::TriangulationParams;
 use draper_mesh::triangulate_solid_with_report;
-use draper_mesh::{triangulate_face_with_cache, EdgeDiscretizationCache};
+use draper_mesh::{triangulate_solid_face_with_cache, EdgeDiscretizationCache};
 use draper_step::{extract_solids, parse_step_file};
 use std::time::Instant;
 
@@ -137,7 +137,7 @@ fn main() {
     );
 }
 
-/// Time each face of `solid` through `triangulate_face_with_cache`,
+/// Time each face of `solid` through the store-resolved entry,
 /// mirroring `triangulate_solid_sequential` (pre-populate + per-face).
 fn face_bench_run(solid: &draper_topology::Solid, params: &TriangulationParams) {
     let mut cache = EdgeDiscretizationCache::new();
@@ -154,9 +154,10 @@ fn face_bench_run(solid: &draper_topology::Solid, params: &TriangulationParams) 
             .as_ref()
             .map(surface_name)
             .unwrap_or("None");
-        let nb = face.edges.len();
+        // (C5 7.6b: store-resolved boundary — Face has no edge mirrors.)
+        let nb = solid.resolve_face_edges(face).len();
         let t = Instant::now();
-        let m = triangulate_face_with_cache(face, params, &mut cache);
+        let m = triangulate_solid_face_with_cache(solid, face, params, &mut cache);
         rows.push((fi, t.elapsed().as_secs_f64(), m.triangle_count(), stype, nb));
     }
     rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());

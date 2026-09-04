@@ -66,7 +66,8 @@ fn main() {
     let mut min = draper_geometry::Point3d::new(f64::MAX, f64::MAX, f64::MAX);
     let mut max = draper_geometry::Point3d::new(f64::MIN, f64::MIN, f64::MIN);
     for face in solid.faces() {
-        for edge in &face.edges {
+        // (C5 7.6b: store-resolved boundary — Face has no edge mirrors.)
+        for edge in solid.resolve_face_edges(face) {
             if edge.degenerate { continue; }
             if let Some(p) = edge.start_point() {
                 min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
@@ -105,9 +106,10 @@ fn main() {
     println!("outer_wire: {} coedges", wire.coedges.len());
 
     for (ci, co) in wire.coedges.iter().enumerate() {
-        let edge = face.edge_by_id(co.edge);
+        // (C5 7.6b: coedge resolution goes through the store's instance view.)
+        let edge = solid.edge_store.instance_edge(co.edge);
         let Some(edge) = edge else {
-            println!("  coedge {ci}: edge id {} NOT RESOLVED via face.edge_by_id", co.edge);
+            println!("  coedge {ci}: edge id {} NOT RESOLVED via the store", co.edge);
             continue;
         };
         let disc = cache.get(edge.id);

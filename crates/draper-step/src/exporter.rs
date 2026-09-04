@@ -1441,45 +1441,56 @@ mod tests {
         assert!(step.contains("PLANE"));
     }
 
-    /// C5 Stage 6.4: store-first export — a mirror corrupted AFTER
-    /// `index_edges` must not leak into the exported EDGE_CURVE geometry;
-    /// the DATA section stays bit-identical to the clean export.
+    /// C5 7.6b: export is store-only (`resolve_face_edges`) — there are no
+    /// mirrors to go stale. The surviving contracts: the exported
+    /// EDGE_CURVE geometry is the STORE's data (mutations surface), and
+    /// repeated exports of the same solid are bit-identical.
     #[test]
-    fn test_export_ignores_stale_mirrors() {
+    fn test_export_reads_store_single_source() {
         use draper_topology::ShapeBuilder;
-        use draper_geometry::Curve3d;
 
         let base = ShapeBuilder::make_box(10.0, 10.0, 10.0);
 
-        let mut clean = base.clone();
-        clean.index_edges();
+        // (7.6b: builder solids are born-indexed — no index pass.)
+        let clean = base.clone();
 
+        // A store mutation is authoritative data now — shifting one
+        // canonical edge (vertex points AND the curve — the exporter
+        // samples `edge.start_point()`, which reads the curve) must
+        // surface in the exported geometry.
         let mut stale = base.clone();
-        stale.index_edges();
         {
-            let shell = stale.outer_shell.as_mut().unwrap();
-            let edge = &mut shell.faces[0].edges[0];
-            edge.start_vertex_point = Some(draper_geometry::Point3d::new(95.0, 0.0, 0.0));
-            edge.end_vertex_point = Some(draper_geometry::Point3d::new(95.0, 10.0, 0.0));
-            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
-                line.origin = draper_geometry::Point3d::new(95.0, 0.0, 0.0);
+            let face0 = &stale.faces()[0];
+            let eid = face0.edge_ids[0];
+            if let Some(edge) = stale.edge_store.get_mut(eid) {
+                edge.start_vertex_point = Some(draper_geometry::Point3d::new(95.0, 0.0, 0.0));
+                edge.end_vertex_point = Some(draper_geometry::Point3d::new(95.0, 10.0, 0.0));
+                if let Some(draper_geometry::Curve3d::Line(ref mut line)) = edge.curve {
+                    line.origin = draper_geometry::Point3d::new(95.0, 0.0, 0.0);
+                }
             }
         }
 
         let step_clean = export_step(&clean, "stale_check");
         let step_stale = export_step(&stale, "stale_check");
 
-        // No exported coordinate may carry the corrupted off-box value.
         assert!(
-            !step_stale.contains("95."),
-            "stale mirror geometry leaked into the export"
+            step_stale.contains("95."),
+            "store mutation must surface in the export (single source of truth)"
         );
-        // DATA section (id-deterministic) is bit-identical to the clean run.
         let data = |s: &str| s.split_once("DATA;").map(|(_, rest)| rest.to_string());
-        assert_eq!(
+        assert_ne!(
             data(&step_clean),
             data(&step_stale),
-            "store-first export must be mirror-staleness-immune"
+            "mutated store must yield a different DATA section"
+        );
+
+        // Determinism: exporting the same solid twice is bit-identical.
+        let again = export_step(&clean, "stale_check");
+        assert_eq!(
+            data(&step_clean),
+            data(&again),
+            "repeated exports must be bit-identical"
         );
     }
 

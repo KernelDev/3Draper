@@ -1,30 +1,28 @@
-//! C5 Stage 7.2 — canonical SOLID payload from STEP.
+//! C5 Stage 7.2 / 7.6b — canonical SOLID payload from STEP.
 //!
-//! `extract_solids` now returns store-first solids: after `index_edges`
-//! (covering outer AND void shells), the converter calls
-//! `Solid::compact_edge_mirrors`, so every face the edge store can fully
-//! answer arrives with EMPTY `edges` mirrors and canonical `edge_ids`.
-//! The production triangulation pipelines (sequential AND parallel) stage
-//! faces through `Solid::resolve_face_edges` (Stage 7.2 migration), so the
-//! compacted payload triangulates without the mirrors.
+//! `extract_solids` returns store-first solids: every face carries
+//! canonical `edge_ids` and the edge store answers all boundary-reader
+//! queries. `Face.edges` mirrors no longer exist (7.6b removed the field),
+//! so the "compacted vs mirror-bearing" distinction collapsed — every
+//! payload IS the compacted end-state.
 //!
 //! Verification criteria:
-//! 1. STEP-loaded solids arrive compacted (mirrors empty where the store
-//!    answers every boundary-reader query) and every wire coedge resolves.
-//! 2. `triangulate_solid` on the compacted payload is watertight (the
-//!    known-good regression files: nist_cone was at 0.00% boundary since
-//!    C5 Stage 1).
-//! 3. Compaction is value-neutral: the mesh from the compacted solid is
-//!    bit-identical to the PRE-Stage-7.2 mirror-reading pipeline
-//!    (per-face `triangulate_face_with_cache` on re-materialized mirrors).
+//! 1. STEP-loaded solids arrive store-first (edge_ids on every face,
+//!    every wire coedge resolvable through the store).
+//! 2. `triangulate_solid` on the payload is watertight (the known-good
+//!    regression files: nist_cone was at 0.00% boundary since C5 Stage 1).
+//! 3. Value-neutrality of the store chain: the production solid pipeline
+//!    is bit-identical to a manual sequential replication that stages
+//!    each face through `triangulate_solid_face_with_cache` (the
+//!    store-resolved per-face entry) on the same payload.
 
 use draper_mesh::{
-    filter_degenerate_triangles, triangulate_face_with_cache, triangulate_solid,
+    filter_degenerate_triangles, triangulate_solid, triangulate_solid_face_with_cache,
     triangulate_solid_with_report, EdgeDiscretizationCache, TriangleMesh,
     TriangulationParams, VertexDedupMap,
 };
 use draper_step::{extract_solids, parse_step};
-use draper_topology::{Face, Solid};
+use draper_topology::Solid;
 
 /// Load + parse a STEP file from the workspace test directory and extract
 /// solids (same path resolution as `seam_junction_regression.rs`).
@@ -78,15 +76,11 @@ fn assert_meshes_bit_identical(a: &TriangleMesh, b: &TriangleMesh, ctx: &str) {
     }
 }
 
-/// Classify a face: `Some(compacted)` when mirrors are empty, `None` when
-/// the face kept (or never had) mirror content.
-fn face_compacted(face: &Face) -> bool {
-    face.edges.is_empty()
-}
-
-/// Test 1 — STEP solids arrive as store-first (compacted) payloads.
+/// Test 1 — STEP solids arrive as store-first payloads (7.6b: the
+/// compacted end-state is the ONLY state — faces carry edge_ids and the
+/// store answers every boundary-reader query).
 #[test]
-fn test_step_solids_arrive_compacted() {
+fn test_step_solids_arrive_store_first() {
     for filename in ["nist_cone.stp", "cube_with_void.stp"] {
         let solids = load_solids(filename);
         for (si, solid) in solids.iter().enumerate() {
@@ -95,22 +89,11 @@ fn test_step_solids_arrive_compacted() {
                 "{filename}: solid {si} must carry an edge store"
             );
             let faces = solid.faces();
-            let mut compacted = 0usize;
             for (fi, face) in faces.iter().enumerate() {
-                if face_compacted(face) {
-                    compacted += 1;
-                    assert!(
-                        !face.edge_ids.is_empty(),
-                        "{filename}: solid {si} face {fi}: compacted face must keep edge_ids"
-                    );
-                } else {
-                    // Un-compacted leftovers must be mirror-only identity
-                    // (un-indexed), never a half-cleared state.
-                    assert!(
-                        !face.edges.is_empty(),
-                        "{filename}: solid {si} face {fi}: non-compacted face keeps mirrors"
-                    );
-                }
+                assert!(
+                    !face.edge_ids.is_empty(),
+                    "{filename}: solid {si} face {fi}: store-first face must keep edge_ids"
+                );
                 // Every wire coedge id resolves through the store — the
                 // boundary readers' hard requirement.
                 let mut coedge_ids = Vec::new();
@@ -127,16 +110,11 @@ fn test_step_solids_arrive_compacted() {
                     );
                 }
             }
-            assert!(
-                compacted > 0,
-                "{filename}: solid {si}: expected at least one compacted face, got 0/{}",
-                faces.len()
-            );
         }
     }
 }
 
-/// Test 2 — the compacted payload triangulates watertight through the
+/// Test 2 — the store-first payload triangulates watertight through the
 /// production solid pipeline (store-first staging, Stage 7.2).
 #[test]
 fn test_compacted_step_solid_triangulates_watertight() {
@@ -155,7 +133,7 @@ fn test_compacted_step_solid_triangulates_watertight() {
     );
 
     // A holed brick: multi-face planar payload through the same pipeline
-    // (bit-identity vs the pre-7.2 pipeline is asserted in test 3).
+    // (bit-identity vs the manual replication is asserted in test 3).
     let solids = load_solids("brick_thin_hole.stp");
     let result = triangulate_solid_with_report(&solids[0], &params);
     assert!(
@@ -169,75 +147,59 @@ fn test_compacted_step_solid_triangulates_watertight() {
     );
 }
 
-/// Test 3 — compaction is value-neutral: bit-identical mesh vs the
-/// PRE-Stage-7.2 mirror-reading sequential pipeline.
+/// Test 3 — the store chain is value-neutral: bit-identical mesh vs a
+/// manual sequential replication staging every face through the
+/// store-resolved per-face entry (`triangulate_solid_face_with_cache`)
+/// with the same adaptive cache setup as `triangulate_solid_with_report`.
 ///
-/// The reference re-materializes the per-face mirrors from the store
-/// (`Solid::instance_edges` — the Stage 6 mirror re-derivation) and runs
-/// the OLD per-face entry (`triangulate_face_with_cache`, which reads the
-/// face's own `edges` mirror) in the old sequential loop shape. The
-/// compacted payload goes through the production `triangulate_solid`
-/// (store-first staging). Bit-identity proves the whole 7.2 chain:
-/// mirror compaction + store resolution + staging.
+/// (7.6b: the historical reference re-materialized per-face mirrors and
+/// ran the mirror-reading `triangulate_face_with_cache` — that path is
+/// structurally gone; the manual store-first replication below proves the
+/// same chain: store resolution + staging + merge.)
 #[test]
-fn test_compaction_value_neutral_bit_identity() {
-    for filename in ["nist_cone.stp", "nist_cylinder.stp", "brick_thin_hole.stp", "cube_with_void.stp"] {
+fn test_store_chain_value_neutral_bit_identity() {
+    for filename in [
+        "nist_cone.stp",
+        "nist_cylinder.stp",
+        "brick_thin_hole.stp",
+        "cube_with_void.stp",
+    ] {
         let solids = load_solids(filename);
         for (si, solid) in solids.iter().enumerate() {
             let params = TriangulationParams::default();
             let ctx = format!("{filename} solid {si}");
 
-            // Production: compacted payload → store-first staging.
-            let compacted_mesh = triangulate_solid(solid, &params);
+            // Production pipeline.
+            let production_mesh = triangulate_solid(solid, &params);
 
-            // Reference: re-materialize mirrors, run the pre-7.2 pipeline.
-            let re_materialized = re_materialize_mirrors(solid);
-            let reference_mesh = legacy_mirror_pipeline(&re_materialized, &params);
+            // Manual sequential replication (store-first per-face entry).
+            let reference_mesh = manual_store_pipeline(solid, &params);
 
             if reference_mesh.triangles.is_empty() {
-                // Pre-existing empty payload (degenerate STEP case, e.g.
-                // cube_with_void solid 2 was empty before Stage 7.2 too):
+                // Pre-existing empty payload (degenerate STEP case):
                 // the new pipeline must stay empty as well.
                 assert!(
-                    compacted_mesh.triangles.is_empty(),
+                    production_mesh.triangles.is_empty(),
                     "{ctx}: reference pipeline produced no triangles, production produced {}",
-                    compacted_mesh.triangles.len()
+                    production_mesh.triangles.len()
                 );
                 continue;
             }
             assert!(
-                !compacted_mesh.triangles.is_empty(),
+                !production_mesh.triangles.is_empty(),
                 "{ctx}: production mesh is empty while reference has {} triangles",
                 reference_mesh.triangles.len()
             );
-            assert_meshes_bit_identical(&compacted_mesh, &reference_mesh, &ctx);
+            assert_meshes_bit_identical(&production_mesh, &reference_mesh, &ctx);
         }
     }
 }
 
-/// Rebuild the per-face `edges` mirrors from the store (Stage 6
-/// `Solid::instance_edges` mirror re-derivation), producing the pre-C5
-/// in-memory shape of the same solid.
-fn re_materialize_mirrors(solid: &Solid) -> Solid {
-    let mut clone = solid.clone();
-    let rebuilt: Vec<Vec<draper_topology::Edge>> = clone
-        .faces()
-        .iter()
-        .map(|face| clone.instance_edges(face))
-        .collect();
-    for (face, edges) in clone.faces_mut().iter_mut().zip(rebuilt) {
-        face.edges = edges;
-    }
-    clone
-}
-
-/// The pre-Stage-7.2 sequential pipeline: pre-populate the shared cache,
-/// then run the MIRROR-READING per-face entry (`triangulate_face_with_cache`
-/// on the face itself), merging with tolerance dedup — the exact loop shape
-/// `triangulate_solid_sequential` had before the store-first migration.
-fn legacy_mirror_pipeline(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
+/// Manual replication of the sequential solid pipeline with the per-face
+/// call staged through the store-resolved entry point.
+fn manual_store_pipeline(solid: &Solid, params: &TriangulationParams) -> TriangleMesh {
     // Same adaptive-tolerance cache setup as `triangulate_solid_with_report`.
-    let (bmin, bmax) = legacy_solid_bbox(solid);
+    let (bmin, bmax) = store_solid_bbox(solid);
     let mut cache = EdgeDiscretizationCache::with_adaptive_tolerance(&bmin, &bmax, 64);
     cache.set_chord_tolerance_override(Some(params.max_deviation));
     cache.pre_populate_for_solid(solid, 20);
@@ -246,7 +208,7 @@ fn legacy_mirror_pipeline(solid: &Solid, params: &TriangulationParams) -> Triang
     let mut mesh = TriangleMesh::new();
     let mut dedup_map = VertexDedupMap::with_tolerance(adaptive_tol);
     for (face_idx, face) in solid.faces().iter().enumerate() {
-        let mut face_mesh = triangulate_face_with_cache(face, params, &mut cache);
+        let mut face_mesh = triangulate_solid_face_with_cache(solid, face, params, &mut cache);
         let face_tri_count = face_mesh.triangles.len();
         face_mesh.triangle_face_ids = Some(vec![face_idx as u64; face_tri_count]);
         mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
@@ -257,7 +219,7 @@ fn legacy_mirror_pipeline(solid: &Solid, params: &TriangulationParams) -> Triang
 
 /// Bounding-box scan over non-degenerate edge endpoints — the same scan
 /// `solid_bounding_box` performs (store-resolved via `Solid::face_edges`).
-fn legacy_solid_bbox(solid: &Solid) -> (draper_geometry::Point3d, draper_geometry::Point3d) {
+fn store_solid_bbox(solid: &Solid) -> (draper_geometry::Point3d, draper_geometry::Point3d) {
     use draper_geometry::Point3d;
     let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
     let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
