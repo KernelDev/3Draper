@@ -3296,3 +3296,25 @@ resolve_face_edges дедупит seam-инстансы по id.
 - `cd94efc` wip(step): 127+46 green
 - `2b131e8` wip(consumers): core/json/wasm + warnings
 - merge: `refactor: C5 stage 7.6b — physical removal of Face.edges`
+
+---
+
+# Worklog — C5 Stage 7.6b, post-merge: draper-testing fixtures
+
+**Дата:** 2026-09-05 (финальный коммит сессии 2)
+
+- `cargo check --workspace --lib` поймал 6 остаточных `face.edges = vec![]`
+  в draper-testing (primitives/combinations) — фикстуры переведены на
+  `(Face, Vec<Edge>)` пары + `Solid::from_edges_only`; подсчёт edge-uses
+  через `resolve_face_edges`
+- Workspace lib check — 0 ошибок ВО ВСЕХ крейтах (включая draper-testing)
+- Коммит `f26c524` запушен в main
+- Диск: debug-target (7.4G, egui/wgpu от случайного `cargo test -p
+  draper-testing`) вычищен; тесты draper-testing по-прежнему НЕ строятся
+  (правило среды)
+
+## Состояние C5 после сессии
+
+Stage 7.6b ПОЛНОСТЬЮ завершён: поле `Face.edges` удалено, вся кодовая
+база store-only, все сьюты зелёные, main = `f26c524`. Следующий шаг по
+ROADMAP — см. PLAN/ROADMAP разделы после C5.
