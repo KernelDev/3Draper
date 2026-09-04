@@ -2833,3 +2833,60 @@ index_edges + sync_edge_mirrors).
   сигнатура `(shell, edges)` или store на Shell
 - Физическое удаление поля `Face.edges` + serde-миграция
 - Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
+
+# C5 Stage 7.5 (часть C) — standalone-контракты с явными рёбрами
+
+**Дата:** 2026-09-04.
+
+## Дизайн-решение
+
+Сигнатура `(shell, edges)` (как в mesh Stage 5.2), НЕ store на Shell:
+StagedShell-паттерн уже стандарт пайплайна; store-on-Shell дублировал бы
+EdgeStore-механику не на том уровне.
+
+## Что сделано
+
+- `tolerant_stitch_with_edges(shell, working: &mut [Vec<Edge>], tol)` —
+  O(n²)-ядро работает по рабочим спискам, толерансы пишутся в них;
+  shell-толеранс остаётся полем шелла. Legacy `tolerant_stitch` —
+  stage/un-stage обёртка (зеркала = первичные данные).
+- `detect_self_intersections_with_edges(shell, working, tol)` —
+  публичная delegation на `detect_self_intersections_impl`; legacy
+  обёртка остаётся.
+- `validate_and_fix` — стадирует шеллы через `StagedShell::from_shell_store`
+  (7.5a: store-first, работает на store-only солидах); ядро
+  `validate_and_fix_staged_shell` валидирует/фиксит рёбра по WORKING-спискам;
+  self-intersection detection вызывает impl напрямую (без чтения зеркал);
+  нормали через `compute_face_centroid_with_edges` +
+  `StagedShell::compute_shell_centroid` (working-центроиды). Удалён
+  мёртвый legacy: `validate_and_fix_shell`, `compute_shell_centroid(shell)`,
+  `compute_face_centroid(face)` (твину `_with_edges` остались).
+
+## Тесты (3)
+
+- `test_tolerant_stitch_with_edges_equivalence`: perturbed box (vertex
+  points установлены — matcher требует Some), legacy ≡ explicit: count +
+  толерансы; урок: builder-рёбра несут None vertex points.
+- `test_detect_self_intersections_with_edges_equivalence`: box (пусто) +
+  crossing-пара (wall × bottom, tol=2.0 — 8-sample сетка шагает ~0.71):
+  legacy ≡ explicit, пересечение детектируется.
+- `test_validate_and_fix_mirror_free_input`: mirror-free солид — те же
+  surface/curve/degenerate/self-inter findings, терминальные зеркала
+  полные. **Найденная семантическая вилка**: store instance-views кодируют
+  реверс SWAPPED param_range (`Edge::reversed` конвенция) — legacy
+  валидатор считает их «reversed param_range» (12 на box), builder-зеркала
+  кодируют тот же реверс противоположной кривой (0). Геометрия — контракт;
+  param-swap семантика на instance-views = задокументированный follow-up
+  (валидатор не должен свапать легитимную конвенцию реверса).
+
+## Верификация
+
+- draper-topology: **256 passed** (225 lib + 31 integration)
+- draper-core: **77 ✅**; `cargo check -p draper-viewer -p draper-step` —
+  0 errors
+
+## Осталось (Stage 7.5)
+
+- Param-swap семантика валидатора vs reversed-instance encoding (follow-up)
+- Физическое удаление поля `Face.edges` + serde-миграция
+- Viewer-wire smoke-check (wasm-харнесс до C5 сломан)

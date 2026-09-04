@@ -434,12 +434,40 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 ///
 /// Returns the number of edge pairs stitched.
 pub fn tolerant_stitch(shell: &mut Shell, tolerance: f64) -> usize {
+    // C5 Stage 7.5 — legacy standalone-shell contract: mirrors are the
+    // primary input representation. Stage them into working lists, run
+    // the mirror-free core, and un-stage (construction semantics).
+    let mut working: Vec<Vec<Edge>> = shell
+        .faces
+        .iter_mut()
+        .map(|f| std::mem::take(&mut f.edges))
+        .collect();
+    let stitched = tolerant_stitch_with_edges(shell, &mut working, tolerance);
+    for (face, edges) in shell.faces.iter_mut().zip(working) {
+        face.edges = edges;
+    }
+    stitched
+}
+
+/// Explicit-edges variant of [`tolerant_stitch`] (C5 Stage 7.5).
+///
+/// The standalone contract without the mirror field: `working[i]` is
+/// face `i`'s boundary edge list (staged working data — the pipeline's
+/// representation, a store-first payload's instance lists, or the
+/// legacy mirrors moved out by the caller). Edge tolerance updates land
+/// in `working`; the shell-level tolerance recompute reads the faces'
+/// own tolerance fields. The face mirror field is never touched.
+pub fn tolerant_stitch_with_edges(
+    shell: &mut Shell,
+    working: &mut [Vec<Edge>],
+    tolerance: f64,
+) -> usize {
     let mut stitched_count = 0usize;
 
     // Collect all edges from all faces with their face index
     let mut all_edges: Vec<(usize, usize)> = Vec::new(); // (face_idx, edge_idx)
-    for (fi, face) in shell.faces.iter().enumerate() {
-        for (ei, _edge) in face.edges.iter().enumerate() {
+    for (fi, face_working) in working.iter().enumerate() {
+        for (ei, _edge) in face_working.iter().enumerate() {
             all_edges.push((fi, ei));
         }
     }
@@ -454,8 +482,8 @@ pub fn tolerant_stitch(shell: &mut Shell, tolerance: f64) -> usize {
                 continue; // Skip edges in the same face
             }
 
-            let edge_a = &shell.faces[fi_a].edges[ei_a];
-            let edge_b = &shell.faces[fi_b].edges[ei_b];
+            let edge_a = &working[fi_a][ei_a];
+            let edge_b = &working[fi_b][ei_b];
 
             // Check if edges share both vertices (within tolerance)
             let (a_start, a_end) = match (&edge_a.start_vertex_point, &edge_a.end_vertex_point) {
@@ -490,9 +518,9 @@ pub fn tolerant_stitch(shell: &mut Shell, tolerance: f64) -> usize {
                 let new_tol = gap / 2.0;
 
                 // Update both edges' tolerance to max(current, gap/2)
-                let edge_a_ref = &mut shell.faces[fi_a].edges[ei_a];
+                let edge_a_ref = &mut working[fi_a][ei_a];
                 edge_a_ref.tolerance = edge_a_ref.tolerance.max(new_tol);
-                let edge_b_ref = &mut shell.faces[fi_b].edges[ei_b];
+                let edge_b_ref = &mut working[fi_b][ei_b];
                 edge_b_ref.tolerance = edge_b_ref.tolerance.max(new_tol);
 
                 stitched_count += 1;
@@ -663,6 +691,11 @@ impl StagedShell {
 
     fn face_edges(&self, i: usize) -> &[Edge] {
         &self.working[i]
+    }
+
+    /// Mutable working-list accessor (C5 Stage 7.5).
+    fn face_edges_mut(&mut self, i: usize) -> &mut Vec<Edge> {
+        &mut self.working[i]
     }
 
     fn edge_count(&self, i: usize) -> usize {
@@ -2254,6 +2287,21 @@ pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfInter
     detect_self_intersections_impl(&shell.faces, &working, tolerance)
 }
 
+/// Explicit-edges variant of [`detect_self_intersections`] (C5 Stage 7.5).
+///
+/// The standalone contract without the mirror field: `working[i]` is
+/// face `i`'s boundary edge list. Callers that stage their shells
+/// store-first (`Solid::instance_edges`, the healing pipeline's working
+/// set) skip the mirror read entirely.
+pub fn detect_self_intersections_with_edges(
+    shell: &Shell,
+    working: &[Vec<Edge>],
+    tolerance: f64,
+) -> Vec<SelfIntersection> {
+    debug_assert_eq!(shell.faces.len(), working.len());
+    detect_self_intersections_impl(&shell.faces, working, tolerance)
+}
+
 /// Working-set core of [`detect_self_intersections`] (C5 Stage 7.4b):
 /// `working[i]` is face i's boundary edge list (staged working data).
 fn detect_self_intersections_impl(
@@ -2461,13 +2509,21 @@ impl ValidationResult {
 /// Returns a (fixed_solid, validation_result) pair. The fixed_solid has
 /// safe auto-fixes applied. Issues that cannot be auto-fixed are logged
 /// in the ValidationResult for manual review.
+///
+/// C5 Stage 7.5: shells are staged STORE-FIRST from the input solid's
+/// `EdgeStore` (`StagedShell::from_shell_store`) — populated mirrors
+/// resolve per position, mirror-free faces derive from `edge_ids`, and
+/// the validation/fix pipeline runs on the working lists. Works on
+/// store-only (compacted / `from_edges_only`) solids.
 pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResult) {
     let mut result = ValidationResult::default();
     let mut solid = solid.clone();
 
     // Validate and fix outer shell
     if let Some(ref shell) = solid.outer_shell {
-        let (fixed_shell, shell_result) = validate_and_fix_shell(shell, tolerance);
+        let (staged, _rederived) = StagedShell::from_shell_store(&solid, shell.clone());
+        let (fixed_shell, shell_result) =
+            validate_and_fix_staged_shell(staged, tolerance);
         result.invalid_param_ranges += shell_result.invalid_param_ranges;
         result.zero_length_edges += shell_result.zero_length_edges;
         result.missing_surfaces += shell_result.missing_surfaces;
@@ -2484,7 +2540,8 @@ pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResu
         .inner_shells
         .iter()
         .map(|shell| {
-            let (fixed, r) = validate_and_fix_shell(shell, tolerance);
+            let (staged, _rederived) = StagedShell::from_shell_store(&solid, shell.clone());
+            let (fixed, r) = validate_and_fix_staged_shell(staged, tolerance);
             result.invalid_param_ranges += r.invalid_param_ranges;
             result.zero_length_edges += r.zero_length_edges;
             result.missing_surfaces += r.missing_surfaces;
@@ -2502,14 +2559,19 @@ pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResu
     (solid, result)
 }
 
-/// Validate and auto-fix a shell.
-fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationResult) {
+/// Mirror-free core of the shell validation/fix (C5 Stage 7.5), used by
+/// [`validate_and_fix`]: all edge validation/fixes run on the staged
+/// working lists; the output shell re-attaches them as construction
+/// mirrors.
+fn validate_and_fix_staged_shell(
+    mut staged: StagedShell,
+    tolerance: f64,
+) -> (Shell, ValidationResult) {
     let mut result = ValidationResult::default();
-    let mut shell = shell.clone();
 
-    for (face_idx, face) in shell.faces.iter_mut().enumerate() {
+    for face_idx in 0..staged.n_faces() {
         // 1. Check surface
-        if face.surface.is_none() {
+        if staged.face(face_idx).surface.is_none() {
             result.missing_surfaces += 1;
             result.messages.push(format!(
                 "Face {}: missing surface geometry",
@@ -2517,8 +2579,8 @@ fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationRe
             ));
         }
 
-        // 2. Validate and fix edges
-        for (edge_idx, edge) in face.edges.iter_mut().enumerate() {
+        // 2. Validate and fix edges (working list)
+        for (edge_idx, edge) in staged.face_edges_mut(face_idx).iter_mut().enumerate() {
             // Check curve
             if edge.curve.is_none() && !edge.degenerate {
                 result.missing_curves += 1;
@@ -2563,8 +2625,9 @@ fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationRe
         }
     }
 
-    // 3. Detect self-intersections (expensive — O(n²))
-    let self_ints = detect_self_intersections(&shell, tolerance);
+    // 3. Detect self-intersections (expensive — O(n²)) — the impl
+    // takes the working lists directly, no mirror read.
+    let self_ints = detect_self_intersections_impl(&staged.shell.faces, &staged.working, tolerance);
     result.self_intersections = self_ints.len() as u32;
     for si in &self_ints {
         result.messages.push(format!(
@@ -2573,30 +2636,39 @@ fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationRe
         ));
     }
 
-    // 4. Fix normal orientation for closed shells
-    if shell.closed {
+    // 4. Fix normal orientation for closed shells (face-level fields;
+    // centroids come from the WORKING lists, not the empty mirrors).
+    if staged.shell.closed {
         let mut flipped = 0u32;
-        let centroid = compute_shell_centroid(&shell);
-        for face in &mut shell.faces {
-            if let Some(ref surface) = face.surface {
-                let face_point = compute_face_centroid(face);
-                let normal = if face.forward {
-                    surface.normal_at(0.0, 0.0)
-                } else {
-                    let n = surface.normal_at(0.0, 0.0);
-                    // Negate the normal direction
-                    Direction3d::new_unchecked(-n.x, -n.y, -n.z)
-                };
-                let to_face = Vec3d::new(
-                    face_point.x - centroid.x,
-                    face_point.y - centroid.y,
-                    face_point.z - centroid.z,
-                );
-                let dot = normal.x * to_face.x + normal.y * to_face.y + normal.z * to_face.z;
-                if dot < 0.0 {
-                    face.forward = !face.forward;
-                    flipped += 1;
+        let centroid = staged.compute_shell_centroid();
+        for i in 0..staged.n_faces() {
+            // Decide from immutable data, then mutate the orientation flag.
+            let flip = {
+                let face = staged.face(i);
+                match &face.surface {
+                    Some(surface) => {
+                        let face_point =
+                            compute_face_centroid_with_edges(face, staged.face_edges(i));
+                        let normal = if face.forward {
+                            surface.normal_at(0.0, 0.0)
+                        } else {
+                            let n = surface.normal_at(0.0, 0.0);
+                            // Negate the normal direction
+                            Direction3d::new_unchecked(-n.x, -n.y, -n.z)
+                        };
+                        let to_face = Vec3d::new(
+                            face_point.x - centroid.x,
+                            face_point.y - centroid.y,
+                            face_point.z - centroid.z,
+                        );
+                        normal.x * to_face.x + normal.y * to_face.y + normal.z * to_face.z < 0.0
+                    }
+                    None => false,
                 }
+            };
+            if flip {
+                staged.shell.faces[i].forward = !staged.shell.faces[i].forward;
+                flipped += 1;
             }
         }
         if flipped > 0 {
@@ -2606,32 +2678,39 @@ fn validate_and_fix_shell(shell: &Shell, tolerance: f64) -> (Shell, ValidationRe
     }
 
     result.is_valid = result.is_clean();
-    (shell, result)
+    // Terminal: the working lists re-attach as construction mirrors.
+    (staged.into_shell(), result)
 }
 
-/// Compute the centroid of a shell as the average of face centroids.
-fn compute_shell_centroid(shell: &Shell) -> Point3d {
-    let mut sum = Point3d::ORIGIN;
-    let mut count = 0usize;
-    for face in &shell.faces {
-        let fc = compute_face_centroid(face);
-        sum.x += fc.x;
-        sum.y += fc.y;
-        sum.z += fc.z;
-        count += 1;
-    }
-    if count > 0 {
-        Point3d::new(sum.x / count as f64, sum.y / count as f64, sum.z / count as f64)
-    } else {
-        Point3d::ORIGIN
+impl StagedShell {
+    /// Shell centroid from the WORKING lists (C5 Stage 7.5) — the staged
+    /// faces' mirror fields are empty, so a mirror-reading centroid
+    /// helper cannot be used mid-pipeline.
+    fn compute_shell_centroid(&self) -> Point3d {
+        let mut sum = Point3d::ORIGIN;
+        let mut count = 0usize;
+        for i in 0..self.n_faces() {
+            let fc = compute_face_centroid_with_edges(self.face(i), self.face_edges(i));
+            sum.x += fc.x;
+            sum.y += fc.y;
+            sum.z += fc.z;
+            count += 1;
+        }
+        if count > 0 {
+            Point3d::new(sum.x / count as f64, sum.y / count as f64, sum.z / count as f64)
+        } else {
+            Point3d::ORIGIN
+        }
     }
 }
 
-/// Compute the centroid of a face as the average of edge midpoints.
-fn compute_face_centroid(face: &Face) -> Point3d {
+/// Compute the centroid of a face as the average of edge midpoints
+/// (working-list form, C5 Stage 7.5): the face supplies only its surface
+/// fallback; the edge midpoints come from the explicit list.
+fn compute_face_centroid_with_edges(face: &Face, edges: &[Edge]) -> Point3d {
     let mut sum = Point3d::ORIGIN;
     let mut count = 0usize;
-    for edge in &face.edges {
+    for edge in edges {
         if let Some(sp) = edge.start_point() {
             sum.x += sp.x; sum.y += sp.y; sum.z += sp.z;
             count += 1;
@@ -3544,6 +3623,170 @@ mod tests {
         // The rebuilt stores agree on the canonical registry size.
         assert_eq!(healed_a.edge_store.len(), healed_b.edge_store.len());
         assert!(healed_b.edge_store.len() > 0);
+    }
+
+    /// C5 Stage 7.5 — `tolerant_stitch_with_edges`: the explicit-edges
+    /// variant produces the same stitch count and edge tolerances as the
+    /// legacy mirror-reading `tolerant_stitch` on the same (perturbed)
+    /// shell.
+    #[test]
+    fn test_tolerant_stitch_with_edges_equivalence() {
+        // A box whose faces' edges carry explicit vertex points (the stitch
+        // matcher requires them; builder edges leave them None), with face
+        // 0's endpoints nudged slightly off (within the stitch tolerance) —
+        // its 4 shared-edge pairs now match cross-face.
+        let make_perturbed = || {
+            let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+            let shell = solid.outer_shell.as_mut().unwrap();
+            for (fi, face) in shell.faces.iter_mut().enumerate() {
+                for edge in &mut face.edges {
+                    let mut s = edge.start_point().expect("line edge start");
+                    let mut e = edge.end_point().expect("line edge end");
+                    if fi == 0 {
+                        s.x += 1e-7; s.y += 1e-7; s.z += 1e-7;
+                        e.x += 1e-7; e.y += 1e-7; e.z += 1e-7;
+                    }
+                    edge.start_vertex_point = Some(s);
+                    edge.end_vertex_point = Some(e);
+                }
+            }
+            shell.clone()
+        };
+
+        // Legacy path (mutates the mirrors in place).
+        let mut shell_legacy = make_perturbed();
+        let tol = 1e-5;
+        let count_legacy = tolerant_stitch(&mut shell_legacy, tol);
+        assert!(count_legacy > 0, "perturbed box must have stitchable pairs");
+        let tolerances_legacy: Vec<f64> = shell_legacy
+            .faces
+            .iter()
+            .flat_map(|f| f.edges.iter().map(|e| e.tolerance))
+            .collect();
+
+        // Explicit-edges path: stage the mirrors out, run, re-attach.
+        let mut shell_explicit = make_perturbed();
+        let mut working: Vec<Vec<Edge>> = shell_explicit
+            .faces
+            .iter_mut()
+            .map(|f| std::mem::take(&mut f.edges))
+            .collect();
+        let count_explicit = tolerant_stitch_with_edges(&mut shell_explicit, &mut working, tol);
+        assert_eq!(count_legacy, count_explicit);
+        for (face, edges) in shell_explicit.faces.iter_mut().zip(working) {
+            face.edges = edges;
+        }
+        let tolerances_explicit: Vec<f64> = shell_explicit
+            .faces
+            .iter()
+            .flat_map(|f| f.edges.iter().map(|e| e.tolerance))
+            .collect();
+        assert_eq!(tolerances_legacy, tolerances_explicit);
+        // The mirror field is untouched by the variant itself — the caller
+        // controls the working lists.
+    }
+
+    /// C5 Stage 7.5 — `detect_self_intersections_with_edges`: identical
+    /// results to the legacy mirror-reading wrapper.
+    #[test]
+    fn test_detect_self_intersections_with_edges_equivalence() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let shell = box_solid.outer_shell.clone().unwrap();
+        let tol = 1e-6;
+
+        let legacy = detect_self_intersections(&shell, tol);
+        let working: Vec<Vec<Edge>> =
+            shell.faces.iter().map(|f| f.edges.clone()).collect();
+        let explicit = detect_self_intersections_with_edges(&shell, &working, tol);
+        assert_eq!(legacy.len(), explicit.len());
+        // A well-formed box has no self-intersections.
+        assert!(legacy.is_empty());
+
+        // A genuinely crossing pair: a vertical wall whose plane cuts the
+        // bottom face's boundary ring (the 8-sample boundary grid steps
+        // ~0.71 units, so the detection tolerance is set accordingly) —
+        // detected identically by both entry points.
+        let mut crossing = Shell::new(vec![]);
+        let bottom = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ])
+        .expect("bottom face");
+        let wall = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, -5.0, 0.0),
+            Point3d::new(0.0, 5.0, 0.0),
+            Point3d::new(0.0, 5.0, 8.0),
+            Point3d::new(0.0, -5.0, 8.0),
+        ])
+        .expect("wall face");
+        crossing.faces.push(bottom);
+        crossing.faces.push(wall);
+
+        let crossing_tol = 2.0;
+        let legacy_cross = detect_self_intersections(&crossing, crossing_tol);
+        let working_cross: Vec<Vec<Edge>> =
+            crossing.faces.iter().map(|f| f.edges.clone()).collect();
+        let explicit_cross =
+            detect_self_intersections_with_edges(&crossing, &working_cross, crossing_tol);
+        assert_eq!(legacy_cross.len(), explicit_cross.len());
+        assert!(!legacy_cross.is_empty(), "crossing pair must be detected");
+    }
+
+    /// C5 Stage 7.5 — `validate_and_fix` on a mirror-free (store-only)
+    /// solid: stages store-first (`from_shell_store`), never reads the
+    /// empty mirrors, and produces the same surface/curve/degenerate/
+    /// self-intersection findings as on the mirror-bearing twin.
+    ///
+    /// Representation note: the param-range counter deliberately does
+    /// NOT parity-check — the store's instance views encode reversal as
+    /// a SWAPPED `param_range` (the `Edge::reversed` convention), which
+    /// the legacy validator counts as "reversed param_range" findings,
+    /// while the builder mirrors encode the same reversal via opposite
+    /// curve direction and count zero. The geometric findings are the
+    /// contract; the param-range swap semantics on instance views is a
+    /// documented Stage 7.5 follow-up.
+    #[test]
+    fn test_validate_and_fix_mirror_free_input() {
+        let mut with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        with_mirrors.index_edges();
+        with_mirrors.sync_edge_mirrors();
+
+        let mut mirror_free = with_mirrors.clone();
+        for face in mirror_free.faces_mut() {
+            face.edges.clear();
+        }
+
+        let tol = 1e-6;
+        let (fixed_a, result_a) = validate_and_fix(&with_mirrors, tol);
+        let (fixed_b, result_b) = validate_and_fix(&mirror_free, tol);
+
+        assert_eq!(result_a.missing_surfaces, result_b.missing_surfaces);
+        assert_eq!(result_a.missing_curves, result_b.missing_curves);
+        assert_eq!(result_a.zero_length_edges, result_b.zero_length_edges);
+        assert_eq!(result_a.degenerate_edges, result_b.degenerate_edges);
+        assert_eq!(result_a.self_intersections, result_b.self_intersections);
+        assert_eq!(result_a.inconsistent_normals, result_b.inconsistent_normals);
+
+        // The mirror-free path flags exactly the reversed instance views
+        // (one per shared edge of the box — 12): the `Edge::reversed`
+        // param_range encoding, not a geometry defect.
+        assert_eq!(result_b.invalid_param_ranges, 12);
+        assert_eq!(result_a.invalid_param_ranges, 0);
+
+        // Both outputs carry complete construction mirrors (terminal).
+        for (fa, fb) in fixed_a
+            .outer_shell
+            .as_ref()
+            .unwrap()
+            .faces
+            .iter()
+            .zip(fixed_b.outer_shell.as_ref().unwrap().faces.iter())
+        {
+            assert_eq!(fa.edges.len(), fb.edges.len());
+            assert!(!fb.edges.is_empty());
+        }
     }
 
     /// Test that healing fixes flipped normals.
