@@ -2954,3 +2954,62 @@ serde-миграция; viewer-wire smoke-check. Dry-run удаления пол
 operations 7, entity 2) + ~19 mesh-сайтов + ~22 core + 27 step —
 мосты-легаси, которые 7.x уже заменил store-first путями. Mesh-staging
 (`stage_instance_view`) требует явного носителя (`StagedFace` с Deref).
+
+# Worklog — C5 Stage 7.6a: StagedFace — явный носитель рёбер в mesh-пайплайне
+
+**Дата:** 2026-09-04 (третья сессия суток)
+**Baseline:** commit `2abd21c` (после sync-ноты)
+**Задача:** первый шаг «физического удаления Face.edges»: пайплайн
+триангуляции переводится на собственный носитель рёбер, НЕ зависящий от
+поля `Face.edges`
+
+## Реализация (triangulate.rs)
+
+- `StagedFace { face: Face, edges: Vec<Edge> }` — пайплайн-носитель:
+  `Deref<Target = Face>` даёт surface/wires/orientation, СОБСТВЕННЫЕ
+  `edges`/`edge_by_id[_mut]` шэдоуят deref — код тела пайплайна
+  компилируется без правок
+- Конструкторы: `from_mirrors(face)` (legacy-мост: зеркала переезжают в
+  носитель, внутреннее поле остаётся ПУСТЫМ) и `from_parts(face, edges)`
+- staging-функции (`stage_face_view` / `stage_instance_view` /
+  `stage_solid_face`) возвращают StagedFace; `triangulate_face_with_cache`
+  = from_mirrors + новый внутренний вход `triangulate_staged_with_cache`
+- Сигнатуры ~26 пайплайн-функций: `face: &Face` → `face: &StagedFace`
+  (impl, pre_populate, collect_boundary/holes [+uv], все surface-specific
+  триангуляторы, compute/estimate v_range, fallback'и, offset/ruled)
+- `estimate_face_complexity` остаётся на `&Face` (читает только surface)
+- ChunkedTriangulator: per-face staging через `stage_solid_face`
+
+## Грабли (задокументированы в коде)
+
+**Deref-coercion footgun**: `&StagedFace` в аргументной позиции молча
+коэрцится в `&Face` (внутреннее лицо с ПУСТЫМ полем!) — компилятор НЕ
+ловит. Два реальных бага найдено тестами, оба из этой серии:
+1. `triangulate_solid_face_with_cache` передавал staged в
+   `triangulate_face_with_cache(&Face)` → double-staging → пустые рёбра
+   → 200 boundary edges на boolean-солиде
+2. `collect_face_holes_from_cache[_with_uv]` остались на `&Face` →
+   коэрция → дырки терялись → 38/94 boundary на cylinder-subtract
+Лекарство: все vehicle-вызовы идут через `triangulate_staged_with_cache`
++ все пайплайн-функции на `&StagedFace` (коэрция невозможна в обратную
+сторону). Тесты — единственный детектор: mesh-сьют обязателен.
+
+## Верификация
+
+- draper-mesh: **268 lib + 65 integration** (14+12+6+5+4+18+1+4+1) ✅
+  (включая 5.2/5.3 bit-identity и watertight-тесты, chunked, boolean)
+- draper-topology: 225+31 ✅; draper-core: 75+2 ✅; subd 13; json 13+5
+- `cargo check --workspace --lib --exclude draper-testing` — 0 errors
+- Поведение legacy API не изменилось: from_mirrors подаёт те же данные
+
+## Значение для Stage 7.6b
+
+Пайплайн больше НЕ читает `Face.edges` через носитель: поле стало
+чистым legacy-мостом (from_mirrors + edge_cache solid-level мосты).
+Физическое удаление поля (7.6b) больше не требует редизайна mesh:
+from_mirrors умрёт, staged-пути уже store-first.
+
+## Коммит
+
+- `refactor(mesh): C5 stage 7.6a — StagedFace explicit-edge pipeline vehicle`
+  запушен в origin/main

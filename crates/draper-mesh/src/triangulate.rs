@@ -23,7 +23,7 @@ use draper_geometry::{
     ConeSurface, NurbsSurface,
     ToleranceContext,
 };
-use draper_topology::{Face, Wire, Edge, Solid, Compound};
+use draper_topology::{Face, Wire, Edge, Solid, Compound, TopoId};
 // WASM-compatible Instant: on native uses std::time::Instant,
 // on wasm32 uses web_time::Instant (backed by performance.now()).
 #[cfg(not(target_arch = "wasm32"))]
@@ -1636,13 +1636,13 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
 /// identical 3D point sequences, which is critical for watertight meshes.
 /// This function pre-populates the cache for the face's edges, then
 /// delegates to `triangulate_face_impl` which uses the immutable cache.
+///
+/// C5 Stage 7.6: the face is staged on an explicit-edge vehicle
+/// ([`StagedFace`]) before entering the pipeline — the pipeline reads the
+/// vehicle's `edges`, never the face's mirror field.
 pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
-    // Pre-populate edges for this face so the cache is complete
-    // before we pass it as an immutable reference
-    if let Some(ref surface) = face.surface {
-        pre_populate_face_edges(cache, face, surface);
-    }
-    triangulate_face_impl(face, params, cache)
+    let staged = StagedFace::from_mirrors(face);
+    triangulate_staged_with_cache(&staged, params, cache)
 }
 
 /// Triangulate a single face with EXPLICITLY supplied edge geometry
@@ -1680,7 +1680,7 @@ pub fn triangulate_face_with_edges_and_cache(
     cache: &mut EdgeDiscretizationCache,
 ) -> TriangleMesh {
     let view = stage_face_view(face, edges);
-    triangulate_face_with_cache(&view, params, cache)
+    triangulate_staged_with_cache(&view, params, cache)
 }
 
 /// Build a staging view of `face` whose mirrors are `edges`.
@@ -1705,20 +1705,26 @@ pub fn triangulate_face_with_edges_and_cache(
 ///   edges usable even when the canonical id differs from the instance id
 ///   the coedges reference — coedge lookups keep resolving, and shared
 ///   edges from adjacent faces still compare equal by geometry.
-pub fn stage_face_view(face: &Face, edges: &[&Edge]) -> Face {
-    let mut view = face.clone();
+pub fn stage_face_view(face: &Face, edges: &[&Edge]) -> StagedFace {
     if edges.len() == face.edges.len() {
-        for (slot, src) in view.edges.iter_mut().zip(edges.iter()) {
-            *slot = restage_instance(slot, src);
-        }
+        // Parallel contract: element `i` upgrades instance `i`.
+        let staged_edges: Vec<Edge> = face
+            .edges
+            .iter()
+            .zip(edges.iter())
+            .map(|(slot, src)| restage_instance(slot, src))
+            .collect();
         // `edge_ids` (canonical store references) stay as the face's own —
         // parallel to the staged mirrors, which keep the instance ids.
+        StagedFace::from_parts(face.clone(), staged_edges)
     } else {
-        view.edges = edges.iter().map(|e| (*e).clone()).collect();
-        // Keep the id list parallel to the staged mirrors.
-        view.edge_ids = view.edges.iter().map(|e| e.id).collect();
+        // Replacement contract: the slice defines the view's edge set and
+        // id space outright (`edge_ids` derived from the slice).
+        let staged_edges: Vec<Edge> = edges.iter().map(|e| (*e).clone()).collect();
+        let mut inner = mirror_free(face);
+        inner.edge_ids = staged_edges.iter().map(|e| e.id).collect();
+        StagedFace::from_parts(inner, staged_edges)
     }
-    view
 }
 
 /// Build the staged instance: the mirror slot keeps its traversal pairing
@@ -1780,17 +1786,93 @@ fn restage_instance(slot: &Edge, src: &Edge) -> Edge {
 /// (the Stage 5 end-state) stage identically. `face.id` is preserved, so
 /// edge-discretization cache keys `(edge_id, face_id)` match the legacy
 /// path exactly.
-fn stage_instance_view(face: &Face, edges: &[Edge]) -> Face {
-    Face {
-        id: face.id,
-        surface: face.surface.clone(),
-        outer_wire: face.outer_wire.clone(),
-        inner_wires: face.inner_wires.clone(),
-        forward: face.forward,
-        tolerance: face.tolerance,
-        edges: edges.to_vec(),
-        edge_ids: edges.iter().map(|e| e.id).collect(),
+fn stage_instance_view(face: &Face, edges: &[Edge]) -> StagedFace {
+    let mut inner = mirror_free(face);
+    inner.edge_ids = edges.iter().map(|e| e.id).collect();
+    StagedFace::from_parts(inner, edges.to_vec())
+}
+
+// ============================================================
+// C5 Stage 7.6 — explicit-edge pipeline vehicle
+// ============================================================
+
+/// The pipeline vehicle for face triangulation (C5 Stage 7.6).
+///
+/// Carries the face's topology (surface, wires, orientation — via
+/// `Deref<Target = Face>`) TOGETHER with an explicit, owned list of
+/// instance-faithful boundary edges. Edge access (`edges`, `edge_by_id`,
+/// `edge_by_id_mut`) resolves on the VEHICLE and shadows the deref'd
+/// `Face`, so the pipeline never reads the face's `edges` mirror field:
+/// the field becomes pure legacy plumbing, ready for physical removal.
+///
+/// Construction: [`StagedFace::from_mirrors`] (legacy bridge — copies the
+/// face's mirror edges into the vehicle) or [`StagedFace::from_parts`]
+/// (store-resolved / replacement edges). The inner `Face`'s own `edges`
+/// field is always left EMPTY by staging: an accidental pipeline read of
+/// the mirror field surfaces as a missing boundary immediately instead
+/// of silently working.
+#[derive(Clone, Debug)]
+pub struct StagedFace {
+    /// Face topology — surface, wires, orientation, id, tolerance.
+    /// Its `edges` mirror is intentionally empty (see type docs).
+    pub face: Face,
+    /// Instance-faithful boundary edges, id-keyed to the wire coedges.
+    pub edges: Vec<Edge>,
+}
+
+impl std::ops::Deref for StagedFace {
+    type Target = Face;
+    fn deref(&self) -> &Face {
+        &self.face
     }
+}
+
+impl std::ops::DerefMut for StagedFace {
+    fn deref_mut(&mut self) -> &mut Face {
+        &mut self.face
+    }
+}
+
+impl StagedFace {
+    /// Legacy bridge: stage from the face's own mirrors.
+    ///
+    /// The mirror list is MOVED into the vehicle (the inner face keeps an
+    /// empty field), so the pipeline consumes exactly the data the legacy
+    /// path would have read. Bit-identical by construction.
+    pub fn from_mirrors(face: &Face) -> Self {
+        let mut inner = face.clone();
+        let edges = std::mem::take(&mut inner.edges);
+        Self { face: inner, edges }
+    }
+
+    /// Assemble from parts: topology-carrying face + explicit edges.
+    ///
+    /// Callers are responsible for keeping `edges` id-keyed to the face's
+    /// wire coedges (the vehicle does not re-key).
+    pub fn from_parts(face: Face, edges: Vec<Edge>) -> Self {
+        let mut this = Self { face, edges };
+        // The vehicle owns the edges — the inner mirror stays empty.
+        this.face.edges.clear();
+        this
+    }
+
+    /// Look up one staged edge instance by id (wire coedge resolution).
+    pub fn edge_by_id(&self, id: TopoId) -> Option<&Edge> {
+        self.edges.iter().find(|e| e.id == id)
+    }
+
+    /// Mutable staged-edge lookup — see [`StagedFace::edge_by_id`].
+    pub fn edge_by_id_mut(&mut self, id: TopoId) -> Option<&mut Edge> {
+        self.edges.iter_mut().find(|e| e.id == id)
+    }
+}
+
+/// Clone `face` with its `edges` mirror field emptied (internal staging
+/// helper — the vehicle owns the edges).
+fn mirror_free(face: &Face) -> Face {
+    let mut inner = face.clone();
+    inner.edges.clear();
+    inner
 }
 
 /// Triangulate one face of a solid through the store-first edge resolution
@@ -1811,7 +1893,26 @@ pub fn triangulate_solid_face_with_cache(
     cache: &mut EdgeDiscretizationCache,
 ) -> TriangleMesh {
     let staged = stage_solid_face(solid, face);
-    triangulate_face_with_cache(&staged, params, cache)
+    triangulate_staged_with_cache(&staged, params, cache)
+}
+
+/// Triangulate an already-staged face with a mutable shared cache
+/// (C5 Stage 7.6 — the internal staged entry point).
+///
+/// Pre-populates the cache from the VEHICLE's edges, then runs the
+/// immutable-cache pipeline. All vehicle-carrying callers must enter here:
+/// passing a `&StagedFace` to [`triangulate_face_with_cache`] would coerce
+/// to the inner `&Face` (whose mirror field is empty by design) and lose
+/// the staged edges.
+fn triangulate_staged_with_cache(
+    staged: &StagedFace,
+    params: &TriangulationParams,
+    cache: &mut EdgeDiscretizationCache,
+) -> TriangleMesh {
+    if let Some(ref surface) = staged.surface {
+        pre_populate_face_edges(cache, staged, surface);
+    }
+    triangulate_face_impl(staged, params, cache)
 }
 
 /// Stage `face` with instance-faithful store-resolved edges (C5 Stage 7.2).
@@ -1825,7 +1926,7 @@ pub fn triangulate_solid_face_with_cache(
 /// is indexed, so compacted (mirror-free) solids stage identically to
 /// mirror-bearing ones. `face.id` is preserved, so edge-discretization
 /// cache keys `(edge_id, face_id)` match the legacy path exactly.
-fn stage_solid_face(solid: &Solid, face: &Face) -> Face {
+fn stage_solid_face(solid: &Solid, face: &Face) -> StagedFace {
     let owned = collect_instance_edges(solid, face);
     stage_instance_view(face, &owned)
 }
@@ -1869,7 +1970,7 @@ fn collect_instance_edges(solid: &Solid, face: &Face) -> Vec<Edge> {
 /// `triangulate_surface_consistent`). A face whose primary triangulation
 /// now fails logs `PrimaryTriangulationFailed` and returns an empty mesh;
 /// with the `strict` feature enabled it panics instead (CI guard).
-fn triangulate_face_impl(face: &Face, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_face_impl(face: &StagedFace, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let primary_mesh = if let Some(ref surface) = face.surface {
         match surface {
             Surface::Plane(plane) => triangulate_planar_face(face, plane, params, cache),
@@ -2095,7 +2196,7 @@ fn nurbs_uv_fast_projection(surface: &Surface, points_3d: &[Point3d]) -> Vec<Poi
 /// lazily populated into the cache. After calling this, the cache
 /// contains entries for all non-degenerate edges of this face,
 /// and the face can be triangulated using only `&EdgeDiscretizationCache`.
-fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, surface: &Surface) {
+fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &StagedFace, surface: &Surface) {
     // Outer wire
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
@@ -2125,7 +2226,7 @@ fn pre_populate_face_edges(cache: &mut EdgeDiscretizationCache, face: &Face, sur
 /// NOTE: This function requires that the cache has been pre-populated for
 /// this face (via `pre_populate_face_edges` or `pre_populate_for_solid_full`).
 fn collect_face_boundary_from_cache(
-    face: &Face,
+    face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     _surface: &Surface,
 ) -> Vec<Point3d> {
@@ -2192,7 +2293,7 @@ fn collect_face_boundary_from_cache(
 /// This replaces `collect_face_boundary_points_with_uv` in the main pipeline.
 /// UV coordinates are retrieved from the cache's per-face UV map.
 fn collect_face_boundary_with_uv_from_cache(
-    face: &Face,
+    face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     surface: &Surface,
 ) -> (Vec<Point3d>, Vec<Point2d>) {
@@ -2286,7 +2387,7 @@ fn collect_face_boundary_with_uv_from_cache(
 ///
 /// This replaces `collect_face_hole_points` in the main pipeline.
 fn collect_face_holes_from_cache(
-    face: &Face,
+    face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     _surface: &Surface,
 ) -> Vec<Vec<Point3d>> {
@@ -2344,7 +2445,7 @@ fn collect_face_holes_from_cache(
 ///
 /// This replaces `collect_face_hole_points_with_uv` in the main pipeline.
 fn collect_face_holes_with_uv_from_cache(
-    face: &Face,
+    face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     surface: &Surface,
 ) -> (Vec<Vec<Point3d>>, Vec<Vec<Point2d>>) {
@@ -2435,7 +2536,7 @@ fn collect_face_holes_with_uv_from_cache(
 /// Uses ear-clipping on the boundary polygon — this produces the minimum
 /// number of triangles for a given boundary polygon (N-2 for convex).
 /// Supports holes via bridge-edge technique.
-fn triangulate_planar_face(face: &Face, plane: &Plane, _params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_planar_face(face: &StagedFace, plane: &Plane, _params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     // Use cached boundary collection for watertight meshes
@@ -3086,7 +3187,7 @@ fn triangulate_ring_surface(
 /// constrain the u direction (u_range < ~half period), we use the full
 /// u range [0, 2π] — this handles the common case of a full cylinder
 /// where the boundary edges are only the top/bottom circles and seam.
-fn triangulate_cylinder_face(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_cylinder_face(face: &StagedFace, cyl: &CylinderSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Cylinder(cyl.clone());
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -4218,7 +4319,7 @@ fn triangulate_cone_full_at_v_range(
 }
 
 /// Full cylinder triangulation (no boundary edges).
-fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_cylinder_full(face: &StagedFace, cyl: &CylinderSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let forward = face.forward;
     let (v_min, v_max) = compute_axis_v_range(face, &cyl.origin, &cyl.axis);
@@ -4273,7 +4374,7 @@ fn triangulate_cylinder_full(face: &Face, cyl: &CylinderSurface, params: &Triang
 /// constrain the u direction, we use the full u range [0, 2π].
 /// Handles apex degeneracy: when v_max reaches the apex height, all
 /// vertices in the top row collapse to a single point.
-fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_cone_face(face: &StagedFace, cone: &ConeSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Cone(cone.clone());
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -4369,7 +4470,7 @@ fn triangulate_cone_face(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// Handles apex degeneracy: when the top row of vertices reaches the apex,
 /// all vertices collapse to a single point. We generate only 1 apex vertex
 /// instead of n_u to avoid degenerate (zero-area) triangles.
-fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_cone_full(face: &StagedFace, cone: &ConeSurface, params: &TriangulationParams) -> TriangleMesh {
     let forward = face.forward;
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = compute_axis_v_range(face, &cone.origin, &cone.axis);
@@ -4514,7 +4615,7 @@ fn triangulate_cone_full(face: &Face, cone: &ConeSurface, params: &Triangulation
 /// Pole degeneracy handling: At v=0 (north pole) and v=π (south pole),
 /// all vertices in that row collapse to a single point. We merge them
 /// into a single vertex to avoid degenerate (zero-area) triangles.
-fn triangulate_sphere_face(face: &Face, sphere: &SphereSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_sphere_face(face: &StagedFace, sphere: &SphereSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Sphere(sphere.clone());
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -4620,7 +4721,7 @@ fn detect_sphere_seam(boundary_uvs: &[draper_geometry::Point2d]) -> bool {
 
 /// Full sphere triangulation (no boundary edges) using a simple grid approach.
 /// Since there are no shared edges with other faces, watertightness is not a concern.
-fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_sphere_full_grid(face: &StagedFace, sphere: &SphereSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (n_u, n_v) = if params.adaptive {
@@ -4717,7 +4818,7 @@ fn triangulate_sphere_full_grid(face: &Face, sphere: &SphereSurface, params: &Tr
 /// we assume the face needs the full period in that direction.
 /// This handles the common case of a full torus with only a single
 /// v-circle boundary edge.
-fn triangulate_torus_face(face: &Face, torus: &TorusSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_torus_face(face: &StagedFace, torus: &TorusSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = Surface::Torus(torus.clone());
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -4934,7 +5035,7 @@ fn unwrap_periodic_torus_boundary(
 /// would create n_v+1 rows (j=0..=n_v), duplicating the v=0 / v=2π seam and
 /// producing 2*n_u boundary edges. This custom generator avoids that by
 /// using modulo wrap-around in BOTH directions.
-fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_torus_full_grid(face: &StagedFace, torus: &TorusSurface, params: &TriangulationParams) -> TriangleMesh {
     let surface = Surface::Torus(torus.clone());
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples(
@@ -4991,7 +5092,7 @@ fn triangulate_torus_full_grid(face: &Face, torus: &TorusSurface, params: &Trian
 }
 
 /// Triangulate a revolution surface face.
-fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_revolution_face(face: &StagedFace, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Revolution(rev.clone()));
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -5017,7 +5118,7 @@ fn triangulate_revolution_face(face: &Face, rev: &draper_geometry::RevolutionSur
 }
 
 /// Full revolution triangulation (no boundary edges) — fallback when cache is empty.
-fn triangulate_revolution_full(face: &Face, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_revolution_full(face: &StagedFace, rev: &draper_geometry::RevolutionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
     let (v_min, v_max) = rev.profile.param_range();
 
@@ -5063,7 +5164,7 @@ fn triangulate_revolution_full(face: &Face, rev: &draper_geometry::RevolutionSur
 }
 
 /// Triangulate an extrusion surface face.
-fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_extrusion_face(face: &StagedFace, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let surface = face.surface.as_ref().cloned().unwrap_or(Surface::Extrusion(ext.clone()));
 
     // Use cached boundary collection WITH UVs for consistency.
@@ -5107,7 +5208,7 @@ fn triangulate_extrusion_face(face: &Face, ext: &draper_geometry::ExtrusionSurfa
 /// computation, so triangulate_surface_consistent() works directly —
 /// no NURBS approximation needed.
 fn triangulate_offset_surface_face(
-    face: &Face,
+    face: &StagedFace,
     offset: &draper_geometry::OffsetSurface,
     params: &TriangulationParams,
     cache: &EdgeDiscretizationCache,
@@ -5148,7 +5249,7 @@ fn triangulate_offset_surface_face(
 /// corresponding points with ruled triangles. The boundary edges from the
 /// cache ensure watertightness with adjacent faces.
 fn triangulate_ruled_surface_face(
-    face: &Face,
+    face: &StagedFace,
     ruled: &draper_geometry::RuledSurface,
     params: &TriangulationParams,
     cache: &EdgeDiscretizationCache,
@@ -5182,7 +5283,7 @@ fn triangulate_ruled_surface_face(
 }
 
 /// Full extrusion triangulation (no boundary edges) — fallback when cache is empty.
-fn triangulate_extrusion_full(face: &Face, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams) -> TriangleMesh {
+fn triangulate_extrusion_full(face: &StagedFace, ext: &draper_geometry::ExtrusionSurface, params: &TriangulationParams) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (v_min, v_max) = compute_extrusion_v_range(face, ext);
@@ -5905,7 +6006,7 @@ fn try_strip_triangulation_ruled_nurbs(
 /// 4. Knot-span subdivision for interior Steiner points
 /// 5. earcutr-based triangulation (O(n log n), handles holes natively)
 /// 6. Boundary 3D points used directly for watertight meshes
-fn triangulate_nurbs_cdt(face: &Face, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_nurbs_cdt(face: &StagedFace, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     // Collect boundary points AND UV coordinates using the edge discretization cache.
     // The cache ensures shared edges produce identical 3D points for watertight meshes.
     // UV coordinates come from the cache's per-face UV map (computed from PCURVEs
@@ -6121,7 +6222,7 @@ fn generate_nurbs_interior_points(
 
 /// Generic surface triangulation by sampling on a grid.
 /// For NURBS surfaces, uses the actual knot range.
-fn triangulate_generic_surface(face: &Face, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
+fn triangulate_generic_surface(face: &StagedFace, surface: &Surface, params: &TriangulationParams, cache: &EdgeDiscretizationCache) -> TriangleMesh {
     let mut mesh = TriangleMesh::new();
 
     let (base_u_min, base_u_max, base_v_min, base_v_max) = if let Surface::Nurbs(nurbs) = surface {
@@ -8890,7 +8991,7 @@ fn compute_angular_range(angles: &[f64]) -> (f64, f64) {
 
 /// Estimate the v parameter range for a face by sampling its edges
 /// and projecting sample points onto the surface's axis direction.
-fn estimate_v_range(face: &Face) -> Option<(f64, f64)> {
+fn estimate_v_range(face: &StagedFace) -> Option<(f64, f64)> {
     if let Some(ref surface) = face.surface {
         match surface {
             Surface::Cylinder(cyl) => {
@@ -8940,7 +9041,7 @@ fn compute_axis_v_range_pts(
 /// Compute the v parameter range for axis-based surfaces (Cylinder, Cone).
 /// When the face has no edges (e.g., simplified primitives), falls back
 /// to surface geometry to estimate the v range.
-fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f64, f64) {
+fn compute_axis_v_range(face: &StagedFace, origin: &Point3d, axis: &Direction3d) -> (f64, f64) {
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
@@ -9024,7 +9125,7 @@ fn compute_axis_v_range(face: &Face, origin: &Point3d, axis: &Direction3d) -> (f
 }
 
 /// Compute the v (extrusion) parameter range for an extrusion surface.
-fn compute_extrusion_v_range(face: &Face, ext: &draper_geometry::ExtrusionSurface) -> (f64, f64) {
+fn compute_extrusion_v_range(face: &StagedFace, ext: &draper_geometry::ExtrusionSurface) -> (f64, f64) {
     let mut v_min = f64::MAX;
     let mut v_max = f64::MIN;
 
@@ -10268,7 +10369,10 @@ impl ChunkedBrepTriangulator {
             }
 
             let face = &self.faces[self.next_face_idx];
-            let face_mesh = triangulate_face_impl(face, &self.params, &self.cache);
+            // C5 Stage 7.6: stage on the explicit-edge vehicle (store-resolved
+            // instance edges via `self.solid`) before entering the pipeline.
+            let staged = stage_solid_face(&self.solid, face);
+            let face_mesh = triangulate_face_impl(&staged, &self.params, &self.cache);
             self.partial_mesh.merge_deduplicating(&face_mesh, &mut self.dedup_map);
             self.next_face_idx += 1;
             faces_this_frame += 1;
@@ -10492,7 +10596,7 @@ fn estimate_face_complexity(face: &Face) -> u32 {
 /// watertight and non-manifold-free. For high-curvature NURBS where UV
 /// projection fails, this is strictly better than producing garbage.
 fn triangulate_face_3d_planar_fallback(
-    face: &Face,
+    face: &StagedFace,
     boundary_3d: &[Point3d],
     holes_3d: &[Vec<Point3d>],
     _params: &TriangulationParams,
@@ -10631,7 +10735,7 @@ fn triangulate_face_3d_planar_fallback(
 /// edge to the centroid. It works for any face shape but produces
 /// degenerate triangles on concave boundaries and does not handle holes.
 /// Use only as a last resort before the empty-mesh fallback.
-fn fallback_boundary_fan(face: &Face, boundary_3d: &[Point3d]) -> Option<TriangleMesh> {
+fn fallback_boundary_fan(face: &StagedFace, boundary_3d: &[Point3d]) -> Option<TriangleMesh> {
     if boundary_3d.len() < 3 {
         return None;
     }
