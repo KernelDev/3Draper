@@ -2695,7 +2695,7 @@ impl ViewerApp {
         // UV grid of the NURBS patch.
         let face = Face::new_surface_only(surface_for_solid);
         let shell = Shell::new(vec![face]);
-        let solid = Solid::from_shell_indexed(shell);
+        let solid = Solid::new(shell);
         (mesh, solid)
     }
 
@@ -14619,7 +14619,8 @@ fn solid_from_detailed_instance(inst: &DetailedMeshInstance) -> Solid {
         .iter()
         .map(|fi| Face::new_surface_only(fi.surface.clone()))
         .collect();
-    Solid::from_shell_indexed(Shell::new(faces))
+    // Surface-only faces carry no edge payload (7.6b).
+    Solid::new(Shell::new(faces))
 }
 
 /// Compute the UV breakdown for every face of a solid.
@@ -18508,6 +18509,8 @@ fn build_vp_face_info(
 
     for (fi, face) in faces.iter().enumerate() {
         let face_id = fi as u64; // Sequential index — matches triangle_face_ids from triangulate_solid
+        // C5 7.6b: boundary geometry resolves through the solid's store.
+        let face_edges = solid.resolve_face_edges(face);
 
         let surface_type = match &face.surface {
             Some(Surface::Plane(_)) => "Plane",
@@ -18549,7 +18552,7 @@ fn build_vp_face_info(
                 // Collect edge endpoints (start point of each coedge's edge)
                 let mut segments: Vec<(Point3d, Point3d)> = Vec::new();
                 for coedge in &wire.coedges {
-                    if let Some(edge) = face.edge_by_id(coedge.edge) {
+                    if let Some(edge) = face_edges.iter().find(|e| e.id == coedge.edge) {
                         if let Some(ref curve) = edge.curve {
                             let (t_min, t_max) = edge.param_range;
                             let p0 = curve.point_at(t_min);
@@ -18640,7 +18643,7 @@ fn build_vp_face_info(
         let inner_boundaries: Vec<Vec<Point3d>> = face.inner_wires.iter().map(|wire| {
             let mut pts = Vec::new();
             for coedge in &wire.coedges {
-                if let Some(edge) = face.edge_by_id(coedge.edge) {
+                if let Some(edge) = face_edges.iter().find(|e| e.id == coedge.edge) {
                     if let Some(ref curve) = edge.curve {
                         let (t_min, t_max) = edge.param_range;
                         // Use more samples for curves (Circle needs ~40 for smooth appearance)
@@ -18717,6 +18720,7 @@ fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
     use draper_geometry::{Plane, Surface};
 
     let mut faces = Vec::with_capacity(mesh.triangles.len());
+    let mut working: Vec<Vec<draper_topology::Edge>> = Vec::with_capacity(mesh.triangles.len());
     for tri in &mesh.triangles {
         let p0 = mesh.vertices[tri[0] as usize];
         let p1 = mesh.vertices[tri[1] as usize];
@@ -18736,13 +18740,13 @@ fn solid_from_mesh(mesh: &draper_mesh::TriangleMesh) -> draper_topology::Solid {
         let plane = Plane::from_three_points(&p0, &p1, &p2)
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, draper_geometry::Direction3d::Z));
 
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = vec![e0, e1, e2];
+        let face = Face::new(Surface::Plane(plane), wire);
         faces.push(face);
+        working.push(vec![e0, e1, e2]);
     }
 
     let shell = Shell::new_closed(faces);
-    draper_topology::Solid::from_shell_indexed(shell)
+    draper_topology::Solid::from_edges_only(shell, working)
 }
 
 /// VP helper: evaluate the graph and return the result solid.
@@ -20145,27 +20149,28 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         .collect();
                                     // Build side faces (quads)
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     for i in 0..profile_pts.len() - 1 {
                                         let quad = vec![
                                             profile_pts[i], profile_pts[i+1],
                                             top_pts[i+1], top_pts[i],
                                         ];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                     // Add caps if closed
                                     if closed {
-                                        if let Some(base) = ShapeBuilder::make_polygon_face(&profile_pts) {
-                                            faces.push(base);
+                                        if let Some((base, base_w)) = ShapeBuilder::make_polygon_face(&profile_pts) {
+                                            faces.push(base); working.push(base_w);
                                         }
-                                        if let Some(top) = ShapeBuilder::make_polygon_face(&top_pts) {
-                                            faces.push(top);
+                                        if let Some((top, top_w)) = ShapeBuilder::make_polygon_face(&top_pts) {
+                                            faces.push(top); working.push(top_w);
                                         }
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20178,6 +20183,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 if pts.len() >= 2 {
                                     let segments = 32;
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     // For each profile segment, create ruled faces around the axis.
                                     for i in 0..pts.len() - 1 {
                                         let p0 = pts[i];
@@ -20193,14 +20199,14 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                                 Point3d::new(p1.x * c1.0, p1.x * c1.1, p1.z),
                                                 Point3d::new(p1.x * c0.0, p1.x * c0.1, p1.z),
                                             ];
-                                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                                faces.push(f);
+                                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                                faces.push(f); working.push(f_w);
                                             }
                                         }
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20224,6 +20230,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let n_sections = all_curves.len();
                                 let n_pts = all_curves[0].len();
                                 let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for i in 0..n_sections - 1 {
                                     let a = &all_curves[i];
                                     let b = &all_curves[i + 1];
@@ -20231,21 +20238,21 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     for j in 0..n {
                                         let k = (j + 1) % n;
                                         let quad = vec![a[j], a[k], b[k], b[j]];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                 }
                                 // Add start and end caps
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&all_curves[0]) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&all_curves[0]) {
+                                    faces.push(f); working.push(f_w);
                                 }
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&all_curves[n_sections - 1]) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&all_curves[n_sections - 1]) {
+                                    faces.push(f); working.push(f_w);
                                 }
                                 if !faces.is_empty() {
                                     let shell = Shell::new_closed(faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                     changed = true;
                                 }
                             }
@@ -20259,6 +20266,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     let n_profile = profile.len();
                                     let n_path = path.len();
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     // For each path segment, create side faces
                                     for i in 0..n_path - 1 {
                                         let p_a = &path[i];
@@ -20301,25 +20309,25 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                                 section_a[j], section_a[k],
                                                 section_b[k], section_b[j],
                                             ];
-                                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                                faces.push(f);
+                                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                                faces.push(f); working.push(f_w);
                                             }
                                         }
                                     }
                                     // Caps
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(
                                         &profile.iter().map(|p| Point3d::new(
                                             path[0].x + p.x, path[0].y + p.y, path[0].z,
                                         )).collect::<Vec<_>>()
-                                    ) { faces.push(f); }
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(
+                                    ) { faces.push(f); working.push(f_w); }
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(
                                         &profile.iter().map(|p| Point3d::new(
                                             path[n_path-1].x + p.x, path[n_path-1].y + p.y, path[n_path-1].z,
                                         )).collect::<Vec<_>>()
-                                    ) { faces.push(f); }
+                                    ) { faces.push(f); working.push(f_w); }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20333,16 +20341,17 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 if a.len() >= 2 && b.len() >= 2 {
                                     let n = a.len().min(b.len());
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     for j in 0..n - 1 {
                                         let k = j + 1;
                                         let quad = vec![a[j], a[k], b[k], b[j]];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20361,9 +20370,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 Point3d::new(origin[0] + half_x, origin[1] + half_y, origin[2]),
                                 Point3d::new(origin[0] - half_x, origin[1] + half_y, origin[2]),
                             ];
-                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
                                 let shell = Shell::new_closed(vec![f]);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, vec![f_w]))));
                                 changed = true;
                             }
                         }
@@ -20374,11 +20383,12 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 if pts.len() >= 3 {
                                     let apex_pt = Point3d::new(apex[0], apex[1], apex[2]);
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     // Side faces: triangles from each profile edge to apex
                                     for i in 0..pts.len() - 1 {
                                         let tri = vec![pts[i], pts[i+1], apex_pt];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&tri) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&tri) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                     // Check if closed (loop back to start)
@@ -20389,13 +20399,13 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         + (first.z - last.z).powi(2)).sqrt() < 1e-6;
                                     if closed {
                                         // Add base cap
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(pts) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20422,23 +20432,24 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }).collect();
                                     let _ = &mut top_pts;
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     for i in 0..pts.len() - 1 {
                                         let quad = vec![
                                             pts[i], pts[i+1], top_pts[i+1], top_pts[i],
                                         ];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
-                                        faces.push(f);
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(pts) {
+                                        faces.push(f); working.push(f_w);
                                     }
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts) {
-                                        faces.push(f);
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&top_pts) {
+                                        faces.push(f); working.push(f_w);
                                     }
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -20627,39 +20638,25 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     + plane_normal[2]*plane_normal[2]).sqrt().max(1e-10);
                                 let n = [plane_normal[0]/normal_len, plane_normal[1]/normal_len, plane_normal[2]/normal_len];
                                 let o = plane_origin;
-                                if let Some(ref mut shell) = s.outer_shell {
-                                    for face in &mut shell.faces {
-                                        for edge in &mut face.edges {
-                                            if let Some(ref mut pt) = edge.start_vertex_point {
-                                                let d = [(pt.x - o[0])*n[0] + (pt.y - o[1])*n[1] + (pt.z - o[2])*n[2],
-                                                         0.0, 0.0];
-                                                let _ = d;
-                                                // Project: p' = p - ((p - o) · n) * n (along plane normal)
-                                                let dot = (pt.x - o[0])*n[0] + (pt.y - o[1])*n[1] + (pt.z - o[2])*n[2];
-                                                pt.x -= dot * n[0];
-                                                pt.y -= dot * n[1];
-                                                pt.z -= dot * n[2];
-                                            }
-                                            if let Some(ref mut pt) = edge.end_vertex_point {
-                                                let dot = (pt.x - o[0])*n[0] + (pt.y - o[1])*n[1] + (pt.z - o[2])*n[2];
-                                                pt.x -= dot * n[0];
-                                                pt.y -= dot * n[1];
-                                                pt.z -= dot * n[2];
-                                            }
-                                            if let Some(ref mut curve) = edge.curve {
-                                                *curve = curve.transform(&Transform::identity());
-                                            }
-                                        }
+                                // C5 7.6b: project the STORE's canonical edges — the
+                                // store is the only edge holder, so the projection lands
+                                // everywhere at once; no re-index pass exists.
+                                for edge in s.edge_store.iter_mut() {
+                                    if let Some(ref mut pt) = edge.start_vertex_point {
+                                        // Project: p' = p - ((p - o) · n) * n (along plane normal)
+                                        let dot = (pt.x - o[0])*n[0] + (pt.y - o[1])*n[1] + (pt.z - o[2])*n[2];
+                                        pt.x -= dot * n[0];
+                                        pt.y -= dot * n[1];
+                                        pt.z -= dot * n[2];
+                                    }
+                                    if let Some(ref mut pt) = edge.end_vertex_point {
+                                        let dot = (pt.x - o[0])*n[0] + (pt.y - o[1])*n[1] + (pt.z - o[2])*n[2];
+                                        pt.x -= dot * n[0];
+                                        pt.y -= dot * n[1];
+                                        pt.z -= dot * n[2];
                                     }
                                 }
                                 let _ = direction; // Direction-based projection would use ray-plane intersection.
-                                // C5 Stage 7.3: the mirror mutations above leave the cloned
-                                // solid's EdgeStore carrying the PRE-projection canonical
-                                // geometry. Re-index so store-first consumers
-                                // (triangulate_solid, boundary readers) see the projected
-                                // result — the sanctioned mutate -> index_edges pairing
-                                // (cf. ShapeBuilder::transform_solid).
-                                s.index_edges();
                                 results.insert(node.id, VpData::Geometry(Box::new(s)));
                                 changed = true;
                             }
@@ -20673,6 +20670,8 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 if pts.len() >= 2 {
                                     let n = *count as usize;
                                     let mut shells = Vec::new();
+                                let mut shells_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
+                                    let mut shells_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     for i in 0..n {
                                         let t = i as f64 / n.max(1) as f64;
                                         let idx = (t * (pts.len() - 1) as f64) as usize;
@@ -20680,13 +20679,21 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         let p = pts[idx];
                                         let mut copy = solid.clone();
                                         ShapeBuilder::transform_solid(&mut copy, &Transform::translation(p.x, p.y, p.z));
+                                        // 7.6b: carry each copy's boundary (resolved from
+                                        // its own store) as the working list.
+                                        for f in copy.faces() {
+                                            shells_working.push(copy.resolve_face_edges(f));
+                                        }
+                                        for f in copy.faces() {
+                                            shells_working.push(copy.resolve_face_edges(f));
+                                        }
                                         if let Some(shell) = copy.outer_shell.as_ref() {
                                             shells.extend(shell.faces.iter().cloned());
                                         }
                                     }
                                     if !shells.is_empty() {
                                         let shell = Shell::new(shells);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, shells_working))));
                                         changed = true;
                                     }
                                 }
@@ -20697,6 +20704,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             if let Some(solid) = inputs.get(0).and_then(to_solid) {
                                 let spacing = inputs.get(1).and_then(to_number).unwrap_or(2.0);
                                 let mut shells = Vec::new();
+                                let mut shells_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for ix in 0..*nx {
                                     for iy in 0..*ny {
                                         for iz in 0..*nz {
@@ -20706,6 +20714,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                                 iy as f64 * spacing,
                                                 iz as f64 * spacing,
                                             ));
+                                            for f in copy.faces() {
+                                                shells_working.push(copy.resolve_face_edges(f));
+                                            }
                                             if let Some(shell) = copy.outer_shell.as_ref() {
                                                 shells.extend(shell.faces.iter().cloned());
                                             }
@@ -20714,7 +20725,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !shells.is_empty() {
                                     let shell = Shell::new(shells);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, shells_working))));
                                     changed = true;
                                 }
                             }
@@ -20726,6 +20737,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 inputs.get(1).and_then(|d| match d { VpData::Surface(s) => Some((**s).clone()), _ => None }),
                             ) {
                                 let mut shells = Vec::new();
+                                let mut shells_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for iu in 0..*nx {
                                     for iv in 0..*ny {
                                         let u = iu as f64 / (*nx - 1).max(1) as f64;
@@ -20733,6 +20745,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         let p = surf.point_at(u, v);
                                         let mut copy = solid.clone();
                                         ShapeBuilder::transform_solid(&mut copy, &Transform::translation(p.x, p.y, p.z));
+                                        for f in copy.faces() {
+                                            shells_working.push(copy.resolve_face_edges(f));
+                                        }
                                         if let Some(shell) = copy.outer_shell.as_ref() {
                                             shells.extend(shell.faces.iter().cloned());
                                         }
@@ -20740,7 +20755,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !shells.is_empty() {
                                     let shell = Shell::new(shells);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, shells_working))));
                                     changed = true;
                                 }
                             }
@@ -21164,18 +21179,19 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                 }
                                 let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for i in 0..nu - 1 {
                                     for j in 0..nv - 1 {
                                         let i0 = i * nv + j; let i1 = i * nv + j + 1;
                                         let i2 = (i + 1) * nv + j + 1; let i3 = (i + 1) * nv + j;
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&[pts[i0], pts[i1], pts[i2], pts[i3]]) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&[pts[i0], pts[i1], pts[i2], pts[i3]]) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
+                                    let solid = draper_topology::Solid::from_edges_only(shell, working);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),
@@ -21309,7 +21325,12 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let nu = 8; let nv = 8;
                                 let mut faces_a = Vec::new();
                                 let mut faces_b = Vec::new();
-                                for (u_start, u_end, faces) in [(0.0, t, &mut faces_a), (t, 1.0, &mut faces_b)] {
+                                let mut working_a: Vec<Vec<draper_topology::Edge>> = Vec::new();
+                                let mut working_b: Vec<Vec<draper_topology::Edge>> = Vec::new();
+                                for (u_start, u_end, faces, working) in [
+                                    (0.0, t, &mut faces_a, &mut working_a),
+                                    (t, 1.0, &mut faces_b, &mut working_b),
+                                ] {
                                     let mut pts: Vec<Point3d> = Vec::with_capacity(nu * nv);
                                     for i in 0..nu {
                                         for j in 0..nv {
@@ -21322,20 +21343,20 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         for j in 0..nv - 1 {
                                             let i0 = i * nv + j; let i1 = i * nv + j + 1;
                                             let i2 = (i + 1) * nv + j + 1; let i3 = (i + 1) * nv + j;
-                                            if let Some(f) = ShapeBuilder::make_polygon_face(&[pts[i0], pts[i1], pts[i2], pts[i3]]) {
-                                                faces.push(f);
+                                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&[pts[i0], pts[i1], pts[i2], pts[i3]]) {
+                                                faces.push(f); working.push(f_w);
                                             }
                                         }
                                     }
                                 }
                                 let mut parts: Vec<VpData> = Vec::new();
                                 if !faces_a.is_empty() {
-                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_shell_indexed(
-                                        draper_topology::Shell::new(faces_a)))));
+                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_edges_only(
+                                        draper_topology::Shell::new(faces_a), working_a))));
                                 }
                                 if !faces_b.is_empty() {
-                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_shell_indexed(
-                                        draper_topology::Shell::new(faces_b)))));
+                                    parts.push(VpData::Geometry(Box::new(draper_topology::Solid::from_edges_only(
+                                        draper_topology::Shell::new(faces_b), working_b))));
                                 }
                                 if parts.is_empty() { parts.push(VpData::Surface(Box::new(surf))); }
                                 results.insert(node.id, VpData::List(parts));
@@ -21376,6 +21397,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 // Build a faceted solid from the grid (represents the rebuilt surface).
                                 let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for i in 0..nu - 1 {
                                     for j in 0..nv - 1 {
                                         let i0 = i * nv + j;
@@ -21383,12 +21405,12 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         let i2 = (i + 1) * nv + j + 1;
                                         let i3 = (i + 1) * nv + j;
                                         let quad = vec![pts[i0], pts[i1], pts[i2], pts[i3]];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) { faces.push(f); }
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) { faces.push(f); working.push(f_w); }
                                     }
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
+                                    let solid = draper_topology::Solid::from_edges_only(shell, working);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),
@@ -21599,20 +21621,21 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         .map(|p| Point3d::new(p.x, p.y, p.z + *thickness))
                                         .collect();
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     for i in 0..profile_pts.len() - 1 {
                                         let quad = vec![
                                             profile_pts[i], profile_pts[i+1],
                                             top_pts[i+1], top_pts[i],
                                         ];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                            faces.push(f);
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                            faces.push(f); working.push(f_w);
                                         }
                                     }
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(&profile_pts) { faces.push(f); }
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts) { faces.push(f); }
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&profile_pts) { faces.push(f); working.push(f_w); }
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&top_pts) { faces.push(f); working.push(f_w); }
                                     if !faces.is_empty() {
                                         let rib_shell = Shell::new_closed(faces);
-                                        let rib_solid = Solid::from_shell_indexed(rib_shell);
+                                        let rib_solid = Solid::from_edges_only(rib_shell, working);
                                         let scale = vp_solid_scale(&solid).max(vp_solid_scale(&rib_solid));
                                         let tol_ctx = draper_geometry::ToleranceContext::from_model_scale(scale);
                                         match draper_topology::boolean::boolean_union(&solid, &rib_solid, &tol_ctx) {
@@ -21999,8 +22022,12 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             // For VP eval: merge all solids into a single shell.
                             if let Some(VpData::List(items)) = inputs.get(0) {
                                 let mut all_faces = Vec::new();
+                                let mut all_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for item in items {
                                     if let Some(solid) = to_solid(item) {
+                                        for f in solid.faces() {
+                                            all_working.push(solid.resolve_face_edges(f));
+                                        }
                                         if let Some(shell) = solid.outer_shell.as_ref() {
                                             all_faces.extend(shell.faces.iter().cloned());
                                         }
@@ -22008,7 +22035,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 if !all_faces.is_empty() {
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, all_working))));
                                     changed = true;
                                 }
                             }
@@ -22036,9 +22063,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 Point3d::new(origin[0] + half_w, origin[1] + half_h, origin[2]),
                                 Point3d::new(origin[0] - half_w, origin[1] + half_h, origin[2]),
                             ];
-                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
+                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
                                 let shell = Shell::new_closed(vec![f]);
-                                let solid = Solid::from_shell_indexed(shell);
+                                let solid = Solid::from_edges_only(shell, vec![f_w]);
                                 let plane = draper_geometry::Plane::from_origin_and_normal(
                                     Point3d::new(origin[0], origin[1], origin[2]),
                                     draper_geometry::Direction3d::Z,
@@ -22065,21 +22092,22 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     .map(|p| Point3d::new(p.x, p.y, p.z + h))
                                     .collect();
                                 let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 // Side faces
                                 for i in 0..n {
                                     let quad = vec![
                                         profile[i], profile[i+1], top_pts[i+1], top_pts[i],
                                     ];
-                                    if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                        faces.push(f);
+                                    if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                        faces.push(f); working.push(f_w);
                                     }
                                 }
                                 // Caps
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&profile[..n]) { faces.push(f); }
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&top_pts[..n]) { faces.push(f); }
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&profile[..n]) { faces.push(f); working.push(f_w); }
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&top_pts[..n]) { faces.push(f); working.push(f_w); }
                                 if !faces.is_empty() {
                                     let shell = Shell::new_closed(faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                     changed = true;
                                 }
                             }
@@ -22092,6 +22120,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     let segments = 16; // circle segments
                                     let n_path = path_pts.len();
                                     let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                     // For each path segment, build side faces
                                     for i in 0..n_path - 1 {
                                         let p_a = &path_pts[i];
@@ -22143,8 +22172,8 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                                 section_a[k], section_a[k_next],
                                                 section_b[k_next], section_b[k],
                                             ];
-                                            if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                                faces.push(f);
+                                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                                faces.push(f); working.push(f_w);
                                             }
                                         }
                                     }
@@ -22152,7 +22181,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     let _ = (radius, segments); // already used
                                     if !faces.is_empty() {
                                         let shell = Shell::new_closed(faces);
-                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                        results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                         changed = true;
                                     }
                                 }
@@ -22190,22 +22219,23 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 .map(|p| Point3d::new(p.x, p.y, p.z + h))
                                 .collect();
                             let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                             // Bottom face
-                            if let Some(f) = ShapeBuilder::make_polygon_face(&profile) { faces.push(f); }
+                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&profile) { faces.push(f); working.push(f_w); }
                             // Top face
-                            if let Some(f) = ShapeBuilder::make_polygon_face(&top_profile) { faces.push(f); }
+                            if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&top_profile) { faces.push(f); working.push(f_w); }
                             // Side faces (each segment + verticals)
                             for i in 0..profile.len() - 1 {
                                 let quad = vec![
                                     profile[i], profile[i+1], top_profile[i+1], top_profile[i],
                                 ];
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&quad) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) {
+                                    faces.push(f); working.push(f_w);
                                 }
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                 changed = true;
                             }
                         }
@@ -22230,14 +22260,15 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 vec![v[1], v[3], v[2]],
                             ];
                             let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                             for pts in &faces_pts {
-                                if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(pts) {
+                                    faces.push(f); working.push(f_w);
                                 }
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                 changed = true;
                             }
                         }
@@ -22264,14 +22295,15 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 vec![v[5], v[0], v[3]],
                             ];
                             let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                             for pts in &faces_pts {
-                                if let Some(f) = ShapeBuilder::make_polygon_face(pts) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(pts) {
+                                    faces.push(f); working.push(f_w);
                                 }
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                 changed = true;
                             }
                         }
@@ -22300,15 +22332,16 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 [9, 11, 7],
                             ];
                             let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                             for idx in &faces_idx {
                                 let pts = vec![v[idx[0]], v[idx[1]], v[idx[2]]];
-                                if let Some(f) = ShapeBuilder::make_polygon_face(&pts) {
-                                    faces.push(f);
+                                if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&pts) {
+                                    faces.push(f); working.push(f_w);
                                 }
                             }
                             if !faces.is_empty() {
                                 let shell = Shell::new_closed(faces);
-                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, working))));
                                 changed = true;
                             }
                         }
@@ -22408,6 +22441,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 let dir = draper_geometry::Direction3d::new(axis_dir[0], axis_dir[1], axis_dir[2])
                                     .unwrap_or(draper_geometry::Direction3d::Z);
                                 let mut all_faces = Vec::new();
+                                let mut all_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for i in 0..n {
                                     let angle = if n > 1 { total_angle * i as f64 / n as f64 } else { 0.0 };
                                     let mut copy = solid.clone();
@@ -22415,13 +22449,16 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     ShapeBuilder::transform_solid(&mut copy, &Transform::translation(-center[0], -center[1], -center[2]));
                                     ShapeBuilder::transform_solid(&mut copy, &Transform::rotation_axis(&dir, angle));
                                     ShapeBuilder::transform_solid(&mut copy, &Transform::translation(center[0], center[1], center[2]));
+                                    for f in copy.faces() {
+                                        all_working.push(copy.resolve_face_edges(f));
+                                    }
                                     if let Some(shell) = copy.outer_shell.as_ref() {
                                         all_faces.extend(shell.faces.iter().cloned());
                                     }
                                 }
                                 if !all_faces.is_empty() {
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, all_working))));
                                     changed = true;
                                 }
                             }
@@ -22444,16 +22481,24 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     ShapeBuilder::transform_solid(&mut s2, &Transform::translation(
                                         -direction[0] * dist, -direction[1] * dist, -direction[2] * dist,
                                     ));
-                                    // Merge faces of both copies
+                                    // Merge faces of both copies (7.6b: + working lists
+                                    // resolved from each copy's store)
                                     let mut all_faces = Vec::new();
+                                    let mut all_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
+                                    for f in s.faces() {
+                                        all_working.push(s.resolve_face_edges(f));
+                                    }
                                     if let Some(shell) = s.outer_shell.as_ref() {
                                         all_faces.extend(shell.faces.iter().cloned());
+                                    }
+                                    for f in s2.faces() {
+                                        all_working.push(s2.resolve_face_edges(f));
                                     }
                                     if let Some(shell) = s2.outer_shell.as_ref() {
                                         all_faces.extend(shell.faces.iter().cloned());
                                     }
                                     let shell = Shell::new(all_faces);
-                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_shell_indexed(shell))));
+                                    results.insert(node.id, VpData::Geometry(Box::new(Solid::from_edges_only(shell, all_working))));
                                 } else {
                                     results.insert(node.id, VpData::Geometry(Box::new(s)));
                                 }
@@ -22771,6 +22816,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     }
                                 }
                                 let mut faces = Vec::new();
+            let mut working: Vec<Vec<draper_topology::Edge>> = Vec::new();
                                 for i in 0..nu - 1 {
                                     for j in 0..nv - 1 {
                                         let i0 = i * nv + j;
@@ -22778,12 +22824,12 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                         let i2 = (i + 1) * nv + j + 1;
                                         let i3 = (i + 1) * nv + j;
                                         let quad = vec![bottom_pts[i0], bottom_pts[i1], top_pts[i2], top_pts[i3]];
-                                        if let Some(f) = ShapeBuilder::make_polygon_face(&quad) { faces.push(f); }
+                                        if let Some((f, f_w)) = ShapeBuilder::make_polygon_face(&quad) { faces.push(f); working.push(f_w); }
                                     }
                                 }
                                 if !faces.is_empty() {
                                     let shell = draper_topology::Shell::new(faces);
-                                    let solid = draper_topology::Solid::from_shell_indexed(shell);
+                                    let solid = draper_topology::Solid::from_edges_only(shell, working);
                                     results.insert(node.id, VpData::List(vec![
                                         VpData::Surface(Box::new(surf)),
                                         VpData::Geometry(Box::new(solid)),

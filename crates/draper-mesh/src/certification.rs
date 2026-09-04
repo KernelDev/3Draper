@@ -313,8 +313,10 @@ fn triangulate_solid_for_thickness(solid: &Solid) -> TriangleMesh {
     let faces = solid.faces();
     for face in &faces {
         if let Some(ref surface) = face.surface {
-            // Get boundary edge endpoints
-            let edge_points: Vec<Point3d> = face.edges.iter()
+            // Get boundary edge endpoints (C5 7.6b: store-resolved
+            // instance-faithful edge list)
+            let face_edges = solid.resolve_face_edges(face);
+            let edge_points: Vec<Point3d> = face_edges.iter()
                 .flat_map(|edge| {
                     let mut pts = Vec::new();
                     if let Some(p) = edge.start_point() { pts.push(p); }

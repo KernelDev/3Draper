@@ -35,11 +35,10 @@ pub fn transform_solid(solid: &mut Solid, transform: &Transform) {
     for shell in &mut solid.inner_shells {
         transform_shell(shell, transform);
     }
-    // Transform the canonical store curves (mirror-free faces)…
+    // Transform the canonical store curves — the store is the ONLY holder
+    // of edge geometry (C5 7.6b), so this IS the whole edge transform:
+    // identity (ids, aliases, orientations) is unaffected, no re-index.
     solid.edge_store.transform_curves(transform);
-    // …then rebuild identity from the transformed mirrors (Pass 0 keeps
-    // the transformed store edges of mirror-free faces).
-    solid.index_edges();
 }
 
 /// Apply a transform to every geometric entity in a compound (assembly).
@@ -66,12 +65,9 @@ pub fn transform_face(face: &mut Face, transform: &Transform) {
         *surface = surface.transform(transform);
     }
 
-    // Transform each edge's curve
-    for edge in &mut face.edges {
-        if let Some(ref mut curve) = edge.curve {
-            *curve = curve.transform(transform);
-        }
-    }
+    // C5 7.6b: edge curves live in the owning solid's `EdgeStore` —
+    // transform them via `solid.edge_store.transform_curves` (see
+    // `transform_solid`); a standalone face carries no edge geometry.
 
     // Note: wires' coedges reference edges by TopoId (which doesn't change),
     // and pcurve/curve_2d data is in UV space of the (already transformed)
@@ -219,13 +215,21 @@ pub fn linear_pattern(
 /// surfaces, the UV polyline is approximated by projecting 32 sample points
 /// of the 3D circle onto the surface.
 pub fn add_circular_hole_to_face(
-    face: &mut Face,
+    solid: &mut Solid,
+    face_index: usize,
     center_3d: Point3d,
     radius: f64,
     normal: Direction3d,
 ) -> Result<(), String> {
     if radius <= 0.0 {
         return Err(format!("Radius must be positive, got {}", radius));
+    }
+    let faces_len = solid.faces().len();
+    if face_index >= faces_len {
+        return Err(format!(
+            "Face index {} out of range (solid has {} faces)",
+            face_index, faces_len
+        ));
     }
 
     // Build the 3D circle edge
@@ -236,9 +240,8 @@ pub fn add_circular_hole_to_face(
         x_axis: perpendicular_direction(&normal),
     };
     let edge_curve = Curve3d::Circle(circle.clone());
-    let edge_id = TopoId::new();
     let edge = Edge {
-        id: edge_id,
+        id: TopoId::new(),
         curve: Some(edge_curve),
         param_range: (0.0, 2.0 * std::f64::consts::PI),
         vertex_start: Some(TopoId::new()),
@@ -250,11 +253,18 @@ pub fn add_circular_hole_to_face(
         degenerate: false,
         step_entity_id: None,
     };
-    face.edges.push(edge.clone());
+    // C5 7.6b: the hole's boundary edge joins the store + the face's
+    // canonical reference list.
+    let hole_edge_id = edge.id;
+    solid.edge_store.insert(edge);
 
     // Build the UV polyline (32 segments) by projecting 3D circle samples
     // onto the face's surface
-    let uv_polyline = if let Some(ref surface) = face.surface {
+    let face_surface = solid
+        .faces()
+        .get(face_index)
+        .and_then(|f| f.surface.clone());
+    let uv_polyline = if let Some(ref surface) = face_surface {
         let mut pts = Vec::with_capacity(33);
         for i in 0..=32 {
             let t = i as f64 * 2.0 * std::f64::consts::PI / 32.0;
@@ -271,7 +281,7 @@ pub fn add_circular_hole_to_face(
     // Build the inner wire (closed loop with one coedge)
     let coedge = CoEdge {
         id: TopoId::new(),
-        edge: edge_id,
+        edge: hole_edge_id,
         forward: true,
         pcurve: Some(draper_topology::Pcurve::new(uv_polyline)),
         curve_2d: Some(Curve2d::Line(Line2d::new(
@@ -285,7 +295,11 @@ pub fn add_circular_hole_to_face(
         closed: true,
     };
 
+    let faces_iter = solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} vanished", face_index))?;
     face.add_hole(wire);
+    face.edge_ids.push(hole_edge_id);
     Ok(())
 }
 
@@ -395,28 +409,28 @@ pub fn delete_face_from_solid(solid: &mut Solid, face_index: usize) -> Result<Fa
 /// vertex references are preserved. Use this for NURBS curve editing,
 /// converting a Line to an Arc, etc.
 pub fn replace_edge_curve(
-    face: &mut Face,
+    solid: &mut Solid,
     edge_id: TopoId,
     new_curve: Curve3d,
     new_param_range: (f64, f64),
 ) -> Result<(), String> {
-    let edge = face
-        .edges
-        .iter_mut()
-        .find(|e| e.id == edge_id)
-        .ok_or_else(|| format!("Edge {:?} not found in face", edge_id))?;
+    // C5 7.6b: edges live in the solid's canonical store.
+    let edge = solid
+        .edge_store
+        .get_mut(edge_id)
+        .ok_or_else(|| format!("Edge {:?} not found in store", edge_id))?;
     edge.curve = Some(new_curve);
     edge.param_range = new_param_range;
     Ok(())
 }
 
 /// Reverse an edge's orientation (swap forward flag).
-pub fn reverse_edge(face: &mut Face, edge_id: TopoId) -> Result<(), String> {
-    let edge = face
-        .edges
-        .iter_mut()
-        .find(|e| e.id == edge_id)
-        .ok_or_else(|| format!("Edge {:?} not found in face", edge_id))?;
+pub fn reverse_edge(solid: &mut Solid, edge_id: TopoId) -> Result<(), String> {
+    // C5 7.6b: edges live in the solid's canonical store.
+    let edge = solid
+        .edge_store
+        .get_mut(edge_id)
+        .ok_or_else(|| format!("Edge {:?} not found in store", edge_id))?;
     edge.forward = !edge.forward;
     edge.param_range = (edge.param_range.1, edge.param_range.0);
     let tmp = edge.vertex_start;
@@ -490,11 +504,11 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     // Find the edge by index across all faces. We need:
     // - the edge itself (curve, endpoints)
     // - the two adjacent faces (face_a, face_b)
-    let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new(); // (face_idx, edge_pos_in_face)
+    let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new(); // (face_idx, edge_pos_in_edge_ids)
     for (fi, face) in shell.faces.iter().enumerate() {
-        for (ei, edge) in face.edges.iter().enumerate() {
-            if edge.id.to_u64() as usize == edge_index
-                || resolve(edge.id) == wanted
+        for (ei, eid) in face.edge_ids.iter().enumerate() {
+            if eid.to_u64() as usize == edge_index
+                || resolve(*eid) == wanted
             {
                 edge_owner_faces.push((fi, ei));
             }
@@ -520,16 +534,13 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
     let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
 
-    // C5 Stage 6.4: store-first edge geometry — the store's instance view
-    // (alias-following, orientation-correct) is the source of truth; the
-    // construction mirror is the fallback for ids the store does not hold.
-    let edge_a = {
-        let mirror = &shell.faces[face_a_idx].edges[edge_a_pos];
-        solid
-            .edge_store
-            .instance_edge(mirror.id)
-            .unwrap_or_else(|| mirror.clone())
-    };
+    // C5 7.6b: store-first edge geometry — the store's instance view
+    // (alias-following, orientation-correct) is the source of truth.
+    let eid_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
+    let edge_a = solid
+        .edge_store
+        .instance_edge(eid_a)
+        .ok_or_else(|| format!("edge {} not found in store", edge_index))?;
     let edge_curve = edge_a.curve.clone();
     let edge_curve = edge_curve.ok_or("edge has no curve")?;
 
@@ -679,33 +690,46 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     let new_edge_a = Edge::new_line(a_offset_start, a_offset_end);
     let new_edge_b = Edge::new_line(b_offset_start, b_offset_end);
 
-    // Replace the old edge in each face with the new offset edge.
-    shell.faces[face_a_idx].edges[edge_a_pos] = new_edge_a.clone();
-    shell.faces[face_b_idx].edges[edge_b_pos] = new_edge_b.clone();
+    // C5 7.6b: replace the old edge reference on each face — the new
+    // offset edges join the store, the wire coedges follow the new ids,
+    // and the old canonical leaves the store.
+    let old_id_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
+    let old_id_b = shell.faces[face_b_idx].edge_ids[edge_b_pos];
+    // Capture the offset-edge ids BEFORE the store takes ownership — they
+    // occupy the fillet face's edge_ids slots below.
+    let fillet_slot_a = new_edge_a.id;
+    let fillet_slot_b = new_edge_b.id;
+    let _ = (old_id_a, old_id_b);
+    replace_face_edge(shell, face_a_idx, edge_a_pos, &new_edge_a);
+    replace_face_edge(shell, face_b_idx, edge_b_pos, &new_edge_b);
+    solid.edge_store.insert(new_edge_a);
+    solid.edge_store.insert(new_edge_b);
+    solid.edge_store.remove(old_id_a);
+    solid.edge_store.remove(old_id_b);
 
-    // Build the fillet face: a cylindrical face bounded by the two offset edges.
+    // Build the fillet face: a cylindrical face bounded by the two offset
+    // edges (wire-less — the boundary lives in the store + edge_ids).
     let mut fillet_face = Face::new_surface_only(fillet_surface);
     // Edges run along the cylinder axis (constant u). The two offset edges
     // correspond to u=0 (on plane_a) and u=π (on plane_b), each running
     // from start to end along the axis.
-    fillet_face.edges = vec![new_edge_a, new_edge_b];
     // Add two cap edges (degenerate points at the start and end) so the
     // face is topologically closed. These caps have zero length.
+    // C5 7.6b fix: ALL FOUR boundary edges must occupy edge_ids slots
+    // (the offsets ARE the fillet cylinder's boundary) — dropping them
+    // starved the wire-less boundary readers (v-range detection).
     let cap_start = Edge::new_line(a_offset_start, b_offset_start);
     let cap_end = Edge::new_line(a_offset_end, b_offset_end);
-    fillet_face.edges.push(cap_start);
-    fillet_face.edges.push(cap_end);
+    fillet_face.edge_ids = vec![fillet_slot_a, fillet_slot_b, cap_start.id, cap_end.id];
     fillet_face.forward = true;
+    solid.edge_store.insert(cap_start);
+    solid.edge_store.insert(cap_end);
 
     // Add the fillet face to the shell.
     shell.faces.push(fillet_face);
 
-    // C5 Stage 7.1: the mutation replaced mirror edges (fresh ids) and
-    // appended a wire-less face — re-index so the store and edge_ids track
-    // the POST-fillet topology. Without this, born-indexed inputs keep a
-    // stale store and store-first readers sample the pre-fillet geometry.
-    drop(shell);
-    solid.index_edges();
+    // C5 7.6b: the store was mutated in place (replaced canonicals, new
+    // fillet edges) — no re-index pass exists or is needed.
 
     Ok(())
 }
@@ -749,12 +773,12 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let resolve = |id: TopoId| aliases.get(&id).copied().unwrap_or(id);
     let wanted = resolve(TopoId::from_u64(edge_index as u64));
 
-    // Find the edge by index across all faces.
+    // Find the edge by index across all faces (canonical references).
     let mut edge_owner_faces: Vec<(usize, usize)> = Vec::new();
     for (fi, face) in shell.faces.iter().enumerate() {
-        for (ei, edge) in face.edges.iter().enumerate() {
-            if edge.id.to_u64() as usize == edge_index
-                || resolve(edge.id) == wanted
+        for (ei, eid) in face.edge_ids.iter().enumerate() {
+            if eid.to_u64() as usize == edge_index
+                || resolve(*eid) == wanted
             {
                 edge_owner_faces.push((fi, ei));
             }
@@ -780,14 +804,12 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let (face_a_idx, edge_a_pos) = edge_owner_faces[0];
     let (face_b_idx, edge_b_pos) = edge_owner_faces[1];
 
-    // C5 Stage 6.4: store-first edge geometry (see fillet_edge).
-    let edge_a = {
-        let mirror = &shell.faces[face_a_idx].edges[edge_a_pos];
-        solid
-            .edge_store
-            .instance_edge(mirror.id)
-            .unwrap_or_else(|| mirror.clone())
-    };
+    // C5 7.6b: store-first edge geometry (see fillet_edge).
+    let eid_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
+    let edge_a = solid
+        .edge_store
+        .instance_edge(eid_a)
+        .ok_or_else(|| format!("edge {} not found in store", edge_index))?;
     let edge_curve = edge_a.curve.clone();
     let edge_curve = edge_curve.ok_or("edge has no curve")?;
 
@@ -909,8 +931,19 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let new_edge_a = Edge::new_line(a_offset_start, a_offset_end);
     let new_edge_b = Edge::new_line(b_offset_start, b_offset_end);
 
-    shell.faces[face_a_idx].edges[edge_a_pos] = new_edge_a.clone();
-    shell.faces[face_b_idx].edges[edge_b_pos] = new_edge_b.clone();
+    // C5 7.6b: store-first replacement (see fillet_edge).
+    let old_id_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
+    let old_id_b = shell.faces[face_b_idx].edge_ids[edge_b_pos];
+    // Capture the offset-edge ids BEFORE the store takes ownership.
+    let chamfer_slot_a = new_edge_a.id;
+    let chamfer_slot_b = new_edge_b.id;
+    let _ = (old_id_a, old_id_b);
+    replace_face_edge(shell, face_a_idx, edge_a_pos, &new_edge_a);
+    replace_face_edge(shell, face_b_idx, edge_b_pos, &new_edge_b);
+    solid.edge_store.insert(new_edge_a);
+    solid.edge_store.insert(new_edge_b);
+    solid.edge_store.remove(old_id_a);
+    solid.edge_store.remove(old_id_b);
 
     // The chamfer face is a plane through the four offset points.
     // Compute the plane normal as (edge_dir × (a_offset_start - b_offset_start)).
@@ -947,20 +980,24 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let chamfer_surface = Surface::Plane(chamfer_plane);
 
     let mut chamfer_face = Face::new_surface_only(chamfer_surface);
-    chamfer_face.edges = vec![new_edge_a, new_edge_b];
-    // Cap edges
+    // C5 7.6b fix: ALL FOUR boundary edges occupy edge_ids slots (the
+    // offsets ARE the chamfer plane's boundary), matching the legacy
+    // mirror list [new_edge_a, new_edge_b, cap_start, cap_end].
     let cap_start = Edge::new_line(a_offset_start, b_offset_start);
     let cap_end = Edge::new_line(a_offset_end, b_offset_end);
-    chamfer_face.edges.push(cap_start);
-    chamfer_face.edges.push(cap_end);
+    chamfer_face.edge_ids = vec![
+        chamfer_slot_a,
+        chamfer_slot_b,
+        cap_start.id,
+        cap_end.id,
+    ];
     chamfer_face.forward = true;
+    solid.edge_store.insert(cap_start);
+    solid.edge_store.insert(cap_end);
 
     shell.faces.push(chamfer_face);
 
-    // C5 Stage 7.1: see fillet_edge — re-index after the in-place mirror
-    // mutation so the store tracks the POST-chamfer topology.
-    drop(shell);
-    solid.index_edges();
+    // C5 7.6b: the store was mutated in place — no re-index pass.
 
     Ok(())
 }
@@ -1013,17 +1050,25 @@ pub fn make_shell(solid: &mut Solid, thickness: f64) -> Result<(), String> {
         face.surface = Some(offset_surface);
         face.id = TopoId::new();
 
-        // Offset the edge curves by the same amount.
-        for edge in &mut face.edges {
-            if let Some(curve) = edge.curve.take() {
-                let offset_curve = offset_curve_along_normal(
-                    &curve,
-                    &surface,
-                    thickness,
-                );
-                edge.curve = Some(offset_curve);
+        // C5 7.6b: offset the face's boundary edges through the store —
+        // each resolved instance is offset, re-keyed to a fresh id, inserted
+        // into the store, and referenced by the face's `edge_ids` (the
+        // original outer-shell references stay untouched).
+        let orig_ids = std::mem::take(&mut face.edge_ids);
+        for oid in orig_ids {
+            if let Some(mut edge) = solid.edge_store.instance_edge(oid) {
+                if let Some(curve) = edge.curve.take() {
+                    let offset_curve = offset_curve_along_normal(
+                        &curve,
+                        &surface,
+                        thickness,
+                    );
+                    edge.curve = Some(offset_curve);
+                }
+                edge.id = TopoId::new();
+                face.edge_ids.push(edge.id);
+                solid.edge_store.insert(edge);
             }
-            edge.id = TopoId::new();
         }
     }
 
@@ -1357,10 +1402,10 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
         );
         edge.param_range = (0.0, 1.0);
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let mut solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Translate by (10, 20, 30)
         translate_solid(&mut solid, 10.0, 20.0, 30.0);
@@ -1375,8 +1420,9 @@ mod tests {
             panic!("Expected Plane surface");
         }
 
-        // Verify edge endpoints moved
-        let e = &f.edges[0];
+        // Verify edge endpoints moved (store-resolved instance).
+        let resolved = solid.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         let end = e.end_point().unwrap();
         assert!((start.x - 10.0).abs() < 1e-9);
@@ -1394,17 +1440,18 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(2.0, 0.0, 0.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let mut solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Rotate 90° around Z
         rotate_solid(&mut solid, &Direction3d::Z, std::f64::consts::PI / 2.0);
 
         // Verify edge endpoints rotated
         let f = &solid.outer_shell.as_ref().unwrap().faces[0];
-        let e = &f.edges[0];
+        let resolved = solid.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         // (1, 0, 0) → (0, 1, 0)
         assert!(start.x.abs() < 1e-9);
@@ -1419,16 +1466,17 @@ mod tests {
             Point3d::new(1.0, 2.0, 3.0),
             Point3d::new(4.0, 5.0, 6.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Mirror about XY plane (z=0)
         let mirrored = mirror_solid(&solid, Point3d::ORIGIN, Direction3d::Z);
 
         let f = &mirrored.outer_shell.as_ref().unwrap().faces[0];
-        let e = &f.edges[0];
+        let resolved = mirrored.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         // (1, 2, 3) → (1, 2, -3)
         assert!((start.x - 1.0).abs() < 1e-9);
@@ -1439,26 +1487,34 @@ mod tests {
     #[test]
     fn test_add_and_remove_hole() {
         let plane = Plane::xy();
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        assert_eq!(face.inner_wires.len(), 0);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: hole surgery takes the SOLID + face index — the hole edge
+        // joins the store; the face keeps topology only.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![Vec::new()]);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 0);
 
         // Add a hole
         add_circular_hole_to_face(
-            &mut face,
+            &mut solid,
+            0,
             Point3d::new(0.5, 0.5, 0.0),
             0.1,
             Direction3d::Z,
         )
         .unwrap();
-        assert_eq!(face.inner_wires.len(), 1);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 1);
 
         // Remove the hole
-        let removed = remove_hole_from_face(&mut face, 0).unwrap();
+        let mut faces = solid.faces_mut();
+        let removed = remove_hole_from_face(faces[0], 0).unwrap();
+        drop(faces);
         assert_eq!(removed.coedges.len(), 1);
-        assert_eq!(face.inner_wires.len(), 0);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 0);
 
         // Removing again should fail
-        assert!(remove_hole_from_face(&mut face, 0).is_err());
+        let mut faces = solid.faces_mut();
+        assert!(remove_hole_from_face(faces[0], 0).is_err());
     }
 
     #[test]
@@ -1488,10 +1544,10 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(2.0, 0.0, 0.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // 5 total instances: original + 4 copies at 72°, 144°, 216°, 288°
         let copies = circular_pattern(&solid, Direction3d::Z, 5, 2.0 * std::f64::consts::PI);
@@ -1500,7 +1556,8 @@ mod tests {
         // Each copy should have its edge at a different angular position
         for (i, c) in copies.iter().enumerate() {
             let f = &c.outer_shell.as_ref().unwrap().faces[0];
-            let e = &f.edges[0];
+            let resolved = c.resolve_face_edges(f);
+            let e = &resolved[0];
             let start = e.start_point().unwrap();
             let angle = 2.0 * std::f64::consts::PI * (i + 1) as f64 / 5.0;
             let expected_x = angle.cos();
@@ -1544,87 +1601,104 @@ mod tests {
         let e_vert_3 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 1.0));
 
         // Bottom face (z=0): edges 0,1,2,3 of bottom
-        let mut bottom = Face::new_surface_only(Surface::Plane(Plane {
+        let bottom = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Y,
             normal: Direction3d::new(0.0, 0.0, -1.0).unwrap(),
         }));
-        bottom.edges.push(e_bottom_01.clone());
-        bottom.edges.push(e_bottom_12.clone());
-        bottom.edges.push(e_bottom_23.clone());
-        bottom.edges.push(e_bottom_30.clone());
+        let bottom_w: Vec<Edge> = vec![
+            e_bottom_01.clone(),
+            e_bottom_12.clone(),
+            e_bottom_23.clone(),
+            e_bottom_30.clone(),
+        ];
 
         // Top face (z=1): edges 0,1,2,3 of top
-        let mut top = Face::new_surface_only(Surface::Plane(Plane {
+        let top = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 1.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Y,
             normal: Direction3d::Z,
         }));
-        top.edges.push(e_top_01.clone());
-        top.edges.push(e_top_12.clone());
-        top.edges.push(e_top_23.clone());
-        top.edges.push(e_top_30.clone());
+        let top_w: Vec<Edge> = vec![
+            e_top_01.clone(),
+            e_top_12.clone(),
+            e_top_23.clone(),
+            e_top_30.clone(),
+        ];
 
         // Front face (y=0): bottom_01 (shared), vert_1, top_01 (shared), vert_0
-        let mut front = Face::new_surface_only(Surface::Plane(Plane {
+        let front = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Z,
             normal: Direction3d::new(0.0, -1.0, 0.0).unwrap(),
         }));
-        front.edges.push(e_bottom_01.clone());
-        front.edges.push(e_vert_1.clone());
-        front.edges.push(e_top_01.clone());
-        front.edges.push(e_vert_0.clone());
+        let front_w: Vec<Edge> = vec![
+            e_bottom_01.clone(),
+            e_vert_1.clone(),
+            e_top_01.clone(),
+            e_vert_0.clone(),
+        ];
 
         // Back face (y=1): bottom_23, vert_3, top_23, vert_2
-        let mut back = Face::new_surface_only(Surface::Plane(Plane {
+        let back = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 1.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Z,
             normal: Direction3d::Y,
         }));
-        back.edges.push(e_bottom_23.clone());
-        back.edges.push(e_vert_3.clone());
-        back.edges.push(e_top_23.clone());
-        back.edges.push(e_vert_2.clone());
+        let back_w: Vec<Edge> = vec![
+            e_bottom_23.clone(),
+            e_vert_3.clone(),
+            e_top_23.clone(),
+            e_vert_2.clone(),
+        ];
 
         // Left face (x=0): bottom_30, vert_3, top_30, vert_0
-        let mut left = Face::new_surface_only(Surface::Plane(Plane {
+        let left = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::Y,
             v_dir: Direction3d::Z,
             normal: Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
         }));
-        left.edges.push(e_bottom_30.clone());
-        left.edges.push(e_vert_3.clone());
-        left.edges.push(e_top_30.clone());
-        left.edges.push(e_vert_0.clone());
+        let left_w: Vec<Edge> = vec![
+            e_bottom_30.clone(),
+            e_vert_3.clone(),
+            e_top_30.clone(),
+            e_vert_0.clone(),
+        ];
 
         // Right face (x=1): bottom_12, vert_1, top_12, vert_2
-        let mut right = Face::new_surface_only(Surface::Plane(Plane {
+        let right = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(1.0, 0.0, 0.0),
             u_dir: Direction3d::Y,
             v_dir: Direction3d::Z,
             normal: Direction3d::X,
         }));
-        right.edges.push(e_bottom_12.clone());
-        right.edges.push(e_vert_1.clone());
-        right.edges.push(e_top_12.clone());
-        right.edges.push(e_vert_2.clone());
+        let right_w: Vec<Edge> = vec![
+            e_bottom_12.clone(),
+            e_vert_1.clone(),
+            e_top_12.clone(),
+            e_vert_2.clone(),
+        ];
 
         let shell = Shell::new_closed(vec![bottom, top, front, back, left, right]);
-        Solid::new(shell)
+        // 7.6b: born-indexed — the shared edge instances (same TopoIds
+        // across faces) ride the working lists into the store.
+        Solid::from_edges_only(
+            shell,
+            vec![bottom_w, top_w, front_w, back_w, left_w, right_w],
+        )
     }
 
     #[test]
     fn test_fillet_edge_on_unit_cube() {
         let mut cube = unit_cube();
-        // Pick the first edge of the first face.
-        let shell = cube.outer_shell.as_ref().unwrap();
-        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+        // Pick the first edge of the first face (store-resolved instance).
+        let f0 = &cube.outer_shell.as_ref().unwrap().faces[0];
+        let edge_id = cube.resolve_face_edges(f0)[0].id.to_u64() as usize;
 
         // Apply fillet with radius 0.1
         let result = fillet_edge(&mut cube, edge_id, 0.1);
@@ -1643,52 +1717,35 @@ mod tests {
             Surface::Cylinder(_) => {}
             other => panic!("expected Cylinder fillet surface, got {:?}", other),
         }
-        // The fillet face should have 4 edges (2 offset + 2 caps).
-        assert_eq!(fillet_face.edges.len(), 4);
+        // The fillet face should have 4 boundary slots (2 offset + 2
+        // caps). 7.6b: `edge_ids` keeps the per-slot canonical references
+        // (cap slots may share canonicals with the adjacent faces' split
+        // edges — geometric dedup), so the SLOT count is the contract.
+        assert_eq!(fillet_face.edge_ids.len(), 4);
     }
 
     #[test]
     fn test_fillet_edge_on_step_style_shared_edge() {
-        // C5 Stage 4: STEP-imported solids duplicate a shared edge as two
-        // instances with DIFFERENT TopoIds (same step_entity_id). Fillet
-        // used to fail with "only 1 adjacent face(s)" because the scan
-        // matched instance ids only; the alias-resolved scan now finds both
-        // incident faces.
+        // C5 Stage 4 → 7.6b: STEP-imported solids unify a shared edge under
+        // one canonical store entry (same step_entity_id in both incident
+        // faces' working lists). Fillet used to fail with "only 1 adjacent
+        // face(s)" when the scan matched per-face instance ids only; the
+        // store-first scan finds both incident faces through the canonical.
         let mut cube = unit_cube();
         // The vertical edge e_vert_0 is shared between front (face 2,
-        // edges[3]) and left (face 4, edges[3]).
-        let front_edge_id = cube.outer_shell.as_ref().unwrap().faces[2].edges[3].id;
+        // slot 3) and left (face 4, slot 3).
+        let f_left = &cube.outer_shell.as_ref().unwrap().faces[4];
+        let shared_id = cube.resolve_face_edges(f_left)[3].id;
 
-        // STEP-ify: replace the left face's copy with a twin carrying a
-        // FRESH TopoId and a shared step_entity_id.
-        {
-            let left = cube
-                .outer_shell
-                .as_mut()
-                .unwrap()
-                .faces
-                .get_mut(4)
-                .unwrap();
-            let mut twin = left.edges[3].clone();
-            twin.id = TopoId::new();
-            twin.step_entity_id = Some(700);
-            left.edges[3] = twin;
+        // STEP-ify: stamp the shared canonical with a STEP entity id —
+        // both incident faces see it through the store.
+        if let Some(e) = cube.edge_store.get_mut(shared_id) {
+            e.step_entity_id = Some(700);
         }
-        {
-            let front = cube
-                .outer_shell
-                .as_mut()
-                .unwrap()
-                .faces
-                .get_mut(2)
-                .unwrap();
-            front.edges[3].step_entity_id = Some(700);
-        }
-        cube.index_edges();
 
-        // Fillet by the FRONT copy's instance id — the alias map must
-        // resolve the left face's twin to the same canonical edge.
-        let result = fillet_edge(&mut cube, front_edge_id.to_u64() as usize, 0.1);
+        // Fillet by the shared (canonical) id — both incident faces must
+        // resolve through the store.
+        let result = fillet_edge(&mut cube, shared_id.to_u64() as usize, 0.1);
         assert!(
             result.is_ok(),
             "fillet on STEP-style shared edge failed: {:?}",
@@ -1701,8 +1758,8 @@ mod tests {
     #[test]
     fn test_chamfer_edge_on_unit_cube() {
         let mut cube = unit_cube();
-        let shell = cube.outer_shell.as_ref().unwrap();
-        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+        let f0 = &cube.outer_shell.as_ref().unwrap().faces[0];
+        let edge_id = cube.resolve_face_edges(f0)[0].id.to_u64() as usize;
 
         let result = chamfer_edge(&mut cube, edge_id, 0.1);
         assert!(result.is_ok(), "chamfer_edge failed: {:?}", result);
@@ -1720,7 +1777,7 @@ mod tests {
             Surface::Plane(_) => {}
             other => panic!("expected Plane chamfer surface, got {:?}", other),
         }
-        assert_eq!(chamfer_face.edges.len(), 4);
+        assert_eq!(chamfer_face.edge_ids.len(), 4);
     }
 
     #[test]
@@ -1796,5 +1853,28 @@ mod tests {
 
         let result = make_shell(&mut cube, -1.0);
         assert!(result.is_err());
+    }
+}
+
+/// C5 7.6b helper: replace the `edge_ids[pos]` entry of face `fi` with the
+/// new edge's id, updating the face's wire coedges that referenced the old
+/// id (the store insert/removal is the caller's job — disjoint borrows).
+fn replace_face_edge(shell: &mut Shell, fi: usize, pos: usize, new_edge: &Edge) {
+    let old_id = shell.faces[fi].edge_ids[pos];
+    let new_id = new_edge.id;
+    shell.faces[fi].edge_ids[pos] = new_id;
+    for wire in shell.faces[fi].inner_wires.iter_mut() {
+        for coedge in wire.coedges.iter_mut() {
+            if coedge.edge == old_id {
+                coedge.edge = new_id;
+            }
+        }
+    }
+    if let Some(ref mut wire) = shell.faces[fi].outer_wire {
+        for coedge in wire.coedges.iter_mut() {
+            if coedge.edge == old_id {
+                coedge.edge = new_id;
+            }
+        }
     }
 }

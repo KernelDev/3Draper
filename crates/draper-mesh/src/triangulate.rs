@@ -1637,11 +1637,14 @@ pub fn triangulate_face(face: &Face, params: &TriangulationParams) -> TriangleMe
 /// This function pre-populates the cache for the face's edges, then
 /// delegates to `triangulate_face_impl` which uses the immutable cache.
 ///
-/// C5 Stage 7.6: the face is staged on an explicit-edge vehicle
-/// ([`StagedFace`]) before entering the pipeline — the pipeline reads the
-/// vehicle's `edges`, never the face's mirror field.
+/// C5 7.6b: a standalone `Face` carries NO edge payload (the mirror field
+/// is gone) — this legacy entry triangulates the FULL surface (wire-less),
+/// matching the historical behavior for faces without mirrors. Boundary-
+/// constrained triangulation goes through the explicit-edge entries
+/// ([`triangulate_face_with_edges`]) or the solid entries
+/// ([`triangulate_solid_face_with_cache`]).
 pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, cache: &mut EdgeDiscretizationCache) -> TriangleMesh {
-    let staged = StagedFace::from_mirrors(face);
+    let staged = StagedFace::from_parts(face.clone(), Vec::new());
     triangulate_staged_with_cache(&staged, params, cache)
 }
 
@@ -1649,12 +1652,11 @@ pub fn triangulate_face_with_cache(face: &Face, params: &TriangulationParams, ca
 /// (C5 Stage 5.2 — standalone API decoupled from `Face.edges`).
 ///
 /// `face` contributes the surface, wires and orientation; `edges` carries
-/// the boundary edge geometry IN FACE-INSTANCE ORDER — element `i` is used
-/// where `face.edges[i]` would have been read, including the instance ids
-/// referenced by the face's coedges and the instance `param_range`
-/// orientation. Pass `face.edges.iter().collect()` to mirror today's
-/// behavior; post-Stage-5 callers resolve the same instance shells from
-/// the owning solid's `EdgeStore`.
+/// the boundary edge geometry — the ids referenced by the face's coedges
+/// and the instance `param_range` orientation. Callers resolve the
+/// instance shells from the owning solid's `EdgeStore`
+/// (`Solid::resolve_face_edges` / `Solid::instance_edges`), or supply the
+/// construction lists directly (STEP converter paths).
 ///
 /// Semantically equivalent to [`triangulate_face`] when handed the face's
 /// own mirrors: the provided edges are staged into a face view which the
@@ -1683,100 +1685,22 @@ pub fn triangulate_face_with_edges_and_cache(
     triangulate_staged_with_cache(&view, params, cache)
 }
 
-/// Build a staging view of `face` whose mirrors are `edges`.
+/// Build a staging view of `face` on the supplied edge geometry (C5 7.6b).
 ///
 /// The view carries the face's surface/wires/orientation plus the supplied
-/// edge geometry. The caller's original face is not modified.
+/// edge list as the vehicle's payload. The caller's original face is not
+/// modified.
 ///
-/// Two staging contracts, picked by length:
-///
-/// * **Replacement** (`edges.len() != face.edges.len()`, e.g. the mirror-less
-///   faces built by the STEP converter): the slice defines the view's edge
-///   set and id space outright (`edge_ids` derived from the slice). The
-///   edges must carry the ids the face's coedges reference.
-/// * **Parallel** (`edges.len() == face.edges.len()` — the
-///   `Solid::face_edges(face)` contract): element `i` upgrades instance `i`.
-///   The mirror keeps its traversal pairing (instance id, `param_range`,
-///   `forward`, vertex ids and pinned vertex points — the fields
-///   `Solid::sync_edge_mirrors` never overwrites), while
-///   orientation-independent fields (`degenerate`, `tolerance`,
-///   `step_entity_id`, `curve`) flow in from the slice under a direction
-///   guard (see [`restage_instance`]). This makes store-resolved CANONICAL
-///   edges usable even when the canonical id differs from the instance id
-///   the coedges reference — coedge lookups keep resolving, and shared
-///   edges from adjacent faces still compare equal by geometry.
+/// **Replacement contract** (the only contract post-7.6b): the slice
+/// defines the view's edge set and id space outright — the edges must
+/// carry the ids the face's coedges reference (instance ids for
+/// store-resolved instance lists, canonical ids for canonical lists;
+/// `edge_ids` is derived from the slice).
 pub fn stage_face_view(face: &Face, edges: &[&Edge]) -> StagedFace {
-    if edges.len() == face.edges.len() {
-        // Parallel contract: element `i` upgrades instance `i`.
-        let staged_edges: Vec<Edge> = face
-            .edges
-            .iter()
-            .zip(edges.iter())
-            .map(|(slot, src)| restage_instance(slot, src))
-            .collect();
-        // `edge_ids` (canonical store references) stay as the face's own —
-        // parallel to the staged mirrors, which keep the instance ids.
-        StagedFace::from_parts(face.clone(), staged_edges)
-    } else {
-        // Replacement contract: the slice defines the view's edge set and
-        // id space outright (`edge_ids` derived from the slice).
-        let staged_edges: Vec<Edge> = edges.iter().map(|e| (*e).clone()).collect();
-        let mut inner = mirror_free(face);
-        inner.edge_ids = staged_edges.iter().map(|e| e.id).collect();
-        StagedFace::from_parts(inner, staged_edges)
-    }
-}
-
-/// Build the staged instance: the mirror slot keeps its traversal pairing
-/// (id, param_range, forward, vertex ids and pinned vertex points — the
-/// fields `Solid::sync_edge_mirrors` never overwrites), while
-/// orientation-independent upgrades (`degenerate`, `tolerance`,
-/// `step_entity_id`, `curve`) flow in from the provided — possibly
-/// canonical store — edge, with a direction guard on the curve.
-///
-/// **Curve direction guard.** C5 Stage 3 geometric dedup unifies
-/// OPPOSITE-direction twins of one shared edge under a single canonical
-/// entry (the store's first-seen instance): its curve may trace the segment
-/// backwards relative to this instance's param_range pairing. Adopting it
-/// blindly would flip the discretized point order and corrupt the wire
-/// traversal XOR logic (`!coedge.forward != (t0 > t1)`), doubling boundary
-/// vertices. The curve is therefore adopted only when it provably traces
-/// the instance's segment in the instance's own direction — exact endpoint
-/// match at each curve's range boundaries. A curve-less mirror (pre-sync
-/// healing state) is backfilled under the same range guard
-/// `sync_edge_mirrors` uses. When the caller passes the face's own mirrors,
-/// every adopted field round-trips and the staged edge equals the original.
-fn restage_instance(slot: &Edge, src: &Edge) -> Edge {
-    let mut staged = slot.clone();
-    if src.degenerate {
-        staged.degenerate = true;
-    }
-    if src.tolerance > staged.tolerance {
-        staged.tolerance = src.tolerance;
-    }
-    if staged.step_entity_id.is_none() {
-        staged.step_entity_id = src.step_entity_id;
-    }
-    match (&src.curve, &staged.curve) {
-        (Some(src_curve), Some(slot_curve)) => {
-            let src_start = src_curve.point_at(src.param_range.0);
-            let src_end = src_curve.point_at(src.param_range.1);
-            let slot_start = slot_curve.point_at(slot.param_range.0);
-            let slot_end = slot_curve.point_at(slot.param_range.1);
-            if src_start == slot_start && src_end == slot_end {
-                staged.curve = Some(src_curve.clone());
-            }
-        }
-        (Some(src_curve), None) => {
-            let same = staged.param_range == src.param_range;
-            let swapped = (staged.param_range.1, staged.param_range.0) == src.param_range;
-            if same || swapped {
-                staged.curve = Some(src_curve.clone());
-            }
-        }
-        _ => {}
-    }
-    staged
+    let staged_edges: Vec<Edge> = edges.iter().map(|e| (*e).clone()).collect();
+    let mut inner = face.clone();
+    inner.edge_ids = staged_edges.iter().map(|e| e.id).collect();
+    StagedFace::from_parts(inner, staged_edges)
 }
 
 /// Stage a mirror-free instance view: like [`stage_face_view`] but
@@ -1787,7 +1711,7 @@ fn restage_instance(slot: &Edge, src: &Edge) -> Edge {
 /// edge-discretization cache keys `(edge_id, face_id)` match the legacy
 /// path exactly.
 fn stage_instance_view(face: &Face, edges: &[Edge]) -> StagedFace {
-    let mut inner = mirror_free(face);
+    let mut inner = face.clone();
     inner.edge_ids = edges.iter().map(|e| e.id).collect();
     StagedFace::from_parts(inner, edges.to_vec())
 }
@@ -1796,21 +1720,17 @@ fn stage_instance_view(face: &Face, edges: &[Edge]) -> StagedFace {
 // C5 Stage 7.6 — explicit-edge pipeline vehicle
 // ============================================================
 
-/// The pipeline vehicle for face triangulation (C5 Stage 7.6).
+/// The pipeline vehicle for face triangulation (C5 Stage 7.6 → 7.6b).
 ///
 /// Carries the face's topology (surface, wires, orientation — via
 /// `Deref<Target = Face>`) TOGETHER with an explicit, owned list of
 /// instance-faithful boundary edges. Edge access (`edges`, `edge_by_id`,
-/// `edge_by_id_mut`) resolves on the VEHICLE and shadows the deref'd
-/// `Face`, so the pipeline never reads the face's `edges` mirror field:
-/// the field becomes pure legacy plumbing, ready for physical removal.
+/// `edge_by_id_mut`) resolves on the VEHICLE and shadows any deref'd
+/// lookup: a `Face` alone carries NO edge geometry (the mirror field is
+/// physically removed), the vehicle is the pipeline's only edge source.
 ///
-/// Construction: [`StagedFace::from_mirrors`] (legacy bridge — copies the
-/// face's mirror edges into the vehicle) or [`StagedFace::from_parts`]
-/// (store-resolved / replacement edges). The inner `Face`'s own `edges`
-/// field is always left EMPTY by staging: an accidental pipeline read of
-/// the mirror field surfaces as a missing boundary immediately instead
-/// of silently working.
+/// Construction: [`StagedFace::from_parts`] (store-resolved / explicit
+/// edges) — every entry point stages through it.
 #[derive(Clone, Debug)]
 pub struct StagedFace {
     /// Face topology — surface, wires, orientation, id, tolerance.
@@ -1834,26 +1754,12 @@ impl std::ops::DerefMut for StagedFace {
 }
 
 impl StagedFace {
-    /// Legacy bridge: stage from the face's own mirrors.
-    ///
-    /// The mirror list is MOVED into the vehicle (the inner face keeps an
-    /// empty field), so the pipeline consumes exactly the data the legacy
-    /// path would have read. Bit-identical by construction.
-    pub fn from_mirrors(face: &Face) -> Self {
-        let mut inner = face.clone();
-        let edges = std::mem::take(&mut inner.edges);
-        Self { face: inner, edges }
-    }
-
     /// Assemble from parts: topology-carrying face + explicit edges.
     ///
     /// Callers are responsible for keeping `edges` id-keyed to the face's
     /// wire coedges (the vehicle does not re-key).
     pub fn from_parts(face: Face, edges: Vec<Edge>) -> Self {
-        let mut this = Self { face, edges };
-        // The vehicle owns the edges — the inner mirror stays empty.
-        this.face.edges.clear();
-        this
+        Self { face, edges }
     }
 
     /// Look up one staged edge instance by id (wire coedge resolution).
@@ -1865,14 +1771,6 @@ impl StagedFace {
     pub fn edge_by_id_mut(&mut self, id: TopoId) -> Option<&mut Edge> {
         self.edges.iter_mut().find(|e| e.id == id)
     }
-}
-
-/// Clone `face` with its `edges` mirror field emptied (internal staging
-/// helper — the vehicle owns the edges).
-fn mirror_free(face: &Face) -> Face {
-    let mut inner = face.clone();
-    inner.edges.clear();
-    inner
 }
 
 /// Triangulate one face of a solid through the store-first edge resolution
@@ -6351,7 +6249,6 @@ pub fn triangulate_face_with_boundary_and_holes(
         let wire = Wire::new(vec![]);
         let mut face = Face::new(surface.clone(), wire);
         face.forward = forward;
-        face.edges = vec![];
         return triangulate_face(&face, params);
     }
 
@@ -6391,7 +6288,6 @@ pub fn triangulate_face_with_boundary_and_holes(
                 let wire = Wire::new(vec![]);
                 let mut face = Face::new(surface.clone(), wire);
                 face.forward = forward;
-                face.edges = vec![];
                 return triangulate_face(&face, params);
             }
 
@@ -7831,7 +7727,6 @@ fn triangulate_surface_uv_trimmed(
             let wire = Wire::new(vec![]);
             let mut face = Face::new(surface.clone(), wire);
             face.forward = forward;
-            face.edges = vec![];
             return triangulate_face(&face, params);
         }
         return triangulate_cap_face(surface, boundary_points_3d, forward);

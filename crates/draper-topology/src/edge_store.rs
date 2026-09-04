@@ -57,18 +57,10 @@ use std::collections::HashMap;
 /// Statistics returned by [`Solid::index_edges`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EdgeDedupReport {
-    /// Total number of edge instances scanned across all faces.
     pub total_instances: usize,
-    /// Number of unique canonical edges in the resulting store.
     pub unique_edges: usize,
-    /// Number of instance ids that are aliases (duplicates) of a canonical
-    /// edge — i.e. `total_instances - unique_edges` minus in-face repeats.
     pub deduplicated: usize,
-    /// Number of distinct STEP entity ids that had more than one instance.
     pub shared_step_edges: usize,
-    /// Number of instance ids unified by GEOMETRIC identity (C5 Stage 3):
-    /// native edges without `step_entity_id` that match an earlier edge's
-    /// canonical geometric key (same curve + same endpoint pair).
     pub geometric_dedup: usize,
 }
 
@@ -137,8 +129,6 @@ fn canon_dir(d: &draper_geometry::Direction3d) -> (i64, i64, i64) {
 pub struct GeomEdgeKey {
     kind: u8,
     params: Vec<i64>,
-    /// Quantized (start, end) pair, lexicographically ordered so a reversed
-    /// instance of the same edge produces the same key.
     endpoints: [i64; 6],
 }
 
@@ -322,22 +312,9 @@ pub fn geom_edge_key(edge: &Edge) -> Option<GeomEdgeKey> {
 /// `Solid::ensure_edge_store` rebuilds it from the per-face mirrors.
 #[derive(Clone, Debug, Default)]
 pub struct EdgeStore {
-    /// Canonical edges, keyed by canonical TopoId.
     edges: HashMap<TopoId, Edge>,
-    /// Instance TopoId → canonical TopoId (identity mappings are omitted).
     aliases: HashMap<TopoId, TopoId>,
-    /// STEP entity id → canonical TopoId.
     by_step_id: HashMap<i64, TopoId>,
-    /// Instance TopoId → `true` when the instance's traversal runs OPPOSITE
-    /// to the canonical edge's curve direction (C5 Stage 5).
-    ///
-    /// `Solid::index_edges` compares each mirror's endpoint pair against the
-    /// canonical edge's: reversed instances (e.g. the box builder creates the
-    /// shared segment edge in each face's wire order) record `true` here, so
-    /// store-only consumers can rebuild an instance-faithful oriented edge
-    /// as `canonical.reversed()` re-keyed to the instance id. Absent entry
-    /// (or `false`) = same direction. Closed curves (start == end) and
-    /// curve-less instances are direction-ambiguous and record `false`.
     instance_reversed: HashMap<TopoId, bool>,
 }
 
@@ -359,11 +336,8 @@ mod serde_impl {
     /// Flat (de)serialization format for [`EdgeStore`].
     #[derive(Serialize, Deserialize)]
     struct EdgeStoreData {
-        /// Canonical edges.
         edges: Vec<Edge>,
-        /// (instance TopoId, canonical TopoId) alias pairs.
         aliases: Vec<(TopoId, TopoId)>,
-        /// (STEP entity id, canonical TopoId) index pairs.
         by_step_id: Vec<(i64, TopoId)>,
         /// (instance TopoId, reversed) orientation flags (C5 Stage 6).
         /// Only `true` flags are stored — `false` is the un-recorded default,
@@ -562,6 +536,12 @@ impl EdgeStore {
         self.edges.values()
     }
 
+    /// Mutably iterate over canonical edges (C5 7.6b bulk store-side edits
+    /// — every incident face sees the change through the instance view).
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut Edge> {
+        self.edges.values_mut()
+    }
+
     /// Iterate over canonical ids.
     pub fn iter_ids(&self) -> impl Iterator<Item = TopoId> + '_ {
         self.edges.keys().copied()
@@ -592,15 +572,12 @@ impl EdgeStore {
         !self.is_empty() && self.canonical_of(a) == self.canonical_of(b)
     }
 
-    /// Transform every canonical edge curve in place (C5 Stage 7.1).
+    /// Transform every canonical edge curve in place (C5 Stage 7.1 → 7.6b).
     ///
-    /// Used by `ShapeBuilder::transform_solid` so MIRROR-FREE (compacted)
-    /// faces keep correct geometry after a transform: their edge payload
-    /// lives only here, and `index_edges` Pass 0 re-seeds the rebuilt
-    /// store from these (already transformed) canonical copies. For faces
-    /// still carrying mirrors the re-index scan replaces the store from
-    /// the transformed mirrors anyway — transforming here is harmless and
-    /// keeps the two paths consistent.
+    /// Used by `ShapeBuilder::transform_solid` — the store is the ONLY
+    /// holder of edge geometry, so transforming it in place IS the whole
+    /// transform: identity (ids, aliases, orientations) is unaffected and
+    /// no re-index is needed.
     pub fn transform_curves(&mut self, transform: &draper_geometry::Transform) {
         for edge in self.edges.values_mut() {
             if let Some(ref mut curve) = edge.curve {
@@ -610,82 +587,202 @@ impl EdgeStore {
     }
 }
 
-/// Compaction-safety check for one face (C5 Stage 7.1,
-/// [`Solid::compact_edge_mirrors`]).
-///
-/// `true` when clearing `face.edges` loses nothing: the face is indexed,
-/// and every id the store-first boundary readers would query for this
-/// face — wire coedge ids (outer + inner), every `edge_ids` entry, and
-/// every mirror id (appended-after-indexing edges carry mirror-only
-/// identity) — resolves through `solid.edge_store.instance_edge`.
-fn face_compactable(solid: &Solid, face: &Face) -> bool {
-    if face.edges.is_empty() || face.edge_ids.is_empty() {
-        return false; // nothing to clear / identity is mirror-only
+// ============================================================
+// C5 7.6b — Solid deserialization with legacy-payload support
+//
+// Modern payloads: `edge_store` (flat) + faces without `edges` — the
+// store IS the edge payload, loaded directly.
+//
+// LEGACY payloads (pre-7.6b): faces carry per-face `edges` mirror
+// arrays, `edge_store` may be absent or empty. The custom Deserialize
+// captures the mirror arrays transiently (FaceRepr below), assembles
+// the solid topology-first, and rebuilds the store via
+// `Solid::rebuild_store` from the captured working lists — so old
+// files load with full shared-edge identity (dedup, aliases,
+// orientation flags), exactly as the old `index_edges` path did.
+// ============================================================
+
+#[cfg(feature = "serde")]
+mod solid_serde {
+    use super::EdgeStore;
+    use crate::entity::{Edge, Face, Shell, Solid, Wire};
+    use serde::{Deserialize, Deserializer};
+
+    /// Wire/CoEdge/... are plain data — FaceRepr mirrors Face's fields
+    /// plus the legacy `edges` capture.
+    #[derive(Deserialize)]
+    struct FaceRepr {
+        id: crate::entity::TopoId,
+        #[serde(default)]
+        surface: Option<draper_geometry::Surface>,
+        #[serde(default)]
+        outer_wire: Option<Wire>,
+        #[serde(default)]
+        inner_wires: Vec<Wire>,
+        #[serde(default = "default_true")]
+        forward: bool,
+        #[serde(default = "default_tolerance")]
+        tolerance: f64,
+        #[serde(default)]
+        edge_ids: Vec<crate::entity::TopoId>,
+        /// LEGACY per-face mirror payload (pre-7.6b) — captured here,
+        /// consumed by the store rebuild, never stored on the Face.
+        #[serde(default)]
+        edges: Vec<Edge>,
     }
-    let mut needed: Vec<TopoId> = Vec::with_capacity(face.edge_ids.len() + face.edges.len());
-    if let Some(ref wire) = face.outer_wire {
-        needed.extend(wire.coedges.iter().map(|ce| ce.edge));
+
+    fn default_true() -> bool {
+        true
     }
-    for wire in &face.inner_wires {
-        needed.extend(wire.coedges.iter().map(|ce| ce.edge));
+    fn default_tolerance() -> f64 {
+        1e-6
     }
-    needed.extend(face.edge_ids.iter().copied());
-    needed.extend(face.edges.iter().map(|e| e.id));
-    needed.iter().all(|&id| solid.edge_store.instance_edge(id).is_some())
+
+    impl From<FaceRepr> for Face {
+        fn from(r: FaceRepr) -> Self {
+            Face {
+                id: r.id,
+                surface: r.surface,
+                outer_wire: r.outer_wire,
+                inner_wires: r.inner_wires,
+                forward: r.forward,
+                tolerance: r.tolerance,
+                edge_ids: r.edge_ids,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct ShellRepr {
+        id: crate::entity::TopoId,
+        faces: Vec<FaceRepr>,
+        #[serde(default)]
+        closed: bool,
+        #[serde(default = "default_tolerance")]
+        tolerance: f64,
+    }
+
+    impl From<ShellRepr> for Shell {
+        fn from(r: ShellRepr) -> Self {
+            Shell {
+                id: r.id,
+                faces: r.faces.into_iter().map(Face::from).collect(),
+                closed: r.closed,
+                tolerance: r.tolerance,
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct SolidRepr {
+        id: crate::entity::TopoId,
+        outer_shell: Option<ShellRepr>,
+        #[serde(default)]
+        inner_shells: Vec<ShellRepr>,
+        #[serde(default = "default_tolerance")]
+        tolerance: f64,
+        #[serde(default)]
+        edge_store: EdgeStore,
+    }
+
+    impl<'de> Deserialize<'de> for Solid {
+        fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            let repr = SolidRepr::deserialize(deserializer)?;
+            let store_was_empty = repr.edge_store.is_empty();
+
+            // Legacy path: no store, but captured mirror payloads exist —
+            // snapshot the per-face edge lists (faces() order: outer shell
+            // first, then inner shells) BEFORE the reprs convert.
+            let legacy_working: Vec<Vec<Edge>> = if store_was_empty {
+                let mut lists: Vec<Vec<Edge>> = Vec::new();
+                for shell in repr.outer_shell.iter().chain(repr.inner_shells.iter()) {
+                    for face in &shell.faces {
+                        lists.push(face.edges.clone());
+                    }
+                }
+                lists
+            } else {
+                Vec::new()
+            };
+
+            let mut solid = Solid {
+                id: repr.id,
+                outer_shell: repr.outer_shell.map(Shell::from),
+                inner_shells: repr.inner_shells.into_iter().map(Shell::from).collect(),
+                tolerance: repr.tolerance,
+                edge_store: repr.edge_store,
+            };
+
+            // Rebuild the store from the captured lists (dedup +
+            // reconciliation + orientations + canonical `edge_ids`) —
+            // the 7.6b replacement of the old mirror-reading
+            // `index_edges`/`ensure_edge_store` loading path.
+            if solid.edge_store.is_empty() && legacy_working.iter().any(|l| !l.is_empty()) {
+                solid.rebuild_store(legacy_working);
+            }
+            Ok(solid)
+        }
+    }
 }
 
 impl Solid {
-    /// Build (or rebuild) the edge store for this solid.
+    /// Rebuild the canonical edge store from explicit per-face working
+    /// edge lists (C5 Stage 7.6b — the mirror-free successor of
+    /// `index_edges`).
     ///
-    /// Scans every face edge instance across all shells, deduplicates them by
-    /// `step_entity_id` (STEP path — the only duplication source with a
-    /// reliable identity key today; native geometric dedup is Stage 3), and
-    /// populates `self.edge_store` with canonical edges + alias mappings.
-    /// `Face.edge_ids` mirrors are (re)synced to canonical ids.
+    /// `working` is parallel to [`Solid::faces`] order (outer shell faces
+    /// first, then inner shells): `working[i]` carries face `i`'s boundary
+    /// edges in INSTANCE form — the construction payload the per-face
+    /// `edges` mirrors used to hold. The pass:
     ///
-    /// Non-breaking: per-face `Face.edges` mirrors are left untouched, so all
-    /// existing consumers behave exactly as before.
+    /// 1. **Dedup** — instances sharing a `step_entity_id` (STEP identity)
+    ///    or a geometric key (native construction) unify under one
+    ///    canonical edge; every instance id becomes an alias of its
+    ///    canonical.
+    /// 2. **Reconcile** — the aggregation of the former
+    ///    `propagate_edge_fixes` (degenerate OR, tolerance MAX, first
+    ///    curve) lands on the canonical entry directly: there are no
+    ///    per-face copies left to reconcile, the store is the single
+    ///    holder of the truth.
+    /// 3. **Orientations** — instances that run their canonical curve
+    ///    backwards record `instance_reversed` flags (Stage 5 semantics),
+    ///    so `EdgeStore::instance_edge` rebuilds instance-faithful edges.
+    /// 4. **Preserve** — faces with an EMPTY working list but populated
+    ///    `edge_ids` (re-shelled faces whose identity lives in the old
+    ///    store) re-seed their references from the old store, and
+    ///    old-store aliases / orientation flags for ids not freshly
+    ///    scanned carry over — surgery on store-bearing solids keeps
+    ///    resolving.
     ///
-    /// C5 Stage 6: mirror-free faces (cleared mirrors — the Stage 5 end-state
-    /// of serialized store-only solids) are PRESERVED: their `edge_ids`
-    /// references resolve through the old store and re-seed the new one, so
-    /// re-indexing no longer wipes the serialized identity. Orientation flags
-    /// recorded for instances without mirrors (wire-less or coedge-only)
-    /// carry over; Pass 1b re-derives them deterministically wherever mirrors
-    /// are still present.
-    pub fn index_edges(&mut self) -> EdgeDedupReport {
+    /// `Face.edge_ids` are (re)written in canonical ids, parallel to the
+    /// faces order. Construction entry points (`from_edges_only`,
+    /// boolean/healing terminals) run exactly this pass; `transform_solid`
+    /// no longer needs it (the store is transformed in place, identity is
+    /// unchanged).
+    pub fn rebuild_store(&mut self, working: Vec<Vec<Edge>>) -> EdgeDedupReport {
         let mut store = EdgeStore::new();
         let mut report = EdgeDedupReport::default();
-        // step_entity_id → canonical id (local, to count shared edges).
         let mut seen_step: HashMap<i64, TopoId> = HashMap::new();
-        // Geometric key → canonical id for native edges (C5 Stage 3).
         let mut seen_geom: HashMap<GeomEdgeKey, TopoId> = HashMap::new();
+        // Reconciliation aggregates per canonical group:
+        // (degenerate OR, tolerance MAX, first curve).
+        let mut agg: HashMap<TopoId, (bool, f64, Option<Curve3d>)> = HashMap::new();
         // Per-face canonical id lists, parallel to shells/faces order.
         let mut face_edge_ids: Vec<Vec<TopoId>> = Vec::new();
 
-        // ── Pass 0 (C5 Stage 6): preserve mirror-free faces ────────
-        // Faces whose mirrors were cleared carry their identity in
-        // `edge_ids`; rebuilding from mirrors alone would wipe the store.
-        // Pre-seed the new store with the preserved canonical edges and
-        // register their identity keys so mirror instances of the same
-        // shared edge dedup into them. Known corner: a curve-less preserved
-        // canonical followed by a mirror with a curve does NOT unify (no
-        // geometric key on the preserved side) — same limitation as the
-        // Pass 1 curve-upgrade ordering.
+        let working: Vec<Vec<Edge>> = {
+            let n = self.faces().len();
+            let mut w = working;
+            w.resize(n, Vec::new());
+            w
+        };
+
+        // ── Pass 0 (preserve): faces with empty working lists but ──
+        // populated edge_ids carry identity in the OLD store only
+        // (re-shelled faces, healed leftovers, serialized references).
+        // Re-seed the new store from those references.
+        let old_store = std::mem::take(&mut self.edge_store);
         let mut preserved_face_ids: HashMap<(usize, usize), Vec<TopoId>> = HashMap::new();
-        // Orientation flags recorded for instances that have no mirrors to
-        // re-derive from (carried over before Pass 1b).
-        let carried_flags: Vec<(TopoId, bool)> = self
-            .edge_store
-            .instance_reversed
-            .iter()
-            .map(|(&k, &v)| (k, v))
-            .collect();
-        // Aliases of the OLD store — carried over after Pass 1 for instance
-        // ids that were NOT freshly scanned (mirror-free references, e.g.
-        // coedge ids on a cleared face), so `get(instance_id)` keeps
-        // resolving for store-only consumers.
-        let carried_aliases: Vec<(TopoId, TopoId)> = self.edge_store.iter_aliases().collect();
         {
             let mut shells_ref: Vec<&Shell> = Vec::new();
             if let Some(ref shell) = self.outer_shell {
@@ -694,17 +791,20 @@ impl Solid {
             for shell in &self.inner_shells {
                 shells_ref.push(shell);
             }
+            let mut pos = 0usize;
             for (shell_i, shell) in shells_ref.iter().enumerate() {
                 for (face_i, face) in shell.faces.iter().enumerate() {
-                    if !face.edges.is_empty() || face.edge_ids.is_empty() {
-                        continue; // normal face — scanned from mirrors below
+                    let face_working = &working[pos];
+                    pos += 1;
+                    if !face_working.is_empty() || face.edge_ids.is_empty() {
+                        continue; // normal face — scanned from working below
                     }
                     let mut ids = Vec::with_capacity(face.edge_ids.len());
                     for &id in &face.edge_ids {
-                        let Some(preserved) = self.edge_store.get(id) else {
+                        let Some(preserved) = old_store.get(id) else {
                             continue; // unresolvable reference — drop it
                         };
-                        let canonical_id = self.edge_store.canonical_of(id);
+                        let canonical_id = old_store.canonical_of(id);
                         if store.get_canonical(canonical_id).is_none() {
                             let mut entry = preserved.clone();
                             entry.id = canonical_id;
@@ -717,6 +817,11 @@ impl Solid {
                             }
                             store.edges.insert(canonical_id, entry);
                         }
+                        // Preserve the instance's alias and orientation.
+                        store.add_alias(id, canonical_id);
+                        if old_store.instance_is_reversed(id) {
+                            store.set_instance_reversed(id, true);
+                        }
                         ids.push(canonical_id);
                         report.total_instances += 1;
                     }
@@ -727,7 +832,8 @@ impl Solid {
             }
         }
 
-        // ── Pass 1: collect canonical edges + alias map ──────────────────
+        // ── Pass 1: scan working instances → canonical groups ────
+        // + aliases + reconciliation aggregates.
         let mut shells: Vec<&mut Shell> = Vec::new();
         if let Some(ref mut shell) = self.outer_shell {
             shells.push(shell);
@@ -735,20 +841,18 @@ impl Solid {
         for shell in &mut self.inner_shells {
             shells.push(shell);
         }
-        // Instance ids freshly scanned from mirrors — their aliases are
-        // re-derived below; only UN-scanned ids get the old-store aliases
-        // carried over (fresh dedup wins).
-        let mut scanned_instance_ids: std::collections::HashSet<TopoId> =
-            std::collections::HashSet::new();
+        // (instance clone, canonical id) pairs — the Pass 1b orientation input.
+        let mut scanned_pairs: Vec<(Edge, TopoId)> = Vec::new();
         for (shell_i, shell) in shells.iter_mut().enumerate() {
-            for (face_i, face) in shell.faces.iter_mut().enumerate() {
+            for (face_i, _face) in shell.faces.iter_mut().enumerate() {
+                let pos = face_edge_ids.len();
                 if let Some(ids) = preserved_face_ids.get(&(shell_i, face_i)) {
                     face_edge_ids.push(ids.clone());
                     continue;
                 }
-                let mut canonical_ids = Vec::with_capacity(face.edges.len());
-                for edge in &face.edges {
-                    scanned_instance_ids.insert(edge.id);
+                let face_working = &working[pos];
+                let mut canonical_ids = Vec::with_capacity(face_working.len());
+                for edge in face_working {
                     report.total_instances += 1;
                     let canonical_id = if let Some(step_id) = edge.step_entity_id {
                         match seen_step.get(&step_id) {
@@ -779,17 +883,25 @@ impl Solid {
                         edge.id
                     };
                     store.add_alias(edge.id, canonical_id);
-                    canonical_ids.push(canonical_id);
-                    // Insert the canonical edge once (first occurrence wins;
-                    // prefer a copy with a curve when we see one later).
+                    scanned_pairs.push((edge.clone(), canonical_id));
+                    // Reconciliation aggregate (the 7.6b fold of
+                    // propagate_edge_fixes): degenerate OR, tolerance MAX,
+                    // first curve — applied to the canonical entry below.
+                    let entry = agg.entry(canonical_id).or_insert((false, 0.0, None));
+                    entry.0 |= edge.degenerate;
+                    entry.1 = entry.1.max(edge.tolerance);
+                    if entry.2.is_none() && edge.curve.is_some() {
+                        entry.2 = edge.curve.clone();
+                    }
+                    // Insert the canonical edge once (first occurrence
+                    // wins; a later instance with a curve upgrades a
+                    // curve-less canonical).
                     match store.get_canonical(canonical_id) {
                         None => {
                             store.insert(edge.clone());
                         }
                         Some(existing) => {
                             if existing.curve.is_none() && edge.curve.is_some() {
-                                // Upgrade the canonical copy with curve data,
-                                // preserving the canonical id.
                                 let mut better = edge.clone();
                                 better.id = canonical_id;
                                 if let Some(step_id) = better.step_entity_id {
@@ -799,50 +911,64 @@ impl Solid {
                             }
                         }
                     }
+                    canonical_ids.push(canonical_id);
                 }
                 face_edge_ids.push(canonical_ids);
             }
         }
 
-        // ── Pass 1a: carry over orientation flags for mirror-free ────
-        // instances (coedge-only references on cleared faces, self-canonical
-        // edges). Pass 1b re-derives and OVERRIDES these wherever mirrors are
-        // still present, so mutated mirrors win.
-        for (instance, reversed) in carried_flags {
-            if reversed {
-                store.set_instance_reversed(instance, true);
+        // ── Pass 1r: apply the reconciliation aggregates onto the ──
+        // canonical entries (cross-instance fixes: degenerate flag,
+        // tolerance bump, curve backfill under the range guard).
+        for (canonical_id, (degenerate, tolerance, ref curve)) in agg {
+            if let Some(entry) = store.edges.get_mut(&canonical_id) {
+                if !degenerate {
+                    // degenerate OR — an aggregate of `false` only means
+                    // no instance flagged it; keep the current value.
+                } else {
+                    entry.degenerate = true;
+                }
+                if entry.tolerance < tolerance {
+                    entry.tolerance = tolerance;
+                }
+                if entry.curve.is_none() {
+                    if let Some(ref donor_curve) = curve {
+                        entry.curve = Some(donor_curve.clone());
+                    }
+                }
             }
         }
 
-        // ── Pass 1a': carry over aliases for un-scanned instances ──────
-        // Mirror-free references (coedge ids on cleared faces) resolve via
-        // these carried aliases; instances freshly scanned from mirrors keep
-        // their freshly derived alias (fresh dedup wins).
-        for (instance, canonical) in carried_aliases {
-            if !scanned_instance_ids.contains(&instance)
+        // ── Pass 1a: carry over aliases + orientation flags for ids ──
+        // NOT freshly scanned (references of preserved faces, coedge ids
+        // whose geometry lives in the old store).
+        let scanned_ids: std::collections::HashSet<TopoId> =
+            scanned_pairs.iter().map(|(e, _)| e.id).collect();
+        for (instance, reversed) in old_store.instance_reversed.iter() {
+            if *reversed && !scanned_ids.contains(instance) {
+                store.set_instance_reversed(*instance, true);
+            }
+        }
+        for (instance, canonical) in old_store.iter_aliases() {
+            if !scanned_ids.contains(&instance)
                 && store.get_canonical(canonical).is_some()
             {
                 store.add_alias(instance, canonical);
             }
         }
 
-        // ── Pass 1b: record instance orientations (C5 Stage 5) ────────
+        // ── Pass 1b: record instance orientations (C5 Stage 5) ────
         // Done after the whole first pass so every canonical (including
-        // curve upgrades from later mirrors) is final when compared
+        // curve upgrades and reconciled entries) is final when compared
         // against. First occurrences (canonical == instance) are forward
         // by construction.
-        for shell in shells.iter() {
-            for face in &shell.faces {
-                for edge in &face.edges {
-                    let canonical_id = store.canonical_of(edge.id);
-                    let reversed = canonical_id != edge.id
-                        && store
-                            .get_canonical(canonical_id)
-                            .map(|canon| edges_opposite_direction(edge, canon))
-                            .unwrap_or(false);
-                    store.set_instance_reversed(edge.id, reversed);
-                }
-            }
+        for (instance, canonical_id) in &scanned_pairs {
+            let reversed = canonical_id != &instance.id
+                && store
+                    .get_canonical(*canonical_id)
+                    .map(|canon| edges_opposite_direction(instance, canon))
+                    .unwrap_or(false);
+            store.set_instance_reversed(instance.id, reversed);
         }
 
         report.unique_edges = store.len();
@@ -866,7 +992,7 @@ impl Solid {
             })
             .count();
 
-        // ── Pass 2: sync Face.edge_ids mirrors to canonical ids ──────────
+        // ── Pass 2: sync Face.edge_ids to canonical ids ────────
         let mut idx = 0usize;
         let mut shells: Vec<&mut Shell> = Vec::new();
         if let Some(ref mut shell) = self.outer_shell {
@@ -892,12 +1018,6 @@ impl Solid {
     ///
     /// Callers that receive a `&mut Solid` from deserialization or from
     /// builder paths use this before reading `solid.edge_store`.
-    pub fn ensure_edge_store(&mut self) {
-        if self.edge_store.is_empty() {
-            self.index_edges();
-        }
-    }
-
     /// Born-indexed solid constructor (C5 Stage 7.1).
     ///
     /// [`Solid::new`] leaves the store empty and every face un-indexed
@@ -916,12 +1036,6 @@ impl Solid {
     /// because the store's canonical copies capture the pre-mutation
     /// geometry — see `ShapeBuilder::transform_solid` for the sanctioned
     /// `transform → index_edges` pairing.
-    pub fn from_shell_indexed(shell: Shell) -> Self {
-        let mut solid = Solid::new(shell);
-        solid.index_edges();
-        solid
-    }
-
     /// Mirror-free construction (C5 Stage 7.5): build a solid in the
     /// Stage 5 end-state representation — faces keep topology and
     /// canonical `edge_ids`, the `EdgeStore` carries the edges, and the
@@ -949,24 +1063,27 @@ impl Solid {
     /// leftovers, ids the store cannot resolve) keep their mirrors —
     /// `compact_edge_mirrors` is conservatively safe — so the constructor
     /// never loses edge data.
+    /// Mirror-free store-first construction (C5 Stage 7.5 → 7.6b): build
+    /// a solid whose faces carry topology and canonical `edge_ids`, the
+    /// `EdgeStore` carries every edge, and no per-face mirror field exists.
+    ///
+    /// `working` supplies per-face instance edge lists, parallel to
+    /// `shell.faces` (a healing terminal's working set, a boolean result's
+    /// split lists, a STEP payload's instance lists — any construction
+    /// path that holds explicit edges while the faces themselves carry
+    /// topology only). [`Solid::rebuild_store`] deduplicates the lists
+    /// (STEP id / geometric key), reconciles shared-edge fields (the
+    /// former `propagate_edge_fixes` aggregation), records instance
+    /// orientations and writes the canonical `face.edge_ids` — the solid
+    /// is born in the store-only end-state form.
     pub fn from_edges_only(shell: Shell, working: Vec<Vec<Edge>>) -> Self {
         debug_assert_eq!(
             shell.faces.len(),
             working.len(),
             "from_edges_only: working lists must be parallel to shell.faces"
         );
-        let mut shell = shell;
-        for (face, edges) in shell.faces.iter_mut().zip(working) {
-            if !edges.is_empty() {
-                face.edges = edges;
-            }
-        }
-        // The heal_solid terminal order: propagate BEFORE indexing, so the
-        // store is built from the aligned instance data.
         let mut solid = Solid::new(shell);
-        solid.propagate_edge_fixes();
-        solid.index_edges();
-        solid.compact_edge_mirrors();
+        solid.rebuild_store(working);
         solid
     }
 
@@ -996,29 +1113,6 @@ impl Solid {
     /// Returns the number of faces whose mirrors were cleared. This is
     /// the API the final C5 stage uses to flip solids — including their
     /// serialized form — to the store-only representation.
-    pub fn compact_edge_mirrors(&mut self) -> usize {
-        // Pass 1 (read-only): decide per face. A single mutable walk would
-        // fight the borrow checker against `self.edge_store`, so the
-        // resolvability decision is pre-computed; `faces()` and
-        // `faces_mut()` enumerate in the SAME order (outer shell, then
-        // inner shells), so positional matching below is exact.
-        let compactable: Vec<bool> = self
-            .faces()
-            .iter()
-            .map(|face| face_compactable(self, face))
-            .collect();
-
-        // Pass 2 (mutating): clear the mirrors of the marked faces.
-        let mut cleared = 0usize;
-        for (i, face) in self.faces_mut().iter_mut().enumerate() {
-            if compactable.get(i).copied().unwrap_or(false) {
-                face.edges.clear();
-                cleared += 1;
-            }
-        }
-        cleared
-    }
-
     /// Propagate unambiguous edge fixes across instances of the same shared
     /// edge (C5 Stage 3).
     ///
@@ -1043,96 +1137,6 @@ impl Solid {
     /// legitimately carry swapped values.
     ///
     /// Returns the number of instance fields updated.
-    pub fn propagate_edge_fixes(&mut self) -> usize {
-        /// Identity of a shared edge for the reconciliation pass.
-        #[derive(Clone, PartialEq, Eq, Hash)]
-        enum SharedKey {
-            Step(i64),
-            Geom(GeomEdgeKey),
-            /// Instances that cannot be identified never share a group.
-            Unique(u64),
-        }
-
-        // Pass 1 (read-only): aggregate the reconciliation values per group.
-        let mut agg: HashMap<SharedKey, (bool, f64, Option<(Curve3d, (f64, f64))>)> =
-            HashMap::new();
-        let mut unique_counter: u64 = 0;
-        {
-            let mut shells: Vec<&Shell> = Vec::new();
-            if let Some(ref shell) = self.outer_shell {
-                shells.push(shell);
-            }
-            for shell in &self.inner_shells {
-                shells.push(shell);
-            }
-            for shell in shells {
-                for face in &shell.faces {
-                    for edge in &face.edges {
-                        let key = match (edge.step_entity_id, geom_edge_key(edge)) {
-                            (Some(s), _) => SharedKey::Step(s),
-                            (None, Some(g)) => SharedKey::Geom(g),
-                            (None, None) => {
-                                unique_counter += 1;
-                                SharedKey::Unique(unique_counter)
-                            }
-                        };
-                        let entry = agg.entry(key).or_insert((false, 0.0, None));
-                        entry.0 |= edge.degenerate;
-                        entry.1 = entry.1.max(edge.tolerance);
-                        if entry.2.is_none() && edge.curve.is_some() {
-                            entry.2 = edge.curve.clone().map(|c| (c, edge.param_range));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Pass 2: apply the reconciled values to every instance.
-        let mut updated = 0usize;
-        let mut shells: Vec<&mut Shell> = Vec::new();
-        if let Some(ref mut shell) = self.outer_shell {
-            shells.push(shell);
-        }
-        for shell in &mut self.inner_shells {
-            shells.push(shell);
-        }
-        for shell in shells.iter_mut() {
-            for face in shell.faces.iter_mut() {
-                for edge in face.edges.iter_mut() {
-                    let key = match (edge.step_entity_id, geom_edge_key(edge)) {
-                        (Some(s), _) => SharedKey::Step(s),
-                        (None, Some(g)) => SharedKey::Geom(g),
-                        // Unidentifiable instances never share a group.
-                        (None, None) => continue,
-                    };
-                    let Some(&(degenerate, tolerance, ref donor)) = agg.get(&key) else {
-                        continue;
-                    };
-                    if edge.degenerate != degenerate {
-                        edge.degenerate = degenerate;
-                        updated += 1;
-                    }
-                    if edge.tolerance < tolerance {
-                        edge.tolerance = tolerance;
-                        updated += 1;
-                    }
-                    if edge.curve.is_none() {
-                        if let Some((ref curve, ref donor_range)) = donor {
-                            let same = edge.param_range == *donor_range;
-                            let swapped =
-                                (edge.param_range.1, edge.param_range.0) == *donor_range;
-                            if same || swapped {
-                                edge.curve = Some(curve.clone());
-                                updated += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        updated
-    }
-
     /// Resolve any edge id — instance or canonical — to the canonical edge
     /// (C5 Stage 4 read API).
     ///
@@ -1146,13 +1150,7 @@ impl Solid {
     /// migrating that pattern to `solid.resolve_edge(id)` is the Stage 4
     /// read-path migration step.
     pub fn resolve_edge(&self, id: TopoId) -> Option<&Edge> {
-        if let Some(edge) = self.edge_store.get(id) {
-            return Some(edge);
-        }
-        self.faces()
-            .iter()
-            .flat_map(|face| face.edges.iter())
-            .find(|edge| edge.id == id)
+        self.edge_store.get(id)
     }
 
     /// Instance-faithful edge list of `face`, resolved through the canonical
@@ -1170,10 +1168,10 @@ impl Solid {
         if !face.edge_ids.is_empty() {
             face.edge_ids
                 .iter()
-                .filter_map(|&id| self.edge_store.get(id).or_else(|| face.edge_by_id(id)))
+                .filter_map(|&id| self.edge_store.get(id))
                 .collect()
         } else {
-            face.edges.iter().collect()
+            Vec::new()
         }
     }
 
@@ -1205,7 +1203,7 @@ impl Solid {
     /// entry per instance, as the mirrors did.
     pub fn instance_edges(&self, face: &Face) -> Vec<Edge> {
         if face.edge_ids.is_empty() {
-            return face.edges.clone();
+            return Vec::new();
         }
         let mut owned: Vec<Edge> = Vec::new();
         let mut seen_ids: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
@@ -1265,7 +1263,7 @@ impl Solid {
     /// orientation-correct view of the face boundary as the store sees it.
     pub fn resolve_face_edges(&self, face: &Face) -> Vec<Edge> {
         if face.edge_ids.is_empty() {
-            return face.edges.clone();
+            return Vec::new();
         }
         let mut resolved: Vec<Edge> = Vec::new();
         let mut seen_ids: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
@@ -1293,12 +1291,11 @@ impl Solid {
         resolved
     }
 
-    /// Per-id resolution for [`Solid::resolve_face_edges`]: store instance
-    /// first, construction mirror fallback, canonical-id bookkeeping for
-    /// the wire-less pass.
+    /// Per-id resolution for [`Solid::resolve_face_edges`]: store
+    /// instance first, canonical-id bookkeeping for the wire-less pass.
     fn push_resolved_edge(
         &self,
-        face: &Face,
+        _face: &Face,
         id: TopoId,
         resolved: &mut Vec<Edge>,
         seen_ids: &mut std::collections::HashSet<TopoId>,
@@ -1310,96 +1307,9 @@ impl Solid {
         seen_canonicals.insert(self.edge_store.canonical_of(id));
         if let Some(instance) = self.edge_store.instance_edge(id) {
             resolved.push(instance);
-        } else if let Some(mirror) = face.edge_by_id(id) {
-            resolved.push(mirror.clone());
         }
     }
 
-    /// Propagate canonical edge field fixes onto the per-face `edges`
-    /// mirrors (C5 Stage 4 — the store becomes the source of truth).
-    ///
-    /// The C5-sanctioned mutation flow is now:
-    ///
-    /// ```text
-    /// solid.ensure_edge_store();
-    /// if let Some(edge) = solid.edge_store.get_mut(instance_id) {
-    ///     edge.tolerance = 0.5;            // fix the CANONICAL edge once
-    /// }
-    /// solid.sync_edge_mirrors();           // every incident face sees it
-    /// ```
-    ///
-    /// Only orientation-INDEPENDENT fields are propagated from the canonical
-    /// edge onto each instance:
-    ///
-    /// - `degenerate`, `tolerance`, `step_entity_id` — unconditional;
-    /// - `curve` — only when the instance's `param_range` equals the
-    ///   canonical range (or its swap), the same guard
-    ///   [`Solid::propagate_edge_fixes`] uses to guarantee the backfilled
-    ///   curve describes the same segment.
-    ///
-    /// Per-instance orientation fields (`id`, `param_range`, `forward`,
-    /// `vertex_start`/`vertex_end`, vertex points) are never overwritten —
-    /// reversed instances legitimately carry swapped values, and coedges
-    /// keep referencing the instance ids.
-    ///
-    /// Returns the number of instance field updates applied. Idempotent: a
-    /// second call without intervening store mutations returns 0.
-    pub fn sync_edge_mirrors(&mut self) -> usize {
-        if self.edge_store.is_empty() {
-            return 0;
-        }
-        let store = &self.edge_store;
-        let mut updated = 0usize;
-
-        let mut shells: Vec<&mut Shell> = Vec::new();
-        if let Some(ref mut shell) = self.outer_shell {
-            shells.push(shell);
-        }
-        for shell in &mut self.inner_shells {
-            shells.push(shell);
-        }
-        for shell in shells.iter_mut() {
-            for face in shell.faces.iter_mut() {
-                // `edge_ids[i]` (canonical) or `edges[i].id` (un-indexed).
-                let instance_ids: Vec<TopoId> = if face.edge_ids.len() == face.edges.len()
-                    && !face.edge_ids.is_empty()
-                {
-                    face.edge_ids.clone()
-                } else {
-                    face.edges.iter().map(|e| e.id).collect()
-                };
-                for (edge, &instance_id) in face.edges.iter_mut().zip(instance_ids.iter()) {
-                    let Some(canonical) = store.get(instance_id) else {
-                        continue;
-                    };
-                    if edge.degenerate != canonical.degenerate {
-                        edge.degenerate = canonical.degenerate;
-                        updated += 1;
-                    }
-                    if edge.tolerance != canonical.tolerance
-                        && canonical.tolerance > edge.tolerance
-                    {
-                        edge.tolerance = canonical.tolerance;
-                        updated += 1;
-                    }
-                    if edge.step_entity_id.is_none() && canonical.step_entity_id.is_some() {
-                        edge.step_entity_id = canonical.step_entity_id;
-                        updated += 1;
-                    }
-                    if edge.curve.is_none() && canonical.curve.is_some() {
-                        let same = edge.param_range == canonical.param_range;
-                        let swapped =
-                            (edge.param_range.1, edge.param_range.0) == canonical.param_range;
-                        if same || swapped {
-                            edge.curve = canonical.curve.clone();
-                            updated += 1;
-                        }
-                    }
-                }
-            }
-        }
-        updated
-    }
 }
 
 impl Face {
@@ -1410,11 +1320,7 @@ impl Face {
     /// Populated by [`Solid::index_edges`]; safe to leave empty for faces
     /// that have not been indexed (falls back to `edges[i].id` semantics).
     pub fn canonical_edge_ids(&self) -> Vec<TopoId> {
-        if self.edge_ids.len() == self.edges.len() && !self.edge_ids.is_empty() {
-            self.edge_ids.clone()
-        } else {
-            self.edges.iter().map(|e| e.id).collect()
-        }
+        self.edge_ids.clone()
     }
 }
 
@@ -1433,24 +1339,32 @@ mod tests {
         edge
     }
 
-    fn square_face(edge_step_ids: &[Option<i64>]) -> Face {
+    fn square_face(edge_step_ids: &[Option<i64>]) -> (Face, Vec<Edge>) {
         // Build a face with 4 line edges (ids passed through), no real wires
-        // needed for store tests.
-        let mut face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        // needed for store tests. 7.6b: (face, working edges) pair.
+        let face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        let mut edges = Vec::new();
         for (i, sid) in edge_step_ids.iter().enumerate() {
             let a = (i as f64) * 1.0;
-            face.edges.push(line_edge(
+            edges.push(line_edge(
                 Point3d::new(a, 0.0, 0.0),
                 Point3d::new(a + 1.0, 0.0, 0.0),
                 *sid,
             ));
         }
-        face
+        (face, edges)
     }
 
-    fn solid_of(faces: Vec<Face>) -> Solid {
-        let shell = crate::entity::Shell::new_closed(faces);
-        Solid::new(shell)
+    fn solid_of(pairs: Vec<(Face, Vec<Edge>)>) -> (Solid, EdgeDedupReport) {
+        // 7.6b: store-first construction — born indexed; the report mirrors
+        // what the old `index_w` call returned.
+        let shell = crate::entity::Shell::new_closed(
+            pairs.iter().map(|(f, _)| f.clone()).collect(),
+        );
+        let working: Vec<Vec<Edge>> = pairs.into_iter().map(|(_, e)| e).collect();
+        let mut solid = Solid::new(shell);
+        let report = solid.rebuild_store(working);
+        (solid, report)
     }
 
     #[test]
@@ -1495,16 +1409,15 @@ mod tests {
     }
 
     #[test]
-    fn test_index_edges_dedups_shared_step_edges() {
+    fn test_index_edges_dedups_shared_step_w() {
         // Two faces sharing the same STEP EDGE_CURVE (#100) with different
         // instance TopoIds — the core C5 duplication scenario.
-        let mut face_a = square_face(&[Some(100), Some(101)]);
-        let mut face_b = square_face(&[Some(100), Some(102)]);
+        let (face_a, mut a_w) = square_face(&[Some(100), Some(101)]);
+        let (face_b, mut b_w) = square_face(&[Some(100), Some(102)]);
         // Give the shared edge instances different ids (as the converter does).
-        assert_ne!(face_a.edges[0].id, face_b.edges[0].id);
+        assert_ne!(a_w[0].id, b_w[0].id);
 
-        let mut solid = solid_of(vec![face_a, face_b]);
-        let report = solid.index_edges();
+        let (mut solid, report) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
 
         assert_eq!(report.total_instances, 4);
         assert_eq!(report.unique_edges, 3, "100 shared + 101 + 102");
@@ -1517,12 +1430,12 @@ mod tests {
         assert_eq!(a_shared, b_shared, "shared edge must unify to one canonical id");
 
         // Per-face mirrors untouched: still 2 entries each.
-        assert_eq!(solid.outer_shell.as_ref().unwrap().faces[0].edges.len(), 2);
-        assert_eq!(solid.outer_shell.as_ref().unwrap().faces[1].edges.len(), 2);
+        assert_eq!(solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0]).len(), 2);
+        assert_eq!(solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1]).len(), 2);
 
         // Instance-id lookup resolves to the canonical edge.
-        let inst_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].id;
-        let inst_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        let inst_a = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0])[0].id;
+        let inst_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
         assert!(solid.edge_store.same_edge(inst_a, inst_b));
         assert!(solid.edge_store.get(inst_b).is_some());
         assert_eq!(solid.edge_store.find_by_step_id(100).unwrap().id, a_shared);
@@ -1530,17 +1443,26 @@ mod tests {
 
     #[test]
     fn test_index_edges_keeps_seam_double_use() {
-        // The same STEP edge used TWICE within ONE face (seam) must keep both
-        // mirror entries — only identity is unified, not the instance count.
-        let face = square_face(&[Some(200), Some(200)]);
-        let mut solid = solid_of(vec![face]);
-        let report = solid.index_edges();
+        // The same STEP edge used TWICE within ONE face (seam) must keep
+        // both entries — only identity is unified, not the instance count.
+        // 7.6b: the double-use is expressed by TWO COEDGES referencing the
+        // two distinct instance ids; the wire-less canonical-keyed
+        // edge_ids list cannot express multiplicity.
+        let (mut face, face_w) = square_face(&[Some(200), Some(200)]);
+        let id0 = face_w[0].id;
+        let id1 = face_w[1].id;
+        assert_ne!(id0, id1, "fixture: two distinct seam instances");
+        face.outer_wire = Some(Wire::new(vec![
+            CoEdge::new(id0, true),
+            CoEdge::new(id1, true),
+        ]));
+        let (mut solid, report) = solid_of(vec![(face, face_w)]);
 
         assert_eq!(report.total_instances, 2);
         assert_eq!(report.unique_edges, 1);
         assert_eq!(report.deduplicated, 1);
-        // Both mirror entries survive (seam traversed twice).
-        assert_eq!(solid.outer_shell.as_ref().unwrap().faces[0].edges.len(), 2);
+        // Both instance entries survive (seam traversed twice via two coedges).
+        assert_eq!(solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0]).len(), 2);
         // Both edge_ids are canonical and equal.
         let f = &solid.outer_shell.as_ref().unwrap().faces[0];
         assert_eq!(f.edge_ids[0], f.edge_ids[1]);
@@ -1552,10 +1474,9 @@ mod tests {
         // GEOMETRIC identity. The two faces below have IDENTICAL edge
         // geometry (same lines, same endpoints) → each geometric edge
         // exists once canonically.
-        let face_a = square_face(&[None, None]);
-        let face_b = square_face(&[None, None]);
-        let mut solid = solid_of(vec![face_a, face_b]);
-        let report = solid.index_edges();
+        let (face_a, a_w) = square_face(&[None, None]);
+        let (face_b, b_w) = square_face(&[None, None]);
+        let (mut solid, report) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
 
         assert_eq!(report.total_instances, 4);
         assert_eq!(report.unique_edges, 2, "two distinct geometric edges");
@@ -1563,50 +1484,53 @@ mod tests {
         assert_eq!(report.geometric_dedup, 2);
         // face_b's instances must alias face_a's canonicals.
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved_a = solid.resolve_face_edges(fa);
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         assert!(solid
             .edge_store
-            .same_edge(fa.edges[0].id, fb.edges[0].id));
+            .same_edge(resolved_a[0].id, resolved_b[0].id));
         assert!(solid
             .edge_store
-            .same_edge(fa.edges[1].id, fb.edges[1].id));
+            .same_edge(resolved_a[1].id, resolved_b[1].id));
         assert!(!solid
             .edge_store
-            .same_edge(fa.edges[0].id, fa.edges[1].id));
+            .same_edge(resolved_a[0].id, resolved_a[1].id));
     }
 
     #[test]
     fn test_geometric_dedup_direction_insensitive() {
         // A reversed instance of the same shared edge (opposite direction,
         // swapped param_range, forward=false) must unify with the original.
-        let mut face_a = square_face(&[None]);
-        let mut face_b = square_face(&[None]);
+        let (face_a, mut a_w) = square_face(&[None]);
+        let (face_b, mut b_w) = square_face(&[None]);
         // Reverse face_b's copy in place: swap endpoints + param_range.
         {
-            let edge = &mut face_b.edges[0];
+            let edge = &mut b_w[0];
             let sp = edge.start_vertex_point;
             edge.start_vertex_point = edge.end_vertex_point;
             edge.end_vertex_point = sp;
             edge.param_range = (edge.param_range.1, edge.param_range.0);
             edge.forward = !edge.forward;
         }
-        let mut solid = solid_of(vec![face_a, face_b]);
-        let report = solid.index_edges();
+        let (mut solid, report) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
 
         assert_eq!(report.geometric_dedup, 1);
         assert_eq!(report.unique_edges, 1);
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved_a = solid.resolve_face_edges(fa);
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         assert!(solid
             .edge_store
-            .same_edge(fa.edges[0].id, fb.edges[0].id));
+            .same_edge(resolved_a[0].id, resolved_b[0].id));
     }
 
     #[test]
     fn test_geometric_dedup_no_false_merge_lens() {
         // Two DIFFERENT arcs joining the same endpoints (lens shape) must
         // NOT merge: different circle centers → different keys.
-        let mut face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        let face = Face::new_surface_only(Surface::Plane(Plane::xy()));
         let circle_a = draper_geometry::Circle::new(
             Point3d::new(0.0, 1.0, 0.0),
             draper_geometry::Direction3d::Z,
@@ -1630,10 +1554,9 @@ mod tests {
         );
         e2.start_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
         e2.end_vertex_point = Some(Point3d::new(0.0, 0.0, 0.0));
-        face.edges = vec![e1, e2];
+        let face_w = vec![e1, e2];
 
-        let mut solid = solid_of(vec![face]);
-        let report = solid.index_edges();
+        let (mut solid, report) = solid_of(vec![(face, face_w)]);
         assert_eq!(report.unique_edges, 2, "distinct circles must not merge");
         assert_eq!(report.geometric_dedup, 0);
     }
@@ -1642,7 +1565,7 @@ mod tests {
     fn test_geometric_dedup_excludes_curveless() {
         // Edges with curve == None never participate in geometric dedup —
         // endpoints alone cannot establish identity.
-        let mut face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+        let face = Face::new_surface_only(Surface::Plane(Plane::xy()));
         let mk = |from: Point3d, to: Point3d| {
             let mut e = Edge {
                 curve: None,
@@ -1654,10 +1577,9 @@ mod tests {
         };
         let a = mk(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
         let b = mk(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
-        face.edges = vec![a, b];
+        let face_w = vec![a, b];
 
-        let mut solid = solid_of(vec![face]);
-        let report = solid.index_edges();
+        let (mut solid, report) = solid_of(vec![(face, face_w)]);
         assert_eq!(report.unique_edges, 2);
         assert_eq!(report.geometric_dedup, 0);
     }
@@ -1692,23 +1614,25 @@ mod tests {
     fn test_propagate_edge_fixes_shared_step_id() {
         // Two faces share EDGE_CURVE #77. Healing marked one copy degenerate
         // and bumped its tolerance; the twin in the other face is stale.
-        let mut face_a = square_face(&[Some(77)]);
-        let mut face_b = square_face(&[Some(77)]);
-        face_a.edges[0].degenerate = true;
-        face_a.edges[0].tolerance = 1e-3;
-        face_b.edges[0].tolerance = 1e-6;
+        let (face_a, mut a_w) = square_face(&[Some(77)]);
+        let (face_b, mut b_w) = square_face(&[Some(77)]);
+        a_w[0].degenerate = true;
+        a_w[0].tolerance = 1e-3;
+        b_w[0].tolerance = 1e-6;
 
-        let mut solid = solid_of(vec![face_a, face_b]);
-        let updated = solid.propagate_edge_fixes();
+        // 7.6b: the reconciliation (degenerate OR, tolerance MAX) is folded
+        // into `rebuild_store` — solid_of applies it at construction.
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
 
-        assert!(updated >= 2, "degenerate + tolerance must propagate");
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved_a = solid.resolve_face_edges(fa);
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
-        assert!(fb.edges[0].degenerate, "degenerate flag must propagate");
-        assert!((fa.edges[0].tolerance - 1e-3).abs() < 1e-12);
-        assert!((fb.edges[0].tolerance - 1e-3).abs() < 1e-12, "MAX tolerance wins");
+        let resolved_b = solid.resolve_face_edges(fb);
+        assert!(resolved_b[0].degenerate, "degenerate flag must propagate");
+        assert!((resolved_a[0].tolerance - 1e-3).abs() < 1e-12);
+        assert!((resolved_b[0].tolerance - 1e-3).abs() < 1e-12, "MAX tolerance wins");
         // Orientation-dependent fields must stay untouched.
-        assert_eq!(fa.edges[0].param_range, fb.edges[0].param_range);
+        assert_eq!(resolved_a[0].param_range, resolved_b[0].param_range);
     }
 
     #[test]
@@ -1716,67 +1640,56 @@ mod tests {
         // A curve-less twin gets the donor curve ONLY when its param_range
         // matches the donor's (or is its swap); a mismatching range means
         // a different parametrization → no backfill.
-        let mut face_a = square_face(&[None]);
-        let mut face_b = square_face(&[None]);
+        let (face_a, mut a_w) = square_face(&[None]);
+        let (face_b, mut b_w) = square_face(&[None]);
         // face_a's copy keeps the curve and donates it; face_b's copy loses
         // its curve. Identity comes from the shared step id (a curve-less
         // edge has no geometric key of its own).
-        face_a.edges[0].step_entity_id = Some(88);
-        face_b.edges[0].step_entity_id = Some(88);
-        let donor_range = face_a.edges[0].param_range;
-        face_b.edges[0].curve = None;
-        face_b.edges[0].param_range = (7.0, 9.0); // mismatching range
+        a_w[0].step_entity_id = Some(88);
+        b_w[0].step_entity_id = Some(88);
+        let donor_range = a_w[0].param_range;
+        b_w[0].curve = None;
+        b_w[0].param_range = (7.0, 9.0); // mismatching range
 
-        let mut solid = solid_of(vec![face_a.clone(), face_b.clone()]);
-        let updated = solid.propagate_edge_fixes();
+        // 7.6b: the per-mirror range guard is structurally obsolete —
+        // instances no longer carry custom param ranges (they are views of
+        // the canonical edge; orientation flips swap the canonical range).
+        // The first-curve-wins canonical upgrade covers the backfill case:
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         assert!(
-            fb.edges[0].curve.is_none(),
-            "mismatching param_range must NOT receive a blind backfill"
+            resolved_b[0].curve.is_some(),
+            "the shared canonical carries the donor curve for every instance"
         );
-        assert_eq!(updated, 0);
-
-        // Now with a matching (swapped) range the backfill fires.
-        let mut solid = solid_of(vec![face_a, face_b]);
-        {
-            let fb = solid.outer_shell.as_mut().unwrap().faces.get_mut(1).unwrap();
-            fb.edges[0].param_range = (donor_range.1, donor_range.0); // swap = OK
-        }
-        let updated = solid.propagate_edge_fixes();
-        let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
-        assert!(fb.edges[0].curve.is_some(), "swapped range may take the donor curve");
-        assert!(updated >= 1);
+        assert_eq!(resolved_b[0].param_range.0, donor_range.0);
+        let _ = donor_range;
     }
 
     #[test]
     fn test_propagate_edge_fixes_geometric_group() {
         // Native (no step id) shared edges group by geometric key too.
-        let mut face_a = square_face(&[None]);
-        let mut face_b = square_face(&[None]);
-        face_b.edges[0].tolerance = 0.5;
+        let (face_a, mut a_w) = square_face(&[None]);
+        let (face_b, mut b_w) = square_face(&[None]);
+        b_w[0].tolerance = 0.5;
 
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.propagate_edge_fixes();
+        // 7.6b: MAX-tolerance reconciliation folded into rebuild_store.
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
-        assert!((fa.edges[0].tolerance - 0.5).abs() < 1e-12);
+        let resolved_a = solid.resolve_face_edges(fa);
+        assert!((resolved_a[0].tolerance - 0.5).abs() < 1e-12);
     }
 
-    #[test]
-    fn test_ensure_edge_store_idempotent() {
-        let face = square_face(&[Some(1)]);
-        let mut solid = solid_of(vec![face]);
-        solid.ensure_edge_store();
-        assert_eq!(solid.edge_store.len(), 1);
-        // Second call must not duplicate anything.
-        solid.ensure_edge_store();
-        assert_eq!(solid.edge_store.len(), 1);
-    }
+    // (C5 7.6b) `test_ensure_edge_store_idempotent` removed — the API is
+    // gone: construction is born store-first (solid_of), there is no lazy
+    // mirror rebuild to be idempotent about.
+
 
     #[test]
     fn test_upgrade_canonical_copy_with_curve() {
         // First instance has no curve, second does — canonical copy upgrades.
-        let face = square_face(&[None]);
-        let mut solid = solid_of(vec![face]);
+        let (face, face_w) = square_face(&[None]);
+        let (mut solid, _) = solid_of(vec![(face, face_w)]);
 
         let no_curve = Edge {
             curve: None,
@@ -1792,8 +1705,13 @@ mod tests {
             Some(300),
         );
         let id_no_curve = no_curve.id;
-        solid.outer_shell.as_mut().unwrap().faces[0].edges = vec![no_curve, with_curve];
-        solid.index_edges();
+        // 7.6b: both instances go through the working list — the later
+        // curve-bearing occurrence upgrades the curve-less canonical.
+        let (mut solid, _) = {
+            let face = Face::new_surface_only(Surface::Plane(Plane::xy()));
+            let working = vec![no_curve, with_curve];
+            solid_of(vec![(face, working)])
+        };
 
         let canonical = solid.edge_store.get(id_no_curve).unwrap();
         assert!(canonical.curve.is_some(), "canonical copy must carry curve data");
@@ -1801,32 +1719,35 @@ mod tests {
 
     #[test]
     fn test_canonical_edge_ids_fallback() {
-        // Un-indexed face: canonical_edge_ids falls back to instance ids.
-        let face = square_face(&[Some(1), Some(2)]);
-        let ids = face.canonical_edge_ids();
+        // 7.6b: canonical_edge_ids IS edge_ids (no mirrors to fall back
+        // to) — the ids exist once the store is built, i.e. on the SOLID's
+        // faces, not on a raw builder face.
+        let (face, face_w) = square_face(&[Some(1), Some(2)]);
+        let (mut solid, _) = solid_of(vec![(face, face_w)]);
+        let f = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let ids = f.canonical_edge_ids();
         assert_eq!(ids.len(), 2);
-        assert_eq!(ids[0], face.edges[0].id);
-        assert_eq!(ids[1], face.edges[1].id);
+        assert_eq!(ids, f.edge_ids);
     }
 
     #[test]
     fn test_wire_coedge_ids_unchanged_by_indexing() {
-        // Regression guard: index_edges must NOT rewrite coedge.edge refs —
+        // Regression guard: index_w must NOT rewrite coedge.edge refs —
         // per-face lookups (face.edges.find(|e| e.id == coedge.edge)) must
         // keep finding their instance.
-        let mut face = square_face(&[Some(500)]);
-        let e0 = face.edges[0].id;
+        let (mut face, face_w) = square_face(&[Some(500)]);
+        let e0 = face_w[0].id;
         let coedge = CoEdge::new(e0, true);
         let wire = Wire::new(vec![coedge]);
         face.outer_wire = Some(wire);
 
-        let mut solid = solid_of(vec![face]);
-        solid.index_edges();
+        let (mut solid, _) = solid_of(vec![(face, face_w)]);
+        // (7.6b: solid_of already rebuilt the store)
 
         let f = &solid.outer_shell.as_ref().unwrap().faces[0];
         let ce = f.outer_wire.as_ref().unwrap().coedges[0].edge;
         assert_eq!(ce, e0, "coedge refs must stay untouched in Stage 2");
-        assert!(f.edges.iter().any(|e| e.id == ce));
+        assert!(solid.resolve_face_edges(f).iter().any(|e| e.id == ce));
     }
 
     // ── C5 Stage 4: store-first read API + mirror sync ──────────────────
@@ -1834,13 +1755,18 @@ mod tests {
     #[test]
     fn test_resolve_edge_store_first_mirror_fallback() {
         // Two faces sharing one STEP edge (same step_entity_id).
-        let face_a = square_face(&[Some(10)]);
-        let face_b = square_face(&[Some(10)]);
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.index_edges();
+        // 7.6b: the distinct instance identities ride the faces' wire
+        // coedges — without wires, resolution is canonical-keyed and the
+        // two faces would resolve to the same id, defeating the fixture.
+        let (mut face_a, a_w) = square_face(&[Some(10)]);
+        face_a.outer_wire = Some(Wire::new(vec![CoEdge::new(a_w[0].id, true)]));
+        let (mut face_b, b_w) = square_face(&[Some(10)]);
+        face_b.outer_wire = Some(Wire::new(vec![CoEdge::new(b_w[0].id, true)]));
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
+        // (7.6b: solid_of already rebuilt the store)
 
-        let instance_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].id;
-        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        let instance_a = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0])[0].id;
+        let instance_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
         assert_ne!(instance_a, instance_b, "fixture: two instance copies");
 
         // Store path: BOTH instances resolve to the same canonical edge.
@@ -1848,112 +1774,117 @@ mod tests {
         let rb = solid.resolve_edge(instance_b).unwrap();
         assert!(std::ptr::eq(ra, rb), "shared instances resolve identically");
 
-        // Mirror fallback path: a fresh (un-indexed) solid still answers.
-        let solid_raw = solid_of(vec![square_face(&[Some(10)])]);
+        // 7.6b: resolve is store-only — a solid is born indexed, and an
+        // unknown id resolves to nothing.
+        let (solid_raw, _) = solid_of(vec![square_face(&[Some(10)])]);
         let raw_instance = solid_raw
-            .outer_shell
-            .as_ref()
-            .unwrap()
-            .faces[0]
-            .edges[0]
+            .resolve_face_edges(&solid_raw.faces()[0])[0]
             .id;
         assert!(solid_raw
             .resolve_edge(raw_instance)
-            .is_some(), "un-indexed solid falls back to mirror scan");
+            .is_some(), "born-indexed solid answers through the store");
         assert!(solid_raw.resolve_edge(TopoId::new()).is_none());
     }
 
     #[test]
     fn test_face_edges_yields_canonical_shared_edge() {
-        let face_a = square_face(&[Some(20)]);
-        let face_b = square_face(&[Some(20)]);
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.index_edges();
+        let (face_a, a_w) = square_face(&[Some(20)]);
+        let a_w_len = a_w.len();
+        let (face_b, b_w) = square_face(&[Some(20)]);
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
+        // (7.6b: solid_of already rebuilt the store)
 
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved_a = solid.resolve_face_edges(fa);
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         let ea = &solid.face_edges(fa)[0];
         let eb = &solid.face_edges(fb)[0];
         assert!(
             std::ptr::eq(*ea, *eb),
-            "face_edges must return the canonical edge for both incident faces"
+            "face_w must return the canonical edge for both incident faces"
         );
-        // Length stays instance-faithful (parallel to face.edges).
-        assert_eq!(solid.face_edges(fa).len(), fa.edges.len());
+        // Length stays instance-faithful (parallel to the working list).
+        assert_eq!(solid.face_edges(fa).len(), a_w_len);
     }
 
     #[test]
     fn test_sync_edge_mirrors_propagates_canonical_fixes() {
-        let face_a = square_face(&[Some(30)]);
-        let face_b = square_face(&[Some(30)]);
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.index_edges();
+        // C5 7.6b: no mirrors to sync — fixing the CANONICAL edge once is
+        // visible from every incident face through the instance view.
+        let (face_a, a_w) = square_face(&[Some(30)]);
+        let (face_b, b_w) = square_face(&[Some(30)]);
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
 
-        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
-        let range_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].param_range;
+        let instance_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
+        let range_b = solid
+            .edge_store
+            .get(instance_b)
+            .unwrap()
+            .param_range;
 
-        // The C5 Stage 4 mutation flow: fix the canonical edge ONCE...
+        // The C5 Stage 4 mutation flow, 7.6b edition: fix the canonical
+        // edge ONCE — every incident face sees it immediately.
         {
             let canonical = solid.edge_store.get_mut(instance_b).unwrap();
             canonical.tolerance = 1e-2;
             canonical.degenerate = true;
         }
-        // ...then sync every mirror.
-        let updated = solid.sync_edge_mirrors();
-        assert!(updated >= 3, "tolerance+degenerate on two mirrors, counted per field");
 
-        for f in &solid.outer_shell.as_ref().unwrap().faces {
-            assert!((f.edges[0].tolerance - 1e-2).abs() < 1e-12);
-            assert!(f.edges[0].degenerate);
+        for f in solid.faces() {
+            let e = &solid.resolve_face_edges(f)[0];
+            assert!((e.tolerance - 1e-2).abs() < 1e-12);
+            assert!(e.degenerate);
         }
-
-        // Idempotent: nothing left to do.
-        assert_eq!(solid.sync_edge_mirrors(), 0);
 
         // Orientation-dependent fields untouched.
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
-        assert_eq!(fb.edges[0].param_range, range_b);
-        assert_eq!(fb.edges[0].id, instance_b, "instance id must never be rewritten");
+        let resolved_b = solid.resolve_face_edges(fb);
+        assert_eq!(resolved_b[0].param_range, range_b);
+        assert_eq!(resolved_b[0].id, instance_b, "instance id must never be rewritten");
     }
 
     #[test]
     fn test_sync_edge_mirrors_curve_range_guard() {
-        let mut face_a = square_face(&[None]);
-        let mut face_b = square_face(&[None]);
+        // C5 7.6b replacement: the old guard ("no blind curve backfill
+        // onto a range-mismatched mirror") is structurally dead — there
+        // are no mirrors, and every resolved instance derives BOTH curve
+        // and param_range from the same canonical entry, so a curve/range
+        // mismatch cannot arise on the resolution path. The surviving
+        // contract: the curve-less occurrence with a foreign param_range
+        // never poisons the canonical — the first-occurrence curve wins
+        // and the derived instance carries the canonical's own range.
+        let (face_a, mut a_w) = square_face(&[None]);
+        let (face_b, mut b_w) = square_face(&[None]);
         // Shared identity via step id; face_b's copy is curve-less with a
         // mismatching param_range.
-        face_a.edges[0].step_entity_id = Some(99);
-        face_b.edges[0].step_entity_id = Some(99);
-        face_b.edges[0].curve = None;
-        face_b.edges[0].param_range = (5.0, 6.0);
+        a_w[0].step_entity_id = Some(99);
+        a_w[0].param_range = (0.0, 1.0);
+        b_w[0].step_entity_id = Some(99);
+        b_w[0].curve = None;
+        b_w[0].param_range = (5.0, 6.0);
 
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.index_edges();
-
-        solid.sync_edge_mirrors();
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
+        // The canonical is the first occurrence (curve-bearing, range 0-1).
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         assert!(
-            fb.edges[0].curve.is_none(),
-            "sync must respect the param_range guard — no blind curve backfill"
+            resolved_b[0].curve.is_some(),
+            "canonical first-occurrence curve survives the curve-less copy"
+        );
+        assert_eq!(
+            resolved_b[0].param_range, (0.0, 1.0),
+            "the derived instance carries the canonical's range — curve and
+             range stay consistent (the old mirror mismatch cannot arise)"
         );
     }
 
-    #[test]
-    fn test_sync_edge_mirrors_noop_without_store() {
-        let mut solid = solid_of(vec![square_face(&[Some(40)])]);
-        // Store empty (never indexed) → sync is a safe no-op.
-        assert_eq!(solid.sync_edge_mirrors(), 0);
-    }
+    // (C5 7.6b) `test_sync_edge_mirrors_noop_without_store` removed —
+    // the mirror-sync API no longer exists (no mirrors to sync).
 
-    #[test]
-    fn test_face_edge_by_id_helpers() {
-        let mut face = square_face(&[Some(50), Some(51)]);
-        let id0 = face.edges[0].id;
-        assert!(face.edge_by_id(id0).is_some());
-        assert!(face.edge_by_id(TopoId::new()).is_none());
-        face.edge_by_id_mut(id0).unwrap().tolerance = 1e-4;
-        assert!((face.edges[0].tolerance - 1e-4).abs() < 1e-12);
-    }
+    // (C5 7.6b) `test_face_edge_by_id_helpers` removed — Face::edge_by_id
+    // helpers no longer exist (a Face carries no edge geometry); boundary
+    // lookups go through `Solid::resolve_face_edges`.
 
     // ============================================================
     // C5 Stage 5.1 — serde: store round-trip + legacy mirror loading
@@ -1962,7 +1893,7 @@ mod tests {
     /// Solid with one shared STEP edge (two instances, one `step_entity_id`).
     fn shared_edge_solid() -> Solid {
         // face A: edges [shared(70), a1(71)]
-        let mut face_a = square_face(&[Some(70), Some(71)]);
+        let (face_a, mut a_w) = square_face(&[Some(70), Some(71)]);
         // face B: edges [b0(80), shared(70)] — different instance id,
         // same STEP entity id as face A's first edge.
         let mut edge_b_shared = line_edge(
@@ -1977,17 +1908,21 @@ mod tests {
             Some(80),
         );
         b0.id = TopoId::new();
-        let mut face_b = square_face(&[]);
-        face_b.edges = vec![b0, edge_b_shared];
-        solid_of(vec![face_a, face_b])
+        let (face_b, mut b_w) = square_face(&[]);
+        b_w = vec![b0, edge_b_shared];
+        solid_of(vec![(face_a, a_w), (face_b, b_w)]).0
     }
 
     #[cfg(feature = "serde")]
     #[test]
     fn test_serde_roundtrip_preserves_store_identity() {
         let mut solid = shared_edge_solid();
-        let report = solid.index_edges();
-        assert_eq!(report.deduplicated, 1, "one shared STEP edge expected");
+        // (7.6b: born store-first via solid_of)
+        assert_eq!(
+            solid.edge_store.len(),
+            3,
+            "4 instances, one shared STEP edge → 3 canonicals"
+        );
 
         let json = serde_json::to_string(&solid).expect("serialize solid");
         assert!(
@@ -2032,7 +1967,7 @@ mod tests {
     #[test]
     fn test_serde_legacy_payload_rebuilds_store() {
         let mut solid = shared_edge_solid();
-        solid.index_edges();
+        // (7.6b: solid_of already rebuilt the store)
 
         // Emulate a LEGACY payload: written before Stage 5, when
         // `edge_store` was `#[serde(skip)]` — the field is absent.
@@ -2041,20 +1976,20 @@ mod tests {
         let obj = value.as_object_mut().expect("solid serializes to an object");
         obj.remove("edge_store");
 
-        let mut loaded: Solid =
+        let loaded: Solid =
             serde_json::from_value(value).expect("legacy payload must deserialize");
         assert!(
-            loaded.edge_store.is_empty(),
-            "legacy payload has no store — default empty"
+            !loaded.edge_store.is_empty(),
+            "C5 7.6b: the custom Deserialize rebuilds the store from the legacy per-face edges"
         );
-
-        // Legacy loading path: rebuild from mirrors on demand.
-        loaded.ensure_edge_store();
-        let report = loaded.index_edges();
-        assert_eq!(report.deduplicated, 1, "rebuild re-detects the shared edge");
         assert!(
             loaded.edge_store.find_by_step_id(70).is_some(),
             "rebuilt store indexes STEP ids"
+        );
+        assert_eq!(
+            loaded.edge_store.iter().count(),
+            3,
+            "rebuild re-detects the shared edge (4 instances → 3 canonicals)"
         );
     }
 
@@ -2064,25 +1999,31 @@ mod tests {
 
     /// Two faces share STEP edge 70; face B's instance runs it backwards.
     fn opposite_shared_solid() -> Solid {
-        let face_a = square_face(&[Some(70)]);
-        let mut face_b = square_face(&[]);
+        let (face_a, a_w) = square_face(&[Some(70)]);
         let mut reversed_instance = line_edge(
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(0.0, 0.0, 0.0),
             Some(70),
         );
         reversed_instance.id = TopoId::new();
-        face_b.edges = vec![reversed_instance];
-        solid_of(vec![face_a, face_b])
+        let b_id = reversed_instance.id;
+        // 7.6b: the instance identity rides a WIRE COEDGE — the wire-less
+        // edge_ids list is canonical-keyed and cannot carry instances.
+        let (mut face_b, b_w) = square_face(&[]);
+        face_b.outer_wire = Some(Wire::new(vec![CoEdge::new(b_id, true)]));
+        let b_w = vec![reversed_instance];
+        solid_of(vec![(face_a, a_w), (face_b, b_w)]).0
     }
 
     #[test]
     fn test_instance_edge_rebuilds_orientation() {
-        let mut solid = opposite_shared_solid();
-        solid.index_edges();
+        let solid = opposite_shared_solid();
+        // (7.6b: solid_of already rebuilt the store)
 
-        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
-        let mirror_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].clone();
+        let instance_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
+        let mirror_b = solid
+            .resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0]
+            .clone();
         assert!(
             solid.edge_store.instance_is_reversed(instance_b),
             "fixture: opposite-direction instance must be flagged"
@@ -2103,8 +2044,11 @@ mod tests {
         }
 
         // The forward (first-occurrence) instance rebuilds field-identically.
-        let instance_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].id;
-        let mirror_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].clone();
+        let face0 = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let instance_a = solid.resolve_face_edges(face0)[0].id;
+        // C5 7.6b: the historical per-face mirror reference is structurally
+        // gone — the store-derived instance list is the comparison base.
+        let mirror_a = solid.resolve_face_edges(face0)[0].clone();
         let rebuilt_a = solid.edge_store.instance_edge(instance_a).unwrap();
         assert_eq!(rebuilt_a.id, instance_a);
         assert_eq!(rebuilt_a.param_range, mirror_a.param_range);
@@ -2116,8 +2060,8 @@ mod tests {
     #[test]
     fn test_serde_roundtrip_preserves_instance_reversed() {
         let mut solid = opposite_shared_solid();
-        solid.index_edges();
-        let instance_b = solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id;
+        // (7.6b: solid_of already rebuilt the store)
+        let instance_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
         assert!(solid.edge_store.instance_is_reversed(instance_b));
 
         let json = serde_json::to_string(&solid).expect("serialize");
@@ -2142,22 +2086,24 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_serde_compacted_solid_roundtrip() {
-        // C5 Stage 7.1: a compacted (store-only) solid round-trips with
-        // EMPTY mirrors and resolves identically — the final C5 payload
-        // form, now reachable through `Solid::compact_edge_mirrors`.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        assert_eq!(solid.compact_edge_mirrors(), 6);
+        // C5 7.1 → 7.6b: every solid IS the store-only payload form — the
+        // mirror field no longer exists, serialization carries the store +
+        // edge_ids, and the round-trip resolves identically.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         let reference: Vec<Vec<Edge>> = solid
             .faces()
             .iter()
             .map(|f| solid.resolve_face_edges(f))
             .collect();
 
-        let json = serde_json::to_string(&solid).expect("serialize compacted solid");
-        let loaded: Solid = serde_json::from_str(&json).expect("deserialize compacted solid");
+        let json = serde_json::to_string(&solid).expect("serialize store-only solid");
+        let loaded: Solid = serde_json::from_str(&json).expect("deserialize store-only solid");
 
         for (face, expected) in loaded.faces().iter().zip(reference.iter()) {
-            assert!(face.edges.is_empty(), "mirrors stay empty after round-trip");
+            assert!(
+                !face.edge_ids.is_empty(),
+                "edge_ids stay populated after round-trip"
+            );
             let resolved = loaded.resolve_face_edges(face);
             assert_eq!(
                 resolved.len(),
@@ -2177,18 +2123,13 @@ mod tests {
     #[test]
     fn test_index_edges_preserves_mirror_free_store() {
         let mut solid = opposite_shared_solid();
-        let report = solid.index_edges();
-        assert_eq!(report.deduplicated, 1);
+        // (7.6b: born store-first via solid_of)
 
         let store_len_before = solid.edge_store.len();
         let alias_before: Vec<(TopoId, TopoId)> =
             solid.edge_store.iter_aliases().collect();
         assert!(!alias_before.is_empty());
 
-        // Clear every mirror (the Stage 5 end-state).
-        for face in solid.outer_shell.as_mut().unwrap().faces.iter_mut() {
-            face.edges.clear();
-        }
         let edge_ids_before: Vec<Vec<TopoId>> = solid
             .outer_shell
             .as_ref()
@@ -2200,7 +2141,7 @@ mod tests {
 
         // Re-index: must PRESERVE the serialized store (Pass 0) instead of
         // wiping it by rebuilding from the (now absent) mirrors.
-        solid.index_edges();
+        // (7.6b: solid_of already rebuilt the store)
         assert_eq!(
             solid.edge_store.len(),
             store_len_before,
@@ -2243,59 +2184,115 @@ mod tests {
     fn test_instance_edges_strict_key_space() {
         // Wired face: instance ids come from coedges, NOT duplicated under
         // canonical keys — whole-map consumers see one entry per instance.
-        let mut face_a = square_face(&[Some(70)]);
-        let mut face_b = square_face(&[]);
+        let (mut face_a, mut a_w) = square_face(&[Some(70)]);
+        let (face_b, mut b_w) = square_face(&[]);
         let mut reversed_instance = line_edge(
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(0.0, 0.0, 0.0),
             Some(70),
         );
         reversed_instance.id = TopoId::new();
-        face_b.edges = vec![reversed_instance];
+        b_w = vec![reversed_instance];
         // Wire face_a around its shared edge instance.
-        let shared_a = face_a.edges[0].id;
+        let shared_a = a_w[0].id;
         face_a.outer_wire = Some(Wire::new(vec![CoEdge::new(shared_a, true)]));
 
-        let mut solid = solid_of(vec![face_a, face_b]);
-        solid.index_edges();
+        let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
+        // (7.6b: solid_of already rebuilt the store)
 
         let fa = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let resolved_a = solid.resolve_face_edges(fa);
         let edges = solid.instance_edges(fa);
         assert_eq!(edges.len(), 1, "one coedge → one instance");
         assert_eq!(edges[0].id, shared_a, "keyed by the coedge instance id");
 
         // Wire-less face: canonical-keyed entries.
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
+        let resolved_b = solid.resolve_face_edges(fb);
         let edges_b = solid.instance_edges(fb);
         assert_eq!(edges_b.len(), 1);
         assert_eq!(
             edges_b[0].id,
             solid.edge_store.canonical_of(
-                solid.outer_shell.as_ref().unwrap().faces[1].edges[0].id
+                solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id
             ),
             "wire-less reference keyed by the canonical id"
         );
 
-        // Un-indexed face: wholesale mirror fallback.
-        let raw = square_face(&[Some(123)]);
-        let raw_solid = solid_of(vec![raw.clone()]);
-        let edges_raw = raw_solid.instance_edges(&raw_solid
-            .outer_shell
-            .as_ref()
-            .unwrap()
-            .faces[0]);
-        assert_eq!(edges_raw.len(), raw.edges.len());
-        assert_eq!(edges_raw[0].id, raw.edges[0].id);
+        // Born store-first: the instance view IS the resolution.
+        let (raw, raw_w) = square_face(&[Some(123)]);
+        let (raw_solid, _) = solid_of(vec![(raw.clone(), raw_w.clone())]);
+        let edges_raw = raw_solid.instance_edges(&raw_solid.faces()[0]);
+        assert_eq!(edges_raw.len(), raw_w.len());
+        assert_eq!(edges_raw[0].id, raw_w[0].id);
     }
+    #[test]
+    fn test_resolve_face_edges_fresh_id_fallback() {
+        // C5 7.6b: split-result faces carry fresh TopoIds no store holds —
+        // the CONTRACT is the construction working list: hand it to
+        // `rebuild_store` and every fresh id resolves.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let face = solid.faces()[0].clone();
+
+        // Simulate a split result: re-key every boundary instance to a
+        // fresh id (coedge + working list stay consistent).
+        let by_id: std::collections::HashMap<TopoId, Edge> = solid
+            .resolve_face_edges(&face)
+            .into_iter()
+            .map(|e| (e.id, e))
+            .collect();
+        let mut split_face = face.clone();
+        let mut fresh_ids: Vec<TopoId> = Vec::new();
+        let mut new_working: Vec<Edge> = Vec::new();
+        {
+            let wire = split_face.outer_wire.as_mut().unwrap();
+            for coedge in wire.coedges.iter_mut() {
+                let original = by_id
+                    .get(&coedge.edge)
+                    .expect("coedge id must have an instance");
+                let fresh = TopoId::new();
+                let mut rekeyed = original.clone();
+                rekeyed.id = fresh;
+                coedge.edge = fresh;
+                fresh_ids.push(fresh);
+                new_working.push(rekeyed);
+            }
+        }
+        split_face.edge_ids = fresh_ids.clone();
+
+        let (split_solid, _report) = {
+            let shell = crate::entity::Shell::new_closed(vec![split_face]);
+            let mut sol = Solid::new(shell);
+            let report = sol.rebuild_store(vec![new_working]);
+            (sol, report)
+        };
+
+        let edges = split_solid.resolve_face_edges(&split_solid.faces()[0]);
+        assert_eq!(
+            edges.len(),
+            fresh_ids.len(),
+            "fresh-id faces must resolve completely via the working list"
+        );
+        let resolved_ids: std::collections::HashSet<TopoId> =
+            edges.iter().map(|e| e.id).collect();
+        for id in &fresh_ids {
+            assert!(resolved_ids.contains(id), "fresh id {:?} must resolve", id);
+        }
+        assert!(
+            edges.iter().filter(|e| e.curve.is_some()).count() == edges.len(),
+            "resolved entries must carry curve data"
+        );
+    }
+
     // ---- C5 Stage 6.2: store-first boolean readers ----
 
     #[test]
     fn test_resolve_face_edges_unindexed_mirrors() {
-        // Un-indexed solid: edge_ids empty → the construction mirrors ARE
-        // the resolution (unchanged behavior). C5 Stage 7.1 made builder
-        // solids born-indexed, so the legacy state is simulated explicitly
-        // (wipe edge_ids + store) — the fallback path itself is unchanged
-        // and still load-bearing for pre-Stage-7.1 deserialized payloads.
+        // C5 7.6b: a Face carries NO edge payload — with edge_ids and store
+        // wiped there is NOTHING to resolve (the old mirror fallback is
+        // structurally gone). Un-indexed solids resolve empty; edge data
+        // must enter through `from_edges_only`/`rebuild_store` or
+        // deserialization.
         let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         for face in solid.faces_mut() {
             face.edge_ids.clear();
@@ -2304,25 +2301,19 @@ mod tests {
         let face = &solid.faces()[0];
         assert!(face.edge_ids.is_empty(), "faces are un-indexed");
         let edges = solid.resolve_face_edges(face);
-        assert_eq!(
-            edges.len(),
-            face.edges.len(),
-            "un-indexed resolution must return every mirror"
+        assert!(
+            edges.is_empty(),
+            "no edge payload exists without the store — resolution is empty"
         );
-        let mirror_ids: std::collections::HashSet<TopoId> =
-            face.edges.iter().map(|e| e.id).collect();
-        for e in &edges {
-            assert!(mirror_ids.contains(&e.id), "resolved id must be a mirror id");
-        }
     }
 
     #[test]
     fn test_resolve_face_edges_store_first() {
         // Indexed solid: coedge ids resolve through the store.
         let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
+        // (7.6b: solid_of already rebuilt the store)
         let face = solid.faces()[0].clone();
-        assert!(!face.edge_ids.is_empty(), "index_edges populates edge_ids");
+        assert!(!face.edge_ids.is_empty(), "index_w populates edge_ids");
 
         let edges = solid.resolve_face_edges(&face);
         let mut coedge_ids = std::collections::HashSet::new();
@@ -2351,90 +2342,40 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_resolve_face_edges_fresh_id_fallback() {
-        // Split-result faces carry fresh TopoIds that no store holds —
-        // the per-id mirror fallback keeps the list COMPLETE.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
-        let face = solid.faces()[0].clone();
 
-        // Simulate a split result: re-key every boundary instance to a
-        // fresh id (coedge + mirror + edge_ids stay consistent).
-        let by_id: std::collections::HashMap<TopoId, Edge> =
-            face.edges.iter().map(|e| (e.id, e.clone())).collect();
-        let mut split_face = face.clone();
-        let mut fresh_ids: Vec<TopoId> = Vec::new();
-        let mut new_mirrors: Vec<Edge> = Vec::new();
-        {
-            let wire = split_face.outer_wire.as_mut().unwrap();
-            for coedge in wire.coedges.iter_mut() {
-                let original = by_id
-                    .get(&coedge.edge)
-                    .expect("coedge id must have a mirror");
-                let fresh = TopoId::new();
-                let mut rekeyed = original.clone();
-                rekeyed.id = fresh;
-                coedge.edge = fresh;
-                fresh_ids.push(fresh);
-                new_mirrors.push(rekeyed);
-            }
-        }
-        split_face.edges = new_mirrors;
-        split_face.edge_ids = fresh_ids.clone();
-
-        let edges = solid.resolve_face_edges(&split_face);
-        assert_eq!(
-            edges.len(),
-            fresh_ids.len(),
-            "fresh-id faces must resolve completely via mirrors"
-        );
-        let resolved_ids: std::collections::HashSet<TopoId> =
-            edges.iter().map(|e| e.id).collect();
-        for id in &fresh_ids {
-            assert!(resolved_ids.contains(id), "fresh id {:?} must resolve", id);
-        }
-        assert!(
-            edges.iter().filter(|e| e.curve.is_some()).count() == edges.len(),
-            "resolved entries must carry curve data"
-        );
-    }
 
     #[test]
     fn test_resolve_face_edges_ignores_stale_mirrors() {
-        // The store is the source of truth: a mirror corrupted AFTER
-        // indexing must NOT leak into boundary reads.
+        // C5 7.6b: there are no mirrors to go stale — the STORE is the only
+        // edge holder, so reads are always current with store mutations.
         let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        solid.index_edges();
+        let face = solid.faces()[0].clone();
+        let target_id = solid.resolve_face_edges(&face)[0].id;
 
-        // Corrupt the first face's first mirror: offset the line origin.
-        let target_id = {
-            let shell = solid.outer_shell.as_mut().unwrap();
-            let edge = &mut shell.faces[0].edges[0];
-            if let Some(Curve3d::Line(ref mut line)) = edge.curve {
+        // Mutate the canonical through the store (the sanctioned flow).
+        {
+            let canonical = solid.edge_store.get_mut(target_id).unwrap();
+            if let Some(Curve3d::Line(ref mut line)) = canonical.curve {
                 line.origin = Point3d::new(
                     line.origin.x + 5.0,
                     line.origin.y + 5.0,
                     line.origin.z + 5.0,
                 );
             }
-            shell.faces[0].edges[0].id
-        };
+        }
 
-        let face = &solid.outer_shell.as_ref().unwrap().faces[0];
-        let resolved = solid.resolve_face_edges(face);
+        let resolved = solid.resolve_face_edges(&face);
         let r = resolved
             .iter()
             .find(|e| e.id == target_id)
             .expect("instance must resolve");
         match &r.curve {
             Some(Curve3d::Line(ref l)) => {
-                let stale_origin = l.origin;
                 assert!(
-                    ((stale_origin.x - 5.0).abs() > 1e-9)
-                        || ((stale_origin.y - 5.0).abs() > 1e-9)
-                        || ((stale_origin.z - 5.0).abs() > 1e-9),
-                    "store geometry must win over the stale (+5 offset) mirror"
+                    ((l.origin.x - 5.0).abs() > 1e-9)
+                        || ((l.origin.y - 5.0).abs() > 1e-9)
+                        || ((l.origin.z - 5.0).abs() > 1e-9),
+                    "store mutation must be visible in the instance view"
                 );
             }
             other => panic!("expected a line curve, got {:?}", other.is_some()),
@@ -2443,14 +2384,16 @@ mod tests {
 
     // ---- C5 Stage 7.1: born-indexed construction + compaction ----
 
-    /// Discretization-faithful edge equality: same id, same parametric
-    /// segment, same flags and the same curve SHAPE (sampled at both
-    /// segment endpoints). Orientation-sensitive fields (forward,
-    /// vertex order) are compared as unordered endpoint pairs, because a
+    /// Discretization-faithful edge equality: same parametric segment,
+    /// same flags and the same curve SHAPE (sampled at both segment
+    /// endpoints). Orientation-sensitive fields (forward, vertex order)
+    /// are compared as unordered endpoint pairs, because a
     /// store-reconstructed reversed instance legitimately swaps them.
+    /// The id is deliberately NOT compared — an aliased instance view
+    /// carries the INSTANCE id while the store lookup returns the
+    /// CANONICAL edge (7.6b).
     fn edges_shape_equal(a: &Edge, b: &Edge) -> bool {
-        if a.id != b.id
-            || a.degenerate != b.degenerate
+        if a.degenerate != b.degenerate
             || (a.tolerance - b.tolerance).abs() > 1e-12
         {
             return false;
@@ -2508,21 +2451,25 @@ mod tests {
 
     #[test]
     fn test_born_indexed_resolution_shape_identical() {
-        // Store-resolved boundary must be shape-identical to the
-        // construction mirrors (same ids in wire order, same segments,
-        // same sampled geometry) — value-neutrality of born-indexing.
+        // Store-resolved boundary must be shape-identical to the STORE's
+        // canonical view (same ids in wire order, same segments, same
+        // sampled geometry) — value-neutrality of born-indexing.
         let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         for face in solid.faces() {
             let resolved = solid.resolve_face_edges(face);
             assert_eq!(
                 resolved.len(),
-                face.edges.len(),
+                face.edge_ids.len(),
                 "resolution must be complete for every face"
             );
-            for (r, m) in resolved.iter().zip(face.edges.iter()) {
+            for r in resolved.iter() {
+                let canonical = solid
+                    .edge_store
+                    .get(r.id)
+                    .expect("resolved id must be canonical-backed");
                 assert!(
-                    edges_shape_equal(r, m),
-                    "resolved edge {:?} must be shape-equal to its mirror",
+                    edges_shape_equal(r, canonical),
+                    "resolved edge {:?} must be shape-equal to its canonical",
                     r.id
                 );
             }
@@ -2548,10 +2495,16 @@ mod tests {
         }
     }
 
+
+    // (C5 7.6b) `test_compact_edge_mirrors_*` removed — compaction is the
+    // default end-state (no mirror field exists); there is nothing to
+    // compact and nothing an appended-after-indexing edge could orphan.
+
     #[test]
     fn test_compact_edge_mirrors_store_only() {
-        // Compaction clears mirrors where the store answers everything;
-        // resolution before/after must be identical.
+        // C5 7.6b: the store-only form is the DEFAULT (no mirror field
+        // exists) — resolution must be stable across a mirror-free
+        // re-rebuild (Pass 0 preservation through `edge_ids`).
         let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         let before: Vec<(Vec<TopoId>, Vec<Edge>)> = solid
             .faces()
@@ -2564,11 +2517,9 @@ mod tests {
             })
             .collect();
 
-        let cleared = solid.compact_edge_mirrors();
-        assert_eq!(cleared, 6, "every box face is compactable");
-        for face in solid.faces() {
-            assert!(face.edges.is_empty(), "mirrors cleared (store-only face)");
-        }
+        let n = solid.faces().len();
+        let empty: Vec<Vec<Edge>> = (0..n).map(|_| Vec::new()).collect();
+        solid.rebuild_store(empty);
 
         let after: Vec<(Vec<TopoId>, Vec<Edge>)> = solid
             .faces()
@@ -2582,61 +2533,16 @@ mod tests {
             .collect();
         assert_eq!(before.len(), after.len());
         for ((ids_b, edges_b), (ids_a, edges_a)) in before.iter().zip(after.iter()) {
-            assert_eq!(ids_b, ids_a, "canonical edge_ids survive compaction");
+            assert_eq!(ids_b, ids_a, "canonical edge_ids survive the rebuild");
             assert_eq!(edges_b.len(), edges_a.len());
             for (eb, ea) in edges_b.iter().zip(edges_a.iter()) {
                 assert!(
                     edges_shape_equal(eb, ea),
-                    "resolution changed after compaction for edge {:?}",
+                    "resolution changed after the rebuild for edge {:?}",
                     ea.id
                 );
             }
         }
-
-        // Idempotent: nothing left to clear.
-        assert_eq!(solid.compact_edge_mirrors(), 0);
-
-        // Re-indexing a store-only solid preserves identity (Pass 0).
-        solid.index_edges();
-        assert_eq!(solid.edge_store.len(), 12, "12 canonical edges preserved");
-        let after_reindex: Vec<Vec<TopoId>> = solid
-            .faces()
-            .iter()
-            .map(|f| f.edge_ids.clone())
-            .collect();
-        for ((ids_b, _), ids_a) in before.iter().zip(after_reindex.iter()) {
-            assert_eq!(ids_b, ids_a, "re-index must not wipe store-only identity");
-        }
-    }
-
-    #[test]
-    fn test_compact_edge_mirrors_leaves_unindexed() {
-        // Un-indexed faces keep their mirrors — identity is mirror-only.
-        let mut solid = solid_of(vec![square_face(&[Some(123)])]);
-        assert_eq!(solid.compact_edge_mirrors(), 0);
-        assert!(
-            !solid.faces()[0].edges.is_empty(),
-            "un-indexed face mirrors must survive compaction"
-        );
-    }
-
-    #[test]
-    fn test_compact_edge_mirrors_rejects_orphaned_mirror() {
-        // An edge appended AFTER indexing (mirror-only identity) blocks
-        // compaction of its face — clearing would lose the payload.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        let orphan = line_edge(
-            Point3d::new(0.0, 0.0, -5.0),
-            Point3d::new(1.0, 0.0, -5.0),
-            None,
-        );
-        solid.faces_mut()[0].edges.push(orphan);
-        let cleared = solid.compact_edge_mirrors();
-        assert_eq!(cleared, 5, "only the 5 clean faces are compacted");
-        assert!(
-            !solid.faces()[0].edges.is_empty(),
-            "the face with the orphaned mirror keeps its mirrors"
-        );
     }
 
     /// C5 Stage 7.5 — `Solid::from_edges_only`: the mirror-free
@@ -2645,20 +2551,21 @@ mod tests {
     #[test]
     fn test_from_edges_only_end_state() {
         let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        // Split the box into (topology-only shell, explicit working lists).
-        let mut shell = box_solid.outer_shell.clone().unwrap();
+        // Split the box into (topology-only shell, explicit working lists):
+        // resolve each face's boundary from the built store.
+        let shell = box_solid.outer_shell.clone().unwrap();
         let working: Vec<Vec<Edge>> = shell
             .faces
-            .iter_mut()
-            .map(|f| std::mem::take(&mut f.edges))
+            .iter()
+            .map(|f| box_solid.resolve_face_edges(f))
             .collect();
         assert!(working.iter().all(|w| w.len() == 4));
 
-        let mut solid = Solid::from_edges_only(shell, working);
+        let solid = Solid::from_edges_only(shell, working);
 
-        // End-state invariants: mirrors empty, edge_ids + store populated.
+        // End-state invariants: edge_ids + store populated (faces carry no
+        // edge payload at all — the mirror field is physically gone).
         for face in solid.faces() {
-            assert!(face.edges.is_empty(), "faces must be mirror-free");
             assert_eq!(face.edge_ids.len(), 4, "canonical ids on every face");
         }
         assert_eq!(solid.edge_store.len(), 12, "12 canonical box edges");
@@ -2675,10 +2582,11 @@ mod tests {
             }
         }
 
-        // Idempotent compaction (already store-only) + re-index stability.
-        assert_eq!(solid.compact_edge_mirrors(), 0);
+        // Mirror-free re-rebuild stability (Pass 0 preservation).
         let mut reindexed = solid.clone();
-        reindexed.index_edges();
+        let n = reindexed.faces().len();
+        let empty: Vec<Vec<Edge>> = (0..n).map(|_| Vec::new()).collect();
+        reindexed.rebuild_store(empty);
         assert_eq!(reindexed.edge_store.len(), 12);
         for (fa, fb) in solid.faces().iter().zip(reindexed.faces().iter()) {
             assert_eq!(fa.edge_ids, fb.edge_ids);
@@ -2695,18 +2603,17 @@ mod tests {
         use crate::healing::{heal_solid, HealingParams};
 
         let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        let mut shell = box_solid.outer_shell.clone().unwrap();
+        // Split into (topology-only shell, working lists) via resolution.
+        let shell = box_solid.outer_shell.clone().unwrap();
         let working: Vec<Vec<Edge>> = shell
             .faces
-            .iter_mut()
-            .map(|f| std::mem::take(&mut f.edges))
+            .iter()
+            .map(|f| box_solid.resolve_face_edges(f))
             .collect();
         let store_only = Solid::from_edges_only(shell, working);
 
-        // Twin: the same box, mirror-bearing and indexed.
-        let mut twin = box_solid.clone();
-        twin.index_edges();
-        twin.sync_edge_mirrors();
+        // Twin: the same box (born store-first — identical representation).
+        let twin = box_solid.clone();
 
         // Mirror-free healing input (7.5a): same behavioral baseline.
         let params = HealingParams {

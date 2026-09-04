@@ -3084,6 +3084,134 @@ resolve_face_edges дедупит seam-инстансы по id.
 - `refactor(mesh): C5 stage 7.6b-1 — store-first UV pass in edge cache`
   запушен в origin/main
 
+# Worklog — C5 Stage 7.6b: физическое удаление Face.edges (СЕССИЯ 1, WIP)
+
+**Дата:** 2026-09-04 (четвёртая сессия суток)
+**Ветка:** `wip/c5-7.6b-face-edges-removal` (main НЕ тронут — коммит только
+когда все сьюты зелёные; база WIP-коммита `c20610c`)
+
+## Что сделано (production-код — ГОТОВО, весь workspace lib компилируется)
+
+- **entity.rs**: поле `Face.edges` + `Face::edge_by_id[_mut]` УДАЛЕНЫ;
+  конструкторы/`reversed` без поля. `Solid`: derive(Serialize) оставлен,
+  Deserialize — кастомный (см. serde).
+- **edge_store.rs** — ядро:
+  - `index_edges` → **`rebuild_store(working: Vec<Vec<Edge>>)`**: прямое
+    построение store из рабочих списков; свёрнут `propagate_edge_fixes`
+    (агрегация degenerate-OR/tolerance-MAX/первая-кривая — Pass 1r);
+    Pass 0 (сохранение store для re-shell-хирургии через edge_ids),
+    Pass 1a (перенос aliases/флагов ориентации для не-сканированных id),
+    Pass 1b (флаги reversed), Pass 2 (edge_ids = каноничны)
+  - `from_edges_only(shell, working)` = Solid::new + rebuild_store;
+    `from_shell_indexed`/`ensure_edge_store`/`compact_edge_mirrors`/
+    `sync_edge_mirrors`/`propagate_edge_fixes` — УДАЛЕНЫ
+  - `resolve_edge`/`face_edges`/`instance_edges`/`resolve_face_edges`/
+    `push_resolved_edge` — mirror-fallback'и удалены (store-only)
+  - `EdgeStore::iter_mut` добавлен (bulk store-мутации)
+  - **serde**: `mod solid_serde` — кастомный Deserialize для Solid:
+    FaceRepr захватывает legacy-ключ `edges` (#[serde(default)]),
+    при пустом payload-store → `rebuild_store(captured)`; старые файлы
+    грузятся без потерь. (Serialize остался derived — `edges` больше не
+    сериализуется.)
+- **builder**: make_rect_face/make_polygon_face/make_disk возвращают
+  `(Face, Vec<Edge>)`; все примитивы собираются через from_edges_only;
+  transform_solid = поверхности + store.transform_curves (без re-index)
+- **boolean (topology)**: `SplitFaceResult.working` (параллельно faces);
+  все split-функции заполняют working; `boolean_operation` держит
+  faces_a/faces_b + working_a/working_b (resolve → split-payload →
+  classification → result); `replace_matching_edges` ВОЗВРАЩАЕТ
+  Vec<Edge> (coedge-фикс на месте); терминалы → from_edges_only;
+  `handle_no_intersection` union-disjoint → working из обеих store'ов;
+  `index_boolean_result` — pass-through
+- **healing**: `StagedShell::from_shell(shell)` = пустые working;
+  `from_shell_store` — только edge_ids→instance_edges; `into_parts()`;
+  `push_face(face, edges)`; `merge_two_faces`/`create_fill_face` →
+  Option<(Face, Vec<Edge>)>; `heal_staged` → ((Shell, working), report);
+  терминал heal_solid = seed-store(clone) + rebuild_store(all_working);
+  `validate_and_fix` аналогично; standalone-контракты (tolerant_stitch,
+  detect_self_intersections, heal_shell) = пустые списки (no-op для
+  edge-проходов)
+- **mesh**: `StagedFace::from_parts`-only (from_mirrors удалён);
+  `stage_face_view` — replacement-only контракт; `triangulate_face[_with_cache]`
+  на standalone Face = full-surface (wire-less); certification — resolve
+- **step**: конвертер собирает outer/void working → `rebuild_store` одним
+  проходом; `apply_healing_to_face_data` — resolve через healed store;
+  7.2-терминал упрощён (index+compact умерли)
+- **core**: fillet/chamfer — edge_ids-скан + store-мутации (helper
+  `replace_face_edge`: edge_ids[pos] = new id + coedge-фикс + insert/remove);
+  make_shell — offset через instance_edge + свежие id в store;
+  transform/move/draft — store-first; `add_circular_hole_to_face(solid,
+  face_index, ...)`; `replace_edge_curve`/`reverse_edge(solid, ...)`;
+  core boolean (fallback) — working из обеих store'ов
+- **viewer/wasm/ffi/json**: ~40 сайтов vp_evaluate_graph → make_polygon_face
+  pairs + from_edges_only; projection-ветка — store.iter_mut; WIP-ветки
+  (Group/PolarArray/Offset/ArrayX) — working resolve из owner-store
+
+## Состояние тестов (НЕ ЗАКОНЧЕНО — работа следующей сессии)
+
+- **draper-topology lib tests**: edge_store.rs ГОТОВО (0 ошибок,
+  фикстуры `square_face()->(Face,Vec)` + `solid_of()->(Solid,report)`);
+  validator/validation — почти (box-фикстуры + shared-edge тесты);
+  healing.rs — **НЕ ЗАКОНЧЕНО (~28 ошибок)**: bulk-правки частично
+  применены, остаток ручной: `face_w` без decl (3970/3987/4417/4457),
+  tuple-несоответствия make_polygon_face (3371/3722/3989), `shell`
+  убран преждевременно (4092/4165/4223 — вернуть let), sync-хвост
+  (4290), мелкие edges-читы (4286/4358/4411-4415/4481+)
+- **mirror_free_validation_test.rs** (4 ошибки): index_edges → drop;
+  face.edges → resolve
+- **boolean.rs tests** (4): 5111-область, split_face(&face, &face.edges)
+  → working; index_edges у box/cyl_indexed
+- **draper-mesh tests** (НЕ НАЧАТО): edge_explicit_api_test (17),
+  triangulation_test (face+edges → with_edges), vertex_match,
+  edge_cache, boolean_subtract; 5.2-тесты переписать store-vs-store
+- **draper-step tests**: compacted_solids_test (face.edges assert),
+  exporter
+- **wasm/tests.rs**: mk_face fixture
+
+## API-изменения (шпаргалка для миграции тестов)
+
+| Было | Стало |
+|---|---|
+| `face.edges = vec![...]` | collect `Vec<Vec<Edge>>` → `from_edges_only(shell, working)` |
+| `solid.index_edges()` | уже born-indexed (solid_of делает rebuild_store) |
+| `solid.sync_edge_mirrors()` | ничего (store-мутация видна сразу) |
+| `solid.compact_edge_mirrors()` | ничего (store-only — дефолт) |
+| `ensure_edge_store()` | ничего (deserialize строит сам) |
+| `face.edge_by_id(id)` | `solid.resolve_face_edges(face).find(...)` или `edge_ids` |
+| `faces[N].edges[i]` | `solid.resolve_face_faces? → resolve_face_edges(&faces[N])[i]` |
+| `make_polygon_face(...)->Face` | `-> (Face, Vec<Edge>)` |
+| `make_disk/make_rect_face` | `-> (Face, Vec<Edge>)` |
+| `heal_staged(...) -> (Shell, R)` | `-> ((Shell, Vec<Vec<Edge>>), R)` |
+| `tolerant_stitch(shell, tol)` | no-op; `_with_edges(shell, &mut working, tol)` |
+| `triangulate_face(face)` standalone | full-surface (пустые edges) |
+| `add_circular_hole_to_face(face,..)` | `(solid, face_index, ..)` |
+| `Solid::from_shell_indexed(shell)` | `from_edges_only(shell, working)` |
+
+## Грабли этой сессии
+
+- regex-миграция тестов НЕ работает вслепую: blanket `X_edges→X_w`
+  переименовал и имена методов (`resolve_face_edges`→`resolve_face_w`);
+  split-по-запятым ломал вложенные вызовы. Чинить прицельно, малыми
+  скриптами с assert'ами.
+- `solid_of` возвращает `(Solid, EdgeDedupReport)` — report-ассерты
+  тестов сохраняются.
+- Тесты "un-indexed/mirror-fallback/stale-mirror/compaction" —
+  семантика УМЕРЛА структурно: переписаны или удалены с заметками.
+
+## Следующий шаг (сессия 2)
+
+1. Докрутить healing.rs tests (список выше), mirror_free, boolean tests
+2. cargo test -p draper-topology (225+31 → зелёные)
+3. draper-mesh: тесты на with_edges API, 5.2 → store-vs-store;
+   cargo test -p draper-mesh (268+65)
+4. draper-step: compacted/exporter тесты + STEP regression
+   (прогнать fixtures из tests/, сверить triangulate_solid watertight)
+5. wasm/json/core тесты
+6. Полный workspace check (lib+tests, кроме draper-testing), удалить
+   warning'и (unused imports EdgeStore/NurbsCurve, dead
+   mirror_matches_instance в healing.rs:771)
+7. merge wip → main, commit `refactor: C5 stage 7.6b — physical removal
+   of Face.edges`, push, worklog-финал
 ---
 
 # Sync note 2026-09-05 (пятая сессия суток)
@@ -3101,3 +3229,70 @@ resolve_face_edges дедупит seam-инстансы по id.
   + `32be2a8`) — физическое удаление `Face.edges`, libs зелёные,
   тесты: edge_store ГОТОВО, validator/validation почти, healing НЕ
   закончен. План «сессии 2» из worklog выше принят к исполнению.
+
+---
+
+# Worklog — C5 Stage 7.6b: СЕССИЯ 2 (финал) — все сьюты зелёные, merge в main
+
+**Дата:** 2026-09-05 (пятая сессия суток)
+**Ветка:** `wip/c5-7.6b-face-edges-removal` → **слита в main** (merge commit
+`refactor: C5 stage 7.6b — physical removal of Face.edges`)
+
+## Сделано (чек-лист «сессии 2» выполнен полностью)
+
+1. **draper-topology 250✅** (219 lib + 31 integration):
+   - healing.rs (28 ошибок → 0): staged from_shell_store для tolerance/
+     mark_degenerate проходов, merge-тесты → heal_solid, idempotence =
+     второй heal no-op, rederive ищет aliased-инстансы в WIRE COEDGES
+     (edge_ids каноничны и не несут инстансы)
+   - seam double-use / shared-instance фикстуры: граням нужны WIRES —
+     wire-less resolution канонична и не выражает мультипликативность
+   - PRODUCTION-БАГ №1: `extrude_polyline` терял боковые грани из shell
+     (working 6 vs faces 2) — `all_faces.extend(side_faces)` восстановлен
+   - PRODUCTION-БАГ №2: `make_proper_box` (validation-фикстура) строился
+     через Solid::new без store → Euler/connectivity проходы молча скипались
+   - mirror_free_validation_test: premise структурно мертва → переписан
+     как store-first детерминизм / сохранность store / clone fidelity
+2. **draper-mesh 330✅** (268 lib + 62 integration):
+   - edge_explicit_api_test переписан store-vs-store: per-face
+     bit-identity (solid_face_with_cache vs with_edges(resolve)),
+     canonical face_edges + ptr-identity, replacement-contract staging,
+     clone end-state, full-pipeline репликация bit-identical + watertight
+   - edge_cache/vertex_match/boolean_subtract диагностика через
+     resolve_face_edges
+3. **draper-step 173✅** (127 lib release + 46 integration):
+   - exporter: store single-source контракт (мутации store всплывают;
+     curve читается start_point; детерминизм)
+   - compacted_solids_test: store-first arrival + watertight +
+     value-neutral bit-identity vs ручная store-репликация пайплайна
+   - примеры (boundary_edges_dump/transmission_bench/fallback_face_probe)
+     переведены на store-first чтения
+   - 3.05.078: единичный фейл при полном параллельном прогоне оказался
+     load-флейком (BREP time-limit face-skip) — cross-check на worktree
+     main + повторные прогоны зелёные
+4. **draper-core 77✅ / json 13✅ / wasm 30✅ / ffi 10✅ / geometry 374✅**:
+   - core: unit_cube через from_edges_only, fillet/chamfer edge-id из
+     resolve, 5-арг hole-API, STEP-style shared-edge через store-каноникал
+   - PRODUCTION-БАГ №3: fillet/chamfer-грань теряла 2 из 4 boundary-слотов
+     (offset-рёбра не попадали в edge_ids) — восстановлены все 4 слота
+   - wasm: `mod tests` НИКОГДА не резолвился (#[path = "tests.rs"] фикс),
+     manifold-finder считает по каноникалам, shared-cube через
+     from_edges_only — первый зелёный прогон 30 тестов
+5. **Workspace check 0 errors** (lib+tests, кроме draper-testing),
+   warnings почищены (dead mirror_matches_instance, test-local
+   EdgeStore/NurbsCurve imports)
+
+## Итог C5 Stage 7.6b
+
+`Face.edges` физически удалён из кодовой базы. Единственное представление
+граничных рёбер — канонический `EdgeStore` (+ `face.edge_ids` слоты);
+сериализация store-only с legacy-загрузкой зеркальных payload'ов;
+все born-indexed конструкции через `from_edges_only`/`rebuild_store`.
+
+## Коммиты сессии (на wip, слиты в main)
+
+- `4c74b17` wip(topology): 250 green
+- `0987d38` wip(mesh): 268+62 green
+- `cd94efc` wip(step): 127+46 green
+- `2b131e8` wip(consumers): core/json/wasm + warnings
+- merge: `refactor: C5 stage 7.6b — physical removal of Face.edges`

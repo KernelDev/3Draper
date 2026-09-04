@@ -1009,8 +1009,7 @@ impl JsonApi {
                 _ => draper_geometry::Direction3d::Z,
             }
         };
-        let face = draper_core::operations::get_face_mut(s, face_index).unwrap();
-        match draper_core::operations::add_circular_hole_to_face(face, center, radius, face_normal) {
+        match draper_core::operations::add_circular_hole_to_face(s, face_index, center, radius, face_normal) {
             Ok(_) => {
                 self.mark_dirty();
                 ApiResponse::ok_msg(&format!("Added hole on face {} of solid {}", face_index, solid_index))

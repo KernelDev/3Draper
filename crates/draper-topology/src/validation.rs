@@ -83,12 +83,9 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
     //
     // C5 Stage 6: detection runs over store-resolved instance-faithful
     // edges and marking goes through the canonical `EdgeStore` entry
-    // (`store.get_mut`) + `sync_edge_mirrors` — the `heal_solid` pattern —
-    // instead of per-face mirror mutation. Works on mirror-free (Stage 5
-    // end-state) solids, and a shared degenerate edge is flagged once
-    // canonically for every incident face.
-    solid.index_edges();
-
+    // (`store.get_mut`) — C5 7.6b: the store is the only holder of edge
+    // geometry, no mirror sync pass exists. A shared degenerate edge is
+    // flagged once canonically for every incident face.
     let mut degenerate_ids: Vec<TopoId> = Vec::new();
     if let Some(ref shell) = solid.outer_shell {
         for face in &shell.faces {
@@ -123,7 +120,6 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
             }
         }
     }
-    let _synced = solid.sync_edge_mirrors();
 
     errors
 }
@@ -198,18 +194,10 @@ pub fn validate_shell(shell: &Shell) -> Vec<ValidationError> {
 pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
     let mut fixes = Vec::new();
 
-    // C5 Stage 4: degeneracy marking goes through the canonical EdgeStore
-    // entry (`store.get_mut`) instead of per-face mirror mutation, then
-    // `sync_edge_mirrors` pushes the flag onto every incident face's twin.
-    // Pre-Stage-4, a degenerate edge shared by two faces was only flagged in
-    // the face whose copy was scanned — the twin stayed stale.
-    //
-    // `index_edges` (not `ensure_edge_store`) guarantees the store is fresh
-    // w.r.t. the current mirrors, so the canonical mutation pass cannot miss
-    // an instance — even if the caller mutated the solid after a previous
-    // indexing.
-    solid.index_edges();
-
+    // C5 Stage 4 → 7.6b: degeneracy marking goes through the canonical
+    // EdgeStore entry (`store.get_mut`) — the store is always the fresh,
+    // single source of edge truth (no mirror drift is possible), so no
+    // re-index is needed before the canonical mutation pass.
     // Detection pass (C5 Stage 6: store-resolved instance-faithful edges —
     // coedge instance ids for wired faces, canonical ids for wire-less ones;
     // works with mirrors cleared entirely). The ids feed the canonical
@@ -251,8 +239,6 @@ pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
             }
         }
     }
-    // Propagation pass: every incident mirror sees the flag.
-    let _synced = solid.sync_edge_mirrors();
     if degenerate_count > 0 {
         fixes.push(format!("Marked {} degenerate edges", degenerate_count));
     }
@@ -1543,13 +1529,14 @@ mod tests {
             CoEdge::new(id01, false),
         ];
         let mut bottom_wire = Wire::new(bottom_coedges);
+        let mut bottom_w: Vec<Edge> = Vec::new();
         bottom_wire.closed = true;
         let plane_bottom = Plane::from_origin_and_normal(
             Point3d::new(0.0, 0.0, -hz),
             Direction3d::new(0.0, 0.0, -1.0).unwrap(),
         );
-        let mut bottom_face = Face::new(Surface::Plane(plane_bottom), bottom_wire);
-        bottom_face.edges = vec![e01.clone(), e12.clone(), e23.clone(), e30.clone()];
+        let bottom_face = Face::new(Surface::Plane(plane_bottom), bottom_wire);
+        bottom_w = vec![e01.clone(), e12.clone(), e23.clone(), e30.clone()];
 
         // Top face (+Z normal): traversal v4→v5→v6→v7→v4
         //   e45(fwd: v4→v5), e56(fwd: v5→v6), e67(fwd: v6→v7), e74(fwd: v7→v4)
@@ -1560,13 +1547,14 @@ mod tests {
             CoEdge::new(id74, true),
         ];
         let mut top_wire = Wire::new(top_coedges);
+        let mut top_w: Vec<Edge> = Vec::new();
         top_wire.closed = true;
         let plane_top = Plane::from_origin_and_normal(
             Point3d::new(0.0, 0.0, hz),
             Direction3d::Z,
         );
-        let mut top_face = Face::new(Surface::Plane(plane_top), top_wire);
-        top_face.edges = vec![e45.clone(), e56.clone(), e67.clone(), e74.clone()];
+        let top_face = Face::new(Surface::Plane(plane_top), top_wire);
+        top_w = vec![e45.clone(), e56.clone(), e67.clone(), e74.clone()];
 
         // Front face (-Y normal): traversal v0→v1→v5→v4→v0
         //   e01(fwd: v0→v1), e15(fwd: v1→v5), e45(rev: v5→v4), e04(rev: v4→v0)
@@ -1577,13 +1565,14 @@ mod tests {
             CoEdge::new(id04, false),
         ];
         let mut front_wire = Wire::new(front_coedges);
+        let mut front_w: Vec<Edge> = Vec::new();
         front_wire.closed = true;
         let plane_front = Plane::from_origin_and_normal(
             Point3d::new(0.0, -hy, 0.0),
             Direction3d::new(0.0, -1.0, 0.0).unwrap(),
         );
-        let mut front_face = Face::new(Surface::Plane(plane_front), front_wire);
-        front_face.edges = vec![e01.clone(), e15.clone(), e45.clone(), e04.clone()];
+        let front_face = Face::new(Surface::Plane(plane_front), front_wire);
+        front_w = vec![e01.clone(), e15.clone(), e45.clone(), e04.clone()];
 
         // Back face (+Y normal): traversal v2→v3→v7→v6→v2
         //   e23(fwd: v2→v3), e37(fwd: v3→v7), e67(rev: v7→v6), e26(rev: v6→v2)
@@ -1594,13 +1583,14 @@ mod tests {
             CoEdge::new(id26, false),
         ];
         let mut back_wire = Wire::new(back_coedges);
+        let mut back_w: Vec<Edge> = Vec::new();
         back_wire.closed = true;
         let plane_back = Plane::from_origin_and_normal(
             Point3d::new(0.0, hy, 0.0),
             Direction3d::Y,
         );
-        let mut back_face = Face::new(Surface::Plane(plane_back), back_wire);
-        back_face.edges = vec![e23.clone(), e37.clone(), e67.clone(), e26.clone()];
+        let back_face = Face::new(Surface::Plane(plane_back), back_wire);
+        back_w = vec![e23.clone(), e37.clone(), e67.clone(), e26.clone()];
 
         // Left face (-X normal): traversal v0→v4→v7→v3→v0
         //   e04(fwd: v0→v4), e74(rev: v4→v7... wait, e74 forward is v7→v4, reversed is v4→v7)
@@ -1617,13 +1607,14 @@ mod tests {
             CoEdge::new(id30, true),   // v3→v0
         ];
         let mut left_wire = Wire::new(left_coedges);
+        let mut left_w: Vec<Edge> = Vec::new();
         left_wire.closed = true;
         let plane_left = Plane::from_origin_and_normal(
             Point3d::new(-hx, 0.0, 0.0),
             Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
         );
-        let mut left_face = Face::new(Surface::Plane(plane_left), left_wire);
-        left_face.edges = vec![e04.clone(), e74.clone(), e37.clone(), e30.clone()];
+        let left_face = Face::new(Surface::Plane(plane_left), left_wire);
+        left_w = vec![e04.clone(), e74.clone(), e37.clone(), e30.clone()];
 
         // Right face (+X normal): traversal v1→v2→v6→v5→v1
         //   e12(fwd: v1→v2), e26(fwd: v2→v6), e56(rev: v6→v5), e15(rev: v5→v1)
@@ -1634,16 +1625,19 @@ mod tests {
             CoEdge::new(id15, false),  // v5→v1
         ];
         let mut right_wire = Wire::new(right_coedges);
+        let mut right_w: Vec<Edge> = Vec::new();
         right_wire.closed = true;
         let plane_right = Plane::from_origin_and_normal(
             Point3d::new(hx, 0.0, 0.0),
             Direction3d::X,
         );
-        let mut right_face = Face::new(Surface::Plane(plane_right), right_wire);
-        right_face.edges = vec![e12.clone(), e26.clone(), e56.clone(), e15.clone()];
+        let right_face = Face::new(Surface::Plane(plane_right), right_wire);
+        right_w = vec![e12.clone(), e26.clone(), e56.clone(), e15.clone()];
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, front_face, back_face, left_face, right_face]);
-        Solid::new(shell)
+        // 7.6b: born-indexed construction — the working lists ride the
+        // solid so validation passes (Euler, connectivity) see the edges.
+        Solid::from_edges_only(shell, vec![bottom_w, top_w, front_w, back_w, left_w, right_w])
     }
 
     // ---- Test 1: Valid box should have no errors ----
@@ -1735,11 +1729,11 @@ mod tests {
 
         let plane = Plane::from_three_points(&p0, &p1, &p2)
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = vec![e0, e1, e_gap];
+        let face = Face::new(Surface::Plane(plane), wire);
+        let face_w = vec![e0, e1, e_gap];
 
         let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let solid = Solid::from_edges_only(shell, vec![face_w]);
 
         let config = TopologyValidationConfig {
             check_wire_closure: true,
@@ -1967,11 +1961,11 @@ mod tests {
 
         let plane = Plane::from_three_points(&p0, &p1, &p2)
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = vec![e0, e1, e2];
+        let face = Face::new(Surface::Plane(plane), wire);
+        let face_w = vec![e0, e1, e2];
 
         let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let solid = Solid::from_edges_only(shell, vec![face_w]);
 
         let config = TopologyValidationConfig {
             check_wire_closure: true,
@@ -2025,11 +2019,15 @@ mod tests {
         let box_solid = make_proper_box();
         let shell = box_solid.outer_shell.as_ref().unwrap();
 
-        // Remove one face
+        // Remove one face (7.6b: the remaining faces' working lists ride
+        // the SOLID — a bare Solid::new carries no store and the Euler
+        // pass would silently skip).
         let mut faces = shell.faces.clone();
         faces.pop();
+        let working: Vec<Vec<Edge>> =
+            faces.iter().map(|f| box_solid.resolve_face_edges(f)).collect();
         let broken_shell = Shell::new_closed(faces);
-        let solid = Solid::new(broken_shell);
+        let solid = Solid::from_edges_only(broken_shell, working);
 
         let config = TopologyValidationConfig {
             check_euler_characteristic: true,

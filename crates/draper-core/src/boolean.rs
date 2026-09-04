@@ -50,15 +50,19 @@ pub type BooleanResult = Result<Solid, String>;
 /// they become internal to the union.
 pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces` — each kept face's
+    // boundary resolved from its OWNING solid's store.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid
-            // (per-id mirror fallback keeps split results complete).
+            // C5 Stage 6.4 → 7.6b: store-first boundary reads of the OWNER
+            // solid.
             let face_edges = a.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -68,6 +72,7 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -77,10 +82,9 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result — cloned faces carry orphaned
-    // edge_ids from the INPUT store; re-indexing re-derives identity from
-    // the mirrors so every store-first consumer sees a live store.
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first — the working lists rebuild the unified
+    // store.
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Boolean subtraction: subtract solid B from solid A.
@@ -91,14 +95,17 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
 /// inner walls of the cavity left by the subtraction.
 pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces`.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            // C5 7.6b: store-first boundary reads of the OWNER solid.
             let face_edges = a.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -108,6 +115,7 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.reversed());
+                working.push(face_edges);
             }
         }
     }
@@ -117,8 +125,8 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result (see boolean_union).
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first (see boolean_union).
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Boolean intersection: keep only the overlap of A and B.
@@ -133,14 +141,17 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
 /// where all faces of A are on the boundary of B and vice versa.
 pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces`.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are INSIDE B (or on boundary).
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            // C5 7.6b: store-first boundary reads of the OWNER solid.
             let face_edges = a.resolve_face_edges(face);
             if face_inside_or_on_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -150,6 +161,7 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if face_inside_or_on_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -159,8 +171,8 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result (see boolean_union).
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first (see boolean_union).
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Like `face_inside_solid`, but also returns true for faces whose
@@ -322,12 +334,14 @@ mod tests {
     fn unit_cube_at(origin: (f64, f64, f64)) -> Solid {
         let (ox, oy, oz) = origin;
         let mut faces = Vec::with_capacity(6);
+        let mut working: Vec<Vec<Edge>> = Vec::with_capacity(6);
 
         // Helper: build a planar face with 4 line edges, INCLUDING the
         // outer_wire (which is required by triangulation_solid_for_queries
-        // and other topology queries).
+        // and other topology queries). C5 7.6b: returns (face, working) —
+        // the boundary edges ride the solid's store, not face mirrors.
         let make_face = |origin: Point3d, normal: Direction3d, u_dir: Direction3d, v_dir: Direction3d,
-                         p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d| -> Face {
+                         p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d| -> (Face, Vec<Edge>) {
             let surface = Surface::Plane(Plane {
                 origin, u_dir, v_dir, normal,
             });
@@ -344,9 +358,8 @@ mod tests {
                 draper_topology::CoEdge::new(e3.id, true),
             ];
             let wire = draper_topology::Wire::new(coedges);
-            let mut f = Face::new(surface, wire);
-            f.edges = vec![e0, e1, e2, e3];
-            f
+            let f = Face::new(surface, wire);
+            (f, vec![e0, e1, e2, e3])
         };
 
         // 8 corner points
@@ -360,44 +373,57 @@ mod tests {
         let p011 = Point3d::new(ox, oy + 1.0, oz + 1.0);
 
         // Bottom (z=oz, normal -Z)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(0.0, 0.0, -1.0).unwrap(),
             Direction3d::X, Direction3d::Y,
             p000, p100, p110, p010,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Top (z=oz+1, normal +Z)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p001, Direction3d::Z,
             Direction3d::X, Direction3d::Y,
             p001, p101, p111, p011,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Front (y=oy, normal -Y)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(0.0, -1.0, 0.0).unwrap(),
             Direction3d::X, Direction3d::Z,
             p000, p100, p101, p001,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Back (y=oy+1, normal +Y)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p010, Direction3d::Y,
             Direction3d::X, Direction3d::Z,
             p010, p110, p111, p011,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Left (x=ox, normal -X)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
             Direction3d::Y, Direction3d::Z,
             p000, p010, p011, p001,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Right (x=ox+1, normal +X)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p100, Direction3d::X,
             Direction3d::Y, Direction3d::Z,
             p100, p110, p111, p101,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
 
         let shell = Shell::new_closed(faces);
-        Solid::new(shell)
+        // 7.6b: born-indexed construction.
+        Solid::from_edges_only(shell, working)
     }
 
     #[test]
@@ -479,11 +505,10 @@ mod tests {
         let a_raw = unit_cube_at((0.0, 0.0, 0.0));
         let b_raw = unit_cube_at((0.5, 0.5, 0.5));
 
-        let mut a_idx = a_raw.clone();
-        a_idx.index_edges();
-        let mut b_idx = b_raw.clone();
-        b_idx.index_edges();
-        assert!(!a_idx.edge_store.is_empty(), "index_edges populated the store");
+        // (7.6b: born-indexed — the store is populated by construction.)
+        let a_idx = a_raw.clone();
+        let b_idx = b_raw.clone();
+        assert!(!a_idx.edge_store.is_empty(), "construction populated the store");
 
         let r_raw = boolean_subtract(&a_raw, &b_raw).expect("raw subtract ok");
         let r_idx = boolean_subtract(&a_idx, &b_idx).expect("indexed subtract ok");

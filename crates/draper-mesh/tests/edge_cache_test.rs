@@ -23,7 +23,8 @@ fn test_edge_cache_consistency() {
     let faces = result.faces();
     for face in &faces {
         // Check if this face has a Circle edge with TopoId(123) or TopoId(124)
-        for edge in &face.edges {
+        // (C5 7.6b: store-resolved instance edges — no Face.edges mirrors)
+        for edge in &result.resolve_face_edges(face) {
             let id_str = format!("{:?}", edge.id);
             let is_cyl = matches!(face.surface, Some(draper_geometry::Surface::Cylinder(_)));
             let is_plane = matches!(face.surface, Some(draper_geometry::Surface::Plane(_)));
@@ -62,14 +63,14 @@ fn test_edge_cache_consistency() {
     // Check if the cylinder face has an outer_wire with coedges
     if let Some(cyl) = cyl_face {
         eprintln!("\nCylinder face:");
-        eprintln!("  edges: {}", cyl.edges.len());
+        eprintln!("  edges: {}", result.resolve_face_edges(cyl).len());
         if let Some(ref wire) = cyl.outer_wire {
             eprintln!("  outer_wire coedges: {}", wire.coedges.len());
             for (i, coedge) in wire.coedges.iter().enumerate() {
                 eprintln!("    coedge[{}]: edge={:?} forward={}", i, coedge.edge, coedge.forward);
             }
         }
-        for (i, edge) in cyl.edges.iter().enumerate() {
+        for (i, edge) in result.resolve_face_edges(cyl).iter().enumerate() {
             eprintln!("  edge[{}]: id={:?}", i, edge.id);
         }
     }

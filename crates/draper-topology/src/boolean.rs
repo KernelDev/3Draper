@@ -2524,6 +2524,10 @@ fn solve_3x3(a: &[[f64; 3]; 3], b: &[f64; 3]) -> Option<[f64; 3]> {
 pub struct SplitFaceResult {
     /// The sub-faces created by the split.
     pub faces: Vec<Face>,
+    /// Per-face boundary edge lists, parallel to `faces` (C5 7.6b): the
+    /// construction payload `Solid::from_edges_only` / `rebuild_store`
+    /// consumes — the split faces' wires reference these edge ids.
+    pub working: Vec<Vec<Edge>>,
 }
 
 /// Split a face along an intersection curve.
@@ -2541,6 +2545,7 @@ pub fn split_face(
     if intersection_points.len() < 2 {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -2550,6 +2555,7 @@ pub fn split_face(
         None => {
             return Ok(SplitFaceResult {
                 faces: vec![face.clone()],
+                working: vec![face_edges.to_vec()],
             });
         }
     };
@@ -2591,6 +2597,7 @@ fn split_planar_face(
     if boundary.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -2614,6 +2621,7 @@ fn split_planar_face(
         // Intersection curve doesn't cross the boundary — can't split
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -2624,8 +2632,9 @@ fn split_planar_face(
         &entry_exit,
     );
 
-    // Convert back to 3D faces
+    // Convert back to 3D faces (7.6b: face + boundary edges pairs)
     let mut result_faces = Vec::new();
+    let mut result_working = Vec::new();
 
     for poly_2d in &[poly_a, poly_b] {
         if poly_2d.len() < 3 {
@@ -2637,19 +2646,22 @@ fn split_planar_face(
             .map(|(u, v)| plane.point_at(*u, *v))
             .collect();
 
-        if let Some(new_face) = ShapeBuilder::make_polygon_face(&points_3d) {
+        if let Some((new_face, new_edges)) = ShapeBuilder::make_polygon_face(&points_3d) {
             result_faces.push(new_face);
+            result_working.push(new_edges);
         }
     }
 
     if result_faces.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
     Ok(SplitFaceResult {
         faces: result_faces,
+        working: result_working,
     })
 }
 
@@ -2787,6 +2799,7 @@ fn split_general_face(
     if intersection_points.len() < 2 {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -2809,8 +2822,11 @@ fn split_general_face(
                 degenerate: false,
                 step_entity_id: None,
             };
-            f.edges.push(int_edge);
-            return Ok(SplitFaceResult { faces: vec![f] });
+            // 7.6b: the unsplit face keeps its resolved boundary PLUS the
+            // intersection edge as construction payload.
+            let mut working = face_edges.to_vec();
+            working.push(int_edge);
+            return Ok(SplitFaceResult { faces: vec![f], working: vec![working] });
         }
     };
 
@@ -2841,8 +2857,11 @@ fn split_general_face(
             degenerate: false,
             step_entity_id: None,
         };
-        f.edges.push(int_edge);
-        return Ok(SplitFaceResult { faces: vec![f] });
+        // 7.6b: the unsplit face keeps its resolved boundary PLUS the
+        // intersection edge as construction payload.
+        let mut working = face_edges.to_vec();
+        working.push(int_edge);
+        return Ok(SplitFaceResult { faces: vec![f], working: vec![working] });
     }
 
     // Collect the face's boundary points (3D + UV).
@@ -2852,7 +2871,7 @@ fn split_general_face(
         .collect();
     if boundary_3d.len() < 3 {
         // Not enough boundary to split.
-        return Ok(SplitFaceResult { faces: vec![face.clone()] });
+        return Ok(SplitFaceResult { faces: vec![face.clone()], working: vec![face_edges.to_vec()] });
     }
     let boundary_uv: Vec<((f64, f64), usize)> = boundary_3d.iter().enumerate()
         .map(|(i, p)| {
@@ -2885,7 +2904,7 @@ fn split_general_face(
 
     // If both endpoints map to the same boundary point, we can't split.
     if best_start_idx == best_end_idx {
-        return Ok(SplitFaceResult { faces: vec![face.clone()] });
+        return Ok(SplitFaceResult { faces: vec![face.clone()], working: vec![face_edges.to_vec()] });
     }
 
     // Create the shared edge along the intersection curve.
@@ -2953,13 +2972,13 @@ fn split_general_face(
     }
     wire_b_edges.push(shared_edge.clone());
 
-    // Build face A
+    // Build face A (7.6b: faces + working lists — the wire coedges
+    // reference the working edges' ids)
     let coedges_a: Vec<CoEdge> = wire_a_edges.iter()
         .map(|e| CoEdge::new(e.id, true))
         .collect();
     let wire_a = Wire::new(coedges_a);
     let mut face_a = Face::new(surface.clone(), wire_a);
-    face_a.edges = wire_a_edges;
     face_a.forward = face.forward;
     face_a.tolerance = face.tolerance;
 
@@ -2969,11 +2988,10 @@ fn split_general_face(
         .collect();
     let wire_b = Wire::new(coedges_b);
     let mut face_b = Face::new(surface.clone(), wire_b);
-    face_b.edges = wire_b_edges;
     face_b.forward = face.forward;
     face_b.tolerance = face.tolerance;
 
-    Ok(SplitFaceResult { faces: vec![face_a, face_b] })
+    Ok(SplitFaceResult { faces: vec![face_a, face_b], working: vec![wire_a_edges, wire_b_edges] })
 }
 
 /// Create a polyline NURBS curve through a set of points.
@@ -3131,6 +3149,20 @@ pub fn boolean_operation(
     // the same edge ID in their wires → edge cache produces shared vertices.
     let mut faces_a: Vec<Face> = shell_a.faces.clone();
     let mut faces_b: Vec<Face> = shell_b.faces.clone();
+    // C5 7.6b: per-face working edge lists, parallel to faces_a/faces_b —
+    // the resolved boundary of every input face (store-first), replaced by
+    // the split payload when a face is split. Classification and the
+    // result assembly consume these lists.
+    let mut working_a: Vec<Vec<Edge>> = shell_a
+        .faces
+        .iter()
+        .map(|f| solid_a.resolve_face_edges(f))
+        .collect();
+    let mut working_b: Vec<Vec<Edge>> = shell_b
+        .faces
+        .iter()
+        .map(|f| solid_b.resolve_face_edges(f))
+        .collect();
 
     // Track which faces were split and need re-classification
     let mut a_split_map: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
@@ -3162,10 +3194,10 @@ pub fn boolean_operation(
             // Face A uses pcurve_a (PCurve on surface A)
             all_pcurves.push(si.pcurve_a.clone());
         }
-        // C5 Stage 6.2: split readers consume the resolved instance-faithful
-        // edge list (store-first for input-solid faces; split pieces carry
-        // fresh ids and resolve via their construction mirrors).
-        let face_edges = solid_a.resolve_face_edges(&faces_a[face_a_idx]);
+        // C5 7.6b: split readers consume the working list (the resolved
+        // boundary of the input face, or a prior split's payload — fresh
+        // ids resolve via their working lists).
+        let face_edges = working_a[face_a_idx].clone();
         let split_result = split_face_with_shared_edges(
             &faces_a[face_a_idx],
             &all_points,
@@ -3178,15 +3210,20 @@ pub fn boolean_operation(
             let mut new_indices = Vec::new();
             let first_idx = face_a_idx;
             faces_a[first_idx] = split_result.faces[0].clone();
+            working_a[first_idx] = split_result.working[0].clone();
             new_indices.push(first_idx);
-            for extra_face in split_result.faces.iter().skip(1) {
+            for (extra_face, extra_edges) in
+                split_result.faces.iter().zip(split_result.working.iter()).skip(1)
+            {
                 let new_idx = faces_a.len();
                 faces_a.push(extra_face.clone());
+                working_a.push(extra_edges.clone());
                 new_indices.push(new_idx);
             }
             a_split_map.insert(face_a_idx, new_indices);
         } else if split_result.faces.len() == 1 {
             faces_a[face_a_idx] = split_result.faces[0].clone();
+            working_a[face_a_idx] = split_result.working[0].clone();
         }
     }
 
@@ -3205,7 +3242,7 @@ pub fn boolean_operation(
             // Face B uses pcurve_b (PCurve on surface B)
             all_pcurves.push(si.pcurve_b.clone());
         }
-        let face_edges = solid_b.resolve_face_edges(&faces_b[face_b_idx]);
+        let face_edges = working_b[face_b_idx].clone();
         let split_result = split_face_with_shared_edges(
             &faces_b[face_b_idx],
             &all_points,
@@ -3218,31 +3255,38 @@ pub fn boolean_operation(
             let mut new_indices = Vec::new();
             let first_idx = face_b_idx;
             faces_b[first_idx] = split_result.faces[0].clone();
+            working_b[first_idx] = split_result.working[0].clone();
             new_indices.push(first_idx);
-            for extra_face in split_result.faces.iter().skip(1) {
+            for (extra_face, extra_edges) in
+                split_result.faces.iter().zip(split_result.working.iter()).skip(1)
+            {
                 let new_idx = faces_b.len();
                 faces_b.push(extra_face.clone());
+                working_b.push(extra_edges.clone());
                 new_indices.push(new_idx);
             }
             b_split_map.insert(face_b_idx, new_indices);
         } else if split_result.faces.len() == 1 {
             faces_b[face_b_idx] = split_result.faces[0].clone();
+            working_b[face_b_idx] = split_result.working[0].clone();
         }
     }
 
     // Step 4: Classify each face piece using MULTIPLE sample points
     // (not just centroid) for more robust inside/outside determination.
     let mut result_faces: Vec<Face> = Vec::new();
+    let mut result_working: Vec<Vec<Edge>> = Vec::new();
 
-    for face in &faces_a {
-        // C5 Stage 6.2: classification reads store-first edges of the
-        // face's OWNING solid (clones keep the source key space).
-        let face_edges = solid_a.resolve_face_edges(face);
-        let classification = classify_face_robust(face, solid_b, tol_ctx, &face_edges);
+    for (fi, face) in faces_a.iter().enumerate() {
+        // C5 7.6b: classification reads the working list (the resolved
+        // boundary of the input face, or the split payload).
+        let face_edges = &working_a[fi];
+        let classification = classify_face_robust(face, solid_b, tol_ctx, face_edges);
         match op {
             BooleanOp::Union | BooleanOp::Subtract => {
                 if classification != FaceClassification::Inside {
                     result_faces.push(face.clone());
+                    result_working.push(working_a[fi].clone());
                 }
             }
             BooleanOp::Intersect => {
@@ -3250,18 +3294,20 @@ pub fn boolean_operation(
                     || classification == FaceClassification::OnBoundary
                 {
                     result_faces.push(face.clone());
+                    result_working.push(working_a[fi].clone());
                 }
             }
         }
     }
 
-    for face in &faces_b {
-        let face_edges = solid_b.resolve_face_edges(face);
-        let classification = classify_face_robust(face, solid_a, tol_ctx, &face_edges);
+    for (fi, face) in faces_b.iter().enumerate() {
+        let face_edges = &working_b[fi];
+        let classification = classify_face_robust(face, solid_a, tol_ctx, face_edges);
         match op {
             BooleanOp::Union => {
                 if classification != FaceClassification::Inside {
                     result_faces.push(face.clone());
+                    result_working.push(working_b[fi].clone());
                 }
             }
             BooleanOp::Subtract => {
@@ -3278,12 +3324,14 @@ pub fn boolean_operation(
                     // cylinder cap disks that are fully embedded in A) are
                     // INTERNAL faces that close the cavity — they must be
                     // discarded to produce a proper through-hole.
-                    let was_split = was_face_split(&face_edges, &shared_intersections);
+                    let was_split = was_face_split(face_edges, &shared_intersections);
                     if was_split {
                         let mut reversed = face.reversed();
                         reversed.forward = !reversed.forward;
-                        replace_matching_edges(&mut reversed, &shared_intersections, &face_edges);
+                        let new_edges =
+                            replace_matching_edges(&mut reversed, &shared_intersections, face_edges);
                         result_faces.push(reversed);
+                        result_working.push(new_edges);
                     }
                 }
             }
@@ -3292,8 +3340,10 @@ pub fn boolean_operation(
                     || classification == FaceClassification::OnBoundary
                 {
                     let mut cloned = face.clone();
-                    replace_matching_edges(&mut cloned, &shared_intersections, &face_edges);
+                    let new_edges =
+                        replace_matching_edges(&mut cloned, &shared_intersections, face_edges);
                     result_faces.push(cloned);
+                    result_working.push(new_edges);
                 }
             }
         }
@@ -3307,10 +3357,11 @@ pub fn boolean_operation(
 
     // Step 5: Connect faces into a new closed shell
     let shell = Shell::new_closed(result_faces);
-    // C5 Stage 7.1: born-indexed result — result faces carry fresh split
-    // edge ids; indexing unifies their identity (shared split edges,
-    // seam double-use) so the mesh-level edge cache dedups discretizations.
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first result — the split faces' working lists
+    // rebuild the store (shared split edges, seam double-use unify by
+    // geometric identity) so the mesh-level edge cache dedups
+    // discretizations exactly as the old mirror indexing did.
+    Ok(Solid::from_edges_only(shell, result_working))
 }
 
 /// Split a face with multiple shared edges (for faces intersected by multiple curves).
@@ -3328,6 +3379,7 @@ fn split_face_with_shared_edges(
     if intersection_points.len() < 2 || shared_edges.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -3336,6 +3388,7 @@ fn split_face_with_shared_edges(
         None => {
             return Ok(SplitFaceResult {
                 faces: vec![face.clone()],
+                working: vec![face_edges.to_vec()],
             });
         }
     };
@@ -3354,14 +3407,18 @@ fn split_face_with_shared_edges(
         _ => {
             // For other non-planar faces: add each shared edge as a hole
             let mut face_with_holes = face.clone();
+            // 7.6b: holes reference shared-edge ids; geometry rides the
+            // working list (resolved boundary + shared edges).
+            let mut working = face_edges.to_vec();
             for se in shared_edges {
                 let coedge = CoEdge::new(se.id, true);
                 let wire = Wire::new(vec![coedge]);
                 face_with_holes.add_hole(wire);
-                face_with_holes.edges.push(se.clone());
+                working.push(se.clone());
             }
             Ok(SplitFaceResult {
                 faces: vec![face_with_holes],
+                working: vec![working],
             })
         }
     }
@@ -3448,14 +3505,16 @@ fn split_cylinder_face_multi_shared(
     if distinct_v.len() < 2 {
         // Can't split — add shared edges as holes
         let mut face_with_holes = face.clone();
+        let mut working = face_edges.to_vec();
         for se in shared_edges {
             let coedge = CoEdge::new(se.id, true);
             let wire = Wire::new(vec![coedge]);
             face_with_holes.add_hole(wire);
-            face_with_holes.edges.push(se.clone());
+            working.push(se.clone());
         }
         return Ok(SplitFaceResult {
             faces: vec![face_with_holes],
+            working: vec![working],
         });
     }
 
@@ -3507,10 +3566,10 @@ fn split_cylinder_face_multi_shared(
         Point2d::new(2.0 * PI, v2),
     )));
     let inner_wire = Wire::new(vec![inner_coedge_bottom, inner_coedge_top]);
-    let mut inner_face = Face::new(Surface::Cylinder(cyl.clone()), inner_wire);
-    inner_face.edges = vec![edge_v1.clone(), edge_v2.clone()];
+    let inner_face = Face::new(Surface::Cylinder(cyl.clone()), inner_wire);
 
     let mut all_faces = vec![inner_face];
+    let mut all_working: Vec<Vec<Edge>> = vec![vec![edge_v1.clone(), edge_v2.clone()]];
 
     // Bottom outer band (v_min to v1)
     if v1 > v_min + tol {
@@ -3530,9 +3589,9 @@ fn split_cylinder_face_multi_shared(
             Point2d::new(0.0, v1),
         )));
         let wire = Wire::new(vec![coedge_bottom, coedge_top]);
-        let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
-        f.edges = vec![bottom_edge, edge_v1.clone()];
+        let f = Face::new(Surface::Cylinder(cyl.clone()), wire);
         all_faces.push(f);
+        all_working.push(vec![bottom_edge, edge_v1.clone()]);
     }
 
     // Top outer band (v2 to v_max)
@@ -3553,13 +3612,14 @@ fn split_cylinder_face_multi_shared(
             Point2d::new(2.0 * PI, v_max),
         )));
         let wire = Wire::new(vec![coedge_bottom, coedge_top]);
-        let mut f = Face::new(Surface::Cylinder(cyl.clone()), wire);
-        f.edges = vec![edge_v2.clone(), top_edge];
+        let f = Face::new(Surface::Cylinder(cyl.clone()), wire);
         all_faces.push(f);
+        all_working.push(vec![edge_v2.clone(), top_edge]);
     }
 
     Ok(SplitFaceResult {
         faces: all_faces,
+        working: all_working,
     })
 }
 
@@ -3596,6 +3656,7 @@ fn split_planar_face_shared(
     if boundary.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -3625,6 +3686,7 @@ fn split_planar_face_shared(
             // Intersection doesn't touch this face — no split needed
             return Ok(SplitFaceResult {
                 faces: vec![face.clone()],
+                working: vec![face_edges.to_vec()],
             });
         }
 
@@ -3636,11 +3698,14 @@ fn split_planar_face_shared(
         coedge.curve_2d = pcurve.clone();
         let wire = Wire::new(vec![coedge]);
         face_with_hole.add_hole(wire);
-        face_with_hole.edges.push(shared_edge.clone());
         // C5 Stage 4: canonical ref from birth (parallel to the mirror).
         face_with_hole.edge_ids.push(shared_edge.id);
+        // 7.6b: the hole's shared-edge geometry rides the working list.
+        let mut working = face_edges.to_vec();
+        working.push(shared_edge.clone());
         return Ok(SplitFaceResult {
             faces: vec![face_with_hole],
+            working: vec![working],
         });
     }
 
@@ -3654,6 +3719,7 @@ fn split_planar_face_shared(
     if !any_inside {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
@@ -3678,6 +3744,7 @@ fn split_planar_face_shared(
     // edge are MERGED into a single edge — this avoids micro-segments
     // in the B-Rep that would create spurious edges in the viewport.
     let mut result_faces = Vec::new();
+    let mut result_working = Vec::new();
 
     // C5 Stage 4: split-edge identity lives in a local EdgeStore instead
     // of an ad-hoc `HashMap<u64, Edge>` (worklog TODO). The canonical Edge
@@ -3821,8 +3888,9 @@ fn split_planar_face_shared(
                 edge_ids.push(shared_edge.id);
                 coedges.push(CoEdge::new(shared_edge.id, true));
             } else if let Some(orig_id) = seg.orig_edge_id {
-                // Find the original edge and reuse it
-                if let Some(orig_edge) = face.edge_by_id(orig_id) {
+                // Find the original edge and reuse it (7.6b: resolved
+                // instance-faithful list, not the mirror field)
+                if let Some(orig_edge) = face_edges.iter().find(|e| e.id == orig_id) {
                     edges.push(orig_edge.clone());
                     edge_ids.push(orig_edge.id);
                     coedges.push(CoEdge::new(orig_edge.id, true));
@@ -3862,19 +3930,21 @@ fn split_planar_face_shared(
         let wire = Wire::new(coedges);
         let surface = Surface::Plane(plane.clone());
         let mut new_face = Face::new(surface, wire);
-        new_face.edges = edges;
         new_face.edge_ids = edge_ids;
         result_faces.push(new_face);
+        result_working.push(edges);
     }
 
     if result_faces.is_empty() {
         return Ok(SplitFaceResult {
             faces: vec![face.clone()],
+            working: vec![face_edges.to_vec()],
         });
     }
 
     Ok(SplitFaceResult {
         faces: result_faces,
+        working: result_working,
     })
 }
 
@@ -3926,11 +3996,12 @@ fn replace_matching_edges(
     face: &mut Face,
     shared_intersections: &[SharedIntersection],
     face_edges: &[Edge],
-) {
-    // C5 Stage 6.2: the matching pass runs on the RESOLVED instance-faithful
-    // edge list (store-first), builds the new mirror list, and writes it
-    // back once. The mirrors of result faces are construction data — this
-    // function remains their sanctioned writer.
+) -> Vec<Edge> {
+    // C5 7.6b: the matching pass runs on the RESOLVED instance-faithful
+    // edge list (store-first), builds the RESULT face's construction
+    // working list, fixes the wire coedges to reference the replacement
+    // ids, and RETURNS the list (the caller hands it to
+    // `Solid::from_edges_only`).
     let mut new_edges: Vec<Edge> = Vec::with_capacity(face_edges.len());
     for edge in face_edges {
         let mut replacement = edge.clone();
@@ -3961,29 +4032,26 @@ fn replace_matching_edges(
         }
         new_edges.push(replacement);
     }
-    face.edges = new_edges;
 
     // Also update the outer_wire coedges to match the new edge IDs
     if let Some(ref mut wire) = face.outer_wire {
         for coedge in &mut wire.coedges {
-            // Find the edge in face.edges that matches this coedge's edge ID
-            // If the coedge's edge ID is no longer in face.edges, find a replacement
+            // Find the edge in the new list that matches this coedge's id;
+            // if the id is gone (replaced), find a replacement by matching
+            // geometry (a Circle at the same position).
             let coedge_id = coedge.edge;
-            let found = face.edges.iter().any(|e| e.id == coedge_id);
+            let found = new_edges.iter().any(|e| e.id == coedge_id);
             if !found {
-                // This coedge's edge was replaced — find the replacement
-                // by matching geometry (check which edge in face.edges is a Circle
-                // at the same position)
-                for (idx, e) in face.edges.iter().enumerate() {
+                for e in new_edges.iter() {
                     if matches!(e.curve, Some(Curve3d::Circle(_))) {
                         coedge.edge = e.id;
                         break;
                     }
-                    let _ = idx;
                 }
             }
         }
     }
+    new_edges
 }
 
 fn classify_face_robust(
@@ -4122,20 +4190,30 @@ fn handle_no_intersection(
             }
             // Disjoint solids → combine shells
             let mut all_faces = Vec::new();
+            let mut all_working = Vec::new();
             if let Some(ref shell) = solid_a.outer_shell {
-                all_faces.extend(shell.faces.clone());
+                for face in &shell.faces {
+                    all_faces.push(face.clone());
+                    // 7.6b: resolve each face's boundary from its OWNING
+                    // solid's store (the key spaces must not mix before
+                    // the unified rebuild).
+                    all_working.push(solid_a.resolve_face_edges(face));
+                }
             }
             if let Some(ref shell) = solid_b.outer_shell {
-                all_faces.extend(shell.faces.clone());
+                for face in &shell.faces {
+                    all_faces.push(face.clone());
+                    all_working.push(solid_b.resolve_face_edges(face));
+                }
             }
             if all_faces.is_empty() {
                 return Err(BooleanError::EmptyResult("Both solids are empty".to_string()));
             }
             // Create a compound-like solid with both shells
             let shell = Shell::new_closed(all_faces);
-            // C5 Stage 7.1: born-indexed result — cloned faces carry
-            // orphaned edge_ids from the input stores.
-            Ok(Solid::from_shell_indexed(shell))
+            // C5 7.6b: born store-first result — the working lists (resolved
+            // from both input stores) rebuild the unified store.
+            Ok(Solid::from_edges_only(shell, all_working))
         }
         BooleanOp::Subtract => {
             if a_in_b {
@@ -4248,16 +4326,12 @@ pub fn boolean_intersect(
 
 /// C5 Stage 3: give boolean results a unified edge store.
 ///
-/// Boolean split faces share geometrically identical split edges (the
-/// `shared_split_edges` map inside `split_face` clones one `Edge` into both
-/// result faces). `index_edges` unifies their identity through geometric
-/// dedup, so healing and the mesh edge-discretization cache observe ONE
-/// canonical edge per shared segment instead of independent copies.
+/// C5 7.6b: boolean results are BORN store-first (`Solid::from_edges_only`
+/// at every assembly terminal — the split working lists rebuild the store
+/// with geometric dedup), so the post-hoc indexing wrapper is a
+/// pass-through kept for call-shape stability.
 fn index_boolean_result(result: BooleanResult<Solid>) -> BooleanResult<Solid> {
-    result.map(|mut solid| {
-        solid.index_edges();
-        solid
-    })
+    result
 }
 
 // ============================================================
@@ -4545,7 +4619,7 @@ mod tests {
         let tol_ctx = ToleranceContext::new();
 
         // Create a simple square face
-        let face = ShapeBuilder::make_polygon_face(&[
+        let (face, face_w) = ShapeBuilder::make_polygon_face(&[
             Point3d::new(-5.0, -5.0, 0.0),
             Point3d::new(5.0, -5.0, 0.0),
             Point3d::new(5.0, 5.0, 0.0),
@@ -4560,7 +4634,7 @@ mod tests {
             Point3d::new(5.0, 0.0, 0.0),
         ];
 
-        let result = split_face(&face, &face.edges, &intersection, &tol_ctx);
+        let result = split_face(&face, &face_w, &intersection, &tol_ctx);
         assert!(result.is_ok(), "Face splitting should succeed");
     }
 
@@ -5330,10 +5404,12 @@ mod tests {
         let box_plain = ShapeBuilder::make_box(100.0, 80.0, 50.0);
         let cyl_plain = ShapeBuilder::make_cylinder(20.0, 100.0);
 
-        let mut box_indexed = box_plain.clone();
-        box_indexed.index_edges();
-        let mut cyl_indexed = cyl_plain.clone();
-        cyl_indexed.index_edges();
+        // C5 7.6b: builder solids are born-indexed — both operands carry
+        // their EdgeStore from construction, so the historical
+        // "plain vs. indexed" distinction has collapsed; the clone still
+        // exercises the store-preservation path of rebuild_store.
+        let box_indexed = box_plain.clone();
+        let cyl_indexed = cyl_plain.clone();
 
         let r_plain = boolean_subtract(&box_plain, &cyl_plain, &tol)
             .expect("plain subtract must succeed");
