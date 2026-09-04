@@ -52,7 +52,7 @@ pub fn make_block_with_hole() -> Solid {
     ];
 
     // Helper to make a rectangular face
-    fn make_rect(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> Face {
+    fn make_rect(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> (Face, Vec<Edge>) {
         let e0 = Edge::new_line(p0, p1);
         let e1 = Edge::new_line(p1, p2);
         let e2 = Edge::new_line(p2, p3);
@@ -74,9 +74,8 @@ pub fn make_block_with_hole() -> Solid {
         let plane = Plane::from_three_points(&p0, &p1, &p2)
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
 
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = vec![e0, e1, e2, e3];
-        face
+        let face = Face::new(Surface::Plane(plane), wire);
+        (face, vec![e0, e1, e2, e3])
     }
 
     // Top face with hole
@@ -115,7 +114,8 @@ pub fn make_block_with_hole() -> Solid {
         top_outer_wire,
     );
     top_face.add_hole(top_hole_wire);
-    top_face.edges = {
+    // (7.6b: boundary edges ride the solid's store.)
+    let top_face_w = {
         let mut e = top_outer_edges;
         e.push(top_hole_edge);
         e
@@ -156,14 +156,14 @@ pub fn make_block_with_hole() -> Solid {
         bottom_outer_wire,
     );
     bottom_face.add_hole(bottom_hole_wire);
-    bottom_face.edges = {
+    let bottom_face_w = {
         let mut e = bottom_outer_edges;
         e.push(bottom_hole_edge);
         e
     };
 
-    // 4 side faces
-    let side_faces = vec![
+    // 4 side faces (7.6b: pairs carry the working lists)
+    let side_pairs = vec![
         make_rect(v[0], v[1], v[5], v[4]), // Front
         make_rect(v[3], v[7], v[6], v[2]), // Back
         make_rect(v[0], v[4], v[7], v[3]), // Left
@@ -201,14 +201,18 @@ pub fn make_block_with_hole() -> Solid {
 
     let cyl_coedge_bottom = CoEdge::new(cyl_edge_bottom.id, true);
     let cyl_wire = Wire::new(vec![cyl_coedge_bottom]);
-    let mut cyl_face = Face::new(Surface::Cylinder(cyl_surface), cyl_wire);
-    cyl_face.edges = vec![cyl_edge_bottom, cyl_edge_top];
+    let cyl_face = Face::new(Surface::Cylinder(cyl_surface), cyl_wire);
+    let cyl_face_w = vec![cyl_edge_bottom, cyl_edge_top];
 
     let mut all_faces: Vec<Face> = vec![bottom_face, top_face, cyl_face];
-    all_faces.extend(side_faces);
+    let mut all_working: Vec<Vec<Edge>> = vec![bottom_face_w, top_face_w, cyl_face_w];
+    for (f, w) in side_pairs {
+        all_faces.push(f);
+        all_working.push(w);
+    }
 
     let shell = Shell::new_closed(all_faces);
-    Solid::new(shell)
+    Solid::from_edges_only(shell, all_working)
 }
 
 #[cfg(test)]

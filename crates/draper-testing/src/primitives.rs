@@ -26,8 +26,9 @@ pub fn make_unit_cube() -> Solid {
         Point3d::new(0.0, 1.0, 1.0), // 7
     ];
 
-    // Build 6 faces using ShapeBuilder-like logic
-    let faces = vec![
+    // Build 6 faces using ShapeBuilder-like logic (7.6b: pairs carry the
+    // per-face boundary working lists).
+    let pairs = vec![
         make_rect_face(v[0], v[1], v[2], v[3]), // Bottom (z=0)
         make_rect_face(v[4], v[7], v[6], v[5]), // Top (z=1)
         make_rect_face(v[0], v[4], v[5], v[1]), // Front (y=0)
@@ -35,9 +36,11 @@ pub fn make_unit_cube() -> Solid {
         make_rect_face(v[0], v[3], v[7], v[4]), // Left (x=0)
         make_rect_face(v[1], v[5], v[6], v[2]), // Right (x=1)
     ];
+    let faces: Vec<Face> = pairs.iter().map(|(f, _)| Face::clone(f)).collect();
+    let working: Vec<Vec<Edge>> = pairs.into_iter().map(|(_, w)| w).collect();
 
     let shell = Shell::new_closed(faces);
-    Solid::new(shell)
+    Solid::from_edges_only(shell, working)
 }
 
 /// Create a unit sphere with specified resolution.
@@ -69,7 +72,9 @@ pub fn make_unit_torus(major_r: f64, minor_r: f64) -> Solid {
 }
 
 /// Helper: create a rectangular face from 4 corner points.
-fn make_rect_face(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> Face {
+/// C5 7.6b: returns (face, boundary edges) — the edges ride the solid's
+/// store via `from_edges_only`, not face mirrors.
+fn make_rect_face(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> (Face, Vec<Edge>) {
     let e0 = Edge::new_line(p0, p1);
     let e1 = Edge::new_line(p1, p2);
     let e2 = Edge::new_line(p2, p3);
@@ -91,9 +96,8 @@ fn make_rect_face(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> Face {
     let plane = Plane::from_three_points(&p0, &p1, &p2)
         .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
 
-    let mut face = Face::new(Surface::Plane(plane), wire);
-    face.edges = vec![e0, e1, e2, e3];
-    face
+    let face = Face::new(Surface::Plane(plane), wire);
+    (face, vec![e0, e1, e2, e3])
 }
 
 #[cfg(test)]
@@ -114,7 +118,12 @@ mod tests {
         // 6 faces × 4 edges each = 24 edge uses
         // Each edge is shared by 2 faces → 12 unique edges
         // 8 unique vertices
-        let total_edge_uses: usize = faces.iter().map(|f| f.edges.len()).sum();
+        // (7.6b: store-only — count resolved boundary slots.)
+        let total_edge_uses: usize = cube
+            .faces()
+            .iter()
+            .map(|f| cube.resolve_face_edges(f).len())
+            .sum();
         assert_eq!(total_edge_uses, 24, "Unit cube should have 24 edge uses (6 faces × 4 edges)");
     }
 
