@@ -3013,3 +3013,73 @@ from_mirrors умрёт, staged-пути уже store-first.
 
 - `refactor(mesh): C5 stage 7.6a — StagedFace explicit-edge pipeline vehicle`
   запушен в origin/main
+
+# Worklog — C5 Stage 7.6b-1: UV-pass edge_cache → store-first
+
+**Дата:** 2026-09-04 (продолжение)
+**Baseline:** commit `c820dbf` (после 7.6a)
+
+## Fix
+
+`pre_populate_for_solid_full` (parallel-путь): второй UV-pass искал рёбра
+через `face.edge_by_id` (зеркала). Теперь per-face резолв через
+`Solid::resolve_face_edges` (wire-coedge-keyed instances) в HashMap —
+compacted (mirror-free) солиды резолвятся идентично mirror-bearing.
+Seam-кейс безопасен: resolve дедупит по id, оба coedge'а шва находят одно
+и то же ребро, guard `uv_per_face.contains_key` одинаков с legacy.
+
+## Верификация
+
+- draper-mesh: **268 + 65 ✅** (полный сьют)
+- draper-topology/core/subd/json — зелёные (не тронуты)
+
+## ROADMAP 7.6b (физическое удаление `Face.edges` — следующая сессия)
+
+Dry-run удаления поля: **64 ошибки в draper-topology** (boolean 14,
+edge_store 20, builder 10, healing 10, operations 7, entity 2 —
+edge_by_id×2) + ~27 step + ~22 core + ~10 mesh-мостов + serde.
+
+**Фаза 1 — topology (по кластерам):**
+- entity.rs: удалить `pub edges` + `edge_by_id[_mut]`; Face::new/
+  new_surface_only/reversed — без поля
+- builder (10): собирать per-face списки рёбер → `Solid::from_edges_only`
+  (7.5b); `make_polygon_face`/`make_disk` меняют контракт (return
+  `(Face, Vec<Edge>)` или caller-side сборка)
+- edge_store (20): index/sync/compact/propagate — mirror-scan passes
+  умирают, Pass 0/1a (mirror-free preservation) остаются;
+  `resolve_face_edges` fallback `face.edges.clone()` умирает
+- healing (10): take/put мосты (7.4b StagedShell уже store-first),
+  терминальные записи зеркал умирают
+- boolean (14) / operations (7): 6.x store-first читатели готовы;
+  терминальные записи умирают
+
+**Фаза 2 — mesh:**
+- `StagedFace::from_mirrors` умирает → `triangulate_face(face)` =
+  full-surface-only (wire-less); либо deprecate
+- `stage_face_view` parallel-contract умирает (replacement-only);
+  5.2-тесты (mirror-vs-explicit bit-identity) переписываются на
+  store-vs-store сравнение
+- `pre_populate_for_solid` первые проходы: `solid.face_edges` fallback
+  умирает (store-only)
+
+**Фаза 3 — step:** конвертер (27 записей зеркал) → рабочие списки рёбер
+→ `from_edges_only` (7.2 уже даёт canonical STEP payload)
+
+**Фаза 4 — core:** ~22 сайта (6.x/7.2 читатели готовы, записи умирают)
+
+**Фаза 5 — serde:** поле уходит из Face-формата; legacy-payload'ы с
+`edges` без store: Face-level custom Deserialize, транзиентно захватывает
+`edges` → Solid-level from_edges_only; edge_store::serde_impl уже
+флэт-сериализует store; round-trip-тесты расширить
+
+**Фаза 6:** workspace check + полные сьюты + STEP regression
+
+**Грабли (из 7.6a):** deref-coercion `&StagedFace`→`&Face` (внутреннее
+лицо с пустым полем!) — компилятор молчит, ловится только тестами;
+param_range reversed-instance = КОДИРОВКА, не дефект (58f324a);
+resolve_face_edges дедупит seam-инстансы по id.
+
+## Коммит
+
+- `refactor(mesh): C5 stage 7.6b-1 — store-first UV pass in edge cache`
+  запушен в origin/main

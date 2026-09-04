@@ -1812,12 +1812,21 @@ impl EdgeDiscretizationCache {
         self.register_edge_store_aliases(&solid.edge_store);
 
         // Second pass: compute UVs for each face-edge pair (needed for parallel)
+        // C5 Stage 7.6: edge lookups are store-first — the face's edges are
+        // resolved through `Solid::resolve_face_edges` (wire-coedge-keyed
+        // instances), so compacted (mirror-free) solids resolve identically
+        // to mirror-bearing ones.
         for face in solid.faces() {
             if let Some(ref surface) = face.surface {
+                let resolved: HashMap<TopoId, Edge> = solid
+                    .resolve_face_edges(face)
+                    .into_iter()
+                    .map(|e| (e.id, e))
+                    .collect();
                 // Outer wire
                 if let Some(ref wire) = face.outer_wire {
                     for coedge in &wire.coedges {
-                        let edge = face.edge_by_id(coedge.edge);
+                        let edge = resolved.get(&coedge.edge);
                         if let Some(edge) = edge {
                             if edge.degenerate { continue; }
                             let key = EdgeCacheKey::from_edge(edge);
@@ -1836,7 +1845,7 @@ impl EdgeDiscretizationCache {
                 // Inner wires
                 for wire in &face.inner_wires {
                     for coedge in &wire.coedges {
-                        let edge = face.edge_by_id(coedge.edge);
+                        let edge = resolved.get(&coedge.edge);
                         if let Some(edge) = edge {
                             if edge.degenerate { continue; }
                             let key = EdgeCacheKey::from_edge(edge);
