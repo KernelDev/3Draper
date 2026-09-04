@@ -305,31 +305,13 @@ pub struct Face {
     pub forward: bool,
     /// Tolerance.
     pub tolerance: f64,
-    /// Edge geometry stored directly in the face for triangulation.
-    /// Maps edge ID → Edge object so triangulation can sample edge curves.
-    ///
-    /// C5 note: this per-face mirror duplicates shared edges between adjacent
-    /// faces (different TopoIds for the same topological edge). Stage 4
-    /// (2026-08-31) demoted it to DERIVED data: the owning solid's
-    /// [`EdgeStore`](crate::edge_store::EdgeStore) is the source of truth,
-    /// and `Solid::sync_edge_mirrors` rebuilds these entries from the
-    /// canonical edges. New code should READ via
-    /// `Solid::face_edges` / `Solid::resolve_edge` (or `Face::edge_by_id`
-    /// for standalone faces) and MUTATE via `edge_store.get_mut` + sync —
-    /// direct writes to this field only stay valid for face-construction
-    /// paths followed by `Solid::index_edges`.
-    ///
-    /// C5 Stage 7.1 (2026-09-03): native construction is born-indexed
-    /// (`Solid::from_shell_indexed` populates the store + `edge_ids` from
-    /// assembly), and [`Solid::compact_edge_mirrors`] can clear this field
-    /// entirely where the store answers every boundary read (store-only
-    /// solids — the serialized end-state form). Physical removal of the
-    /// field remains the final C5 stage.
-    pub edges: Vec<Edge>,
     /// Canonical edge references into the owning Solid's `EdgeStore` (C5).
-    /// Populated by `Solid::index_edges` — a shared edge carries the SAME
-    /// id in every incident face. Falls back to `edges[i].id` semantics when
-    /// the face has not been indexed yet.
+    /// Populated by store-first construction (`Solid::from_edges_only`) —
+    /// a shared edge carries the SAME canonical id in every incident face.
+    /// Instance-faithful edge geometry resolves through
+    /// [`Solid::resolve_face_edges`] / [`Solid::instance_edges`] at read
+    /// time; a `Face` alone carries NO edge geometry (C5 Stage 7.6b — the
+    /// per-face `edges` mirror field is physically removed).
     #[cfg_attr(feature = "serde", serde(default))]
     pub edge_ids: Vec<TopoId>,
 }
@@ -344,7 +326,6 @@ impl Face {
             inner_wires: Vec::new(),
             forward: true,
             tolerance: 1e-6,
-            edges: Vec::new(),
             edge_ids: Vec::new(),
         }
     }
@@ -358,7 +339,6 @@ impl Face {
             inner_wires: Vec::new(),
             forward: true,
             tolerance: 1e-6,
-            edges: Vec::new(),
             edge_ids: Vec::new(),
         }
     }
@@ -366,24 +346,6 @@ impl Face {
     /// Add an inner wire (hole).
     pub fn add_hole(&mut self, wire: Wire) {
         self.inner_wires.push(wire);
-    }
-
-    /// Look up one edge instance of this face by its id (C5 Stage 4).
-    ///
-    /// This encapsulates the mirror lookup
-    /// `self.edges.iter().find(|e| e.id == id)` that was previously written
-    /// out at ~30 call sites. Prefer [`crate::entity::Solid::resolve_edge`]
-    /// when the owning solid is at hand — it follows store aliases, so a
-    /// shared edge resolves identically from both incident faces; this
-    /// mirror-level helper remains correct for standalone (un-indexed)
-    /// faces and coedge id lookups.
-    pub fn edge_by_id(&self, id: TopoId) -> Option<&Edge> {
-        self.edges.iter().find(|e| e.id == id)
-    }
-
-    /// Mutable mirror lookup — see [`Face::edge_by_id`].
-    pub fn edge_by_id_mut(&mut self, id: TopoId) -> Option<&mut Edge> {
-        self.edges.iter_mut().find(|e| e.id == id)
     }
 
     /// Reversed face (normal points inward).
@@ -395,7 +357,6 @@ impl Face {
             inner_wires: self.inner_wires.clone(),
             forward: !self.forward,
             tolerance: self.tolerance,
-            edges: self.edges.clone(),
             edge_ids: self.edge_ids.clone(),
         }
     }
@@ -459,7 +420,7 @@ impl Shell {
 
 /// A solid — a closed shell plus zero or more void shells.
 #[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Solid {
     pub id: TopoId,
     /// Outer shell.
@@ -473,13 +434,17 @@ pub struct Solid {
     /// Canonical edge registry (C5 Stage 2) — single source of truth for
     /// edge identity. Deduplicated by `step_entity_id`; alias mappings let
     /// any instance TopoId resolve to its canonical shared edge.
-    /// Rebuilt lazily via `Solid::ensure_edge_store` / `Solid::index_edges`.
     ///
-    /// C5 Stage 5.1 (2026-08-31): the store is now SERIALIZED (flat format,
+    /// C5 Stage 5.1 (2026-08-31): the store is SERIALIZED (flat format,
     /// see `edge_store::serde_impl`) so shared-edge identity survives
-    /// round-trips. Legacy payloads without this field deserialize to an
-    /// empty store — call `Solid::ensure_edge_store` to rebuild it from
-    /// the per-face mirrors.
+    /// round-trips.
+    ///
+    /// C5 7.6b: the store is the ONLY edge holder (the per-face mirror
+    /// field is physically removed). LEGACY payloads (pre-7.6b) carry
+    /// per-face `edges` arrays instead — the custom `Deserialize`
+    /// implementation (see `edge_store::solid_serde`) captures them
+    /// transiently and rebuilds the store via `Solid::rebuild_store`, so
+    /// old files load with full edge identity.
     #[cfg_attr(feature = "serde", serde(default))]
     pub edge_store: crate::edge_store::EdgeStore,
 }

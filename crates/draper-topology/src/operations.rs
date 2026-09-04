@@ -77,7 +77,7 @@ fn compute_bounding_box(solid: &Solid) -> (Point3d, Point3d) {
             }
         }
         // Also sample the surface if there are no edges
-        if face.edges.is_empty() {
+        if solid.face_edges(face).is_empty() {
             if let Some(ref surface) = face.surface {
                 let (u_min, u_max, v_min, v_max) = surface_param_range_approx(surface);
                 let n = 10;
@@ -151,9 +151,10 @@ fn find_adjacent_faces(solid: &Solid, edge_id: TopoId) -> Vec<usize> {
             }
         }
         // Also check if the edge id appears in the face's edge list
+        // (canonical references — wire-less faces)
         if !found {
-            for edge in &face.edges {
-                if canonical_of(edge.id) == wanted {
+            for &eid in &face.edge_ids {
+                if canonical_of(eid) == wanted {
                     found = true;
                     break;
                 }
@@ -316,11 +317,12 @@ fn make_chamfer_wedge(
     let side3 = ShapeBuilder::make_polygon_face(&[a1, b1, b2, a2]); // Chamfer face
 
     let mut faces = Vec::new();
-    if let Some(f) = tri1 { faces.push(f); }
-    if let Some(f) = tri2 { faces.push(f); }
-    if let Some(f) = side1 { faces.push(f); }
-    if let Some(f) = side2 { faces.push(f); }
-    if let Some(f) = side3 { faces.push(f); }
+    let mut working = Vec::new();
+    if let Some((f, w)) = tri1 { faces.push(f); working.push(w); }
+    if let Some((f, w)) = tri2 { faces.push(f); working.push(w); }
+    if let Some((f, w)) = side1 { faces.push(f); working.push(w); }
+    if let Some((f, w)) = side2 { faces.push(f); working.push(w); }
+    if let Some((f, w)) = side3 { faces.push(f); working.push(w); }
 
     // Need at least 4 faces for a valid closed shell (triangular prism has 5)
     if faces.len() < 4 {
@@ -333,7 +335,7 @@ fn make_chamfer_wedge(
     }
 
     let shell = Shell::new_closed(faces);
-    Solid::new(shell)
+    Solid::from_edges_only(shell, working)
 }
 
 // ============================================================
@@ -601,146 +603,45 @@ pub fn draft_face(solid: &Solid, face_index: usize, angle_degrees: f64) -> Resul
     // Create a modified copy of the solid
     let mut result = solid.clone();
 
-    // Modify the target face's edge vertices
-    if let Some(ref mut shell) = result.outer_shell {
-        // Find the face in the outer shell
-        let mut face_count = 0;
-        for face in &mut shell.faces {
-            // Check if this face corresponds to the target face index
-            // We need to count faces in inner_shells too
-            if face_count == face_index {
-                // Modify edge vertices
-                for edge in &mut face.edges {
-                    if let Some(ref mut curve) = edge.curve {
-                        match curve {
-                            Curve3d::Line(ref line) => {
-                                // Offset both start and end points
-                                let offset_origin = offset_point_for_draft(
-                                    &line.origin, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                );
-                                // Direction stays the same for line edges
-                                *curve = Curve3d::Line(Line::new(offset_origin, line.direction));
-                            }
-                            Curve3d::Circle(ref mut circle) => {
-                                // For circles, offset the center
-                                let offset_center = offset_point_for_draft(
-                                    &circle.center, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                );
-                                circle.center = offset_center;
-                            }
-                            Curve3d::Ellipse(ref mut ellipse) => {
-                                let offset_center = offset_point_for_draft(
-                                    &ellipse.center, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                );
-                                ellipse.center = offset_center;
-                            }
-                            _ => {
-                                // For other curves (NURBS, Arc), offset control points
-                                if let Curve3d::Nurbs(ref mut nurbs) = curve {
-                                    for cp in &mut nurbs.control_points {
-                                        *cp = offset_point_for_draft(
-                                            cp, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Also update the surface if planar
-                if let Some(ref mut surface) = face.surface {
-                    match surface {
-                        Surface::Plane(ref mut plane) => {
-                            // Offset the plane origin
-                            plane.origin = offset_point_for_draft(
-                                &plane.origin, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                            );
-                            // Tilt the plane normal
-                            let new_normal_vec = Vec3d::new(
-                                plane.normal.x + tan_angle * horiz_dir.x,
-                                plane.normal.y + tan_angle * horiz_dir.y,
-                                plane.normal.z + tan_angle * horiz_dir.z,
-                            );
-                            if let Some(new_normal) = new_normal_vec.normalize() {
-                                plane.normal = new_normal;
-                                // Recompute u_dir and v_dir
-                                let new_u = if new_normal.is_parallel_to(&Direction3d::Y) {
-                                    new_normal.cross(&Direction3d::X)
-                                } else {
-                                    new_normal.cross(&Direction3d::Y)
-                                };
-                                let new_v = new_normal.cross(&new_u);
-                                plane.u_dir = new_u;
-                                plane.v_dir = new_v;
-                            }
-                        }
-                        _ => {
-                            // For non-planar surfaces, the edge modifications
-                            // are sufficient for a simplified implementation
-                        }
-                    }
-                }
-
-                break;
+    // C5 7.6b: the target face's edge curves are mutated through the
+    // canonical store (the only holder of edge geometry) — the change is
+    // visible from every incident face. Face SURFACE tilt stays a
+    // per-face edit (faces own their surfaces).
+    let target_edge_ids: Vec<TopoId> = solid
+        .face_edges(&faces[face_index])
+        .iter()
+        .map(|e| e.id)
+        .collect();
+    for id in target_edge_ids {
+        if let Some(edge) = result.edge_store.get_mut(id) {
+            if let Some(ref mut curve) = edge.curve {
+                draft_curve_in_place(curve, &horiz_dir, &draft_dir, tan_angle, ref_height);
             }
-            face_count += 1;
         }
+    }
 
-        // If the face wasn't found in the outer shell, check inner shells
-        if face_count < face_index {
-            let remaining = face_index - face_count;
-            let mut inner_count = 0;
-            for shell in &mut result.inner_shells {
-                for face in &mut shell.faces {
-                    if inner_count == remaining {
-                        // Apply the same modification
-                        for edge in &mut face.edges {
-                            if let Some(ref mut curve) = edge.curve {
-                                match curve {
-                                    Curve3d::Line(ref line) => {
-                                        let offset_origin = offset_point_for_draft(
-                                            &line.origin, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                        );
-                                        *curve = Curve3d::Line(Line::new(offset_origin, line.direction));
-                                    }
-                                    Curve3d::Circle(ref mut circle) => {
-                                        let offset_center = offset_point_for_draft(
-                                            &circle.center, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                        );
-                                        circle.center = offset_center;
-                                    }
-                                    _ => {}
-                                }
-                            }
+    // Tilt the target face's surface when planar (outer or inner shell —
+    // the flattened face index decides).
+    {
+        let mut shells: Vec<&mut crate::entity::Shell> = Vec::new();
+        if let Some(ref mut shell) = result.outer_shell {
+            shells.push(shell);
+        }
+        for shell in &mut result.inner_shells {
+            shells.push(shell);
+        }
+        let mut face_count = 0usize;
+        'outer: for shell in shells {
+            for face in &mut shell.faces {
+                if face_count == face_index {
+                    if let Some(ref mut surface) = face.surface {
+                        if let Surface::Plane(ref mut plane) = surface {
+                            tilt_plane_for_draft(plane, &horiz_dir, &draft_dir, tan_angle, ref_height);
                         }
-                        if let Some(ref mut surface) = face.surface {
-                            if let Surface::Plane(ref mut plane) = surface {
-                                plane.origin = offset_point_for_draft(
-                                    &plane.origin, &horiz_dir, &draft_dir, tan_angle, ref_height,
-                                );
-                                let new_normal_vec = Vec3d::new(
-                                    plane.normal.x + tan_angle * horiz_dir.x,
-                                    plane.normal.y + tan_angle * horiz_dir.y,
-                                    plane.normal.z + tan_angle * horiz_dir.z,
-                                );
-                                if let Some(new_normal) = new_normal_vec.normalize() {
-                                    plane.normal = new_normal;
-                                    let new_u = if new_normal.is_parallel_to(&Direction3d::Y) {
-                                        new_normal.cross(&Direction3d::X)
-                                    } else {
-                                        new_normal.cross(&Direction3d::Y)
-                                    };
-                                    let new_v = new_normal.cross(&new_u);
-                                    plane.u_dir = new_u;
-                                    plane.v_dir = new_v;
-                                }
-                            }
-                        }
-                        break;
                     }
-                    inner_count += 1;
+                    break 'outer;
                 }
+                face_count += 1;
             }
         }
     }
@@ -773,6 +674,81 @@ fn offset_point_for_draft(
         point.y + offset * horiz_dir.y,
         point.z + offset * horiz_dir.z,
     )
+}
+
+/// Apply the draft offset to one edge curve in place (C5 7.6b store-side
+/// mutation helper — Line/Circle/Ellipse get analytic offsets, NURBS
+/// control points are offset individually).
+fn draft_curve_in_place(
+    curve: &mut Curve3d,
+    horiz_dir: &Direction3d,
+    draft_dir: &Direction3d,
+    tan_angle: f64,
+    ref_height: f64,
+) {
+    match curve {
+        Curve3d::Line(ref mut line) => {
+            // Offset both start and end points
+            let offset_origin = offset_point_for_draft(
+                &line.origin, horiz_dir, draft_dir, tan_angle, ref_height,
+            );
+            // Direction stays the same for line edges
+            *curve = Curve3d::Line(Line::new(offset_origin, line.direction));
+        }
+        Curve3d::Circle(ref mut circle) => {
+            // For circles, offset the center
+            let offset_center = offset_point_for_draft(
+                &circle.center, horiz_dir, draft_dir, tan_angle, ref_height,
+            );
+            circle.center = offset_center;
+        }
+        Curve3d::Ellipse(ref mut ellipse) => {
+            let offset_center = offset_point_for_draft(
+                &ellipse.center, horiz_dir, draft_dir, tan_angle, ref_height,
+            );
+            ellipse.center = offset_center;
+        }
+        _ => {
+            // For other curves (NURBS, Arc), offset control points
+            if let Curve3d::Nurbs(ref mut nurbs) = curve {
+                for cp in &mut nurbs.control_points {
+                    *cp = offset_point_for_draft(
+                        cp, horiz_dir, draft_dir, tan_angle, ref_height,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Tilt a planar surface for the draft angle (origin offset + normal
+/// recomposition with u/v axes rebuilt).
+fn tilt_plane_for_draft(
+    plane: &mut Plane,
+    horiz_dir: &Direction3d,
+    draft_dir: &Direction3d,
+    tan_angle: f64,
+    ref_height: f64,
+) {
+    plane.origin = offset_point_for_draft(
+        &plane.origin, horiz_dir, draft_dir, tan_angle, ref_height,
+    );
+    let new_normal_vec = Vec3d::new(
+        plane.normal.x + tan_angle * horiz_dir.x,
+        plane.normal.y + tan_angle * horiz_dir.y,
+        plane.normal.z + tan_angle * horiz_dir.z,
+    );
+    if let Some(new_normal) = new_normal_vec.normalize() {
+        plane.normal = new_normal;
+        let new_u = if new_normal.is_parallel_to(&Direction3d::Y) {
+            new_normal.cross(&Direction3d::X)
+        } else {
+            new_normal.cross(&Direction3d::Y)
+        };
+        let new_v = new_normal.cross(&new_u);
+        plane.u_dir = new_u;
+        plane.v_dir = new_v;
+    }
 }
 
 // ============================================================
@@ -925,13 +901,13 @@ pub fn extrude_polyline(
         .map(|p| Point3d::new(p.x + offset.x, p.y + offset.y, p.z + offset.z))
         .collect();
 
-    // Build faces using ShapeBuilder
+    // Build faces using ShapeBuilder (7.6b: faces + construction edge lists)
     // Base face: planar face in XY plane
-    let base_face = ShapeBuilder::make_polygon_face(&base_pts)
+    let (base_face, base_edges) = ShapeBuilder::make_polygon_face(&base_pts)
         .ok_or(ModelingError::TooFewPoints(base_pts.len()))?;
 
     // Top face: planar face translated by offset (reversed orientation)
-    let top_face = ShapeBuilder::make_polygon_face(&top_pts)
+    let (top_face, top_edges) = ShapeBuilder::make_polygon_face(&top_pts)
         .ok_or(ModelingError::TooFewPoints(top_pts.len()))?;
 
     // Side faces: one quadrilateral per edge.
@@ -939,6 +915,7 @@ pub fn extrude_polyline(
     // polyline along +X), some side quads will be degenerate (all 4 points
     // collinear). Skip those — they don't contribute to the shell's topology.
     let mut side_faces = Vec::with_capacity(n);
+    let mut side_working = Vec::with_capacity(n);
     for i in 0..n {
         let j = (i + 1) % n;
         let quad_pts = vec![
@@ -969,18 +946,20 @@ pub fn extrude_polyline(
             // Degenerate side face — skip.
             continue;
         }
-        if let Some(side_face) = ShapeBuilder::make_polygon_face(&quad_pts) {
+        if let Some((side_face, side_edges)) = ShapeBuilder::make_polygon_face(&quad_pts) {
             side_faces.push(side_face);
+            side_working.push(side_edges);
         }
         // If make_polygon_face returned None despite the non-degeneracy check,
         // we silently skip — better than failing the whole extrude.
     }
 
-    // Assemble shell
+    // Assemble shell (7.6b: store-first construction)
     let mut all_faces = vec![base_face, top_face];
-    all_faces.extend(side_faces);
+    let mut all_working = vec![base_edges, top_edges];
+    all_working.extend(side_working);
     let shell = Shell::new_closed(all_faces);
-    Ok(Solid::new(shell))
+    Ok(Solid::from_edges_only(shell, all_working))
 }
 
 /// Revolve a closed 2D polyline around the Z axis to create a solid of revolution.
@@ -1061,6 +1040,7 @@ pub fn revolve_polyline(
     }
 
     // Side faces: quads connecting consecutive rings
+    let mut all_working = Vec::new();
     for i in 0..n_segments {
         let ring_a = &rings[i];
         let ring_b = &rings[i + 1];
@@ -1072,26 +1052,29 @@ pub fn revolve_polyline(
                 ring_b[k],
                 ring_b[j],
             ];
-            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+            let (face, edges) = ShapeBuilder::make_polygon_face(&quad_pts)
                 .ok_or(ModelingError::TooFewPoints(quad_pts.len()))?;
             all_faces.push(face);
+            all_working.push(edges);
         }
     }
 
     // Cap faces (only if not full circle)
     if !full_circle {
         // Start cap: profile at angle 0
-        let start_face = ShapeBuilder::make_polygon_face(&rings[0])
+        let (start_face, start_edges) = ShapeBuilder::make_polygon_face(&rings[0])
             .ok_or(ModelingError::TooFewPoints(rings[0].len()))?;
         all_faces.push(start_face);
+        all_working.push(start_edges);
         // End cap: profile at angle (reversed)
-        let end_face = ShapeBuilder::make_polygon_face(&rings[n_segments])
+        let (end_face, end_edges) = ShapeBuilder::make_polygon_face(&rings[n_segments])
             .ok_or(ModelingError::TooFewPoints(rings[n_segments].len()))?;
         all_faces.push(end_face);
+        all_working.push(end_edges);
     }
 
     let shell = Shell::new_closed(all_faces);
-    Ok(Solid::new(shell))
+    Ok(Solid::from_edges_only(shell, all_working))
 }
 
 // ============================================================
@@ -1158,6 +1141,7 @@ pub fn sweep_polyline(
 
     // Create side faces (quads between consecutive cross-sections)
     let mut all_faces = Vec::new();
+    let mut all_working = Vec::new();
     for i in 0..n_path - 1 {
         let section_a = &cross_sections[i];
         let section_b = &cross_sections[i + 1];
@@ -1169,23 +1153,26 @@ pub fn sweep_polyline(
                 section_b[k],
                 section_b[j],
             ];
-            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+            let (face, edges) = ShapeBuilder::make_polygon_face(&quad_pts)
                 .ok_or(ModelingError::TooFewPoints(4))?;
             all_faces.push(face);
+            all_working.push(edges);
         }
     }
 
     // Add start and end caps
-    let start_face = ShapeBuilder::make_polygon_face(&cross_sections[0])
+    let (start_face, start_edges) = ShapeBuilder::make_polygon_face(&cross_sections[0])
         .ok_or(ModelingError::TooFewPoints(cross_sections[0].len()))?;
     all_faces.push(start_face);
+    all_working.push(start_edges);
 
-    let end_face = ShapeBuilder::make_polygon_face(&cross_sections[n_path - 1])
+    let (end_face, end_edges) = ShapeBuilder::make_polygon_face(&cross_sections[n_path - 1])
         .ok_or(ModelingError::TooFewPoints(cross_sections[n_path - 1].len()))?;
     all_faces.push(end_face);
+    all_working.push(end_edges);
 
     let shell = Shell::new_closed(all_faces);
-    Ok(Solid::new(shell))
+    Ok(Solid::from_edges_only(shell, all_working))
 }
 
 /// Compute Frenet-Serret frames at each point of a path.
@@ -1382,6 +1369,7 @@ pub fn loft_polylines(
 
     // Create side faces (quads between consecutive profiles)
     let mut all_faces = Vec::new();
+    let mut all_working = Vec::new();
     for i in 0..n_profiles - 1 {
         let section_a = &cross_sections[i];
         let section_b = &cross_sections[i + 1];
@@ -1393,23 +1381,26 @@ pub fn loft_polylines(
                 section_b[k],
                 section_b[j],
             ];
-            let face = ShapeBuilder::make_polygon_face(&quad_pts)
+            let (face, edges) = ShapeBuilder::make_polygon_face(&quad_pts)
                 .ok_or(ModelingError::TooFewPoints(4))?;
             all_faces.push(face);
+            all_working.push(edges);
         }
     }
 
     // Add start and end caps
-    let start_face = ShapeBuilder::make_polygon_face(&cross_sections[0])
+    let (start_face, start_edges) = ShapeBuilder::make_polygon_face(&cross_sections[0])
         .ok_or(ModelingError::TooFewPoints(cross_sections[0].len()))?;
     all_faces.push(start_face);
+    all_working.push(start_edges);
 
-    let end_face = ShapeBuilder::make_polygon_face(&cross_sections[n_profiles - 1])
+    let (end_face, end_edges) = ShapeBuilder::make_polygon_face(&cross_sections[n_profiles - 1])
         .ok_or(ModelingError::TooFewPoints(cross_sections[n_profiles - 1].len()))?;
     all_faces.push(end_face);
+    all_working.push(end_edges);
 
     let shell = Shell::new_closed(all_faces);
-    Ok(Solid::new(shell))
+    Ok(Solid::from_edges_only(shell, all_working))
 }
 
 // ============================================================
@@ -1474,6 +1465,7 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
 
     // Build side faces: one quad per edge per transition
     let mut side_faces = Vec::with_capacity(n_points * (n_wires - 1));
+    let mut side_working = Vec::with_capacity(n_points * (n_wires - 1));
     for w in 0..(n_wires - 1) {
         for i in 0..n_points {
             let j = (i + 1) % n_points;
@@ -1483,8 +1475,9 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
                 wires[w + 1][j].clone(),
                 wires[w + 1][i].clone(),
             ];
-            if let Some(face) = ShapeBuilder::make_polygon_face(&quad_pts) {
+            if let Some((face, edges)) = ShapeBuilder::make_polygon_face(&quad_pts) {
                 side_faces.push(face);
+                side_working.push(edges);
             }
         }
     }
@@ -1494,15 +1487,18 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
     let end_pts: Vec<Point3d> = wires[n_wires - 1].iter().cloned().collect();
 
     let mut all_faces = side_faces;
-    if let Some(start_face) = ShapeBuilder::make_polygon_face(&start_pts) {
+    let mut all_working = side_working;
+    if let Some((start_face, start_edges)) = ShapeBuilder::make_polygon_face(&start_pts) {
         all_faces.push(start_face);
+        all_working.push(start_edges);
     }
-    if let Some(end_face) = ShapeBuilder::make_polygon_face(&end_pts) {
+    if let Some((end_face, end_edges)) = ShapeBuilder::make_polygon_face(&end_pts) {
         all_faces.push(end_face);
+        all_working.push(end_edges);
     }
 
     let shell = Shell::new_closed(all_faces);
-    Ok(Solid::new(shell))
+    Ok(Solid::from_edges_only(shell, all_working))
 }
 
 // ============================================================
@@ -1512,19 +1508,29 @@ pub fn loft_wires(wires: &[Vec<Point3d>]) -> Result<Solid, ModelingError> {
 /// Move a single planar face by a translation vector.
 /// Non-planar faces return an error. The original solid is not mutated.
 pub fn move_face_planar(solid: &Solid, face_index: usize, translation: Vec3d) -> Result<Solid, String> {
-    let mut new_solid = solid.clone();
-    let faces_len = new_solid.faces().len();
-    let faces_iter = new_solid.faces_mut();
-    let face = faces_iter.into_iter().nth(face_index)
+    let faces_len = solid.faces().len();
+    let all_faces = solid.faces();
+    let target = all_faces.get(face_index)
         .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
             face_index, faces_len))?;
 
-    let plane = match &face.surface {
+    let plane = match &target.surface {
         Some(Surface::Plane(p)) => p.clone(),
         Some(other) => return Err(format!(
             "Face {} is not planar (surface type: {})", face_index, surface_type_name(other))),
         None => return Err(format!("Face {} has no surface", face_index)),
     };
+
+    // C5 7.6b: collect the face's canonical edge ids BEFORE cloning —
+    // the edges translate through the store (the only edge holder).
+    let target_edges = solid.face_edges(target);
+    let face_edge_ids: Vec<TopoId> = target_edges.iter().map(|e| e.id).collect();
+
+    let mut new_solid = solid.clone();
+    let faces_iter = new_solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
+            face_index, faces_len))?;
 
     let new_plane = Plane {
         origin: Point3d::new(
@@ -1536,8 +1542,10 @@ pub fn move_face_planar(solid: &Solid, face_index: usize, translation: Vec3d) ->
     };
     face.surface = Some(Surface::Plane(new_plane));
 
-    for edge in &mut face.edges {
-        translate_edge_in_place(edge, &translation);
+    for id in face_edge_ids {
+        if let Some(edge) = new_solid.edge_store.get_mut(id) {
+            translate_edge_in_place(edge, &translation);
+        }
     }
 
     Ok(new_solid)
@@ -1569,20 +1577,27 @@ pub fn replace_face_planar(
 ) -> Result<Solid, String> {
     let mut new_solid = solid.clone();
     let faces_len = new_solid.faces().len();
-    let faces_iter = new_solid.faces_mut();
-    let face = faces_iter.into_iter().nth(face_index)
-        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
-            face_index, faces_len))?;
 
     let plane = Plane::from_three_points(&p1, &p2, &p3)
         .ok_or_else(|| "Three points are collinear — cannot form a plane".to_string())?;
-    face.surface = Some(Surface::Plane(plane));
 
     let e1 = Edge::new_line(p1, p2);
     let e2 = Edge::new_line(p2, p3);
     let e3 = Edge::new_line(p3, p1);
     let e1_id = e1.id; let e2_id = e2.id; let e3_id = e3.id;
-    face.edges = vec![e1, e2, e3];
+    // C5 7.6b: the new boundary lives in the store + canonical references
+    // (fresh edges are their own canonicals) — inserted BEFORE the face
+    // borrow (disjoint field borrows).
+    new_solid.edge_store.insert(e1);
+    new_solid.edge_store.insert(e2);
+    new_solid.edge_store.insert(e3);
+
+    let faces_iter = new_solid.faces_mut();
+    let face = faces_iter.into_iter().nth(face_index)
+        .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
+            face_index, faces_len))?;
+    face.surface = Some(Surface::Plane(plane));
+    face.edge_ids = vec![e1_id, e2_id, e3_id];
     face.outer_wire = Some(Wire::new(vec![
         CoEdge::new(e1_id, true), CoEdge::new(e2_id, true), CoEdge::new(e3_id, true),
     ]));
@@ -1599,14 +1614,18 @@ pub fn split_face(
     }
     let mut new_solid = solid.clone();
     let faces_len = new_solid.faces().len();
+
+    let new_edge = Edge::new_line(p1, p2);
+    let new_edge_id = new_edge.id;
+    // C5 7.6b: split edges join the store and the canonical reference
+    // list — inserted BEFORE the face borrow (disjoint field borrows).
+    new_solid.edge_store.insert(new_edge);
+
     let faces_iter = new_solid.faces_mut();
     let face = faces_iter.into_iter().nth(face_index)
         .ok_or_else(|| format!("Face index {} out of range (solid has {} faces)",
             face_index, faces_len))?;
-
-    let new_edge = Edge::new_line(p1, p2);
-    let new_edge_id = new_edge.id;
-    face.edges.push(new_edge);
+    face.edge_ids.push(new_edge_id);
     if let Some(ref mut wire) = face.outer_wire {
         wire.coedges.push(CoEdge::new(new_edge_id, true));
     }
@@ -1658,7 +1677,7 @@ mod tests {
     fn count_edges(solid: &Solid) -> usize {
         let mut count = 0;
         for face in solid.faces() {
-            count += face.edges.len();
+            count += face.edge_ids.len();
         }
         count
     }

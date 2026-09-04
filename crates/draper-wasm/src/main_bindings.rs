@@ -577,8 +577,7 @@ impl DraperDocument {
                 _ => Direction3d::Z,
             }
         };
-        let face = ops::get_face_mut(s, face_index).unwrap();
-        ops::add_circular_hole_to_face(face, center, radius, face_normal).map_err(|e| JsValue::from_str(&e))
+        ops::add_circular_hole_to_face(s, face_index, center, radius, face_normal).map_err(|e| JsValue::from_str(&e))
     }
 
     /// Remove a hole by index from a face of a solid.

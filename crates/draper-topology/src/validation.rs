@@ -83,12 +83,9 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
     //
     // C5 Stage 6: detection runs over store-resolved instance-faithful
     // edges and marking goes through the canonical `EdgeStore` entry
-    // (`store.get_mut`) + `sync_edge_mirrors` — the `heal_solid` pattern —
-    // instead of per-face mirror mutation. Works on mirror-free (Stage 5
-    // end-state) solids, and a shared degenerate edge is flagged once
-    // canonically for every incident face.
-    solid.index_edges();
-
+    // (`store.get_mut`) — C5 7.6b: the store is the only holder of edge
+    // geometry, no mirror sync pass exists. A shared degenerate edge is
+    // flagged once canonically for every incident face.
     let mut degenerate_ids: Vec<TopoId> = Vec::new();
     if let Some(ref shell) = solid.outer_shell {
         for face in &shell.faces {
@@ -123,7 +120,6 @@ pub fn validate_solid(solid: &mut Solid) -> Vec<ValidationError> {
             }
         }
     }
-    let _synced = solid.sync_edge_mirrors();
 
     errors
 }
@@ -198,18 +194,10 @@ pub fn validate_shell(shell: &Shell) -> Vec<ValidationError> {
 pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
     let mut fixes = Vec::new();
 
-    // C5 Stage 4: degeneracy marking goes through the canonical EdgeStore
-    // entry (`store.get_mut`) instead of per-face mirror mutation, then
-    // `sync_edge_mirrors` pushes the flag onto every incident face's twin.
-    // Pre-Stage-4, a degenerate edge shared by two faces was only flagged in
-    // the face whose copy was scanned — the twin stayed stale.
-    //
-    // `index_edges` (not `ensure_edge_store`) guarantees the store is fresh
-    // w.r.t. the current mirrors, so the canonical mutation pass cannot miss
-    // an instance — even if the caller mutated the solid after a previous
-    // indexing.
-    solid.index_edges();
-
+    // C5 Stage 4 → 7.6b: degeneracy marking goes through the canonical
+    // EdgeStore entry (`store.get_mut`) — the store is always the fresh,
+    // single source of edge truth (no mirror drift is possible), so no
+    // re-index is needed before the canonical mutation pass.
     // Detection pass (C5 Stage 6: store-resolved instance-faithful edges —
     // coedge instance ids for wired faces, canonical ids for wire-less ones;
     // works with mirrors cleared entirely). The ids feed the canonical
@@ -251,8 +239,6 @@ pub fn heal_solid(solid: &mut Solid) -> Vec<String> {
             }
         }
     }
-    // Propagation pass: every incident mirror sees the flag.
-    let _synced = solid.sync_edge_mirrors();
     if degenerate_count > 0 {
         fixes.push(format!("Marked {} degenerate edges", degenerate_count));
     }

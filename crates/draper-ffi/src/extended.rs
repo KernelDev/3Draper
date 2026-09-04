@@ -937,8 +937,7 @@ pub extern "C" fn draper_solid_add_circular_hole(
             _ => Direction3d::Z,
         }
     };
-    let face = ops::get_face_mut(s, face_index).unwrap();
-    match ops::add_circular_hole_to_face(face, center, radius, face_normal) {
+    match ops::add_circular_hole_to_face(s, face_index, center, radius, face_normal) {
         Ok(()) => DraperResult::Success,
         Err(e) => {
             set_last_error(&e);

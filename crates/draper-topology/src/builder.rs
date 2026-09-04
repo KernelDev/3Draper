@@ -34,26 +34,27 @@ impl ShapeBuilder {
             Point3d::new(-hx,  hy,  hz), // 7
         ];
 
-        // Create 6 faces
-        let faces = vec![
-            // Bottom (-Z)
-            Self::make_rect_face(v[0], v[1], v[2], v[3], Plane::xz()), // Bottom face
-            // Top (+Z)
-            Self::make_rect_face(v[4], v[7], v[6], v[5], Plane::xz()), // Top face
-            // Front (-Y)
-            Self::make_rect_face(v[0], v[4], v[5], v[1], Plane::xy()), // Front face
-            // Back (+Y)
-            Self::make_rect_face(v[3], v[2], v[6], v[7], Plane::xy()), // Back face
-            // Left (-X)
-            Self::make_rect_face(v[0], v[3], v[7], v[4], Plane::yz()), // Left face
-            // Right (+X)
-            Self::make_rect_face(v[1], v[5], v[6], v[2], Plane::yz()), // Right face
+        // Create 6 faces (each with its boundary edges — 7.6b working lists)
+        let rect_specs = [
+            (v[0], v[1], v[2], v[3]), // Bottom (-Z)
+            (v[4], v[7], v[6], v[5]), // Top (+Z)
+            (v[0], v[4], v[5], v[1]), // Front (-Y)
+            (v[3], v[2], v[6], v[7]), // Back (+Y)
+            (v[0], v[3], v[7], v[4]), // Left (-X)
+            (v[1], v[5], v[6], v[2]), // Right (+X)
         ];
+        let mut faces = Vec::with_capacity(6);
+        let mut working = Vec::with_capacity(6);
+        for (p0, p1, p2, p3) in rect_specs {
+            let (face, edges) = Self::make_rect_face(p0, p1, p2, p3);
+            faces.push(face);
+            working.push(edges);
+        }
 
         let shell = Shell::new_closed(faces);
-        // C5 Stage 7.1: born-indexed — the store and canonical edge_ids
+        // C5 7.6b: born store-first — the store and canonical edge_ids
         // exist from construction (shared box edges dedup by geometric key).
-        Solid::from_shell_indexed(shell)
+        Solid::from_edges_only(shell, working)
     }
 
     /// Create a box at a specific position (min corner).
@@ -66,8 +67,10 @@ impl ShapeBuilder {
         box_solid
     }
 
-    /// Create a rectangular face from 4 corner points.
-    fn make_rect_face(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d, _plane: Plane) -> Face {
+    /// Create a rectangular face from 4 corner points, together with its
+    /// boundary edge list (C5 7.6b — construction payload, the caller
+    /// hands it to `Solid::from_edges_only`).
+    fn make_rect_face(p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d) -> (Face, Vec<Edge>) {
         // Create 4 edges
         let e0 = Edge::new_line(p0, p1);
         let e1 = Edge::new_line(p1, p2);
@@ -90,10 +93,8 @@ impl ShapeBuilder {
         let plane = Plane::from_three_points(&p0, &p1, &p2)
             .unwrap_or_else(|| Plane::from_origin_and_normal(p0, Direction3d::Z));
 
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        // Store edges in face so triangulation can sample edge curves
-        face.edges = vec![e0, e1, e2, e3];
-        face
+        let face = Face::new(Surface::Plane(plane), wire);
+        (face, vec![e0, e1, e2, e3])
     }
 
     /// Create a cylinder along the Z axis.
@@ -125,8 +126,7 @@ impl ShapeBuilder {
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false); // Reversed for bottom (looking from -Z)
         let bottom_wire = Wire::new(vec![bottom_coedge]);
-        let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
-        bottom_face.edges = vec![bottom_edge.clone()];
+        let bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
 
         // === Top face (disk) ===
         let top_circle = Circle::new_xy(top_center, radius);
@@ -145,11 +145,10 @@ impl ShapeBuilder {
         };
         let top_coedge = CoEdge::new(top_edge.id, true); // Forward for top (looking from +Z)
         let top_wire = Wire::new(vec![top_coedge]);
-        let mut top_face = Face::new(
+        let top_face = Face::new(
             Surface::Plane(Plane::from_origin_and_normal(top_center, Direction3d::Z)),
             top_wire,
         );
-        top_face.edges = vec![top_edge.clone()];
 
         // === Lateral face (cylinder surface) ===
         // Store bottom and top circle edges so compute_axis_v_range can
@@ -159,13 +158,17 @@ impl ShapeBuilder {
         // When a boolean operation adds an intersection curve as an inner
         // wire (hole), the triangulation's fallback path handles it.
         let lateral_wire = Wire::new(vec![]);
-        let mut lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
-        lateral_face.edges = vec![bottom_edge, top_edge];
+        let lateral_face = Face::new(Surface::Cylinder(cyl_surface), lateral_wire);
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, lateral_face]);
-        // C5 Stage 7.1: born-indexed — bottom/top circle edges are shared
+        // C5 7.6b: born store-first — bottom/top circle edges are shared
         // between the disk faces and the (wire-less) lateral face.
-        Solid::from_shell_indexed(shell)
+        let working = vec![
+            vec![bottom_edge.clone()],
+            vec![top_edge.clone()],
+            vec![bottom_edge, top_edge],
+        ];
+        Solid::from_edges_only(shell, working)
     }
 
     /// Create a cylinder at a specific position.
@@ -189,9 +192,9 @@ impl ShapeBuilder {
         let face = Face::new(Surface::Sphere(sphere_surface), wire);
 
         let shell = Shell::new_closed(vec![face]);
-        // C5 Stage 7.1: born-indexed (no-op for edge-less faces, but keeps
-        // the constructor contract uniform across primitives).
-        Solid::from_shell_indexed(shell)
+        // Wire-less single face — no edge payload; store-first construction
+        // with empty working lists is equivalent to the plain constructor.
+        Solid::new(shell)
     }
 
     /// Create a cone.
@@ -221,20 +224,19 @@ impl ShapeBuilder {
         };
         let bottom_coedge = CoEdge::new(bottom_edge.id, false);
         let bottom_wire = Wire::new(vec![bottom_coedge]);
-        let mut bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
-        bottom_face.edges = vec![bottom_edge.clone()];
+        let bottom_face = Face::new(Surface::Plane(Plane::xy()), bottom_wire);
 
         // Lateral cone face — store bottom circle edge so compute_axis_v_range
         // can determine the height range. Wire is empty — triangulation uses
         // the full cone path with apex degeneracy handling.
         let lateral_wire = Wire::new(vec![]);
-        let mut lateral_face = Face::new(Surface::Cone(cone_surface), lateral_wire);
-        lateral_face.edges = vec![bottom_edge];
+        let lateral_face = Face::new(Surface::Cone(cone_surface), lateral_wire);
 
         let shell = Shell::new_closed(vec![bottom_face, lateral_face]);
-        // C5 Stage 7.1: born-indexed — the bottom circle edge is shared
+        // C5 7.6b: born store-first — the bottom circle edge is shared
         // between the disk face and the (wire-less) lateral face.
-        Solid::from_shell_indexed(shell)
+        let working = vec![vec![bottom_edge.clone()], vec![bottom_edge]];
+        Solid::from_edges_only(shell, working)
     }
 
     /// Create a torus.
@@ -293,11 +295,10 @@ impl ShapeBuilder {
 
         let coedges = vec![CoEdge::new(edge_v.id, true)];
         let wire = Wire::new(coedges);
-        let mut face = Face::new(Surface::Torus(torus_surface), wire);
-        face.edges = vec![edge_v];
+        let face = Face::new(Surface::Torus(torus_surface), wire);
 
         let shell = Shell::new_closed(vec![face]);
-        Solid::from_shell_indexed(shell)
+        Solid::from_edges_only(shell, vec![vec![edge_v]])
     }
 
     /// Create a solid of revolution by revolving a profile curve around the Z axis.
@@ -322,11 +323,11 @@ impl ShapeBuilder {
             direction,
         });
 
-        // Simplified: single face extrusion
+        // Simplified: single face extrusion (wire-less — no edge payload)
         let wire = Wire::new(vec![]);
         let face = Face::new(ext_surface, wire);
         let shell = Shell::new_closed(vec![face]);
-        Solid::from_shell_indexed(shell)
+        Solid::new(shell)
     }
 
     /// Transform a solid (apply transformation to all geometry).
@@ -347,23 +348,18 @@ impl ShapeBuilder {
                 if let Some(ref mut surface) = face.surface {
                     *surface = surface.transform(transform);
                 }
-                // Transform edge curves stored in the face
-                for edge in &mut face.edges {
-                    if let Some(ref mut curve) = edge.curve {
-                        *curve = curve.transform(transform);
-                    }
-                }
             }
         }
-        // Transform the canonical store curves (mirror-free faces).
+        // Transform the canonical store curves — the store is the ONLY
+        // holder of edge geometry (C5 7.6b), so this IS the whole edge
+        // transform: identity (ids, aliases, orientations) is unaffected.
         solid.edge_store.transform_curves(transform);
-        // Rebuild identity: fresh dedup from the transformed mirrors;
-        // Pass 0 preserves the (transformed) store edges of mirror-free faces.
-        solid.index_edges();
     }
 
-    /// Create a polygonal face from a list of 3D points.
-    pub fn make_polygon_face(points: &[Point3d]) -> Option<Face> {
+    /// Create a polygonal face from a list of 3D points, together with
+    /// its boundary edge list (C5 7.6b — construction payload for
+    /// `Solid::from_edges_only` / `rebuild_store`).
+    pub fn make_polygon_face(points: &[Point3d]) -> Option<(Face, Vec<Edge>)> {
         if points.len() < 3 {
             return None;
         }
@@ -433,13 +429,13 @@ impl ShapeBuilder {
                 }
             })?;
 
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = edges;
-        Some(face)
+        let face = Face::new(Surface::Plane(plane), wire);
+        Some((face, edges))
     }
 
-    /// Create a circular disk face.
-    pub fn make_disk(center: Point3d, normal: Direction3d, radius: f64) -> Face {
+    /// Create a circular disk face together with its boundary circle
+    /// edge (C5 7.6b — construction payload for `Solid::from_edges_only`).
+    pub fn make_disk(center: Point3d, normal: Direction3d, radius: f64) -> (Face, Vec<Edge>) {
         let circle = Circle::new(center, normal, radius);
         let edge = Edge {
             id: TopoId::new(),
@@ -457,8 +453,7 @@ impl ShapeBuilder {
         let coedge = CoEdge::new(edge.id, true);
         let wire = Wire::new(vec![coedge]);
         let plane = Plane::from_origin_and_normal(center, normal);
-        let mut face = Face::new(Surface::Plane(plane), wire);
-        face.edges = vec![edge];
-        face
+        let face = Face::new(Surface::Plane(plane), wire);
+        (face, vec![edge])
     }
 }

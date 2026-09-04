@@ -50,15 +50,19 @@ pub type BooleanResult = Result<Solid, String>;
 /// they become internal to the union.
 pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces` — each kept face's
+    // boundary resolved from its OWNING solid's store.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid
-            // (per-id mirror fallback keeps split results complete).
+            // C5 Stage 6.4 → 7.6b: store-first boundary reads of the OWNER
+            // solid.
             let face_edges = a.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -68,6 +72,7 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -77,10 +82,9 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result — cloned faces carry orphaned
-    // edge_ids from the INPUT store; re-indexing re-derives identity from
-    // the mirrors so every store-first consumer sees a live store.
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first — the working lists rebuild the unified
+    // store.
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Boolean subtraction: subtract solid B from solid A.
@@ -91,14 +95,17 @@ pub fn boolean_union(a: &Solid, b: &Solid) -> BooleanResult {
 /// inner walls of the cavity left by the subtraction.
 pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces`.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are OUTSIDE B.
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            // C5 7.6b: store-first boundary reads of the OWNER solid.
             let face_edges = a.resolve_face_edges(face);
             if !face_inside_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -108,6 +115,7 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if face_inside_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.reversed());
+                working.push(face_edges);
             }
         }
     }
@@ -117,8 +125,8 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result (see boolean_union).
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first (see boolean_union).
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Boolean intersection: keep only the overlap of A and B.
@@ -133,14 +141,17 @@ pub fn boolean_subtract(a: &Solid, b: &Solid) -> BooleanResult {
 /// where all faces of A are on the boundary of B and vice versa.
 pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     let mut faces = Vec::new();
+    // C5 7.6b: working lists parallel to `faces`.
+    let mut working: Vec<Vec<Edge>> = Vec::new();
 
     // Keep faces of A that are INSIDE B (or on boundary).
     if let Some(ref shell_a) = a.outer_shell {
         for face in &shell_a.faces {
-            // C5 Stage 6.4: store-first boundary reads of the OWNER solid.
+            // C5 7.6b: store-first boundary reads of the OWNER solid.
             let face_edges = a.resolve_face_edges(face);
             if face_inside_or_on_solid(face, &face_edges, b, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -150,6 +161,7 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
             let face_edges = b.resolve_face_edges(face);
             if face_inside_or_on_solid(face, &face_edges, a, /*tolerance=*/ 1e-9) {
                 faces.push(face.clone());
+                working.push(face_edges);
             }
         }
     }
@@ -159,8 +171,8 @@ pub fn boolean_intersect(a: &Solid, b: &Solid) -> BooleanResult {
     }
 
     let shell = Shell::new_closed(faces);
-    // C5 Stage 7.1: born-indexed result (see boolean_union).
-    Ok(Solid::from_shell_indexed(shell))
+    // C5 7.6b: born store-first (see boolean_union).
+    Ok(Solid::from_edges_only(shell, working))
 }
 
 /// Like `face_inside_solid`, but also returns true for faces whose

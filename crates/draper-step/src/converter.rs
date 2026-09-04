@@ -202,6 +202,8 @@ fn compute_face_data_signature(face_data_list: &[FaceData]) -> FaceDataSignature
 fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
     let mut outer_topo_faces = Vec::new();
     let mut void_topo_faces = Vec::new();
+    let mut outer_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
+    let mut void_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
     let mut face_id_to_index = HashMap::new();
 
     for (fd_idx, fd) in face_data_list.iter().enumerate() {
@@ -241,7 +243,6 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
 
         let mut face = Face::new(fd.surface.clone(), outer_wire.unwrap_or_else(|| Wire::new(vec![])));
         face.forward = fd.forward;
-        face.edges = fd.edges.clone();
 
         // Record the mapping before we add holes (which doesn't change the ID)
         face_id_to_index.insert(face.id, fd_idx);
@@ -251,12 +252,21 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
             face.add_hole(wire);
         }
 
+        // C5 7.6b: the boundary edges ride the working list (topology only
+        // on the face).
+        let face_working = fd.edges.clone();
+
         if fd.is_void {
             void_topo_faces.push(face);
+            void_working.push(face_working);
         } else {
             outer_topo_faces.push(face);
+            outer_working.push(face_working);
         }
     }
+
+    let mut all_working: Vec<Vec<draper_topology::Edge>> = outer_working;
+    all_working.extend(void_working);
 
     let outer_shell = Shell::new_closed(outer_topo_faces);
     let mut solid = Solid::new(outer_shell);
@@ -272,12 +282,12 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
         solid.add_void(void_shell);
     }
 
-    // C5 Stage 2: build the canonical edge store — dedup shared STEP edges
-    // (same EDGE_CURVE entity used by two ORIENTED_EDGEs) into a single
-    // canonical TopoId with alias mappings. Per-face `edges` mirrors are left
-    // untouched; `Face.edge_ids` are synced to canonical ids so downstream
-    // consumers (mesh cache, healing, future C5 stages) see unified identity.
-    let dedup_report = solid.index_edges();
+    // C5 7.6b: build the canonical edge store from the working lists —
+    // dedup shared STEP edges (same EDGE_CURVE entity used by two
+    // ORIENTED_EDGEs) into a single canonical TopoId with alias mappings,
+    // reconcile shared-edge fields, record instance orientations, and
+    // write canonical `Face.edge_ids` — the solid is born store-only.
+    let dedup_report = solid.rebuild_store(all_working);
     if dedup_report.deduplicated > 0 {
         log::debug!(
             "face_data_list_to_solid: indexed {} edge instances → {} canonical edges ({} shared STEP edges deduplicated)",
@@ -330,10 +340,13 @@ fn apply_healing_to_face_data(
         } else {
             // This is a new face added by the healing pipeline (e.g., hole fill).
             // Create a FaceData with default STEP IDs.
+            // C5 7.6b: resolve the healed face's boundary through the
+            // healed solid's store, then split by wire membership.
+            let resolved = healed_solid.resolve_face_edges(face);
             let outer_edges: Vec<TopoEdge> = if let Some(ref wire) = face.outer_wire {
                 wire.coedges.iter()
                     .filter_map(|coedge| {
-                        face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+                        resolved.iter().find(|e| e.id == coedge.edge).cloned()
                     })
                     .collect()
             } else {
@@ -344,7 +357,7 @@ fn apply_healing_to_face_data(
                 .map(|wire| {
                     wire.coedges.iter()
                         .filter_map(|coedge| {
-                            face.edges.iter().find(|e| e.id == coedge.edge).cloned()
+                            resolved.iter().find(|e| e.id == coedge.edge).cloned()
                         })
                         .collect()
                 })
@@ -2558,28 +2571,12 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // C5 Stage 7.2: canonical SOLID payload. The void shells joined the
-        // solid AFTER `face_data_list_to_solid` indexed the outer shell, so
-        // re-index once to fold the void faces into the store (Pass 0 keeps
-        // the already-indexed outer identity stable), then compact the
-        // per-face `edges` mirrors wherever the store answers every boundary
-        // reader query (coedge ids of all wires + every `edge_ids` entry).
-        // STEP-loaded solids arrive store-first — the serialized form carries
-        // an empty mirror payload (see `test_serde_compacted_solid_roundtrip`),
-        // and `triangulate_solid` resolves them through the store (Stage 7.2
-        // sequential/parallel staging). Faces the store cannot fully answer
-        // (un-indexable leftovers) keep their mirrors — compaction is
-        // safety-guarded per face, never a hard requirement.
-        solid.index_edges();
-        let compacted = solid.compact_edge_mirrors();
-        if compacted > 0 {
-            log::debug!(
-                "extract_solid_from_brep: compacted edge mirrors on {}/{} faces (store-only payload)",
-                compacted,
-                solid.faces().len()
-            );
-        }
-
+        // C5 7.2 → 7.6b: the SOLID payload is canonical and store-only from
+        // the start — `face_data_list_to_solid` rebuilt the store over outer
+        // AND void faces in one pass (no mirror compaction step exists: the
+        // mirror field is physically gone). STEP-loaded solids serialize in
+        // the store-only form (see `test_serde_compacted_solid_roundtrip`),
+        // and `triangulate_solid` resolves them through the store.
         Some(solid)
     }
 

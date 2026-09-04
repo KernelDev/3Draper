@@ -329,16 +329,12 @@ impl HealingReport {
 pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingReport) {
     let mut report = HealingReport::default();
 
-    // Heal outer shell
+    // Heal outer shell (C5 7.6b — store-first staging; the working lists
+    // derive from the input solid's `EdgeStore`, the faces carry topology
+    // only for the whole pipeline).
+    let mut outer_working: Option<Vec<Vec<Edge>>> = None;
+    let mut voids_working: Vec<Vec<Vec<Edge>>> = Vec::new();
     let outer_shell = if let Some(ref shell) = solid.outer_shell {
-        // C5 Stage 7.5 — store-first, mirror-free staging: the pipeline's
-        // working lists are built from the input solid's `EdgeStore` at
-        // the `heal_solid` boundary. Populated mirrors resolve per
-        // position (store wins on geometry mismatch, unknown ids keep
-        // the construction mirror — the 6.3 semantics); mirror-FREE
-        // faces (Stage 5 end-state / store-first serialization) derive
-        // their lists from `edge_ids` via `Solid::instance_edges`. The
-        // staged mirror fields stay empty for the whole pipeline.
         let (staged, rederived) = StagedShell::from_shell_store(solid, shell.clone());
         if rederived > 0 {
             report.add_msg(format!(
@@ -346,7 +342,8 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
                 rederived
             ));
         }
-        let (healed_shell, shell_report) = heal_staged(staged, params, false);
+        let ((healed_shell, healed_working), shell_report) = heal_staged(staged, params, false);
+        outer_working = Some(healed_working);
         merge_report(&mut report, &shell_report);
         Some(healed_shell)
     } else {
@@ -367,7 +364,8 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
                     rederived
                 ));
             }
-            let (healed, r) = heal_staged(staged, params, true);
+            let ((healed, w), r) = heal_staged(staged, params, true);
+            voids_working.push(w);
             merge_report(&mut report, &r);
             healed
         })
@@ -378,43 +376,30 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
         tolerance: solid.tolerance,
         outer_shell,
         inner_shells,
-        edge_store: EdgeStore::new(),
+        // Seed with the input store so rebuild_store's preservation pass
+        // can carry un-referenced identity (re-shelled faces).
+        edge_store: solid.edge_store.clone(),
     };
 
-    // C5 Stage 2: healing may restructure faces and their edge mirrors
-    // (stitching, merging, hole filling) — rebuild the edge store so the
-    // canonical registry reflects the HEALED topology, not the input.
-    //
-    // C5 Stage 3: BEFORE indexing, propagate unambiguous edge fixes across
-    // instances of the same shared edge. Healing mutates per-face copies
-    // independently; without this pass a fix (degenerate flag, tolerance
-    // bump, curve backfill) applied to one copy leaves its twin in the
-    // adjacent face stale — the exact cross-face inconsistency C5 removes.
-    let propagated = healed_solid.propagate_edge_fixes();
-    if propagated > 0 {
+    // C5 7.6b terminal: rebuild the store from the HEALED working lists —
+    // dedup + cross-instance reconciliation (the former
+    // `propagate_edge_fixes` aggregation) + orientations + canonical
+    // `edge_ids`, all in one store-first pass. The healed solid is born
+    // in the store-only end-state form.
+    let mut all_working: Vec<Vec<Edge>> = outer_working.unwrap_or_default();
+    for w in voids_working {
+        all_working.extend(w);
+    }
+    let dedup_report = healed_solid.rebuild_store(all_working);
+    if dedup_report.deduplicated > 0 {
         report.add_msg(format!(
-            "Propagated {} edge field fix(es) across shared-edge instances",
-            propagated
+            "Rebuilt edge store: {} instances → {} canonical edges ({} deduplicated)",
+            dedup_report.total_instances,
+            dedup_report.unique_edges,
+            dedup_report.deduplicated
         ));
     }
-    healed_solid.index_edges();
 
-    // C5 Stage 4: after the store is (re)built from the healed mirrors,
-    // reverse-sync the canonical fields back onto them. This is where the
-    // mirrors stop being an independent source of truth and become derived
-    // data: the store's curve-upgraded canonical copies (see the
-    // "upgrade with curve data" path in `index_edges`) backfill their
-    // curve-less twins in every incident face, and reconciled
-    // tolerance/degenerate values land on all copies — exactly the
-    // `ensure → get_mut → sync_edge_mirrors` flow Stage 4 establishes for
-    // the rest of the code base.
-    let synced = healed_solid.sync_edge_mirrors();
-    if synced > 0 {
-        report.add_msg(format!(
-            "Synced {} canonical edge field(s) onto face mirrors",
-            synced
-        ));
-    }
 
     (healed_solid, report)
 }
@@ -434,19 +419,14 @@ pub fn heal_solid(solid: &Solid, params: &HealingParams) -> (Solid, HealingRepor
 ///
 /// Returns the number of edge pairs stitched.
 pub fn tolerant_stitch(shell: &mut Shell, tolerance: f64) -> usize {
-    // C5 Stage 7.5 — legacy standalone-shell contract: mirrors are the
-    // primary input representation. Stage them into working lists, run
-    // the mirror-free core, and un-stage (construction semantics).
-    let mut working: Vec<Vec<Edge>> = shell
-        .faces
-        .iter_mut()
-        .map(|f| std::mem::take(&mut f.edges))
-        .collect();
-    let stitched = tolerant_stitch_with_edges(shell, &mut working, tolerance);
-    for (face, edges) in shell.faces.iter_mut().zip(working) {
-        face.edges = edges;
-    }
-    stitched
+    // C5 7.6b — standalone shells carry NO edge payload, so the
+    // mirror-based standalone contract is gone: this entry is a no-op
+    // kept for API compatibility. Use [`tolerant_stitch_with_edges`] with
+    // explicit per-face edge lists (the healing pipeline's working set or
+    // `Solid::instance_edges` output).
+    let working: Vec<Vec<Edge>> = (0..shell.faces.len()).map(|_| Vec::new()).collect();
+    let mut working = working;
+    tolerant_stitch_with_edges(shell, &mut working, tolerance)
 }
 
 /// Explicit-edges variant of [`tolerant_stitch`] (C5 Stage 7.5).
@@ -562,6 +542,10 @@ pub fn tolerant_stitch_with_edges(
 /// inside a solid. For void shells, face normals should point INTO the solid
 /// material (i.e., TOWARD the centroid of the shell), which is the opposite
 /// of the outer shell heuristic (normals point AWAY from centroid).
+/// C5 7.6b: a standalone shell carries no edge payload — edge-driven
+/// healing passes see empty working lists; topology-only passes (normal
+/// orientation, small-feature face removal) still run. Solids heal with
+/// full edge data via [`heal_solid`].
 pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) -> (Shell, HealingReport) {
     heal_shell_owned(shell.clone(), params, is_void_shell)
 }
@@ -574,24 +558,18 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) ->
 /// EMPTIED for the duration of the pipeline), and every pipeline
 /// read/mutation routes through the working lists.
 ///
-/// This is the working-representation step toward the physical removal of
-/// the mirror field: inside `heal_solid`, `Face.edges` remains only as
-/// (a) staging input — populated mirrors are resolved per position through
-/// the store and land in the working lists (`from_shell_store`, Stage
-/// 7.5; mirror-free faces derive from `edge_ids` instead) — and (b)
-/// terminal construction output — `into_shell` re-attaches the lists, and
-/// the caller immediately re-indexes the store from them. Both are the
-/// sanctioned face-construction semantics.
+/// C5 Stage 7.6b — the mirror field is GONE: the working lists are the
+/// pipeline's only edge representation. Staging derives them from the
+/// input solid's `EdgeStore` (`from_shell_store`: mirror-free faces
+/// derive from `edge_ids` via `Solid::instance_edges`), the pipeline
+/// reads/mutates them exclusively, and the terminals hand shell + working
+/// lists to `Solid::rebuild_store` (the born store-first construction).
 ///
-/// Because staging EMPTIES the mirror field, any accidental `face.edges`
-/// access inside the pipeline sees empty data and fails loudly in the
-/// healing test suite — the structural guard the field removal needs.
-///
-/// NOT migrated (standalone-shell contracts where mirrors are the primary
-/// input representation, like `triangulate_face` in draper-mesh):
-/// `tolerant_stitch`, `validate_and_fix[_shell]`, and the public
-/// `detect_self_intersections` wrapper (the heal pipeline calls the impl
-/// with its working lists instead).
+/// Standalone-shell contracts (`tolerant_stitch`, `validate_and_fix`,
+/// the public `detect_self_intersections` wrapper, `heal_shell`) operate
+/// on bare shells that carry NO edge payload — their edge-driven passes
+/// see empty working lists; the `_with_edges` / staged variants are the
+/// working contracts.
 struct StagedShell {
     shell: Shell,
     /// Per-face working edge lists, parallel to `shell.faces`.
@@ -599,66 +577,32 @@ struct StagedShell {
 }
 
 impl StagedShell {
-    /// Stage a shell: move each face's construction mirrors into the
-    /// working lists and empty the mirror field.
-    fn from_shell(mut shell: Shell) -> Self {
-        let working = shell
-            .faces
-            .iter_mut()
-            .map(|f| std::mem::take(&mut f.edges))
-            .collect();
+    /// Stage a bare shell (C5 7.6b): a standalone shell carries no edge
+    /// payload, so the working lists start EMPTY — edge-driven passes
+    /// no-op, topology-only passes (normal orientation, face removal)
+    /// still run. Store-bearing callers stage via
+    /// [`StagedShell::from_shell_store`].
+    fn from_shell(shell: Shell) -> Self {
+        let working = (0..shell.faces.len()).map(|_| Vec::new()).collect();
         Self { shell, working }
     }
 
-    /// C5 Stage 7.5 — store-first staging for the `heal_solid` entry.
+    /// C5 7.6b — store-first staging for the `heal_solid` entry.
     ///
-    /// Case (a) — mirrors populated: per-position resolution with the
-    /// exact `rederive_edge_mirrors` (6.3) semantics, writing into the
-    /// WORKING lists instead of the mirrors: each mirror's id resolves
-    /// through the source solid's store (`EdgeStore::instance_edge` —
-    /// alias-following, orientation-correct instance view); the store
-    /// wins on geometry mismatch, ids the store does not know (fresh
-    /// split results, un-indexed builder faces) keep the construction
-    /// mirror. Order and length of the mirror list are preserved.
+    /// Faces with populated `edge_ids` derive their working list from the
+    /// source solid's store via [`Solid::instance_edges`] (wire-coedge
+    /// instance order + wire-less canonical references, alias-following,
+    /// orientation-correct). Un-indexed faces stage EMPTY working lists
+    /// (no edge payload exists anywhere for them).
     ///
-    /// Case (b) — mirrors EMPTY with `edge_ids` populated (the Stage 5
-    /// end-state / store-first serialization): the working list is
-    /// DERIVED from the store via [`Solid::instance_edges`] (wire-coedge
-    /// instance order + wire-less canonical references). Pre-7.5 this
-    /// input staged empty working lists — the pipeline silently
-    /// no-opped; healing is now mirror-free on the input side.
-    ///
-    /// The staged faces' mirror fields stay EMPTY either way — mirrors
-    /// never influence the pipeline.
-    ///
-    /// Returns the number of working-list entries whose payload came
-    /// from the store (case a: geometry-differing replacements; case b:
-    /// the whole derived list).
-    fn from_shell_store(source: &Solid, mut shell: Shell) -> (Self, usize) {
+    /// Returns the number of working-list entries derived from the store.
+    fn from_shell_store(source: &Solid, shell: Shell) -> (Self, usize) {
         let mut rederived = 0usize;
         let working = shell
             .faces
-            .iter_mut()
+            .iter()
             .map(|face| {
-                if !face.edges.is_empty() {
-                    // (a) populated mirrors — per-position store resolution.
-                    std::mem::take(&mut face.edges)
-                        .into_iter()
-                        .map(|mirror| {
-                            match source.edge_store.instance_edge(mirror.id) {
-                                Some(instance)
-                                    if !mirror_matches_instance(&mirror, &instance) =>
-                                {
-                                    rederived += 1; // stale mirror — the store wins
-                                    instance
-                                }
-                                _ => mirror, // equal or unknown — keep verbatim
-                            }
-                        })
-                        .collect()
-                } else if !face.edge_ids.is_empty() {
-                    // (b) mirror-free face — derive the working list from
-                    // the store (instance-id key space).
+                if !face.edge_ids.is_empty() {
                     let derived = source.instance_edges(face);
                     rederived += derived.len();
                     derived
@@ -670,15 +614,12 @@ impl StagedShell {
         (Self { shell, working }, rederived)
     }
 
-    /// Un-stage: re-attach the working lists onto the faces as CONSTRUCTION
-    /// mirrors. The caller must re-index (or hand the shell to
-    /// `Solid::from_shell_indexed`) right after — the sanctioned
-    /// construction path.
-    fn into_shell(mut self) -> Shell {
-        for (face, edges) in self.shell.faces.iter_mut().zip(self.working) {
-            face.edges = edges;
-        }
-        self.shell
+    /// Un-stage: return the shell TOGETHER with its per-face working
+    /// edge lists (C5 7.6b) — the caller hands both to
+    /// `Solid::rebuild_store` / `Solid::from_edges_only` (the sanctioned
+    /// store-first construction).
+    fn into_parts(self) -> (Shell, Vec<Vec<Edge>>) {
+        (self.shell, self.working)
     }
 
     fn n_faces(&self) -> usize {
@@ -716,11 +657,10 @@ impl StagedShell {
         self.working.remove(i);
     }
 
-    /// Push a freshly CONSTRUCTED face (edges populated — construction
-    /// semantics): its edge list moves into the working set, the face is
-    /// stored mirror-free.
-    fn push_face(&mut self, mut face: Face) {
-        let edges = std::mem::take(&mut face.edges);
+    /// Push a freshly CONSTRUCTED face together with its boundary edge
+    /// list (C5 7.6b construction semantics): the face is stored
+    /// topology-only, the list joins the working set.
+    fn push_face(&mut self, face: Face, edges: Vec<Edge>) {
         self.shell.faces.push(face);
         self.working.push(edges);
     }
@@ -743,25 +683,30 @@ impl StagedShell {
     }
 }
 
-/// Owned-entry healing pipeline — [`heal_shell`] clones (standalone
-/// mirrors), `heal_solid` stages store-first (C5 Stage 7.5).
+/// Owned-entry healing pipeline — [`heal_shell`] clones (standalone,
+/// no edge payload). The working lists are DROPPED at the boundary: a
+/// bare shell cannot carry edge data (C5 7.6b).
 fn heal_shell_owned(
     shell: Shell,
     params: &HealingParams,
     is_void_shell: bool,
 ) -> (Shell, HealingReport) {
-    heal_staged(StagedShell::from_shell(shell), params, is_void_shell)
+    let ((healed, _working), report) =
+        heal_staged(StagedShell::from_shell(shell), params, is_void_shell);
+    (healed, report)
 }
 
-/// Staged-entry healing pipeline (C5 Stage 7.4b/7.5): the caller controls
-/// how the working set is built — [`StagedShell::from_shell`] (standalone
-/// shells, mirrors primary) or [`StagedShell::from_shell_store`] (the
-/// `heal_solid` boundary, store-first).
+/// Staged-entry healing pipeline (C5 Stage 7.4b/7.5/7.6b): the caller
+/// controls how the working set is built — [`StagedShell::from_shell`]
+/// (standalone shells, no edge payload) or
+/// [`StagedShell::from_shell_store`] (the `heal_solid` boundary,
+/// store-first). Returns the healed shell TOGETHER with the healed
+/// per-face working lists (the `rebuild_store` construction payload).
 fn heal_staged(
     mut staged: StagedShell,
     params: &HealingParams,
     is_void_shell: bool,
-) -> (Shell, HealingReport) {
+) -> ((Shell, Vec<Vec<Edge>>), HealingReport) {
     let mut report = HealingReport::default();
 
     // 0. Propagate tolerances (must run first — correct tolerances are
@@ -807,10 +752,9 @@ fn heal_staged(
         remove_inconsistent_normal_faces(&mut staged, params, &mut report);
     }
 
-    // C5 Stage 7.4b: un-stage — the working lists land back on the faces
-    // as construction mirrors; `heal_solid` re-indexes the store from
-    // them immediately after (the sanctioned construction path).
-    (staged.into_shell(), report)
+    // C5 7.6b: un-stage — shell + working lists go to the caller; the
+    // terminal rebuilds the store from them (`Solid::rebuild_store`).
+    (staged.into_parts(), report)
 }
 
 /// Geometry-level comparison behind [`StagedShell::from_shell_store`]'s
@@ -1184,10 +1128,12 @@ fn fill_holes(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
     let mut holes_filled = 0u32;
     for hole_loop in &loops {
         if hole_loop.len() <= params.max_hole_edges && hole_loop.len() >= 3 {
-            // Create a face to fill the hole (construction — edges
-            // populated; push_face moves them into the working set)
-            if let Some(fill_face) = create_fill_face(hole_loop, &edge_points, params.tolerance) {
-                staged.push_face(fill_face);
+            // Create a face to fill the hole (construction — the face
+            // plus its boundary edges join the working set)
+            if let Some((fill_face, fill_edges)) =
+                create_fill_face(hole_loop, &edge_points, params.tolerance)
+            {
+                staged.push_face(fill_face, fill_edges);
                 holes_filled += 1;
             }
         }
@@ -1388,7 +1334,7 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
     // (C5 Stage 7.4b: geometry comes from the working lists — the scan
     // is read-only, so face + working borrows coexist)
     let mut faces_to_remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut new_faces: Vec<Face> = Vec::new();
+    let mut new_faces: Vec<(Face, Vec<Edge>)> = Vec::new();
     let mut merge_count = 0u32;
 
     for (fi, fj) in &adjacent_pairs {
@@ -1419,10 +1365,12 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
         }
 
         // Merge the two faces
-        if let Some(merged_face) = merge_two_faces(face_a, edges_a, face_b, edges_b, &shared, tol) {
+        if let Some((merged_face, merged_edges)) =
+            merge_two_faces(face_a, edges_a, face_b, edges_b, &shared, tol)
+        {
             faces_to_remove.insert(*fi);
             faces_to_remove.insert(*fj);
-            new_faces.push(merged_face);
+            new_faces.push((merged_face, merged_edges));
             merge_count += 1;
         }
     }
@@ -1435,8 +1383,8 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
         for &idx in sorted_remove.iter().rev() {
             staged.remove_face(idx);
         }
-        for face in new_faces {
-            staged.push_face(face);
+        for (face, edges) in new_faces {
+            staged.push_face(face, edges);
         }
     }
 
@@ -1687,7 +1635,7 @@ fn merge_two_faces(
     edges_b: &[Edge],
     shared_edge_ids: &std::collections::HashSet<TopoId>,
     tol: f64,
-) -> Option<Face> {
+) -> Option<(Face, Vec<Edge>)> {
     // Collect coedges from both faces, marking which are shared
     // We need to walk the boundary and skip shared edges
     let coedges_a = face_coedges_with_forward(face_a);
@@ -1753,17 +1701,15 @@ fn merge_two_faces(
     inner_wires.extend(face_a.inner_wires.clone());
     inner_wires.extend(face_b.inner_wires.clone());
 
-    // Create merged face (construction — edges populated; the caller's
-    // push_face moves them into the working set)
+    // Create merged face (construction — face + boundary edges pair)
     let mut merged_face = Face::new(
         face_a.surface.clone().unwrap_or(Surface::Plane(Plane::xy())),
         outer_wire,
     );
     merged_face.forward = face_a.forward;
-    merged_face.edges = merged_edge_list;
     merged_face.inner_wires = inner_wires;
 
-    Some(merged_face)
+    Some((merged_face, merged_edge_list))
 }
 
 /// Get the list of (edge_id, forward) for coedges in the outer wire of a face.
@@ -2275,15 +2221,10 @@ pub struct SelfIntersection {
 /// Future optimization: use bounding box pre-filtering to skip
 /// non-overlapping face pairs.
 pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfIntersection> {
-    // C5 Stage 7.4b: public standalone-shell contract — mirrors are the
-    // primary input representation (like `triangulate_face` in draper-mesh).
-    // The heal pipeline calls `detect_self_intersections_impl` with its
-    // staged working lists instead, so the pipeline never reads mirrors.
-    let working: Vec<Vec<Edge>> = shell
-        .faces
-        .iter()
-        .map(|f| f.edges.clone())
-        .collect();
+    // C5 7.6b: standalone shells carry no edge payload — this wrapper
+    // sees empty working lists (no detectable edge geometry). Callers
+    // with edge data use `detect_self_intersections_with_edges`.
+    let working: Vec<Vec<Edge>> = (0..shell.faces.len()).map(|_| Vec::new()).collect();
     detect_self_intersections_impl(&shell.faces, &working, tolerance)
 }
 
@@ -2518,12 +2459,19 @@ impl ValidationResult {
 pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResult) {
     let mut result = ValidationResult::default();
     let mut solid = solid.clone();
+    let mut all_working: Vec<Vec<Edge>> = Vec::new();
+    let n_outer = solid
+        .outer_shell
+        .as_ref()
+        .map(|sh| sh.faces.len())
+        .unwrap_or(0);
 
     // Validate and fix outer shell
     if let Some(ref shell) = solid.outer_shell {
         let (staged, _rederived) = StagedShell::from_shell_store(&solid, shell.clone());
-        let (fixed_shell, shell_result) =
+        let ((fixed_shell, fixed_working), shell_result) =
             validate_and_fix_staged_shell(staged, tolerance);
+        all_working.extend(fixed_working);
         result.invalid_param_ranges += shell_result.invalid_param_ranges;
         result.zero_length_edges += shell_result.zero_length_edges;
         result.missing_surfaces += shell_result.missing_surfaces;
@@ -2541,7 +2489,8 @@ pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResu
         .iter()
         .map(|shell| {
             let (staged, _rederived) = StagedShell::from_shell_store(&solid, shell.clone());
-            let (fixed, r) = validate_and_fix_staged_shell(staged, tolerance);
+            let ((fixed, w), r) = validate_and_fix_staged_shell(staged, tolerance);
+            all_working.extend(w);
             result.invalid_param_ranges += r.invalid_param_ranges;
             result.zero_length_edges += r.zero_length_edges;
             result.missing_surfaces += r.missing_surfaces;
@@ -2556,17 +2505,22 @@ pub fn validate_and_fix(solid: &Solid, tolerance: f64) -> (Solid, ValidationResu
     solid.inner_shells = fixed_inner;
 
     result.is_valid = result.is_clean();
+    // C5 7.6b: the fixes (param-range swaps, degenerate flags) landed in
+    // the working lists — rebuild the store so the canonical edges carry
+    // them (working lists are parallel to faces(): outer, then voids).
+    let _ = n_outer;
+    solid.rebuild_store(all_working);
     (solid, result)
 }
 
-/// Mirror-free core of the shell validation/fix (C5 Stage 7.5), used by
-/// [`validate_and_fix`]: all edge validation/fixes run on the staged
-/// working lists; the output shell re-attaches them as construction
-/// mirrors.
+/// Mirror-free core of the shell validation/fix (C5 Stage 7.5 → 7.6b),
+/// used by [`validate_and_fix`]: all edge validation/fixes run on the
+/// staged working lists; the output is shell + working lists (the
+/// `rebuild_store` construction payload).
 fn validate_and_fix_staged_shell(
     mut staged: StagedShell,
     tolerance: f64,
-) -> (Shell, ValidationResult) {
+) -> ((Shell, Vec<Vec<Edge>>), ValidationResult) {
     let mut result = ValidationResult::default();
 
     for face_idx in 0..staged.n_faces() {
@@ -2685,8 +2639,8 @@ fn validate_and_fix_staged_shell(
     }
 
     result.is_valid = result.is_clean();
-    // Terminal: the working lists re-attach as construction mirrors.
-    (staged.into_shell(), result)
+    // Terminal: shell + working lists for the store rebuild.
+    (staged.into_parts(), result)
 }
 
 impl StagedShell {
@@ -2918,7 +2872,7 @@ fn create_fill_face(
     edge_ids: &[TopoId],
     edge_points: &std::collections::HashMap<TopoId, (Point3d, Point3d)>,
     tolerance: f64,
-) -> Option<Face> {
+) -> Option<(Face, Vec<Edge>)> {
     // Collect all unique vertices in order
     let mut vertices: Vec<Point3d> = Vec::new();
     for &edge_id in edge_ids {
@@ -2966,9 +2920,8 @@ fn create_fill_face(
         Plane::from_origin_and_normal(centroid, Direction3d::Z)
     };
 
-    let mut face = Face::new(Surface::Plane(plane), wire);
-    face.edges = edges;
-    Some(face)
+    let face = Face::new(Surface::Plane(plane), wire);
+    Some((face, edges))
 }
 
 /// Estimate the area of a face using its edge polygon.
