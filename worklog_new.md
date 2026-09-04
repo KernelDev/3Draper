@@ -2735,3 +2735,57 @@ index_edges + sync_edge_mirrors).
 
 - (см. git log: refactor(topology): C5 stage 7.4b — healing
   working-set)
+
+# C5 Stage 7.5 (часть A) — mirror-free вход heal_solid
+
+**Дата:** 2026-09-04 (продолжение после обнаружения, что origin/main был
+впереди локальной ветки: Stage 5/5.2/5.3/6.x/7.1-7.4b уже запушены;
+локальный redo Stage 5 сохранён в branch `stage5-redo-backup`, HEAD
+сброшен на `21514d9` и верифицирован: topology 250, mesh+json+ffi 368 ✅).
+
+## Что сделано
+
+- `StagedShell::from_shell_store(source, shell) -> (Self, usize)` —
+  store-first staging на входе `heal_solid`:
+  - case (a) зеркала заполнены: per-position резолвинг (семантика
+    `rederive_edge_mirrors` 6.3 — store выигрывает при geometry-mismatch,
+    неизвестные id сохраняют construction-mirror), пишет в WORKING-списки;
+  - case (b) зеркала ПУСТЫ + `edge_ids` заполнены (Stage 5 end-state /
+    store-first сериализация): рабочий список ПРОИЗВОДИТСЯ из store через
+    `Solid::instance_edges` (wire-coedge instance порядок + wire-less
+    canonical ссылки). До 7.5 такой вход молча стадировал пустые списки —
+    пайплайн no-opp;
+  - зеркала staged-граней остаются пустыми весь пайплайн.
+- `heal_shell_owned` → тонкая обёртка над `heal_staged(staged, params,
+  is_void)` (caller контролирует staging); `heal_solid` (outer + inner
+  shells) стадирует через `from_shell_store`.
+- `rederive_edge_mirrors` УДАЛЁН (superseded case-логикой в
+  `from_shell_store`); его прямой тест переработан на новый вход
+  (`test_rederive_preserves_reversed_instance_orientation`).
+- Обновлены модуль-доки (6.3 → 7.5 контракт) и док StagedShell.
+
+## Тесты
+
+- НОВЫЙ `test_heal_solid_mirror_free_input` — архитектурное
+  доказательство: солид с ПУСТЫМИ зеркалами (edge_ids + store) лечится
+  ИДЕНТИЧНО mirror-несущему твину: все счётчики отчёта, топология,
+  терминальные construction-зеркала, размер перестроенного store;
+  сообщение «store-first healing input» присутствует.
+- Существующие контракты зелёные: staged_shell_pipeline_mirror_free,
+  fresh_id_completeness, rederive_idempotent, store_first_input,
+  un_indexed_fallback.
+
+## Верификация
+
+- draper-topology: **251 passed** (220 lib + 31 integration), 0 failed
+- draper-core: **77 ✅**; `cargo check -p draper-core -p draper-step` —
+  0 errors
+
+## Осталось (Stage 7.5)
+
+- `index_edges`-вход: строить store из edge_ids + working-списков
+  (терминал heal_solid), `Solid::from_edges_only`-конструкция
+- Standalone-контракты (tolerant_stitch/validate_and_fix/detect):
+  сигнатура `(shell, edges)` или store на Shell
+- Физическое удаление поля `Face.edges` + serde-миграция
+- Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
