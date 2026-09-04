@@ -24,14 +24,14 @@ fn test_cylinder_plane_vertex_match() {
             Some(draper_geometry::Surface::Cylinder(_)) => "Cylinder",
             _ => "Other",
         };
-        let edge_count = face.edges.len();
+        let edge_count = result.resolve_face_edges(face).len();
         let has_outer = face.outer_wire.is_some();
         let hole_count = face.inner_wires.len();
         eprintln!("  Face[{}]: {} (edges={}, outer={}, holes={})",
             i, surf_type, edge_count, has_outer, hole_count);
 
         // Print edge IDs and curve types
-        for (j, edge) in face.edges.iter().enumerate() {
+        for (j, edge) in result.resolve_face_edges(face).iter().enumerate() {
             let curve_type = match &edge.curve {
                 Some(draper_geometry::Curve3d::Circle(_)) => "Circle",
                 Some(draper_geometry::Curve3d::Line(_)) => "Line",

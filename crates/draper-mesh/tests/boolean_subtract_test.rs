@@ -33,7 +33,7 @@ fn test_box_minus_cylinder_subtract() {
 
             for (i, face) in result_faces.iter().enumerate() {
                 let has_surface = face.surface.is_some();
-                let edge_count = face.edges.len();
+                let edge_count = result.resolve_face_edges(face).len();
                 let has_outer_wire = face.outer_wire.is_some();
                 eprintln!("  Face[{}]: surface={}, edges={}, outer_wire={}",
                     i, has_surface, edge_count, has_outer_wire);
