@@ -2643,3 +2643,95 @@ mesh-читатель, standalone-контракт» из остатка 7.3+.
 
 - (см. git log: refactor(mesh): C5 stage 7.4a — remove dead
   triangulate_shell)
+
+
+# Worklog — C5 Stage 7.4b: healing working-set (StagedShell)
+
+**Baseline:** commit `5e2ddca` (после C5 Stage 7.4a)
+**Дата:** 2026-09-04
+**Задача:** «healing working-set redesign» — последний крупный блокер
+физического удаления `Face.edges`: ~22 shell-scoped зеркальных обращения
+пайплайна healing (между re-derivation входа и терминальным
+index_edges + sync_edge_mirrors).
+
+## СРЕДА (сессия начата в перезагруженном sandbox)
+
+- `~/.cargo`/`~/.rustup` стёрты → rustup 1.98.0 переустановлен, PATH в
+  `~/.bashrc`, `git config core.fileMode false`
+- УРОК (пятый уровень повторения, теперь записан и соблюдён): перед
+  любой реализацией — `git fetch` + сверка с origin/main. Локальный
+  HEAD был `59695be` (Stage 4!), а remote уже содержал Stage 5–7.4a.
+  Дублирующий коммит stage-5.1 был создан и ОТБРОШЕН
+  (`git reset --hard origin/main`), резервная ветка удалена после
+  сверки. Реализация 7.4b начата с актуального baseline.
+
+## Дизайн
+
+`StagedShell` (private, healing.rs):
+
+- `shell: Shell` — грани несут ТОПОЛОГИЮ только (surface/wires/edge_ids);
+  поле `edges` ОПУСТОШАЕТСЯ на время пайплайна (`mem::take`)
+- `working: Vec<Vec<Edge>>` — per-face instance-edge рабочие списки,
+  индекс-параллельны `shell.faces`
+- `from_shell` (staging: зеркала → списки, поле пустеет) /
+  `into_shell` (терминал: списки → construction-зеркала, вызывающий
+  сразу re-index'ает)
+- `push_face` (construction-грани: fill-hole/merged — список уходит в
+  working) / `remove_face` / `retain_where` (faces+working синхронно)
+- СТРУКТУРНАЯ ГАРАНТИЯ: случайное чтение `face.edges` внутри пайплайна
+  видит ПУСТЫЕ данные → громкий фейл в поведенческих тестах
+
+## Миграция (10 шагов пайплайна + хелперы)
+
+- `propagate_tolerances`, `mark_degenerate_edges`, `close_gaps`,
+  `fill_holes`, `stitch_collinear_edges` (фазовое разделение:
+  read-snapshot → wire-mut → edge-mut), `merge_faces`/`merge_one_pass`/
+  `merge_two_faces(face, edges_a, face_b, edges_b, …)`,
+  `remove_small_features`, `fix_normal_orientation`,
+  `fix_self_intersections_heal`, `remove_inconsistent_normal_faces`
+- Хелперы с явными списками рёбер: `detect_self_intersections_impl`
+  (пайплайн) + публичная обёртка `detect_self_intersections(&Shell)`
+  (standalone-контракт, зеркала = первичные данные),
+  `faces_share_edge`, `face_bounding_box`, `check_face_pair_intersection`,
+  `sample_face_boundary(edges)`, `estimate_face_area(face, edges, surf)`,
+  `compute_face_representative_point(face, edges, surf)`
+
+## НЕ мигрировано (задокументированные standalone-контракты)
+
+- `tolerant_stitch(&mut Shell)` — вызывается из viewer на standalone-шелле
+- `validate_and_fix[_shell]` — StepValidator Phase 2.4 (тест-only),
+  работает на standalone-клонированных шеллах
+- `rederive_edge_mirrors` (6.3) — staging-вход, санционировано;
+  `create_fill_face`/merge-writer — construction-путь, санционировано
+- Вердикт по остаточным `.edges` в healing (production): staging-вход +
+  терминальная конструкция + standalone-контракты — читателей исходных
+  зеркал ВНУТРИ пайплайна heal_solid больше НЕТ
+
+## Верификация
+
+- Тест-инвариант количества: 252 теста до/после (git stash сравнение)
+- draper-topology: **250 passed / 0 failed** (218 lib вкл. новый
+  `test_staged_shell_pipeline_mirror_free` + integration)
+- draper-core: **77 ✅**; draper-mesh: **332 ✅**; json+ffi: **23 ✅**
+- `cargo check --workspace --exclude draper-testing --lib` — 0 errors
+- Новый тест-контракт: зеркала ПУСТЫ во время staging, рабочие списки
+  несут данные, round-trip восстанавливает, поведенческий baseline
+  box-heal неизменен (12 gaps closed, 6 граней)
+
+## Осталось (Stage 7.5 — финал C5)
+
+- `index_edges`-вход: строить store из edge_ids + working-списков
+  (терминал heal_solid), `Solid::from_edges_only`-конструкция
+- Mirror-free вход heal_solid: staging из `Solid::instance_edges`
+  вместо rederive-по-позициям-зеркал (сейчас пустые зеркала →
+  пустые позиции rederive)
+- Standalone-контракты (tolerant_stitch/validate_and_fix/detect):
+  новая сигнатура `(shell, edges)` или store на Shell — дизайн-решение
+- Физическое удаление поля `Face.edges` + serde-миграция
+- Viewer-wire: heal_solid после 7.3 born-indexed солидов —
+  smoke-проверка на интеграционном бинарре (wasm-харнесс сломан до C5)
+
+## Коммит
+
+- (см. git log: refactor(topology): C5 stage 7.4b — healing
+  working-set)

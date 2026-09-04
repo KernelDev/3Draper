@@ -535,59 +535,179 @@ pub fn heal_shell(shell: &Shell, params: &HealingParams, is_void_shell: bool) ->
     heal_shell_owned(shell.clone(), params, is_void_shell)
 }
 
+/// C5 Stage 7.4b — healing working set.
+///
+/// The pipeline's edge geometry lives in per-face WORKING lists owned by
+/// this struct, decoupled from the `Face.edges` mirror field: staged faces
+/// carry topology only (surface, wires, `edge_ids` — their mirror field is
+/// EMPTIED for the duration of the pipeline), and every pipeline
+/// read/mutation routes through the working lists.
+///
+/// This is the working-representation step toward the physical removal of
+/// the mirror field: inside `heal_solid`, `Face.edges` remains only as
+/// (a) staging input — the (re-derived, C5 6.3) construction mirrors
+/// `from_shell` moves into the working lists — and (b) terminal
+/// construction output — `into_shell` re-attaches the lists, and the
+/// caller immediately re-indexes the store from them. Both are the
+/// sanctioned face-construction semantics.
+///
+/// Because staging EMPTIES the mirror field, any accidental `face.edges`
+/// access inside the pipeline sees empty data and fails loudly in the
+/// healing test suite — the structural guard the field removal needs.
+///
+/// NOT migrated (standalone-shell contracts where mirrors are the primary
+/// input representation, like `triangulate_face` in draper-mesh):
+/// `tolerant_stitch`, `validate_and_fix[_shell]`, and the public
+/// `detect_self_intersections` wrapper (the heal pipeline calls the impl
+/// with its working lists instead).
+struct StagedShell {
+    shell: Shell,
+    /// Per-face working edge lists, parallel to `shell.faces`.
+    working: Vec<Vec<Edge>>,
+}
+
+impl StagedShell {
+    /// Stage a shell: move each face's construction mirrors into the
+    /// working lists and empty the mirror field.
+    fn from_shell(mut shell: Shell) -> Self {
+        let working = shell
+            .faces
+            .iter_mut()
+            .map(|f| std::mem::take(&mut f.edges))
+            .collect();
+        Self { shell, working }
+    }
+
+    /// Un-stage: re-attach the working lists onto the faces as CONSTRUCTION
+    /// mirrors. The caller must re-index (or hand the shell to
+    /// `Solid::from_shell_indexed`) right after — the sanctioned
+    /// construction path.
+    fn into_shell(mut self) -> Shell {
+        for (face, edges) in self.shell.faces.iter_mut().zip(self.working) {
+            face.edges = edges;
+        }
+        self.shell
+    }
+
+    fn n_faces(&self) -> usize {
+        self.shell.faces.len()
+    }
+
+    fn face(&self, i: usize) -> &Face {
+        &self.shell.faces[i]
+    }
+
+    fn face_edges(&self, i: usize) -> &[Edge] {
+        &self.working[i]
+    }
+
+    fn edge_count(&self, i: usize) -> usize {
+        self.working[i].len()
+    }
+
+    fn find_edge(&self, i: usize, id: TopoId) -> Option<&Edge> {
+        self.working[i].iter().find(|e| e.id == id)
+    }
+
+    fn find_edge_mut(&mut self, i: usize, id: TopoId) -> Option<&mut Edge> {
+        self.working[i].iter_mut().find(|e| e.id == id)
+    }
+
+    /// Remove face `i` together with its working list.
+    fn remove_face(&mut self, i: usize) {
+        self.shell.faces.remove(i);
+        self.working.remove(i);
+    }
+
+    /// Push a freshly CONSTRUCTED face (edges populated — construction
+    /// semantics): its edge list moves into the working set, the face is
+    /// stored mirror-free.
+    fn push_face(&mut self, mut face: Face) {
+        let edges = std::mem::take(&mut face.edges);
+        self.shell.faces.push(face);
+        self.working.push(edges);
+    }
+
+    /// Apply `keep` (parallel to faces) to both the faces and the working
+    /// lists.
+    fn retain_where(&mut self, keep: Vec<bool>) {
+        let mut idx = 0usize;
+        self.shell.faces.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+        let mut idx = 0usize;
+        self.working.retain(|_| {
+            let k = keep[idx];
+            idx += 1;
+            k
+        });
+    }
+}
+
 /// Owned-entry healing pipeline — [`heal_shell`] clones, `heal_solid`
 /// hands over its re-derived working copy directly (C5 Stage 6.3).
 fn heal_shell_owned(
-    mut shell: Shell,
+    shell: Shell,
     params: &HealingParams,
     is_void_shell: bool,
 ) -> (Shell, HealingReport) {
     let mut report = HealingReport::default();
 
+    // C5 Stage 7.4b: stage the shell — the (re-derived) construction
+    // mirrors move into per-face working lists and the faces' mirror
+    // fields are emptied. Every step below operates on the working
+    // lists; the field stays untouched until `into_shell`.
+    let mut staged = StagedShell::from_shell(shell);
+
     // 0. Propagate tolerances (must run first — correct tolerances are
     //    needed for all subsequent operations)
     if params.propagate_tolerances {
-        propagate_tolerances(&mut shell, params, &mut report);
+        propagate_tolerances(&mut staged, params, &mut report);
     }
 
     // 1. Mark degenerate edges
-    mark_degenerate_edges(&mut shell, params, &mut report);
+    mark_degenerate_edges(&mut staged, params, &mut report);
 
     // 2. Close gaps
-    close_gaps(&mut shell, params, &mut report);
+    close_gaps(&mut staged, params, &mut report);
 
     // 3. Fill small holes
-    fill_holes(&mut shell, params, &mut report);
+    fill_holes(&mut staged, params, &mut report);
 
     // 4. Stitch collinear edges
     if params.stitch_edges {
-        stitch_collinear_edges(&mut shell, params, &mut report);
+        stitch_collinear_edges(&mut staged, params, &mut report);
     }
 
     // 5. Merge coplanar and co-cylindrical faces
     if params.merge_faces {
-        merge_faces(&mut shell, params, &mut report);
+        merge_faces(&mut staged, params, &mut report);
     }
 
     // 6. Remove small-feature faces
-    remove_small_features(&mut shell, params, &mut report);
+    remove_small_features(&mut staged, params, &mut report);
 
     // 7. Fix normal orientation for closed shells
-    if params.fix_normals && shell.closed {
-        fix_normal_orientation(&mut shell, params, &mut report, is_void_shell);
+    if params.fix_normals && staged.shell.closed {
+        fix_normal_orientation(&mut staged, params, &mut report, is_void_shell);
     }
 
     // 8. Detect and fix self-intersections
     if params.fix_self_intersections {
-        fix_self_intersections_heal(&mut shell, params, &mut report);
+        fix_self_intersections_heal(&mut staged, params, &mut report);
     }
 
     // 9. Remove faces with inconsistent normals
     if params.remove_inconsistent_normals {
-        remove_inconsistent_normal_faces(&mut shell, params, &mut report);
+        remove_inconsistent_normal_faces(&mut staged, params, &mut report);
     }
 
-    (shell, report)
+    // C5 Stage 7.4b: un-stage — the working lists land back on the faces
+    // as construction mirrors; `heal_solid` re-indexes the store from
+    // them immediately after (the sanctioned construction path).
+    (staged.into_shell(), report)
 }
 
 /// C5 Stage 6.3 — re-derive a shell's edge mirrors from a solid's edge
@@ -682,7 +802,7 @@ fn mirror_matches_instance(mirror: &Edge, instance: &Edge) -> bool {
 /// 4. **Face → Shell**: The shell's effective tolerance is the maximum
 ///    of all its face tolerances. (This is informational; shells don't
 ///    have a tolerance field, so we report it.)
-fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn propagate_tolerances(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     let mut count = 0u32;
 
     // Determine the floor tolerance from ToleranceContext (downward propagation)
@@ -709,15 +829,18 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
     //   from edges.
 
     // Phase 1: Apply floor tolerance to all edges and faces (downward propagation)
+    // C5 Stage 7.4b: faces and working edge lists are separate arrays —
+    // edge pass first, face pass second (the count total is identical).
     if floor_tol > 0.0 {
-        for face in &mut shell.faces {
-            // Apply floor to edges
-            for edge in &mut face.edges {
+        for edges in &mut staged.working {
+            for edge in edges.iter_mut() {
                 if edge.tolerance < floor_tol {
                     edge.tolerance = floor_tol;
                     count += 1;
                 }
             }
+        }
+        for face in &mut staged.shell.faces {
             // Apply floor to face
             if face.tolerance < floor_tol {
                 face.tolerance = floor_tol;
@@ -743,8 +866,8 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
         std::collections::HashMap::new();
 
     // First pass: collect the maximum tolerance for each vertex
-    for face in &shell.faces {
-        for edge in &face.edges {
+    for edges in &staged.working {
+        for edge in edges.iter() {
             if let Some(vid) = edge.vertex_start {
                 let entry = vertex_max_tol.entry(vid).or_insert(0.0);
                 *entry = (*entry).max(edge.tolerance);
@@ -757,8 +880,8 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
     }
 
     // Second pass: propagate vertex tolerances upward to edges
-    for face in &mut shell.faces {
-        for edge in &mut face.edges {
+    for edges in &mut staged.working {
+        for edge in edges.iter_mut() {
             let mut max_vertex_tol = 0.0f64;
             if let Some(vid) = edge.vertex_start {
                 if let Some(&tol) = vertex_max_tol.get(&vid) {
@@ -778,14 +901,14 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
     }
 
     // Phase 3: Edge → Face propagation
-    for face in &mut shell.faces {
-        let max_edge_tol = face
-            .edges
+    for fi in 0..staged.n_faces() {
+        let max_edge_tol = staged
+            .face_edges(fi)
             .iter()
             .map(|e| e.tolerance)
             .fold(0.0f64, f64::max);
-        if max_edge_tol > face.tolerance {
-            face.tolerance = max_edge_tol;
+        if max_edge_tol > staged.shell.faces[fi].tolerance {
+            staged.shell.faces[fi].tolerance = max_edge_tol;
             count += 1;
         }
     }
@@ -793,7 +916,8 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
     // Phase 4: Face → Shell (informational)
     // Shell doesn't have a tolerance field, but we report the max face
     // tolerance in the report messages for debugging.
-    let max_face_tol = shell
+    let max_face_tol = staged
+        .shell
         .faces
         .iter()
         .map(|f| f.tolerance)
@@ -809,10 +933,10 @@ fn propagate_tolerances(shell: &mut Shell, params: &HealingParams, report: &mut 
 }
 
 /// Mark degenerate edges (zero-length or degenerate curves).
-fn mark_degenerate_edges(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn mark_degenerate_edges(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     let mut count = 0u32;
-    for face in &mut shell.faces {
-        for edge in &mut face.edges {
+    for edges in &mut staged.working {
+        for edge in edges.iter_mut() {
             if !edge.degenerate {
                 let is_degen = if let Some(ref curve) = edge.curve {
                     curve.is_degenerate(params.tolerance)
@@ -842,7 +966,7 @@ fn mark_degenerate_edges(shell: &mut Shell, params: &HealingParams, report: &mut
 /// Searches for pairs of boundary edges (edges used by only one coedge
 /// in the shell) whose midpoints are closer than `tolerance * gap_factor`,
 /// and merges them by making the coedges reference the same edge.
-fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     let gap_tol = params.gap_tolerance();
     let gap_tol_sq = gap_tol * gap_tol;
 
@@ -850,7 +974,7 @@ fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
     // Count how many times each edge ID is referenced.
     let mut edge_use_count: std::collections::HashMap<TopoId, u32> =
         std::collections::HashMap::new();
-    for face in &shell.faces {
+    for face in &staged.shell.faces {
         if let Some(ref wire) = face.outer_wire {
             for coedge in &wire.coedges {
                 *edge_use_count.entry(coedge.edge).or_insert(0) += 1;
@@ -863,11 +987,12 @@ fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
         }
     }
 
-    // Also count from the face.edges list — edges stored directly
+    // Also count from the working edge lists — edges stored directly
+    // (C5 Stage 7.4b: mirrors → working lists)
     let mut edge_midpoints: std::collections::HashMap<TopoId, Point3d> =
         std::collections::HashMap::new();
-    for face in &shell.faces {
-        for edge in &face.edges {
+    for edges in &staged.working {
+        for edge in edges.iter() {
             let midpoint = edge
                 .point_at(0.5)
                 .unwrap_or_else(|| edge.start_point().unwrap_or(Point3d::ORIGIN));
@@ -881,7 +1006,7 @@ fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
     let boundary_edge_ids: Vec<TopoId> = {
         let mut coedge_use_count: std::collections::HashMap<TopoId, u32> =
             std::collections::HashMap::new();
-        for face in &shell.faces {
+        for face in &staged.shell.faces {
             if let Some(ref wire) = face.outer_wire {
                 for coedge in &wire.coedges {
                     *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
@@ -938,7 +1063,7 @@ fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
     // Apply merges: replace references to id_b with id_a in coedges
     let mut gap_count = 0u32;
     for (id_a, id_b) in &merges {
-        let replaced = replace_coedge_edge_refs(&mut shell.faces, *id_b, *id_a);
+        let replaced = replace_coedge_edge_refs(&mut staged.shell.faces, *id_b, *id_a);
         if replaced > 0 {
             gap_count += 1;
         }
@@ -955,11 +1080,11 @@ fn close_gaps(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
 /// A hole is a closed boundary loop formed by edges that appear in only
 /// one coedge. If the loop has ≤ `max_hole_edges` edges, a new face is
 /// created to cap the hole.
-fn fill_holes(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn fill_holes(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     // Collect boundary edges (used by exactly 1 coedge)
     let mut coedge_use_count: std::collections::HashMap<TopoId, u32> =
         std::collections::HashMap::new();
-    for face in &shell.faces {
+    for face in &staged.shell.faces {
         if let Some(ref wire) = face.outer_wire {
             for coedge in &wire.coedges {
                 *coedge_use_count.entry(coedge.edge).or_insert(0) += 1;
@@ -985,8 +1110,8 @@ fn fill_holes(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
     // Build a map from edge ID to edge geometry (start/end points)
     let mut edge_points: std::collections::HashMap<TopoId, (Point3d, Point3d)> =
         std::collections::HashMap::new();
-    for face in &shell.faces {
-        for edge in &face.edges {
+    for edges in &staged.working {
+        for edge in edges.iter() {
             if boundary_edge_ids.contains(&edge.id) {
                 if let (Some(sp), Some(ep)) = (edge.start_point(), edge.end_point()) {
                     edge_points.insert(edge.id, (sp, ep));
@@ -1001,9 +1126,10 @@ fn fill_holes(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
     let mut holes_filled = 0u32;
     for hole_loop in &loops {
         if hole_loop.len() <= params.max_hole_edges && hole_loop.len() >= 3 {
-            // Create a face to fill the hole
+            // Create a face to fill the hole (construction — edges
+            // populated; push_face moves them into the working set)
             if let Some(fill_face) = create_fill_face(hole_loop, &edge_points, params.tolerance) {
-                shell.faces.push(fill_face);
+                staged.push_face(fill_face);
                 holes_filled += 1;
             }
         }
@@ -1020,78 +1146,91 @@ fn fill_holes(shell: &mut Shell, params: &HealingParams, report: &mut HealingRep
 /// When two adjacent edges are collinear (their direction vectors are
 /// parallel within angular tolerance) and share a common vertex, they
 /// are merged into a single edge.
-fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn stitch_collinear_edges(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     let angular_tol = 1e-6; // Radians — ~0.00006 degrees
     let mut stitch_count = 0u32;
 
-    for face in &mut shell.faces {
+    // C5 Stage 7.4b: the wire (face topology) and the edge geometry
+    // (working list) live in separate arrays — per face, the scan runs
+    // read-only on snapshots, then mutations apply: wire coedges first,
+    // working edges second. Same phase order as the mirror version.
+    for fi in 0..staged.n_faces() {
         // Look for consecutive edges in the outer wire that are collinear
-        if let Some(ref mut wire) = face.outer_wire {
-            if wire.coedges.len() < 2 {
+        let n = match staged.face(fi).outer_wire {
+            Some(ref wire) if wire.coedges.len() >= 2 => wire.coedges.len(),
+            _ => continue,
+        };
+
+        // Phase 1 (read): snapshot the wire's coedge ids
+        let coedge_ids: Vec<TopoId> = staged.face(fi)
+            .outer_wire
+            .as_ref()
+            .map(|w| w.coedges.iter().map(|c| c.edge).collect())
+            .unwrap_or_default();
+
+        let mut to_remove: Vec<usize> = Vec::new();
+        // Collect (edge_id_i, new_end_point, new_param_range) so we can
+        // extend edge i after removing coedge j. Without this, the merged
+        // edge would still have its original param_range and end_vertex_point,
+        // leaving the wire's end-to-start connectivity broken.
+        let mut edge_extensions: Vec<(TopoId, Point3d, (f64, f64))> = Vec::new();
+
+        // Phase 2 (read): scan for collinear pairs in the working edges
+        for i in 0..n {
+            if to_remove.contains(&i) {
+                continue;
+            }
+            let j = (i + 1) % n;
+            if to_remove.contains(&j) {
                 continue;
             }
 
-            let n = wire.coedges.len();
-            let mut to_remove: Vec<usize> = Vec::new();
-            // Collect (edge_id_i, new_end_point, new_param_range) so we can
-            // extend edge i after removing coedge j. Without this, the merged
-            // edge would still have its original param_range and end_vertex_point,
-            // leaving the wire's end-to-start connectivity broken.
-            let mut edge_extensions: Vec<(TopoId, Point3d, (f64, f64))> = Vec::new();
+            let edge_id_i = coedge_ids[i];
+            let edge_id_j = coedge_ids[j];
 
-            for i in 0..n {
-                if to_remove.contains(&i) {
-                    continue;
-                }
-                let j = (i + 1) % n;
-                if to_remove.contains(&j) {
-                    continue;
-                }
+            // Find the corresponding edges
+            let edge_i = staged.find_edge(fi, edge_id_i);
+            let edge_j = staged.find_edge(fi, edge_id_j);
 
-                let edge_id_i = wire.coedges[i].edge;
-                let edge_id_j = wire.coedges[j].edge;
-
-                // Find the corresponding edges
-                let edge_i = face.edges.iter().find(|e| e.id == edge_id_i);
-                let edge_j = face.edges.iter().find(|e| e.id == edge_id_j);
-
-                if let (Some(ei), Some(ej)) = (edge_i, edge_j) {
-                    if are_edges_collinear(ei, ej, angular_tol, params.tolerance) {
-                        // Merge: remove edge j, extend edge i to cover both.
-                        //
-                        // The merged edge spans from ei.start to ej.end.
-                        // For Line curves this is straightforward: param_range
-                        // is typically (0, length) or (0, 1) — extend to
-                        // (ei.param_range.0, ei.param_range.1 + ej.param_range.1 - ej.param_range.0).
-                        //
-                        // For Circle/NURBS curves, "collinear" merging is
-                        // geometrically incorrect anyway (they're curves,
-                        // not lines), but we still need to extend the param
-                        // range to keep the wire's end-to-start connectivity.
-                        //
-                        // The new end point is ej's end point.
-                        let new_end_point = ej.end_vertex_point
-                            .or(ej.start_vertex_point)
-                            .or(ei.end_vertex_point);
-                        let ej_span = ej.param_range.1 - ej.param_range.0;
-                        let new_param_range = (
-                            ei.param_range.0,
-                            ei.param_range.1 + ej_span,
-                        );
-                        if let Some(end_pt) = new_end_point {
-                            edge_extensions.push((edge_id_i, end_pt, new_param_range));
-                        }
-                        to_remove.push(j);
-                        stitch_count += 1;
+            if let (Some(ei), Some(ej)) = (edge_i, edge_j) {
+                if are_edges_collinear(ei, ej, angular_tol, params.tolerance) {
+                    // Merge: remove edge j, extend edge i to cover both.
+                    //
+                    // The merged edge spans from ei.start to ej.end.
+                    // For Line curves this is straightforward: param_range
+                    // is typically (0, length) or (0, 1) — extend to
+                    // (ei.param_range.0, ei.param_range.1 + ej.param_range.1 - ej.param_range.0).
+                    //
+                    // For Circle/NURBS curves, "collinear" merging is
+                    // geometrically incorrect anyway (they're curves,
+                    // not lines), but we still need to extend the param
+                    // range to keep the wire's end-to-start connectivity.
+                    //
+                    // The new end point is ej's end point.
+                    let new_end_point = ej.end_vertex_point
+                        .or(ej.start_vertex_point)
+                        .or(ei.end_vertex_point);
+                    let ej_span = ej.param_range.1 - ej.param_range.0;
+                    let new_param_range = (
+                        ei.param_range.0,
+                        ei.param_range.1 + ej_span,
+                    );
+                    if let Some(end_pt) = new_end_point {
+                        edge_extensions.push((edge_id_i, end_pt, new_param_range));
                     }
+                    to_remove.push(j);
+                    stitch_count += 1;
                 }
             }
+        }
 
-            // Remove merged coedges (in reverse order to keep indices valid)
-            if !to_remove.is_empty() {
-                let mut sorted = to_remove;
-                sorted.sort_unstable();
-                sorted.dedup();
+        // Phase 3 (mut): remove merged coedges (in reverse order to keep
+        // indices valid)
+        if !to_remove.is_empty() {
+            let mut sorted = to_remove;
+            sorted.sort_unstable();
+            sorted.dedup();
+            if let Some(ref mut wire) = staged.shell.faces[fi].outer_wire {
                 for &idx in sorted.iter().rev() {
                     wire.coedges.remove(idx);
                 }
@@ -1099,15 +1238,15 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
                     wire.closed = true;
                 }
             }
+        }
 
-            // Apply edge extensions: update param_range and end_vertex_point
-            // of the surviving edges so that the wire's end-to-start
-            // connectivity is preserved.
-            for (edge_id, new_end, new_range) in edge_extensions {
-                if let Some(edge) = face.edges.iter_mut().find(|e| e.id == edge_id) {
-                    edge.param_range = new_range;
-                    edge.end_vertex_point = Some(new_end);
-                }
+        // Phase 4 (mut): apply edge extensions — update param_range and
+        // end_vertex_point of the surviving edges so that the wire's
+        // end-to-start connectivity is preserved.
+        for (edge_id, new_end, new_range) in edge_extensions {
+            if let Some(edge) = staged.find_edge_mut(fi, edge_id) {
+                edge.param_range = new_range;
+                edge.end_vertex_point = Some(new_end);
             }
         }
     }
@@ -1131,7 +1270,7 @@ fn stitch_collinear_edges(shell: &mut Shell, params: &HealingParams, report: &mu
 /// 3. For compatible pairs, reconstruct the merged boundary by removing
 ///    shared edges and re-connecting the remaining edges.
 /// 4. Replace both original faces with the merged face.
-fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn merge_faces(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     let tol = params.tolerance;
     let angular_tol = 1e-6; // radians (~0.00006°)
 
@@ -1143,7 +1282,7 @@ fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingRe
     let mut total_merged = 0u32;
     let max_passes = 50;
     for _ in 0..max_passes {
-        let merged_this_pass = merge_one_pass(shell, tol, angular_tol);
+        let merged_this_pass = merge_one_pass(staged, tol, angular_tol);
         if merged_this_pass == 0 {
             break;
         }
@@ -1157,8 +1296,8 @@ fn merge_faces(shell: &mut Shell, params: &HealingParams, report: &mut HealingRe
 }
 
 /// Perform one pass of face merging. Returns the number of merges performed.
-fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
-    let n = shell.faces.len();
+fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
+    let n = staged.n_faces();
     if n < 2 {
         return 0;
     }
@@ -1166,7 +1305,7 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
     // Build a map: edge_id → set of face indices that use this edge in their coedges
     let mut edge_to_faces: std::collections::HashMap<TopoId, std::collections::HashSet<usize>> =
         std::collections::HashMap::new();
-    for (fi, face) in shell.faces.iter().enumerate() {
+    for (fi, face) in staged.shell.faces.iter().enumerate() {
         let coedge_edge_ids = face_coedge_edge_ids(face);
         for eid in coedge_edge_ids {
             edge_to_faces.entry(eid).or_default().insert(fi);
@@ -1188,6 +1327,8 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
     }
 
     // Check each adjacent pair for surface compatibility and merge
+    // (C5 Stage 7.4b: geometry comes from the working lists — the scan
+    // is read-only, so face + working borrows coexist)
     let mut faces_to_remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut new_faces: Vec<Face> = Vec::new();
     let mut merge_count = 0u32;
@@ -1197,8 +1338,10 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
             continue;
         }
 
-        let face_a = &shell.faces[*fi];
-        let face_b = &shell.faces[*fj];
+        let face_a = staged.face(*fi);
+        let face_b = staged.face(*fj);
+        let edges_a = staged.face_edges(*fi);
+        let edges_b = staged.face_edges(*fj);
 
         // Check surface compatibility
         if !are_surfaces_compatible(&face_a.surface, &face_b.surface, tol, angular_tol) {
@@ -1206,10 +1349,10 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
         }
 
         // Find shared edge IDs
-        let edges_a = face_coedge_edge_ids(face_a);
-        let edges_b = face_coedge_edge_ids(face_b);
-        let set_a: std::collections::HashSet<TopoId> = edges_a.iter().copied().collect();
-        let set_b: std::collections::HashSet<TopoId> = edges_b.iter().copied().collect();
+        let wire_edges_a = face_coedge_edge_ids(face_a);
+        let wire_edges_b = face_coedge_edge_ids(face_b);
+        let set_a: std::collections::HashSet<TopoId> = wire_edges_a.iter().copied().collect();
+        let set_b: std::collections::HashSet<TopoId> = wire_edges_b.iter().copied().collect();
         let shared: std::collections::HashSet<TopoId> =
             set_a.intersection(&set_b).copied().collect();
 
@@ -1218,7 +1361,7 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
         }
 
         // Merge the two faces
-        if let Some(merged_face) = merge_two_faces(face_a, face_b, &shared, tol) {
+        if let Some(merged_face) = merge_two_faces(face_a, edges_a, face_b, edges_b, &shared, tol) {
             faces_to_remove.insert(*fi);
             faces_to_remove.insert(*fj);
             new_faces.push(merged_face);
@@ -1226,14 +1369,17 @@ fn merge_one_pass(shell: &mut Shell, tol: f64, angular_tol: f64) -> u32 {
         }
     }
 
-    // Apply: remove merged faces and add new ones
+    // Apply: remove merged faces and add new ones (faces AND working
+    // lists, index-parallel)
     if merge_count > 0 {
         let mut sorted_remove: Vec<usize> = faces_to_remove.iter().copied().collect();
         sorted_remove.sort_unstable();
         for &idx in sorted_remove.iter().rev() {
-            shell.faces.remove(idx);
+            staged.remove_face(idx);
         }
-        shell.faces.extend(new_faces);
+        for face in new_faces {
+            staged.push_face(face);
+        }
     }
 
     merge_count
@@ -1478,7 +1624,9 @@ fn are_cylinders_compatible(
 /// - Preserves all inner wires (holes) from both faces
 fn merge_two_faces(
     face_a: &Face,
+    edges_a: &[Edge],
     face_b: &Face,
+    edges_b: &[Edge],
     shared_edge_ids: &std::collections::HashSet<TopoId>,
     tol: f64,
 ) -> Option<Face> {
@@ -1487,12 +1635,13 @@ fn merge_two_faces(
     let coedges_a = face_coedges_with_forward(face_a);
     let coedges_b = face_coedges_with_forward(face_b);
 
-    // Collect edge geometry from both faces
+    // Collect edge geometry from both faces (C5 Stage 7.4b: working
+    // lists replace the mirror field reads)
     let mut all_edges: std::collections::HashMap<TopoId, Edge> = std::collections::HashMap::new();
-    for edge in &face_a.edges {
+    for edge in edges_a {
         all_edges.entry(edge.id).or_insert_with(|| edge.clone());
     }
-    for edge in &face_b.edges {
+    for edge in edges_b {
         all_edges.entry(edge.id).or_insert_with(|| edge.clone());
     }
 
@@ -1546,7 +1695,8 @@ fn merge_two_faces(
     inner_wires.extend(face_a.inner_wires.clone());
     inner_wires.extend(face_b.inner_wires.clone());
 
-    // Create merged face
+    // Create merged face (construction — edges populated; the caller's
+    // push_face moves them into the working set)
     let mut merged_face = Face::new(
         face_a.surface.clone().unwrap_or(Surface::Plane(Plane::xy())),
         outer_wire,
@@ -1684,31 +1834,41 @@ fn order_coedges_into_wire(
 }
 
 /// Remove faces with area below `min_face_area`.
-fn remove_small_features(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
-    let before = shell.faces.len();
+fn remove_small_features(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
+    let before = staged.n_faces();
 
-    shell.faces.retain(|face| {
-        // Keep faces that have no surface (we can't estimate area)
-        let surface = match face.surface {
-            Some(ref s) => s,
-            None => return true,
-        };
+    // C5 Stage 7.4b: compute the keep flags from faces + working lists
+    // (read-only), then apply them to both arrays.
+    let keep: Vec<bool> = staged
+        .shell
+        .faces
+        .iter()
+        .enumerate()
+        .map(|(fi, face)| {
+            // Keep faces that have no surface (we can't estimate area)
+            let surface = match face.surface {
+                Some(ref s) => s,
+                None => return true,
+            };
 
-        // Audit item 2.3 (2026-07-19): NEVER remove NURBS faces.
-        // These represent complex geometry (fillets, organic shapes) that
-        // may have small area but are topologically important. Removing
-        // them was the root cause of "healing drops valid NURBS faces" bug.
-        if matches!(surface, Surface::Nurbs(_)) {
-            return true;
-        }
+            // Audit item 2.3 (2026-07-19): NEVER remove NURBS faces.
+            // These represent complex geometry (fillets, organic shapes) that
+            // may have small area but are topologically important. Removing
+            // them was the root cause of "healing drops valid NURBS faces" bug.
+            if matches!(surface, Surface::Nurbs(_)) {
+                return true;
+            }
 
-        // Estimate face area by sampling the surface within the wire boundary.
-        // For simplicity, use the edge polygon area as an approximation.
-        let area = estimate_face_area(face, surface);
-        area >= params.min_face_area
-    });
+            // Estimate face area by sampling the surface within the wire boundary.
+            // For simplicity, use the edge polygon area as an approximation.
+            let area = estimate_face_area(face, staged.face_edges(fi), surface);
+            area >= params.min_face_area
+        })
+        .collect();
 
-    let removed = before - shell.faces.len();
+    staged.retain_where(keep);
+
+    let removed = before - staged.n_faces();
     if removed > 0 {
         report.small_faces_removed = removed as u32;
         report.add_msg(format!("Removed {} small-feature faces", removed));
@@ -1722,16 +1882,17 @@ fn remove_small_features(shell: &mut Shell, params: &HealingParams, report: &mut
 /// 1. Computes the shell's centroid
 /// 2. For each face, checks whether its normal points away from the centroid
 /// 3. Flips faces whose normals point inward
-fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport, is_void_shell: bool) {
-    if shell.faces.is_empty() {
+fn fix_normal_orientation(staged: &mut StagedShell, _params: &HealingParams, report: &mut HealingReport, is_void_shell: bool) {
+    if staged.shell.faces.is_empty() {
         return;
     }
 
-    // Compute centroid as average of edge midpoints
+    // Compute centroid as average of edge midpoints (C5 Stage 7.4b:
+    // edge midpoints from the working lists)
     let mut centroid = Point3d::ORIGIN;
     let mut count = 0usize;
-    for face in &shell.faces {
-        for edge in &face.edges {
+    for fi in 0..staged.n_faces() {
+        for edge in staged.face_edges(fi).iter() {
             if let Some(p) = edge.point_at(0.5) {
                 centroid.x += p.x;
                 centroid.y += p.y;
@@ -1740,7 +1901,7 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
             }
         }
         // Also sample surface center
-        if let Some(ref surface) = face.surface {
+        if let Some(ref surface) = staged.face(fi).surface {
             let p = surface.point_at(0.0, 0.0);
             centroid.x += p.x;
             centroid.y += p.y;
@@ -1757,8 +1918,8 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
     centroid.z /= count as f64;
 
     let mut flipped = 0u32;
-    for face in &mut shell.faces {
-        let surface = match face.surface {
+    for fi in 0..staged.n_faces() {
+        let surface = match staged.face(fi).surface {
             Some(ref s) => s,
             None => continue,
         };
@@ -1770,7 +1931,9 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
         // Instead, compute the average of the edge midpoints — this is
         // guaranteed to be on the face's boundary, which for a simply-
         // connected face is a reasonable representative point.
-        let (face_point, face_u, face_v) = if let Some((fp, u, v)) = compute_face_representative_point(face, surface) {
+        let (face_point, face_u, face_v) = if let Some((fp, u, v)) =
+            compute_face_representative_point(staged.face(fi), staged.face_edges(fi), surface)
+        {
             (fp, u, v)
         } else {
             // Fallback: UV origin
@@ -1778,7 +1941,7 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
         };
 
         // Get the face normal at the representative point
-        let normal = if face.forward {
+        let normal = if staged.face(fi).forward {
             surface.normal_at(face_u, face_v)
         } else {
             surface.normal_at(face_u, face_v).neg()
@@ -1807,7 +1970,7 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
         };
 
         if needs_flip {
-            face.forward = !face.forward;
+            staged.shell.faces[fi].forward = !staged.shell.faces[fi].forward;
             flipped += 1;
         }
     }
@@ -1832,7 +1995,7 @@ fn fix_normal_orientation(shell: &mut Shell, _params: &HealingParams, report: &m
 /// For more sophisticated repair, the intersecting face could be trimmed
 /// rather than removed entirely, but that requires curve-surface intersection
 /// and re-wiring the topology, which is significantly more complex.
-fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report: &mut HealingReport) {
+fn fix_self_intersections_heal(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
     // Conservative self-intersection repair.
     //
     // This is NOT a stub — it's a conservative real implementation:
@@ -1852,7 +2015,11 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
     // implementing `split_face_with_intersection` which is a major feature
     // (see B3 split_general_face in BREP_CORE_FIX_PLAN.md for the partial
     // implementation done for boolean operations).
-    let intersections = detect_self_intersections(shell, params.tolerance);
+    //
+    // C5 Stage 7.4b: detection runs on the staged faces + working lists
+    // (the impl variant — no mirror reads).
+    let intersections =
+        detect_self_intersections_impl(&staged.shell.faces, &staged.working, params.tolerance);
     if intersections.is_empty() {
         return;
     }
@@ -1871,11 +2038,11 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
         }
 
         // Check if either face is a NURBS surface — if so, skip this intersection
-        let is_nurbs_a = shell.faces.get(si.face_a)
+        let is_nurbs_a = staged.shell.faces.get(si.face_a)
             .and_then(|f| f.surface.as_ref())
             .map(|s| matches!(s, Surface::Nurbs(_)))
             .unwrap_or(false);
-        let is_nurbs_b = shell.faces.get(si.face_b)
+        let is_nurbs_b = staged.shell.faces.get(si.face_b)
             .and_then(|f| f.surface.as_ref())
             .map(|s| matches!(s, Surface::Nurbs(_)))
             .unwrap_or(false);
@@ -1883,8 +2050,8 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
             continue; // Don't remove NURBS faces
         }
 
-        let edges_a = shell.faces.get(si.face_a).map(|f| f.edges.len()).unwrap_or(0);
-        let edges_b = shell.faces.get(si.face_b).map(|f| f.edges.len()).unwrap_or(0);
+        let edges_a = staged.edge_count(si.face_a);
+        let edges_b = staged.edge_count(si.face_b);
 
         // Remove the face with fewer edges — it's more likely to be the defect
         let to_remove = if edges_a <= edges_b { si.face_a } else { si.face_b };
@@ -1893,12 +2060,13 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
 
     let removed = faces_to_remove.len();
     if removed > 0 {
-        // Remove faces in reverse order to preserve indices
+        // Remove faces in reverse order to preserve indices (faces AND
+        // working lists)
         let mut indices: Vec<usize> = faces_to_remove.into_iter().collect();
         indices.sort_unstable_by(|a, b| b.cmp(a)); // Sort descending
         for idx in indices {
-            if idx < shell.faces.len() {
-                shell.faces.remove(idx);
+            if idx < staged.n_faces() {
+                staged.remove_face(idx);
             }
         }
         report.small_faces_removed += removed as u32;
@@ -1923,16 +2091,16 @@ fn fix_self_intersections_heal(shell: &mut Shell, params: &HealingParams, report
 /// This catches faces that are "inside-out" due to bad topology in the
 /// STEP file, which couldn't be fixed by the simple centroid-based
 /// orientation check.
-fn remove_inconsistent_normal_faces(shell: &mut Shell, _params: &HealingParams, report: &mut HealingReport) {
-    if shell.faces.len() < 2 {
+fn remove_inconsistent_normal_faces(staged: &mut StagedShell, _params: &HealingParams, report: &mut HealingReport) {
+    if staged.n_faces() < 2 {
         return;
     }
 
     let angular_tol = 0.1; // ~5.7 degrees
     let mut faces_to_remove = Vec::new();
 
-    for (i, face) in shell.faces.iter().enumerate() {
-        let surface = match face.surface {
+    for fi in 0..staged.n_faces() {
+        let surface = match staged.face(fi).surface {
             Some(ref s) => s,
             None => continue,
         };
@@ -1945,24 +2113,25 @@ fn remove_inconsistent_normal_faces(shell: &mut Shell, _params: &HealingParams, 
         }
 
         // Get this face's normal at center
-        let this_normal = if face.forward {
+        let this_normal = if staged.face(fi).forward {
             surface.normal_at(0.0, 0.0)
         } else {
             surface.normal_at(0.0, 0.0).neg()
         };
 
-        // Collect adjacent face normals
+        // Collect adjacent face normals (C5 Stage 7.4b: edge ids from
+        // the working lists)
         let face_edge_ids: std::collections::HashSet<TopoId> =
-            face.edges.iter().map(|e| e.id).collect();
+            staged.face_edges(fi).iter().map(|e| e.id).collect();
 
         let mut adjacent_normals: Vec<Vec3d> = Vec::new();
-        for (j, other_face) in shell.faces.iter().enumerate() {
-            if i == j { continue; }
-            let shares_edge = other_face.edges.iter().any(|e| face_edge_ids.contains(&e.id));
+        for fj in 0..staged.n_faces() {
+            if fi == fj { continue; }
+            let shares_edge = staged.face_edges(fj).iter().any(|e| face_edge_ids.contains(&e.id));
             if !shares_edge { continue; }
 
-            if let Some(ref other_surface) = other_face.surface {
-                let other_normal = if other_face.forward {
+            if let Some(ref other_surface) = staged.face(fj).surface {
+                let other_normal = if staged.face(fj).forward {
                     other_surface.normal_at(0.0, 0.0)
                 } else {
                     other_surface.normal_at(0.0, 0.0).neg()
@@ -1988,16 +2157,17 @@ fn remove_inconsistent_normal_faces(shell: &mut Shell, _params: &HealingParams, 
         let dot = this_normal.x * avg.x + this_normal.y * avg.y + this_normal.z * avg.z;
         if dot < -(1.0 - angular_tol) {
             // This face's normal points opposite to its neighbors — it's inconsistent
-            faces_to_remove.push(i);
+            faces_to_remove.push(fi);
         }
     }
 
     let removed = faces_to_remove.len();
     if removed > 0 {
-        // Remove in reverse order to preserve indices
+        // Remove in reverse order to preserve indices (faces AND working
+        // lists)
         for idx in faces_to_remove.into_iter().rev() {
-            if idx < shell.faces.len() {
-                shell.faces.remove(idx);
+            if idx < staged.n_faces() {
+                staged.remove_face(idx);
             }
         }
         report.small_faces_removed += removed as u32;
@@ -2047,24 +2217,43 @@ pub struct SelfIntersection {
 /// Future optimization: use bounding box pre-filtering to skip
 /// non-overlapping face pairs.
 pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfIntersection> {
+    // C5 Stage 7.4b: public standalone-shell contract — mirrors are the
+    // primary input representation (like `triangulate_face` in draper-mesh).
+    // The heal pipeline calls `detect_self_intersections_impl` with its
+    // staged working lists instead, so the pipeline never reads mirrors.
+    let working: Vec<Vec<Edge>> = shell
+        .faces
+        .iter()
+        .map(|f| f.edges.clone())
+        .collect();
+    detect_self_intersections_impl(&shell.faces, &working, tolerance)
+}
+
+/// Working-set core of [`detect_self_intersections`] (C5 Stage 7.4b):
+/// `working[i]` is face i's boundary edge list (staged working data).
+fn detect_self_intersections_impl(
+    faces: &[Face],
+    working: &[Vec<Edge>],
+    tolerance: f64,
+) -> Vec<SelfIntersection> {
     let mut intersections = Vec::new();
 
     // Build a set of shared edge pairs to skip
-    let n_faces = shell.faces.len();
+    let n_faces = faces.len();
 
     for i in 0..n_faces {
         for j in (i + 1)..n_faces {
-            let face_a = &shell.faces[i];
-            let face_b = &shell.faces[j];
+            let face_a = &faces[i];
+            let face_b = &faces[j];
 
             // Skip if faces share an edge — they're supposed to meet there
-            if faces_share_edge(face_a, face_b) {
+            if faces_share_edge(face_a, &working[i], face_b, &working[j]) {
                 continue;
             }
 
             // Quick bounding box check — skip if faces don't overlap
-            let (a_min, a_max) = face_bounding_box(face_a);
-            let (b_min, b_max) = face_bounding_box(face_b);
+            let (a_min, a_max) = face_bounding_box(face_a, &working[i]);
+            let (b_min, b_max) = face_bounding_box(face_b, &working[j]);
 
             if a_min.x > b_max.x + tolerance || b_min.x > a_max.x + tolerance
                 || a_min.y > b_max.y + tolerance || b_min.y > a_max.y + tolerance
@@ -2075,7 +2264,7 @@ pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfInter
 
             // Sample boundary points of face A and check distance to face B's surface
             check_face_pair_intersection(
-                i, j, face_a, face_b, tolerance, &mut intersections,
+                i, j, face_a, &working[i], face_b, &working[j], tolerance, &mut intersections,
             );
         }
     }
@@ -2084,9 +2273,11 @@ pub fn detect_self_intersections(shell: &Shell, tolerance: f64) -> Vec<SelfInter
 }
 
 /// Check if two faces share any edge (by TopoId).
-fn faces_share_edge(a: &Face, b: &Face) -> bool {
-    let a_edges: std::collections::HashSet<TopoId> = a.edges.iter().map(|e| e.id).collect();
-    for edge in &b.edges {
+/// C5 Stage 7.4b: edge geometry arrives as explicit lists — the face
+/// params document which face each list belongs to.
+fn faces_share_edge(_a: &Face, edges_a: &[Edge], _b: &Face, edges_b: &[Edge]) -> bool {
+    let a_edges: std::collections::HashSet<TopoId> = edges_a.iter().map(|e| e.id).collect();
+    for edge in edges_b {
         if a_edges.contains(&edge.id) {
             return true;
         }
@@ -2095,11 +2286,12 @@ fn faces_share_edge(a: &Face, b: &Face) -> bool {
 }
 
 /// Compute the axis-aligned bounding box of a face from its edge vertices.
-fn face_bounding_box(face: &Face) -> (Point3d, Point3d) {
+/// C5 Stage 7.4b: edge geometry arrives as an explicit list.
+fn face_bounding_box(_face: &Face, edges: &[Edge]) -> (Point3d, Point3d) {
     let mut min = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
     let mut max = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
 
-    for edge in &face.edges {
+    for edge in edges {
         if let Some(p) = edge.start_point() {
             min.x = min.x.min(p.x); min.y = min.y.min(p.y); min.z = min.z.min(p.z);
             max.x = max.x.max(p.x); max.y = max.y.max(p.y); max.z = max.z.max(p.z);
@@ -2119,19 +2311,22 @@ fn face_bounding_box(face: &Face) -> (Point3d, Point3d) {
 }
 
 /// Check for intersections between boundary curves of two faces.
+/// C5 Stage 7.4b: edge geometry arrives as explicit lists.
 fn check_face_pair_intersection(
     face_a_idx: usize,
     face_b_idx: usize,
     face_a: &Face,
+    edges_a: &[Edge],
     face_b: &Face,
+    edges_b: &[Edge],
     tolerance: f64,
     intersections: &mut Vec<SelfIntersection>,
 ) {
     let tol_sq = tolerance * tolerance;
 
     // Collect edge sample points from both faces
-    let pts_a = sample_face_boundary(face_a, 8);
-    let pts_b = sample_face_boundary(face_b, 8);
+    let pts_a = sample_face_boundary(edges_a, 8);
+    let pts_b = sample_face_boundary(edges_b, 8);
 
     // Check face A boundary points against face B's surface
     if let Some(ref surface_b) = face_b.surface {
@@ -2171,9 +2366,9 @@ fn check_face_pair_intersection(
 }
 
 /// Sample points along a face's boundary edges.
-fn sample_face_boundary(face: &Face, n_samples: usize) -> Vec<Point3d> {
+fn sample_face_boundary(edges: &[Edge], n_samples: usize) -> Vec<Point3d> {
     let mut points = Vec::new();
-    for edge in &face.edges {
+    for edge in edges {
         if edge.degenerate { continue; }
         if let Some(ref curve) = edge.curve {
             let (tmin, tmax) = edge.param_range;
@@ -2666,14 +2861,14 @@ fn create_fill_face(
 }
 
 /// Estimate the area of a face using its edge polygon.
-fn estimate_face_area(face: &Face, surface: &Surface) -> f64 {
-    // Collect 3D points from edges
+fn estimate_face_area(face: &Face, edges: &[Edge], surface: &Surface) -> f64 {
+    // Collect 3D points from edges (C5 Stage 7.4b: explicit working list)
     let mut points: Vec<Point3d> = Vec::new();
 
     if let Some(ref wire) = face.outer_wire {
         for coedge in &wire.coedges {
-            // Find the edge in face.edges
-            if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+            // Find the edge in the working list
+            if let Some(edge) = edges.iter().find(|e| e.id == coedge.edge) {
                 if let Some(sp) = edge.start_point() {
                     points.push(sp);
                 }
@@ -2856,13 +3051,15 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
 /// 2. Average them to get a centroid in 3D.
 /// 3. Project the centroid back to the surface UV space.
 fn compute_face_representative_point(
-    face: &Face,
+    _face: &Face,
+    edges: &[Edge],
     surface: &draper_geometry::Surface,
 ) -> Option<(Point3d, f64, f64)> {
-    // Collect edge midpoints
+    // Collect edge midpoints (C5 Stage 7.4b: explicit working list;
+    // `face` carries only topology)
     let mut sum = Point3d::new(0.0, 0.0, 0.0);
     let mut count = 0usize;
-    for edge in &face.edges {
+    for edge in edges {
         if let Some(p) = edge.point_at(0.5) {
             sum.x += p.x;
             sum.y += p.y;
@@ -3042,6 +3239,72 @@ mod tests {
         assert_eq!(report.gaps_closed, 12);
         if let Some(ref shell) = healed.outer_shell {
             assert_eq!(shell.faces.len(), 6);
+        }
+    }
+
+    /// C5 Stage 7.4b contract: the staged pipeline runs mirror-free.
+    ///
+    /// `StagedShell::from_shell` moves the construction mirrors into
+    /// per-face working lists and EMPTIES the `Face.edges` field for the
+    /// duration of the pipeline — any accidental mirror read inside a
+    /// heal step sees empty data and fails loudly in the behavioral
+    /// suites. This test pins the invariant structurally: mirrors empty
+    /// while staged, working lists carry the geometry, `into_shell`
+    /// re-attaches both, and the healed output of a box (12 gaps closed
+    /// on the builder's per-face edge copies, 6 faces) is unchanged.
+    #[test]
+    fn test_staged_shell_pipeline_mirror_free() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let shell = box_solid.outer_shell.clone().unwrap();
+
+        // Staging invariant: mirrors emptied, working lists populated.
+        let staged = StagedShell::from_shell(shell.clone());
+        for (fi, face) in staged.shell.faces.iter().enumerate() {
+            assert!(
+                face.edges.is_empty(),
+                "face {fi}: mirror field must be EMPTY while staged (pipeline reads working lists only)"
+            );
+            assert_eq!(
+                staged.working[fi].len(),
+                4,
+                "face {fi}: working list must carry the 4 boundary edges"
+            );
+            assert_eq!(
+                staged.face_edges(fi).len(),
+                4,
+                "face {fi}: face_edges accessor must reach the working list"
+            );
+        }
+
+        // Round-trip: into_shell re-attaches the construction mirrors.
+        let back = staged.into_shell();
+        for (fi, face) in back.faces.iter().enumerate() {
+            assert_eq!(face.edges.len(), 4, "face {fi}: mirrors must be re-attached");
+            assert!(
+                face.edges.iter().all(|e| shell.faces[fi]
+                    .edges
+                    .iter()
+                    .any(|orig| orig.id == e.id)),
+                "face {fi}: re-attached mirrors must carry the original edge ids"
+            );
+        }
+
+        // End-to-end through the public API: the staged pipeline's
+        // behavioral baseline is unchanged (same report as the
+        // un-indexed fallback baseline above).
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&box_solid, &params);
+        assert_eq!(report.gaps_closed, 12);
+        if let Some(ref hshell) = healed.outer_shell {
+            assert_eq!(hshell.faces.len(), 6);
+            // terminal construction output: faces leave heal with mirrors
+            // (the sanctioned construction path, re-indexed right after)
+            for face in &hshell.faces {
+                assert!(!face.edges.is_empty());
+            }
         }
     }
 
@@ -3431,7 +3694,7 @@ mod tests {
         let face1 = ShapeBuilder::make_polygon_face(&[p0, p1, p2, p3]).unwrap();
         let face2 = ShapeBuilder::make_polygon_face(&[p1, p4, p5, p2]).unwrap();
 
-        let mut shell = Shell::new(vec![face1, face2]);
+        let shell = Shell::new(vec![face1, face2]);
 
         // The shared edge between face1 (p1→p2) and face2 (p2→p1 in reverse)
         // has different IDs — this creates a gap in topological connectivity
@@ -3442,7 +3705,10 @@ mod tests {
         };
 
         let mut report = HealingReport::default();
-        close_gaps(&mut shell, &params, &mut report);
+        // C5 Stage 7.4b: pipeline steps take the staged working set
+        let mut staged = StagedShell::from_shell(shell);
+        close_gaps(&mut staged, &params, &mut report);
+        let shell = staged.into_shell();
 
         // The gap should be detected and closed
         // (may or may not find gaps depending on midpoint proximity)
@@ -3501,7 +3767,10 @@ mod tests {
         };
 
         let mut report = HealingReport::default();
-        mark_degenerate_edges(&mut shell, &params, &mut report);
+        // C5 Stage 7.4b: pipeline steps take the staged working set
+        let mut staged = StagedShell::from_shell(shell);
+        mark_degenerate_edges(&mut staged, &params, &mut report);
+        let _shell = staged.into_shell();
 
         // Both the no-curve edge and the zero-radius circle should be degenerate
         assert!(report.degenerate_edges_marked >= 2,
@@ -3924,7 +4193,10 @@ mod tests {
             ..HealingParams::default()
         };
 
-        propagate_tolerances(&mut shell, &params, &mut report);
+        // C5 Stage 7.4b: pipeline steps take the staged working set
+        let mut staged = StagedShell::from_shell(shell);
+        propagate_tolerances(&mut staged, &params, &mut report);
+        let shell = staged.into_shell();
 
         // Face tolerance should be at least max edge tolerance (1e-4)
         assert!(
@@ -3974,7 +4246,10 @@ mod tests {
         };
 
         let mut report = HealingReport::default();
-        propagate_tolerances(&mut shell, &params, &mut report);
+        // C5 Stage 7.4b: pipeline steps take the staged working set
+        let mut staged = StagedShell::from_shell(shell);
+        propagate_tolerances(&mut staged, &params, &mut report);
+        let shell = staged.into_shell();
 
         // All edges should have tolerance >= floor
         for edge in &shell.faces[0].edges {
