@@ -3083,3 +3083,21 @@ resolve_face_edges дедупит seam-инстансы по id.
 
 - `refactor(mesh): C5 stage 7.6b-1 — store-first UV pass in edge cache`
   запушен в origin/main
+
+---
+
+# Sync note 2026-09-05 (пятая сессия суток)
+
+- Sandbox снова сброшен: Rust 1.98.1 установлен заново (minimal profile),
+  `target/` стёрт. Репозиторий с HEAD `59695be` оказался на 40 коммитов
+  позади origin/main (C5 5/5.2/5.3 → 6.x → 7.1–7.5 → 7.6a/7.6b-1 уже
+  запушены другими инстансами).
+- Сессионный дубль stage-5.1 (локальный `8d57774`, «явные рёбра +
+  stage_face_view») продублировал давно существующую работу `d14af6e` —
+  ДИСКАРДИРОВАН (git reset --hard), как и предыдущий дубль (см. `2abd21c`).
+  Урок закреплён: перед любой работой — `git fetch origin` + сверка
+  `HEAD..origin/main` И списка веток (wip/*), не только main.
+- Продолжение: ветка `wip/c5-7.6b-face-edges-removal` (коммиты `c20610c`
+  + `32be2a8`) — физическое удаление `Face.edges`, libs зелёные,
+  тесты: edge_store ГОТОВО, validator/validation почти, healing НЕ
+  закончен. План «сессии 2» из worklog выше принят к исполнению.
