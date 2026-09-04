@@ -2890,3 +2890,30 @@ EdgeStore-механику не на том уровне.
 - Param-swap семантика валидатора vs reversed-instance encoding (follow-up)
 - Физическое удаление поля `Face.edges` + serde-миграция
 - Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
+
+# C5 Stage 7.5 (follow-up) — param-swap семантика валидатора
+
+**Дата:** 2026-09-04.
+
+## Fix
+
+`validate_and_fix_staged_shell`: свап reversed param_range применяется
+ТОЛЬКО при несовместимой кодировке (`param_range.0 > .1 && forward`).
+Легитимная конвенция реверса `Edge::reversed` (STEP ORIENTED_EDGE .F.
+baking, store instance-views) — swapped range + `forward == false` —
+это КОДИРОВАНИЕ реверса, не дефект: свап назад ломал бы XOR-контракт
+обхода (`!coedge.forward != (param_range.0 > .1)`). Zero-length
+degenerate-маркировка остаётся для обеих кодировок (плюс отдельный
+start/end-distance шаг покрывает реверс-нулевой случай).
+
+Результат: полная parity mirror-free vs mirror-bearing входа
+validate_and_fix, включая invalid_param_ranges (0/0 на box).
+
+## Верификация
+
+- draper-topology: **256 passed**; draper-core: **77 ✅**
+
+## Осталось (Stage 7.5)
+
+- Физическое удаление поля `Face.edges` + serde-миграция
+- Viewer-wire smoke-check (wasm-харнесс до C5 сломан)

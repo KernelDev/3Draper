@@ -2590,8 +2590,15 @@ fn validate_and_fix_staged_shell(
                 ));
             }
 
-            // Fix reversed param_range
-            if edge.param_range.0 > edge.param_range.1 {
+            // Fix reversed param_range (C5 Stage 7.5: only when the
+            // encoding is INCONSISTENT — `param_range.0 > .1` together
+            // with `forward == true`. The `Edge::reversed` convention
+            // (STEP ORIENTED_EDGE .F. baking, store instance views)
+            // legitimately carries a swapped range together with
+            // `forward == false` — that is the reversal ENCODING, not a
+            // defect, and swapping it back would corrupt the traversal
+            // XOR contract (`!coedge.forward != (param_range.0 > .1)`).
+            if edge.param_range.0 > edge.param_range.1 && edge.forward {
                 let len = edge.param_range.1 - edge.param_range.0;
                 if len.abs() < tolerance * 1e-6 {
                     // Zero-length edge
@@ -3736,17 +3743,13 @@ mod tests {
 
     /// C5 Stage 7.5 — `validate_and_fix` on a mirror-free (store-only)
     /// solid: stages store-first (`from_shell_store`), never reads the
-    /// empty mirrors, and produces the same surface/curve/degenerate/
-    /// self-intersection findings as on the mirror-bearing twin.
-    ///
-    /// Representation note: the param-range counter deliberately does
-    /// NOT parity-check — the store's instance views encode reversal as
-    /// a SWAPPED `param_range` (the `Edge::reversed` convention), which
-    /// the legacy validator counts as "reversed param_range" findings,
-    /// while the builder mirrors encode the same reversal via opposite
-    /// curve direction and count zero. The geometric findings are the
-    /// contract; the param-range swap semantics on instance views is a
-    /// documented Stage 7.5 follow-up.
+    /// empty mirrors, and produces the SAME findings as on the
+    /// mirror-bearing twin — including the param-range counter: the
+    /// store's instance views encode reversal as a swapped `param_range`
+    /// together with `forward == false` (the `Edge::reversed`
+    /// convention), which the validator now recognizes as the reversal
+    /// ENCODING rather than a defect (swap only fires on the
+    /// inconsistent `forward == true` + swapped range combination).
     #[test]
     fn test_validate_and_fix_mirror_free_input() {
         let mut with_mirrors = ShapeBuilder::make_box(10.0, 10.0, 10.0);
@@ -3769,11 +3772,11 @@ mod tests {
         assert_eq!(result_a.self_intersections, result_b.self_intersections);
         assert_eq!(result_a.inconsistent_normals, result_b.inconsistent_normals);
 
-        // The mirror-free path flags exactly the reversed instance views
-        // (one per shared edge of the box — 12): the `Edge::reversed`
-        // param_range encoding, not a geometry defect.
-        assert_eq!(result_b.invalid_param_ranges, 12);
-        assert_eq!(result_a.invalid_param_ranges, 0);
+        // Full parity on the param-range counter: the reversed instance
+        // views (swapped range + forward=false) are the legitimate
+        // `Edge::reversed` encoding — not findings on either path.
+        assert_eq!(result_a.invalid_param_ranges, result_b.invalid_param_ranges);
+        assert_eq!(result_b.invalid_param_ranges, 0);
 
         // Both outputs carry complete construction mirrors (terminal).
         for (fa, fb) in fixed_a
