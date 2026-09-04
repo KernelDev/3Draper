@@ -558,3 +558,45 @@ fn test_store_path_watertight_and_canonical_ptr_identity() {
         }
     }
 }
+
+/// C5 Stage 7.5 — `Solid::from_edges_only` construction: a solid built
+/// mirror-free from scratch (topology-only shell + explicit working
+/// lists → indexed → compacted) triangulates bit-identically to the
+/// mirror-bearing reference and stays watertight.
+#[test]
+fn test_from_edges_only_solid_bit_identical() {
+    for (si, mut solid) in test_solids().into_iter().enumerate() {
+        solid.ensure_edge_store();
+        let params = TriangulationParams::default();
+
+        let reference = triangulate_solid(&solid, &params);
+
+        // Deconstruct into (topology-only shell, working lists) and
+        // rebuild through the Stage 7.5 mirror-free constructor.
+        let shell = solid.outer_shell.clone().unwrap();
+        let mut topology_only = shell.clone();
+        let working: Vec<Vec<draper_topology::Edge>> = topology_only
+            .faces
+            .iter_mut()
+            .map(|f| std::mem::take(&mut f.edges))
+            .collect();
+        let built = Solid::from_edges_only(topology_only, working);
+        for face in built.faces() {
+            assert!(face.edges.is_empty(), "from_edges_only faces are mirror-free");
+            assert!(!face.edge_ids.is_empty());
+        }
+
+        let mesh = triangulate_solid(&built, &params);
+        assert_meshes_bit_identical(
+            &reference,
+            &mesh,
+            &format!("solid {si} from_edges_only construction"),
+        );
+        let report = validate_watertight(&mesh, false);
+        assert!(
+            report.is_watertight(),
+            "solid {si}: from_edges_only mesh is not watertight: {} boundary edges",
+            report.boundary_edge_count
+        );
+    }
+}

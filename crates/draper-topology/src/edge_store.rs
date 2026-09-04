@@ -922,6 +922,54 @@ impl Solid {
         solid
     }
 
+    /// Mirror-free construction (C5 Stage 7.5): build a solid in the
+    /// Stage 5 end-state representation — faces keep topology and
+    /// canonical `edge_ids`, the `EdgeStore` carries the edges, and the
+    /// per-face `edges` mirrors stay EMPTY.
+    ///
+    /// `working` supplies per-face instance edge lists, parallel to
+    /// `shell.faces` (the healing terminal's working set, a store-first
+    /// payload's instance lists, or any construction path that holds
+    /// explicit edges while the faces themselves carry topology only).
+    /// Construction runs through the sanctioned terminal order — the
+    /// lists are attached as construction mirrors,
+    /// `propagate_edge_fixes` aligns shared-edge instance fields,
+    /// `index_edges` builds the store and canonical `edge_ids` from the
+    /// aligned data, and [`Solid::compact_edge_mirrors`] then clears the
+    /// mirrors wherever the store can answer every boundary read, so the
+    /// result is the store-only form.
+    ///
+    /// Every store-first reader (`resolve_face_edges`, `instance_edges`,
+    /// `face_edges`, mesh staging, the 7.5 mirror-free healing input)
+    /// answers from the store exactly as it did from the mirrors. The
+    /// full rebuild path back to mirror-bearing form is attach, index,
+    /// sync (`index_edges` from attached mirrors + `sync_edge_mirrors`).
+    ///
+    /// Faces whose identity cannot fully move into the store (un-indexed
+    /// leftovers, ids the store cannot resolve) keep their mirrors —
+    /// `compact_edge_mirrors` is conservatively safe — so the constructor
+    /// never loses edge data.
+    pub fn from_edges_only(shell: Shell, working: Vec<Vec<Edge>>) -> Self {
+        debug_assert_eq!(
+            shell.faces.len(),
+            working.len(),
+            "from_edges_only: working lists must be parallel to shell.faces"
+        );
+        let mut shell = shell;
+        for (face, edges) in shell.faces.iter_mut().zip(working) {
+            if !edges.is_empty() {
+                face.edges = edges;
+            }
+        }
+        // The heal_solid terminal order: propagate BEFORE indexing, so the
+        // store is built from the aligned instance data.
+        let mut solid = Solid::new(shell);
+        solid.propagate_edge_fixes();
+        solid.index_edges();
+        solid.compact_edge_mirrors();
+        solid
+    }
+
     /// Compact this solid to the store-only ("Stage 5 end-state") form
     /// (C5 Stage 7.1): clear `Face.edges` mirrors wherever the store can
     /// answer every boundary read the solid itself would perform.
@@ -2589,6 +2637,96 @@ mod tests {
             !solid.faces()[0].edges.is_empty(),
             "the face with the orphaned mirror keeps its mirrors"
         );
+    }
+
+    /// C5 Stage 7.5 — `Solid::from_edges_only`: the mirror-free
+    /// construction. Faces arrive with topology only + explicit per-face
+    /// working lists; the result is the store-only end-state.
+    #[test]
+    fn test_from_edges_only_end_state() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        // Split the box into (topology-only shell, explicit working lists).
+        let mut shell = box_solid.outer_shell.clone().unwrap();
+        let working: Vec<Vec<Edge>> = shell
+            .faces
+            .iter_mut()
+            .map(|f| std::mem::take(&mut f.edges))
+            .collect();
+        assert!(working.iter().all(|w| w.len() == 4));
+
+        let mut solid = Solid::from_edges_only(shell, working);
+
+        // End-state invariants: mirrors empty, edge_ids + store populated.
+        for face in solid.faces() {
+            assert!(face.edges.is_empty(), "faces must be mirror-free");
+            assert_eq!(face.edge_ids.len(), 4, "canonical ids on every face");
+        }
+        assert_eq!(solid.edge_store.len(), 12, "12 canonical box edges");
+
+        // Store-first readers answer exactly as from the mirror-bearing twin.
+        for face in solid.faces() {
+            assert_eq!(solid.instance_edges(face).len(), 4);
+            assert_eq!(solid.face_edges(face).len(), 4);
+            for edge in solid.resolve_face_edges(face) {
+                assert!(
+                    solid.edge_store.instance_edge(edge.id).is_some(),
+                    "every instance id must resolve through the store"
+                );
+            }
+        }
+
+        // Idempotent compaction (already store-only) + re-index stability.
+        assert_eq!(solid.compact_edge_mirrors(), 0);
+        let mut reindexed = solid.clone();
+        reindexed.index_edges();
+        assert_eq!(reindexed.edge_store.len(), 12);
+        for (fa, fb) in solid.faces().iter().zip(reindexed.faces().iter()) {
+            assert_eq!(fa.edge_ids, fb.edge_ids);
+        }
+    }
+
+    /// End-to-end on the store-only solid: the 7.5 mirror-free healing
+    /// input works on `from_edges_only` output — heal behaves like the
+    /// mirror-bearing twin. (The mesh-side end-to-end — store-first
+    /// triangulation of a store-only solid — lives in draper-mesh's
+    /// Stage 5 test suite; the topology crate cannot depend on it.)
+    #[test]
+    fn test_from_edges_only_heal_parity() {
+        use crate::healing::{heal_solid, HealingParams};
+
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let mut shell = box_solid.outer_shell.clone().unwrap();
+        let working: Vec<Vec<Edge>> = shell
+            .faces
+            .iter_mut()
+            .map(|f| std::mem::take(&mut f.edges))
+            .collect();
+        let store_only = Solid::from_edges_only(shell, working);
+
+        // Twin: the same box, mirror-bearing and indexed.
+        let mut twin = box_solid.clone();
+        twin.index_edges();
+        twin.sync_edge_mirrors();
+
+        // Mirror-free healing input (7.5a): same behavioral baseline.
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed_a, report_a) = heal_solid(&twin, &params);
+        let (healed_b, report_b) = heal_solid(&store_only, &params);
+        assert_eq!(report_a.gaps_closed, report_b.gaps_closed);
+        assert!(report_b.gaps_closed > 0);
+        assert_eq!(
+            healed_a.edge_store.len(),
+            healed_b.edge_store.len(),
+            "healed stores must agree"
+        );
+        // The healed store-only solid is itself a valid mirror-free input
+        // for another round (idempotent healing representation).
+        for face in healed_b.faces() {
+            assert!(!face.edge_ids.is_empty());
+        }
     }
 
 }

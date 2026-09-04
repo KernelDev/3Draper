@@ -2789,3 +2789,47 @@ index_edges + sync_edge_mirrors).
   сигнатура `(shell, edges)` или store на Shell
 - Физическое удаление поля `Face.edges` + serde-миграция
 - Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
+
+# C5 Stage 7.5 (часть B) — Solid::from_edges_only: mirror-free construction
+
+**Дата:** 2026-09-04.
+
+## Что сделано
+
+- `Solid::from_edges_only(shell, working: Vec<Vec<Edge>>) -> Solid`
+  (edge_store.rs): конструктор Stage 5 end-state — грани несут ТОПОЛОГИЮ,
+  `working` даёт явные per-face instance-списки. Терминальный порядок
+  санционированного construction-пути: attach (construction-зеркала) →
+  `propagate_edge_fixes` (выравнивание instance-полей ДО индексации —
+  как в терминале heal_solid) → `index_edges` (store + канонические
+  `edge_ids` из выровненных данных) → `compact_edge_mirrors`
+  (консервативная очистка зеркал). Результат: store-only-солид.
+- Договор: store-first читатели (`resolve_face_edges`/
+  `instance_edges`/`face_edges`/mesh staging/7.5a heal-input) отвечают
+  так же, как из зеркал; полный rebuild обратно = attach+index+sync;
+  некомпактируемые грани (un-indexed, orphaned) сохраняют зеркала —
+  данные не теряются никогда.
+
+## Тесты
+
+- topology `test_from_edges_only_end_state`: end-state инварианты
+  (зеркала пусты, edge_ids=4/грань, store=12), store-first читатели,
+  идемпотентность compact, re-index стабильность (Pass 0);
+- topology `test_from_edges_only_heal_parity`: heal на from_edges_only
+  солиде ≡ heal на mirror-bearing твине (gaps_closed, размер store);
+- mesh `test_from_edges_only_solid_bit_identical`: box+cylinder,
+  построенные from_edges_only, триангулируются BIT-IDENTICAL reference
+  и watertight.
+
+## Верификация
+
+- draper-topology: **253 passed** (222 lib + integration)
+- draper-mesh: 11 suites green (вкл. 14 в edge_explicit_api_test)
+- `cargo check -p draper-core -p draper-step -p draper-viewer` — 0 errors
+
+## Осталось (Stage 7.5)
+
+- Standalone-контракты (tolerant_stitch/validate_and_fix/detect):
+  сигнатура `(shell, edges)` или store на Shell
+- Физическое удаление поля `Face.edges` + serde-миграция
+- Viewer-wire smoke-check (wasm-харнесс до C5 сломан)
