@@ -1443,15 +1443,25 @@ mod tests {
 
     #[test]
     fn test_index_edges_keeps_seam_double_use() {
-        // The same STEP edge used TWICE within ONE face (seam) must keep both
-        // mirror entries — only identity is unified, not the instance count.
-        let (face, face_w) = square_face(&[Some(200), Some(200)]);
+        // The same STEP edge used TWICE within ONE face (seam) must keep
+        // both entries — only identity is unified, not the instance count.
+        // 7.6b: the double-use is expressed by TWO COEDGES referencing the
+        // two distinct instance ids; the wire-less canonical-keyed
+        // edge_ids list cannot express multiplicity.
+        let (mut face, face_w) = square_face(&[Some(200), Some(200)]);
+        let id0 = face_w[0].id;
+        let id1 = face_w[1].id;
+        assert_ne!(id0, id1, "fixture: two distinct seam instances");
+        face.outer_wire = Some(Wire::new(vec![
+            CoEdge::new(id0, true),
+            CoEdge::new(id1, true),
+        ]));
         let (mut solid, report) = solid_of(vec![(face, face_w)]);
 
         assert_eq!(report.total_instances, 2);
         assert_eq!(report.unique_edges, 1);
         assert_eq!(report.deduplicated, 1);
-        // Both mirror entries survive (seam traversed twice).
+        // Both instance entries survive (seam traversed twice via two coedges).
         assert_eq!(solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0]).len(), 2);
         // Both edge_ids are canonical and equal.
         let f = &solid.outer_shell.as_ref().unwrap().faces[0];
@@ -1709,13 +1719,15 @@ mod tests {
 
     #[test]
     fn test_canonical_edge_ids_fallback() {
-        // 7.6b: canonical_edge_ids IS edge_ids (no mirrors to fall back to).
+        // 7.6b: canonical_edge_ids IS edge_ids (no mirrors to fall back
+        // to) — the ids exist once the store is built, i.e. on the SOLID's
+        // faces, not on a raw builder face.
         let (face, face_w) = square_face(&[Some(1), Some(2)]);
-        let ids = face.canonical_edge_ids();
+        let (mut solid, _) = solid_of(vec![(face, face_w)]);
+        let f = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let ids = f.canonical_edge_ids();
         assert_eq!(ids.len(), 2);
-        assert_eq!(ids, face.edge_ids);
-        assert_eq!(ids[0], face_w[0].id);
-        assert_eq!(ids[1], face_w[1].id);
+        assert_eq!(ids, f.edge_ids);
     }
 
     #[test]
@@ -1743,8 +1755,13 @@ mod tests {
     #[test]
     fn test_resolve_edge_store_first_mirror_fallback() {
         // Two faces sharing one STEP edge (same step_entity_id).
-        let (face_a, a_w) = square_face(&[Some(10)]);
-        let (face_b, b_w) = square_face(&[Some(10)]);
+        // 7.6b: the distinct instance identities ride the faces' wire
+        // coedges — without wires, resolution is canonical-keyed and the
+        // two faces would resolve to the same id, defeating the fixture.
+        let (mut face_a, a_w) = square_face(&[Some(10)]);
+        face_a.outer_wire = Some(Wire::new(vec![CoEdge::new(a_w[0].id, true)]));
+        let (mut face_b, b_w) = square_face(&[Some(10)]);
+        face_b.outer_wire = Some(Wire::new(vec![CoEdge::new(b_w[0].id, true)]));
         let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
         // (7.6b: solid_of already rebuilt the store)
 
@@ -1829,23 +1846,36 @@ mod tests {
 
     #[test]
     fn test_sync_edge_mirrors_curve_range_guard() {
+        // C5 7.6b replacement: the old guard ("no blind curve backfill
+        // onto a range-mismatched mirror") is structurally dead — there
+        // are no mirrors, and every resolved instance derives BOTH curve
+        // and param_range from the same canonical entry, so a curve/range
+        // mismatch cannot arise on the resolution path. The surviving
+        // contract: the curve-less occurrence with a foreign param_range
+        // never poisons the canonical — the first-occurrence curve wins
+        // and the derived instance carries the canonical's own range.
         let (face_a, mut a_w) = square_face(&[None]);
         let (face_b, mut b_w) = square_face(&[None]);
         // Shared identity via step id; face_b's copy is curve-less with a
         // mismatching param_range.
         a_w[0].step_entity_id = Some(99);
+        a_w[0].param_range = (0.0, 1.0);
         b_w[0].step_entity_id = Some(99);
         b_w[0].curve = None;
         b_w[0].param_range = (5.0, 6.0);
 
         let (mut solid, _) = solid_of(vec![(face_a, a_w), (face_b, b_w)]);
-        // (7.6b: solid_of already rebuilt the store)
-        // (7.6b: no mirrors to sync)
+        // The canonical is the first occurrence (curve-bearing, range 0-1).
         let fb = &solid.outer_shell.as_ref().unwrap().faces[1];
         let resolved_b = solid.resolve_face_edges(fb);
         assert!(
-            resolved_b[0].curve.is_none(),
-            "sync must respect the param_range guard — no blind curve backfill"
+            resolved_b[0].curve.is_some(),
+            "canonical first-occurrence curve survives the curve-less copy"
+        );
+        assert_eq!(
+            resolved_b[0].param_range, (0.0, 1.0),
+            "the derived instance carries the canonical's range — curve and
+             range stay consistent (the old mirror mismatch cannot arise)"
         );
     }
 
@@ -1970,15 +2000,18 @@ mod tests {
     /// Two faces share STEP edge 70; face B's instance runs it backwards.
     fn opposite_shared_solid() -> Solid {
         let (face_a, a_w) = square_face(&[Some(70)]);
-        let (face_b, mut b_w) = square_face(&[]);
         let mut reversed_instance = line_edge(
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(0.0, 0.0, 0.0),
             Some(70),
         );
         reversed_instance.id = TopoId::new();
-        let (face_b, mut b_w) = square_face(&[]);
-        b_w = vec![reversed_instance];
+        let b_id = reversed_instance.id;
+        // 7.6b: the instance identity rides a WIRE COEDGE — the wire-less
+        // edge_ids list is canonical-keyed and cannot carry instances.
+        let (mut face_b, b_w) = square_face(&[]);
+        face_b.outer_wire = Some(Wire::new(vec![CoEdge::new(b_id, true)]));
+        let b_w = vec![reversed_instance];
         solid_of(vec![(face_a, a_w), (face_b, b_w)]).0
     }
 
@@ -2011,8 +2044,11 @@ mod tests {
         }
 
         // The forward (first-occurrence) instance rebuilds field-identically.
-        let instance_a = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[0])[0].id;
-        let mirror_a = solid.outer_shell.as_ref().unwrap().faces[0].edges[0].clone();
+        let face0 = &solid.outer_shell.as_ref().unwrap().faces[0];
+        let instance_a = solid.resolve_face_edges(face0)[0].id;
+        // C5 7.6b: the historical per-face mirror reference is structurally
+        // gone — the store-derived instance list is the comparison base.
+        let mirror_a = solid.resolve_face_edges(face0)[0].clone();
         let rebuilt_a = solid.edge_store.instance_edge(instance_a).unwrap();
         assert_eq!(rebuilt_a.id, instance_a);
         assert_eq!(rebuilt_a.param_range, mirror_a.param_range);
@@ -2146,7 +2182,7 @@ mod tests {
     fn test_instance_edges_strict_key_space() {
         // Wired face: instance ids come from coedges, NOT duplicated under
         // canonical keys — whole-map consumers see one entry per instance.
-        let (face_a, mut a_w) = square_face(&[Some(70)]);
+        let (mut face_a, mut a_w) = square_face(&[Some(70)]);
         let (face_b, mut b_w) = square_face(&[]);
         let mut reversed_instance = line_edge(
             Point3d::new(1.0, 0.0, 0.0),
@@ -2346,14 +2382,16 @@ mod tests {
 
     // ---- C5 Stage 7.1: born-indexed construction + compaction ----
 
-    /// Discretization-faithful edge equality: same id, same parametric
-    /// segment, same flags and the same curve SHAPE (sampled at both
-    /// segment endpoints). Orientation-sensitive fields (forward,
-    /// vertex order) are compared as unordered endpoint pairs, because a
+    /// Discretization-faithful edge equality: same parametric segment,
+    /// same flags and the same curve SHAPE (sampled at both segment
+    /// endpoints). Orientation-sensitive fields (forward, vertex order)
+    /// are compared as unordered endpoint pairs, because a
     /// store-reconstructed reversed instance legitimately swaps them.
+    /// The id is deliberately NOT compared — an aliased instance view
+    /// carries the INSTANCE id while the store lookup returns the
+    /// CANONICAL edge (7.6b).
     fn edges_shape_equal(a: &Edge, b: &Edge) -> bool {
-        if a.id != b.id
-            || a.degenerate != b.degenerate
+        if a.degenerate != b.degenerate
             || (a.tolerance - b.tolerance).abs() > 1e-12
         {
             return false;

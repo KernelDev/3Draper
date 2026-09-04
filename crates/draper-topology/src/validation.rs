@@ -1635,7 +1635,9 @@ mod tests {
         right_w = vec![e12.clone(), e26.clone(), e56.clone(), e15.clone()];
 
         let shell = Shell::new_closed(vec![bottom_face, top_face, front_face, back_face, left_face, right_face]);
-        Solid::new(shell)
+        // 7.6b: born-indexed construction — the working lists ride the
+        // solid so validation passes (Euler, connectivity) see the edges.
+        Solid::from_edges_only(shell, vec![bottom_w, top_w, front_w, back_w, left_w, right_w])
     }
 
     // ---- Test 1: Valid box should have no errors ----
@@ -2017,11 +2019,15 @@ mod tests {
         let box_solid = make_proper_box();
         let shell = box_solid.outer_shell.as_ref().unwrap();
 
-        // Remove one face
+        // Remove one face (7.6b: the remaining faces' working lists ride
+        // the SOLID — a bare Solid::new carries no store and the Euler
+        // pass would silently skip).
         let mut faces = shell.faces.clone();
         faces.pop();
+        let working: Vec<Vec<Edge>> =
+            faces.iter().map(|f| box_solid.resolve_face_edges(f)).collect();
         let broken_shell = Shell::new_closed(faces);
-        let solid = Solid::new(broken_shell);
+        let solid = Solid::from_edges_only(broken_shell, working);
 
         let config = TopologyValidationConfig {
             check_euler_characteristic: true,

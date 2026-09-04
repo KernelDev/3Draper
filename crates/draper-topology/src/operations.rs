@@ -957,6 +957,7 @@ pub fn extrude_polyline(
     // Assemble shell (7.6b: store-first construction)
     let mut all_faces = vec![base_face, top_face];
     let mut all_working = vec![base_edges, top_edges];
+    all_faces.extend(side_faces);
     all_working.extend(side_working);
     let shell = Shell::new_closed(all_faces);
     Ok(Solid::from_edges_only(shell, all_working))

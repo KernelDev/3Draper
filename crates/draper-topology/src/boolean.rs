@@ -4619,7 +4619,7 @@ mod tests {
         let tol_ctx = ToleranceContext::new();
 
         // Create a simple square face
-        let face = ShapeBuilder::make_polygon_face(&[
+        let (face, face_w) = ShapeBuilder::make_polygon_face(&[
             Point3d::new(-5.0, -5.0, 0.0),
             Point3d::new(5.0, -5.0, 0.0),
             Point3d::new(5.0, 5.0, 0.0),
@@ -4634,7 +4634,7 @@ mod tests {
             Point3d::new(5.0, 0.0, 0.0),
         ];
 
-        let result = split_face(&face, &face.edges, &intersection, &tol_ctx);
+        let result = split_face(&face, &face_w, &intersection, &tol_ctx);
         assert!(result.is_ok(), "Face splitting should succeed");
     }
 
@@ -5404,10 +5404,12 @@ mod tests {
         let box_plain = ShapeBuilder::make_box(100.0, 80.0, 50.0);
         let cyl_plain = ShapeBuilder::make_cylinder(20.0, 100.0);
 
-        let mut box_indexed = box_plain.clone();
-        box_indexed.index_edges();
-        let mut cyl_indexed = cyl_plain.clone();
-        cyl_indexed.index_edges();
+        // C5 7.6b: builder solids are born-indexed — both operands carry
+        // their EdgeStore from construction, so the historical
+        // "plain vs. indexed" distinction has collapsed; the clone still
+        // exercises the store-preservation path of rebuild_store.
+        let box_indexed = box_plain.clone();
+        let cyl_indexed = cyl_plain.clone();
 
         let r_plain = boolean_subtract(&box_plain, &cyl_plain, &tol)
             .expect("plain subtract must succeed");
