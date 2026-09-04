@@ -334,12 +334,14 @@ mod tests {
     fn unit_cube_at(origin: (f64, f64, f64)) -> Solid {
         let (ox, oy, oz) = origin;
         let mut faces = Vec::with_capacity(6);
+        let mut working: Vec<Vec<Edge>> = Vec::with_capacity(6);
 
         // Helper: build a planar face with 4 line edges, INCLUDING the
         // outer_wire (which is required by triangulation_solid_for_queries
-        // and other topology queries).
+        // and other topology queries). C5 7.6b: returns (face, working) —
+        // the boundary edges ride the solid's store, not face mirrors.
         let make_face = |origin: Point3d, normal: Direction3d, u_dir: Direction3d, v_dir: Direction3d,
-                         p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d| -> Face {
+                         p0: Point3d, p1: Point3d, p2: Point3d, p3: Point3d| -> (Face, Vec<Edge>) {
             let surface = Surface::Plane(Plane {
                 origin, u_dir, v_dir, normal,
             });
@@ -356,9 +358,8 @@ mod tests {
                 draper_topology::CoEdge::new(e3.id, true),
             ];
             let wire = draper_topology::Wire::new(coedges);
-            let mut f = Face::new(surface, wire);
-            f.edges = vec![e0, e1, e2, e3];
-            f
+            let f = Face::new(surface, wire);
+            (f, vec![e0, e1, e2, e3])
         };
 
         // 8 corner points
@@ -372,44 +373,57 @@ mod tests {
         let p011 = Point3d::new(ox, oy + 1.0, oz + 1.0);
 
         // Bottom (z=oz, normal -Z)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(0.0, 0.0, -1.0).unwrap(),
             Direction3d::X, Direction3d::Y,
             p000, p100, p110, p010,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Top (z=oz+1, normal +Z)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p001, Direction3d::Z,
             Direction3d::X, Direction3d::Y,
             p001, p101, p111, p011,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Front (y=oy, normal -Y)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(0.0, -1.0, 0.0).unwrap(),
             Direction3d::X, Direction3d::Z,
             p000, p100, p101, p001,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Back (y=oy+1, normal +Y)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p010, Direction3d::Y,
             Direction3d::X, Direction3d::Z,
             p010, p110, p111, p011,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Left (x=ox, normal -X)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p000, Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
             Direction3d::Y, Direction3d::Z,
             p000, p010, p011, p001,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
         // Right (x=ox+1, normal +X)
-        faces.push(make_face(
+        let (f__, w__) = make_face(
             p100, Direction3d::X,
             Direction3d::Y, Direction3d::Z,
             p100, p110, p111, p101,
-        ));
+        );
+        faces.push(f__);
+        working.push(w__);
 
         let shell = Shell::new_closed(faces);
-        Solid::new(shell)
+        // 7.6b: born-indexed construction.
+        Solid::from_edges_only(shell, working)
     }
 
     #[test]
@@ -491,11 +505,10 @@ mod tests {
         let a_raw = unit_cube_at((0.0, 0.0, 0.0));
         let b_raw = unit_cube_at((0.5, 0.5, 0.5));
 
-        let mut a_idx = a_raw.clone();
-        a_idx.index_edges();
-        let mut b_idx = b_raw.clone();
-        b_idx.index_edges();
-        assert!(!a_idx.edge_store.is_empty(), "index_edges populated the store");
+        // (7.6b: born-indexed — the store is populated by construction.)
+        let a_idx = a_raw.clone();
+        let b_idx = b_raw.clone();
+        assert!(!a_idx.edge_store.is_empty(), "construction populated the store");
 
         let r_raw = boolean_subtract(&a_raw, &b_raw).expect("raw subtract ok");
         let r_idx = boolean_subtract(&a_idx, &b_idx).expect("indexed subtract ok");

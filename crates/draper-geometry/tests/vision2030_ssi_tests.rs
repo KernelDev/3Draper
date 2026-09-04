@@ -2,7 +2,7 @@
 // Copyright (c) 2026 KernelDev
 //! Tests for Vision 2030 B-spline SSI fitting (audit Block C).
 
-use draper_geometry::{Point3d, Curve3d};
+use draper_geometry::Point3d;
 use draper_geometry::intersection::{SurfaceSurfaceIntersection, FittingError};
 
 #[test]

@@ -2017,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_instance_edge_rebuilds_orientation() {
-        let mut solid = opposite_shared_solid();
+        let solid = opposite_shared_solid();
         // (7.6b: solid_of already rebuilt the store)
 
         let instance_b = solid.resolve_face_edges(&solid.outer_shell.as_ref().unwrap().faces[1])[0].id;
@@ -2086,22 +2086,24 @@ mod tests {
     #[cfg(feature = "serde")]
     #[test]
     fn test_serde_compacted_solid_roundtrip() {
-        // C5 Stage 7.1: a compacted (store-only) solid round-trips with
-        // EMPTY mirrors and resolves identically — the final C5 payload
-        // form, now reachable through `Solid::compact_edge_mirrors`.
-        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
-        assert_eq!(solid.compact_edge_mirrors(), 6);
+        // C5 7.1 → 7.6b: every solid IS the store-only payload form — the
+        // mirror field no longer exists, serialization carries the store +
+        // edge_ids, and the round-trip resolves identically.
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
         let reference: Vec<Vec<Edge>> = solid
             .faces()
             .iter()
             .map(|f| solid.resolve_face_edges(f))
             .collect();
 
-        let json = serde_json::to_string(&solid).expect("serialize compacted solid");
-        let loaded: Solid = serde_json::from_str(&json).expect("deserialize compacted solid");
+        let json = serde_json::to_string(&solid).expect("serialize store-only solid");
+        let loaded: Solid = serde_json::from_str(&json).expect("deserialize store-only solid");
 
         for (face, expected) in loaded.faces().iter().zip(reference.iter()) {
-            assert!(face.edges.is_empty(), "mirrors stay empty after round-trip");
+            assert!(
+                !face.edge_ids.is_empty(),
+                "edge_ids stay populated after round-trip"
+            );
             let resolved = loaded.resolve_face_edges(face);
             assert_eq!(
                 resolved.len(),
@@ -2559,7 +2561,7 @@ mod tests {
             .collect();
         assert!(working.iter().all(|w| w.len() == 4));
 
-        let mut solid = Solid::from_edges_only(shell, working);
+        let solid = Solid::from_edges_only(shell, working);
 
         // End-state invariants: edge_ids + store populated (faces carry no
         // edge payload at all — the mirror field is physically gone).

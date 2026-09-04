@@ -44,7 +44,6 @@
 //! ```
 
 use crate::entity::*;
-use crate::edge_store::EdgeStore;
 use draper_geometry::{
     CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
@@ -757,28 +756,9 @@ fn heal_staged(
     (staged.into_parts(), report)
 }
 
-/// Geometry-level comparison behind [`StagedShell::from_shell_store`]'s
-/// change count. The check is deliberately ORIENTATION-INSENSITIVE and
-/// REPRESENTATION-INSENSITIVE: a healthy reversed-instance mirror holds
-/// the same segment as the store's instance view, expressed in its own
-/// curve parameterization (swapped endpoints, own `Line` object), so the
-/// endpoint pair is compared as an unordered set and `param_range` /
-/// `forward` / vertex ids are excluded as representation-coupled fields.
-/// Deep curve equality is approximated by endpoint coordinates plus curve
-/// presence; a corrupted curve interior with intact endpoints is the
-/// known (documented) blind spot of the counting — the overwrite itself
-/// always installs the full store instance.
-fn mirror_matches_instance(mirror: &Edge, instance: &Edge) -> bool {
-    let same_orientation = mirror.start_vertex_point == instance.start_vertex_point
-        && mirror.end_vertex_point == instance.end_vertex_point;
-    let swapped_orientation = mirror.start_vertex_point == instance.end_vertex_point
-        && mirror.end_vertex_point == instance.start_vertex_point;
-    (same_orientation || swapped_orientation)
-        && mirror.tolerance == instance.tolerance
-        && mirror.degenerate == instance.degenerate
-        && mirror.step_entity_id == instance.step_entity_id
-        && mirror.curve.is_some() == instance.curve.is_some()
-}
+// (C5 7.6b) `mirror_matches_instance` removed — no mirrors exist to
+// match against; the store instance view is the only representation.
+
 
 // ============================================================
 // Internal healing operations
@@ -3909,6 +3889,7 @@ mod tests {
     /// Test that healing handles solids without outer shells.
     #[test]
     fn test_heal_no_outer_shell() {
+        use crate::edge_store::EdgeStore;
         let solid = Solid {
             tolerance: 0.0,
             id: TopoId::new(),

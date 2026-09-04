@@ -695,6 +695,10 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     // and the old canonical leaves the store.
     let old_id_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
     let old_id_b = shell.faces[face_b_idx].edge_ids[edge_b_pos];
+    // Capture the offset-edge ids BEFORE the store takes ownership — they
+    // occupy the fillet face's edge_ids slots below.
+    let fillet_slot_a = new_edge_a.id;
+    let fillet_slot_b = new_edge_b.id;
     let _ = (old_id_a, old_id_b);
     replace_face_edge(shell, face_a_idx, edge_a_pos, &new_edge_a);
     replace_face_edge(shell, face_b_idx, edge_b_pos, &new_edge_b);
@@ -711,14 +715,15 @@ pub fn fillet_edge(solid: &mut Solid, edge_index: usize, radius: f64) -> Result<
     // from start to end along the axis.
     // Add two cap edges (degenerate points at the start and end) so the
     // face is topologically closed. These caps have zero length.
+    // C5 7.6b fix: ALL FOUR boundary edges must occupy edge_ids slots
+    // (the offsets ARE the fillet cylinder's boundary) — dropping them
+    // starved the wire-less boundary readers (v-range detection).
     let cap_start = Edge::new_line(a_offset_start, b_offset_start);
     let cap_end = Edge::new_line(a_offset_end, b_offset_end);
-    let fillet_edges = vec![cap_start, cap_end];
-    fillet_face.edge_ids = fillet_edges.iter().map(|e| e.id).collect();
+    fillet_face.edge_ids = vec![fillet_slot_a, fillet_slot_b, cap_start.id, cap_end.id];
     fillet_face.forward = true;
-    for e in fillet_edges {
-        solid.edge_store.insert(e);
-    }
+    solid.edge_store.insert(cap_start);
+    solid.edge_store.insert(cap_end);
 
     // Add the fillet face to the shell.
     shell.faces.push(fillet_face);
@@ -929,6 +934,9 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     // C5 7.6b: store-first replacement (see fillet_edge).
     let old_id_a = shell.faces[face_a_idx].edge_ids[edge_a_pos];
     let old_id_b = shell.faces[face_b_idx].edge_ids[edge_b_pos];
+    // Capture the offset-edge ids BEFORE the store takes ownership.
+    let chamfer_slot_a = new_edge_a.id;
+    let chamfer_slot_b = new_edge_b.id;
     let _ = (old_id_a, old_id_b);
     replace_face_edge(shell, face_a_idx, edge_a_pos, &new_edge_a);
     replace_face_edge(shell, face_b_idx, edge_b_pos, &new_edge_b);
@@ -972,15 +980,20 @@ pub fn chamfer_edge(solid: &mut Solid, edge_index: usize, distance: f64) -> Resu
     let chamfer_surface = Surface::Plane(chamfer_plane);
 
     let mut chamfer_face = Face::new_surface_only(chamfer_surface);
-    // Cap edges (wire-less face — the boundary lives in the store)
+    // C5 7.6b fix: ALL FOUR boundary edges occupy edge_ids slots (the
+    // offsets ARE the chamfer plane's boundary), matching the legacy
+    // mirror list [new_edge_a, new_edge_b, cap_start, cap_end].
     let cap_start = Edge::new_line(a_offset_start, b_offset_start);
     let cap_end = Edge::new_line(a_offset_end, b_offset_end);
-    let chamfer_edges = vec![cap_start, cap_end];
-    chamfer_face.edge_ids = chamfer_edges.iter().map(|e| e.id).collect();
+    chamfer_face.edge_ids = vec![
+        chamfer_slot_a,
+        chamfer_slot_b,
+        cap_start.id,
+        cap_end.id,
+    ];
     chamfer_face.forward = true;
-    for e in chamfer_edges {
-        solid.edge_store.insert(e);
-    }
+    solid.edge_store.insert(cap_start);
+    solid.edge_store.insert(cap_end);
 
     shell.faces.push(chamfer_face);
 
@@ -1389,10 +1402,10 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
         );
         edge.param_range = (0.0, 1.0);
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let mut solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Translate by (10, 20, 30)
         translate_solid(&mut solid, 10.0, 20.0, 30.0);
@@ -1407,8 +1420,9 @@ mod tests {
             panic!("Expected Plane surface");
         }
 
-        // Verify edge endpoints moved
-        let e = &f.edges[0];
+        // Verify edge endpoints moved (store-resolved instance).
+        let resolved = solid.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         let end = e.end_point().unwrap();
         assert!((start.x - 10.0).abs() < 1e-9);
@@ -1426,17 +1440,18 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(2.0, 0.0, 0.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let mut solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Rotate 90° around Z
         rotate_solid(&mut solid, &Direction3d::Z, std::f64::consts::PI / 2.0);
 
         // Verify edge endpoints rotated
         let f = &solid.outer_shell.as_ref().unwrap().faces[0];
-        let e = &f.edges[0];
+        let resolved = solid.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         // (1, 0, 0) → (0, 1, 0)
         assert!(start.x.abs() < 1e-9);
@@ -1451,16 +1466,17 @@ mod tests {
             Point3d::new(1.0, 2.0, 3.0),
             Point3d::new(4.0, 5.0, 6.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // Mirror about XY plane (z=0)
         let mirrored = mirror_solid(&solid, Point3d::ORIGIN, Direction3d::Z);
 
         let f = &mirrored.outer_shell.as_ref().unwrap().faces[0];
-        let e = &f.edges[0];
+        let resolved = mirrored.resolve_face_edges(f);
+        let e = &resolved[0];
         let start = e.start_point().unwrap();
         // (1, 2, 3) → (1, 2, -3)
         assert!((start.x - 1.0).abs() < 1e-9);
@@ -1471,26 +1487,34 @@ mod tests {
     #[test]
     fn test_add_and_remove_hole() {
         let plane = Plane::xy();
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        assert_eq!(face.inner_wires.len(), 0);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: hole surgery takes the SOLID + face index — the hole edge
+        // joins the store; the face keeps topology only.)
+        let mut solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![Vec::new()]);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 0);
 
         // Add a hole
         add_circular_hole_to_face(
-            &mut face,
+            &mut solid,
+            0,
             Point3d::new(0.5, 0.5, 0.0),
             0.1,
             Direction3d::Z,
         )
         .unwrap();
-        assert_eq!(face.inner_wires.len(), 1);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 1);
 
         // Remove the hole
-        let removed = remove_hole_from_face(&mut face, 0).unwrap();
+        let mut faces = solid.faces_mut();
+        let removed = remove_hole_from_face(faces[0], 0).unwrap();
+        drop(faces);
         assert_eq!(removed.coedges.len(), 1);
-        assert_eq!(face.inner_wires.len(), 0);
+        assert_eq!(solid.faces()[0].inner_wires.len(), 0);
 
         // Removing again should fail
-        assert!(remove_hole_from_face(&mut face, 0).is_err());
+        let mut faces = solid.faces_mut();
+        assert!(remove_hole_from_face(faces[0], 0).is_err());
     }
 
     #[test]
@@ -1520,10 +1544,10 @@ mod tests {
             Point3d::new(1.0, 0.0, 0.0),
             Point3d::new(2.0, 0.0, 0.0),
         );
-        let mut face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
-        face.edges.push(edge);
-        let shell = Shell::new_closed(vec![face]);
-        let solid = Solid::new(shell);
+        let face = Face::new(Surface::Plane(plane), Wire::new(vec![]));
+        // (7.6b: the boundary edge rides the solid's store.)
+        let solid =
+            Solid::from_edges_only(Shell::new_closed(vec![face]), vec![vec![edge]]);
 
         // 5 total instances: original + 4 copies at 72°, 144°, 216°, 288°
         let copies = circular_pattern(&solid, Direction3d::Z, 5, 2.0 * std::f64::consts::PI);
@@ -1532,7 +1556,8 @@ mod tests {
         // Each copy should have its edge at a different angular position
         for (i, c) in copies.iter().enumerate() {
             let f = &c.outer_shell.as_ref().unwrap().faces[0];
-            let e = &f.edges[0];
+            let resolved = c.resolve_face_edges(f);
+            let e = &resolved[0];
             let start = e.start_point().unwrap();
             let angle = 2.0 * std::f64::consts::PI * (i + 1) as f64 / 5.0;
             let expected_x = angle.cos();
@@ -1576,87 +1601,104 @@ mod tests {
         let e_vert_3 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 1.0));
 
         // Bottom face (z=0): edges 0,1,2,3 of bottom
-        let mut bottom = Face::new_surface_only(Surface::Plane(Plane {
+        let bottom = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Y,
             normal: Direction3d::new(0.0, 0.0, -1.0).unwrap(),
         }));
-        bottom.edges.push(e_bottom_01.clone());
-        bottom.edges.push(e_bottom_12.clone());
-        bottom.edges.push(e_bottom_23.clone());
-        bottom.edges.push(e_bottom_30.clone());
+        let bottom_w: Vec<Edge> = vec![
+            e_bottom_01.clone(),
+            e_bottom_12.clone(),
+            e_bottom_23.clone(),
+            e_bottom_30.clone(),
+        ];
 
         // Top face (z=1): edges 0,1,2,3 of top
-        let mut top = Face::new_surface_only(Surface::Plane(Plane {
+        let top = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 1.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Y,
             normal: Direction3d::Z,
         }));
-        top.edges.push(e_top_01.clone());
-        top.edges.push(e_top_12.clone());
-        top.edges.push(e_top_23.clone());
-        top.edges.push(e_top_30.clone());
+        let top_w: Vec<Edge> = vec![
+            e_top_01.clone(),
+            e_top_12.clone(),
+            e_top_23.clone(),
+            e_top_30.clone(),
+        ];
 
         // Front face (y=0): bottom_01 (shared), vert_1, top_01 (shared), vert_0
-        let mut front = Face::new_surface_only(Surface::Plane(Plane {
+        let front = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Z,
             normal: Direction3d::new(0.0, -1.0, 0.0).unwrap(),
         }));
-        front.edges.push(e_bottom_01.clone());
-        front.edges.push(e_vert_1.clone());
-        front.edges.push(e_top_01.clone());
-        front.edges.push(e_vert_0.clone());
+        let front_w: Vec<Edge> = vec![
+            e_bottom_01.clone(),
+            e_vert_1.clone(),
+            e_top_01.clone(),
+            e_vert_0.clone(),
+        ];
 
         // Back face (y=1): bottom_23, vert_3, top_23, vert_2
-        let mut back = Face::new_surface_only(Surface::Plane(Plane {
+        let back = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 1.0, 0.0),
             u_dir: Direction3d::X,
             v_dir: Direction3d::Z,
             normal: Direction3d::Y,
         }));
-        back.edges.push(e_bottom_23.clone());
-        back.edges.push(e_vert_3.clone());
-        back.edges.push(e_top_23.clone());
-        back.edges.push(e_vert_2.clone());
+        let back_w: Vec<Edge> = vec![
+            e_bottom_23.clone(),
+            e_vert_3.clone(),
+            e_top_23.clone(),
+            e_vert_2.clone(),
+        ];
 
         // Left face (x=0): bottom_30, vert_3, top_30, vert_0
-        let mut left = Face::new_surface_only(Surface::Plane(Plane {
+        let left = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(0.0, 0.0, 0.0),
             u_dir: Direction3d::Y,
             v_dir: Direction3d::Z,
             normal: Direction3d::new(-1.0, 0.0, 0.0).unwrap(),
         }));
-        left.edges.push(e_bottom_30.clone());
-        left.edges.push(e_vert_3.clone());
-        left.edges.push(e_top_30.clone());
-        left.edges.push(e_vert_0.clone());
+        let left_w: Vec<Edge> = vec![
+            e_bottom_30.clone(),
+            e_vert_3.clone(),
+            e_top_30.clone(),
+            e_vert_0.clone(),
+        ];
 
         // Right face (x=1): bottom_12, vert_1, top_12, vert_2
-        let mut right = Face::new_surface_only(Surface::Plane(Plane {
+        let right = Face::new_surface_only(Surface::Plane(Plane {
             origin: Point3d::new(1.0, 0.0, 0.0),
             u_dir: Direction3d::Y,
             v_dir: Direction3d::Z,
             normal: Direction3d::X,
         }));
-        right.edges.push(e_bottom_12.clone());
-        right.edges.push(e_vert_1.clone());
-        right.edges.push(e_top_12.clone());
-        right.edges.push(e_vert_2.clone());
+        let right_w: Vec<Edge> = vec![
+            e_bottom_12.clone(),
+            e_vert_1.clone(),
+            e_top_12.clone(),
+            e_vert_2.clone(),
+        ];
 
         let shell = Shell::new_closed(vec![bottom, top, front, back, left, right]);
-        Solid::new(shell)
+        // 7.6b: born-indexed — the shared edge instances (same TopoIds
+        // across faces) ride the working lists into the store.
+        Solid::from_edges_only(
+            shell,
+            vec![bottom_w, top_w, front_w, back_w, left_w, right_w],
+        )
     }
 
     #[test]
     fn test_fillet_edge_on_unit_cube() {
         let mut cube = unit_cube();
-        // Pick the first edge of the first face.
-        let shell = cube.outer_shell.as_ref().unwrap();
-        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+        // Pick the first edge of the first face (store-resolved instance).
+        let f0 = &cube.outer_shell.as_ref().unwrap().faces[0];
+        let edge_id = cube.resolve_face_edges(f0)[0].id.to_u64() as usize;
 
         // Apply fillet with radius 0.1
         let result = fillet_edge(&mut cube, edge_id, 0.1);
@@ -1675,52 +1717,35 @@ mod tests {
             Surface::Cylinder(_) => {}
             other => panic!("expected Cylinder fillet surface, got {:?}", other),
         }
-        // The fillet face should have 4 edges (2 offset + 2 caps).
-        assert_eq!(fillet_face.edges.len(), 4);
+        // The fillet face should have 4 boundary slots (2 offset + 2
+        // caps). 7.6b: `edge_ids` keeps the per-slot canonical references
+        // (cap slots may share canonicals with the adjacent faces' split
+        // edges — geometric dedup), so the SLOT count is the contract.
+        assert_eq!(fillet_face.edge_ids.len(), 4);
     }
 
     #[test]
     fn test_fillet_edge_on_step_style_shared_edge() {
-        // C5 Stage 4: STEP-imported solids duplicate a shared edge as two
-        // instances with DIFFERENT TopoIds (same step_entity_id). Fillet
-        // used to fail with "only 1 adjacent face(s)" because the scan
-        // matched instance ids only; the alias-resolved scan now finds both
-        // incident faces.
+        // C5 Stage 4 → 7.6b: STEP-imported solids unify a shared edge under
+        // one canonical store entry (same step_entity_id in both incident
+        // faces' working lists). Fillet used to fail with "only 1 adjacent
+        // face(s)" when the scan matched per-face instance ids only; the
+        // store-first scan finds both incident faces through the canonical.
         let mut cube = unit_cube();
         // The vertical edge e_vert_0 is shared between front (face 2,
-        // edges[3]) and left (face 4, edges[3]).
-        let front_edge_id = cube.outer_shell.as_ref().unwrap().faces[2].edges[3].id;
+        // slot 3) and left (face 4, slot 3).
+        let f_left = &cube.outer_shell.as_ref().unwrap().faces[4];
+        let shared_id = cube.resolve_face_edges(f_left)[3].id;
 
-        // STEP-ify: replace the left face's copy with a twin carrying a
-        // FRESH TopoId and a shared step_entity_id.
-        {
-            let left = cube
-                .outer_shell
-                .as_mut()
-                .unwrap()
-                .faces
-                .get_mut(4)
-                .unwrap();
-            let mut twin = left.edges[3].clone();
-            twin.id = TopoId::new();
-            twin.step_entity_id = Some(700);
-            left.edges[3] = twin;
+        // STEP-ify: stamp the shared canonical with a STEP entity id —
+        // both incident faces see it through the store.
+        if let Some(e) = cube.edge_store.get_mut(shared_id) {
+            e.step_entity_id = Some(700);
         }
-        {
-            let front = cube
-                .outer_shell
-                .as_mut()
-                .unwrap()
-                .faces
-                .get_mut(2)
-                .unwrap();
-            front.edges[3].step_entity_id = Some(700);
-        }
-        cube.index_edges();
 
-        // Fillet by the FRONT copy's instance id — the alias map must
-        // resolve the left face's twin to the same canonical edge.
-        let result = fillet_edge(&mut cube, front_edge_id.to_u64() as usize, 0.1);
+        // Fillet by the shared (canonical) id — both incident faces must
+        // resolve through the store.
+        let result = fillet_edge(&mut cube, shared_id.to_u64() as usize, 0.1);
         assert!(
             result.is_ok(),
             "fillet on STEP-style shared edge failed: {:?}",
@@ -1733,8 +1758,8 @@ mod tests {
     #[test]
     fn test_chamfer_edge_on_unit_cube() {
         let mut cube = unit_cube();
-        let shell = cube.outer_shell.as_ref().unwrap();
-        let edge_id = shell.faces[0].edges[0].id.to_u64() as usize;
+        let f0 = &cube.outer_shell.as_ref().unwrap().faces[0];
+        let edge_id = cube.resolve_face_edges(f0)[0].id.to_u64() as usize;
 
         let result = chamfer_edge(&mut cube, edge_id, 0.1);
         assert!(result.is_ok(), "chamfer_edge failed: {:?}", result);
@@ -1752,7 +1777,7 @@ mod tests {
             Surface::Plane(_) => {}
             other => panic!("expected Plane chamfer surface, got {:?}", other),
         }
-        assert_eq!(chamfer_face.edges.len(), 4);
+        assert_eq!(chamfer_face.edge_ids.len(), 4);
     }
 
     #[test]

@@ -184,12 +184,13 @@ fn test_step_to_usda_pipeline_produces_valid_output() {
 
 fn find_first_manifold_edge(solid: &draper_topology::Solid) -> usize {
     use std::collections::HashMap;
+    // C5 7.6b: count by CANONICAL identity — a shared edge appears once in
+    // each incident face's store-resolved boundary.
     let mut edge_count: HashMap<u64, usize> = HashMap::new();
-    if let Some(shell) = solid.outer_shell.as_ref() {
-        for face in &shell.faces {
-            for edge in &face.edges {
-                *edge_count.entry(edge.id.to_u64()).or_insert(0) += 1;
-            }
+    for face in solid.faces() {
+        for edge in solid.resolve_face_edges(face) {
+            let canonical = solid.edge_store.canonical_of(edge.id).to_u64();
+            *edge_count.entry(canonical).or_insert(0) += 1;
         }
     }
     for (id, count) in &edge_count {
@@ -224,46 +225,46 @@ fn make_unit_cube_with_shared_edges() -> draper_topology::Solid {
     let e_vert_2 = Edge::new_line(Point3d::new(1.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 1.0));
     let e_vert_3 = Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 1.0));
 
-    let mk_face = |edges: Vec<Edge>, coedges: Vec<(draper_topology::TopoId, bool)>, plane: Plane| -> Face {
+    // C5 7.6b: (face, working) — the boundary edges ride the solid's store.
+    let mk_face = |edges: Vec<Edge>, coedges: Vec<(draper_topology::TopoId, bool)>, plane: Plane| -> (Face, Vec<Edge>) {
         let mut face = Face::new_surface_only(Surface::Plane(plane));
-        face.edges = edges;
         face.outer_wire = Some(Wire::new(coedges.into_iter().map(|(id, f)| CoEdge::new(id, f)).collect()));
-        face
+        (face, edges)
     };
 
-    let bottom = mk_face(
+    let (bottom, bottom_w) = mk_face(
         vec![e_bot_01.clone(), e_bot_12.clone(), e_bot_23.clone(), e_bot_30.clone()],
         vec![(e_bot_01.id, true), (e_bot_12.id, true), (e_bot_23.id, true), (e_bot_30.id, true)],
         Plane { origin: Point3d::new(0.0, 0.0, 0.0), u_dir: Direction3d::X, v_dir: Direction3d::Y, normal: Direction3d::new(0.0, 0.0, -1.0).unwrap() },
     );
-    let top = mk_face(
+    let (top, top_w) = mk_face(
         vec![e_top_01.clone(), e_top_12.clone(), e_top_23.clone(), e_top_30.clone()],
         vec![(e_top_01.id, true), (e_top_12.id, true), (e_top_23.id, true), (e_top_30.id, true)],
         Plane { origin: Point3d::new(0.0, 0.0, 1.0), u_dir: Direction3d::X, v_dir: Direction3d::Y, normal: Direction3d::Z },
     );
-    let front = mk_face(
+    let (front, front_w) = mk_face(
         vec![e_bot_01.clone(), e_vert_1.clone(), e_top_01.clone(), e_vert_0.clone()],
         vec![(e_bot_01.id, true), (e_vert_1.id, true), (e_top_01.id, false), (e_vert_0.id, false)],
         Plane { origin: Point3d::new(0.0, 0.0, 0.0), u_dir: Direction3d::X, v_dir: Direction3d::Z, normal: Direction3d::new(0.0, -1.0, 0.0).unwrap() },
     );
-    let back = mk_face(
+    let (back, back_w) = mk_face(
         vec![e_bot_23.clone(), e_vert_3.clone(), e_top_23.clone(), e_vert_2.clone()],
         vec![(e_bot_23.id, false), (e_vert_3.id, true), (e_top_23.id, true), (e_vert_2.id, false)],
         Plane { origin: Point3d::new(0.0, 1.0, 0.0), u_dir: Direction3d::X, v_dir: Direction3d::Z, normal: Direction3d::Y },
     );
-    let left = mk_face(
+    let (left, left_w) = mk_face(
         vec![e_bot_30.clone(), e_vert_0.clone(), e_top_30.clone(), e_vert_3.clone()],
         vec![(e_bot_30.id, true), (e_vert_0.id, true), (e_top_30.id, false), (e_vert_3.id, false)],
         Plane { origin: Point3d::new(0.0, 0.0, 0.0), u_dir: Direction3d::Y, v_dir: Direction3d::Z, normal: Direction3d::new(-1.0, 0.0, 0.0).unwrap() },
     );
-    let right = mk_face(
+    let (right, right_w) = mk_face(
         vec![e_bot_12.clone(), e_vert_2.clone(), e_top_12.clone(), e_vert_1.clone()],
         vec![(e_bot_12.id, false), (e_vert_2.id, true), (e_top_12.id, true), (e_vert_1.id, false)],
         Plane { origin: Point3d::new(1.0, 0.0, 0.0), u_dir: Direction3d::Y, v_dir: Direction3d::Z, normal: Direction3d::X },
     );
 
     let shell = Shell::new_closed(vec![bottom, top, front, back, left, right]);
-    Solid::new(shell)
+    Solid::from_edges_only(shell, vec![bottom_w, top_w, front_w, back_w, left_w, right_w])
 }
 
 #[test]
@@ -291,7 +292,7 @@ fn test_scale_around_point_resizes_about_origin() {
     // The right-most edge endpoint should be at x=10.
     let mut max_x = f64::NEG_INFINITY;
     for face in &shell.faces {
-        for edge in &face.edges {
+        for edge in s.resolve_face_edges(face) {
             if let Some(p) = edge.start_point() {
                 max_x = max_x.max(p.x);
             }
@@ -308,10 +309,9 @@ fn test_remove_hole_and_clear_holes_on_face() {
     use draper_core::operations::{add_circular_hole_to_face, clear_holes_from_face, get_face_mut};
     use draper_geometry::{Point3d, Direction3d, Surface, Plane};
     let mut s = ShapeBuilder::make_box(100.0, 100.0, 100.0);
-    // Add a hole on face 0
+    // Add a hole on face 0 (7.6b: (solid, face_index) signature)
     {
-        let face = get_face_mut(&mut s, 0).unwrap();
-        let _ = add_circular_hole_to_face(face, Point3d::new(50.0, 50.0, 0.0), 10.0, Direction3d::Z);
+        let _ = add_circular_hole_to_face(&mut s, 0, Point3d::new(50.0, 50.0, 0.0), 10.0, Direction3d::Z);
     }
     // Verify hole was added
     {

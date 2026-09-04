@@ -14,7 +14,7 @@ use crate::boolean::boolean_subtract;
 use draper_geometry::{
     Point3d, Direction3d, Vec3d,
     Curve3d, Line, Surface, Plane,
-    Transform, ToleranceContext, NurbsCurve,
+    Transform, ToleranceContext,
 };
 use std::f64::consts::PI;
 
@@ -2318,6 +2318,7 @@ mod tests {
 
     #[test]
     fn test_sweep_along_nurbs_curve() {
+        use draper_geometry::NurbsCurve;
         // Sweep a rectangle profile along a NURBS circle path
         let profile = Polyline2d::rectangle(2.0, 2.0);
         // Sample a NURBS circle curve at 16 points

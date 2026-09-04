@@ -23,6 +23,7 @@
 
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
+#[path = "tests.rs"]
 mod tests;
 
 use draper_core::{

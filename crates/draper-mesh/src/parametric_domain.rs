@@ -8167,7 +8167,7 @@ mod tests {
 
     #[test]
     fn test_fully_degenerate_boundary_falls_through_to_cdt() {
-        use draper_geometry::{ConeSurface, Surface, Point3d};
+        use draper_geometry::{ConeSurface, Surface};
 
         // D4 fan-guard regression: a boundary whose EVERY point is at the
         // apex singularity (0 non-degenerate ring points) must NOT return
