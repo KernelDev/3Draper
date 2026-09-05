@@ -17,7 +17,6 @@
 //! buffers and evaluated in a WGSL compute shader with minimal adaptation.
 
 use crate::NurbsSurface;
-use crate::Point3d;
 
 /// SOA (Structure of Arrays) representation of a NURBS surface.
 ///
@@ -321,6 +320,7 @@ fn de_boor_soa(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Point3d;
 
     #[test]
     fn test_soa_from_nurbs() {
