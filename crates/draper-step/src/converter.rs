@@ -3325,7 +3325,13 @@ impl<'a> StepConverter<'a> {
             let child_pds: std::collections::HashSet<i64> = nauos.iter()
                 .filter_map(|n| self.extract_nauo_pd_refs(n).1)
                 .collect();
-            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            let mut roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            // DETERMINISM FIX (2026-09-06): HashSet::difference iterates
+            // in per-process random hash order — the assembly-tree walk
+            // (and hence the instance / merged-mesh ordering) differed on
+            // every run. Sort the roots so the conversion is a pure
+            // function of the STEP file.
+            roots.sort_unstable();
 
             if roots.is_empty() {
                 info!("No root assembly found, falling back to direct BREP conversion");
@@ -3644,7 +3650,13 @@ impl<'a> StepConverter<'a> {
             let child_pds: std::collections::HashSet<i64> = nauos.iter()
                 .filter_map(|n| self.extract_nauo_pd_refs(n).1)
                 .collect();
-            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            let mut roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            // DETERMINISM FIX (2026-09-06): HashSet::difference iterates
+            // in per-process random hash order — the assembly-tree walk
+            // (and hence the instance / merged-mesh ordering) differed on
+            // every run. Sort the roots so the conversion is a pure
+            // function of the STEP file.
+            roots.sort_unstable();
 
             if !roots.is_empty() {
                 for root_pd in &roots {
@@ -3999,7 +4011,11 @@ impl<'a> StepConverter<'a> {
         let child_pds: std::collections::HashSet<i64> = nauos.iter()
             .filter_map(|n| self.extract_nauo_pd_refs(n).1)
             .collect();
-        let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+        let mut roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+        // DETERMINISM FIX (2026-09-06): HashSet::difference iterates in
+        // per-process random hash order — sort so the tree is a pure
+        // function of the STEP file.
+        roots.sort_unstable();
 
         if let Some(&root_pd) = roots.first() {
             let root_name = self.get_product_name(root_pd);
@@ -4573,6 +4589,7 @@ impl<'a> StepConverter<'a> {
 
             // Log consolidated aliasing statistics (KS-1)
             alias_stats.log_summary(brep_id);
+
         }
 
         // KS-2: Validate circle consistency in debug builds.
@@ -5025,7 +5042,7 @@ impl<'a> StepConverter<'a> {
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
             let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
-            
+
             // DIAG: Compute post-healing geometry signature
             let post_heal_sig = compute_face_data_signature(&healed_list);
             if post_heal_sig.surface_count != pre_heal_sig.surface_count {
@@ -5223,6 +5240,7 @@ impl<'a> StepConverter<'a> {
                 );
             }
 
+
             // Phase 2: 3D coordinate-based aliasing (supplementary)
             // Same logic as in triangulate_brep() — see comments there.
             // Also applies midpoint check to avoid aliasing different curves.
@@ -5296,6 +5314,7 @@ impl<'a> StepConverter<'a> {
                 brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
             );
 
+
             // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
             // For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
             // edges at u=0 and u=u_max represent the same geometric boundary (seam).
@@ -5308,6 +5327,7 @@ impl<'a> StepConverter<'a> {
                     brep_id, seam_count
                 );
             }
+
         }
 
         // Time guard: limit per-BREP triangulation time.
@@ -7321,7 +7341,13 @@ impl<'a> StepConverter<'a> {
             let child_pds: std::collections::HashSet<i64> = nauos.iter()
                 .filter_map(|n| self.extract_nauo_pd_refs(n).1)
                 .collect();
-            let roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            let mut roots: Vec<i64> = parent_pds.difference(&child_pds).copied().collect();
+            // DETERMINISM FIX (2026-09-06): HashSet::difference iterates
+            // in per-process random hash order — the assembly-tree walk
+            // (and hence the instance / merged-mesh ordering) differed on
+            // every run. Sort the roots so the conversion is a pure
+            // function of the STEP file.
+            roots.sort_unstable();
 
             if !roots.is_empty() {
                 // Track which BREPs we've already added (to avoid duplicates)
@@ -9294,7 +9320,17 @@ impl<'a> StepConverter<'a> {
 
         // For each face with a periodic surface, find pairs of edges that share
         // the same vertex-pair coordinates (these are seam edges).
-        for (_fi, edges) in &edges_by_surface {
+        //
+        // DETERMINISM FIX (2026-09-06): HashMap iteration order is randomized
+        // per process, and `register_step_id_alias` OVERWRITES a prior entry
+        // for the same `from_id` — when the same step_id is a seam edge for
+        // two different faces with conflicting alias targets, the winner
+        // depended on the random face order. Iterate the faces in index
+        // order so the alias map is a pure function of the STEP file.
+        let mut seam_face_order: Vec<usize> = edges_by_surface.keys().copied().collect();
+        seam_face_order.sort_unstable();
+        for fi in seam_face_order {
+            let edges = &edges_by_surface[&fi];
             for i in 0..edges.len() {
                 for j in (i + 1)..edges.len() {
                     let (sid_i, ai, bi) = &edges[i];

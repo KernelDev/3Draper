@@ -1376,8 +1376,12 @@ fn validate_circular_assembly_refs(
     let mut in_stack: HashSet<i64> = HashSet::new();
     let mut path: Vec<i64> = Vec::new();
 
-    // Find all PDs that appear as parents
-    let all_parents: Vec<i64> = parent_to_children.keys().copied().collect();
+    // Find all PDs that appear as parents.
+    // DETERMINISM FIX (2026-09-06): HashMap keys iterate in per-process
+    // random hash order — sort so the validation report is a pure
+    // function of the STEP file.
+    let mut all_parents: Vec<i64> = parent_to_children.keys().copied().collect();
+    all_parents.sort_unstable();
 
     for start_pd in &all_parents {
         if visited.contains(start_pd) {

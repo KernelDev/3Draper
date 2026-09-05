@@ -3559,3 +3559,80 @@ git-дерево не откатилось).
 - Недетерминизм all_files_test (HashMap-порядок в pre-compute фазах)
 - Vision 2036 §2.1: B-spline fitting результата marching (fit_b_spline
   уже вызывается в intersect_surfaces — проверить покрытие/качество)
+
+# Worklog — детерминизм STEP→mesh конвейера (2026-09-06, девятая сессия)
+
+**Baseline:** commit `86142d5` (Torus×Torus analytic SSI).
+**Задача:** Закрыть пункт «Осталось» — недетерминизм all_files_test
+(HashMap-порядок в pre-compute фазах).
+
+## Диагностика (эмпирическая, тест-зонд determinism_probe)
+
+Новый интеграционный тест `crates/draper-step/tests/determinism_probe.rs`:
+хеширует (FNV) выходы `step_to_mesh` / `step_to_mesh_instances` /
+`extract_solids` / `step_to_detailed_instances` (total + per-face +
+per-solid + boundary lengths) для brick_thin_hole / compressor / as1.
+Запуск в двух процессах = разные HashMap-сиды → изначально ВСЕ
+дайджесты различались, у compressor — даже ЧИСЛА вершин/треугольников
+(3786/9955 vs 3684/9700): недетерминизм был не только порядком, но и
+ГЕОМЕТРИЕЙ. Бисект по подфазам (временные eprintln-трассы, удалены):
+
+healed_list identical → alias map identical → edge-cache points identical
+→ per-face MERGE identical → … → пост-фазы различались.
+
+## Найденные и исправленные источники (13 фикс-сайтов)
+
+**draper-step (converter.rs):**
+1. roots сборки assembly-дерева — `HashSet::difference` (4 копии!) →
+   sort_unstable; порядок инстансов/меша.
+2. `register_seam_aliases` — итерация `edges_by_surface` (HashMap) +
+   `register_step_id_alias` ПЕРЕЗАПИСЫВАЕТ конфликтующие алиасы →
+   случайный победитель; сортировка по face-индексу.
+3. validation.rs `all_parents` — сортировка (порядок отчёта).
+
+**draper-topology (healing.rs):**
+4. `merge_faces` — жадное слияние по `adjacent_pairs` (HashSet):
+   удалённая грань не участвует в later-парах → разные группы слияний.
+5. `close_gaps` — `boundary_edge_ids` из HashMap-итерации → случайные
+   пары рёбер (жадность).
+6. `fill_holes`/`find_boundary_loops` — HashSet-вход → случайный
+   порядок циклов + ротация + junction tie-breaks.
+
+**draper-mesh:**
+7. `parametric_domain` gap-fill — `connected_to_a.intersection(&…)` —
+   случайный порядок кандидатов `best_vc` + код не следовал
+   документированному критерию минимальной площади → сортировка
+   + min-area выбор (tie → меньший индекс).
+8. `parametric_domain` chord-refinement (2 копии) — `edges_to_split`
+   (HashMap) порядок вставки новых вершин → сортировка.
+9. `weld_boundary_edge_vertices` — PASS 1 (`short_boundary_edges`),
+   PASS 2, PASS 3 (`boundary_vertices`) — union-find цепочки
+   зависели от случайного порядка → сортированные итерации.
+10. `repair_t_junctions` — `splits.keys()` (порядок рёбер в полигоне)
+    и `&tri_splits` (порядок новых треугольников) → сортировка.
+11. `fill_boundary_gaps` — `boundary_undirected` (adjacency + loop
+    discovery) → сортированная копия.
+12. `fix_inconsistent_winding` — adjacency из HashMap-итерации →
+    BFS-порядок случаен → для неориентируемых компонент разные
+    flip-множества; сортировка рёбер.
+13. `subdivision.rs` — shared-пара из intersection → сортировка
+    (winding квадов).
+
+## Верификация
+
+- **6/6 запусков зонда в разных процессах — идентичные дайджесты**
+  (включая RAYON_NUM_THREADS=2/4 — число потоков не влияет)
+- draper-mesh: 268+ интеграция зелёные
+- draper-topology: 225 lib + 31 integration зелёные
+- draper-step: 124 lib зелёные (тяжёлые промышленные скипнуты — правило
+  среды; их пути покрыты зондом: brick/compressor/as1 полные конверсии)
+- `cargo check --workspace --lib`: 0 ошибок; предупреждения — 22
+  pre-existing (проверено stash-циклом), новые не добавлены
+- Диск: 5.1G free
+
+## Осталось (обновление)
+
+- Vision 2036 §2.1: B-spline fitting качества marching-выходов
+- Cylinder×Torus parallel-offset аналитика (квартка) — точность/производительность
+- Legacy eprintln-ы в converter.rs (MERGE/POST_*/WELD_SKIP) — шум в
+  stderr, кандидат на log::debug перевод (отдельная чистка)

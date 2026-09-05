@@ -5536,8 +5536,16 @@ pub fn triangulate_surface_consistent(
                         if a == vb || b == vb { connected_to_b.insert(if a == vb { b } else { a }); }
                     }
                 }
-                // Find common neighbors (connected to both va and vb)
-                let common: Vec<u32> = connected_to_a.intersection(&connected_to_b).copied().collect();
+                // Find common neighbors (connected to both va and vb).
+                //
+                // DETERMINISM FIX (2026-09-06): `HashSet::intersection`
+                // iterates in hash order, which is randomized per process
+                // — the gap-fill vertex choice (and hence the mesh) was
+                // different on every run. Sort the candidates by vertex
+                // index so the choice below is a pure function of the mesh.
+                let mut common: Vec<u32> =
+                    connected_to_a.intersection(&connected_to_b).copied().collect();
+                common.sort_unstable();
 
                 // CRITICAL: For faces with holes, verify that the fill triangle's
                 // centroid is inside the domain (not inside a hole).
@@ -5551,7 +5559,13 @@ pub fn triangulate_surface_consistent(
                 // Bug history: drill_top.stp STEP #843 (cylinder face with 2
                 // holes) showed triangles covering the holes because gap-filling
                 // added a fill triangle that spanned across a hole.
-                let mut best_vc: Option<u32> = None;
+                //
+                // Selection: among acceptable candidates (centroid inside the
+                // domain), take the one MINIMIZING the fill-triangle area — the
+                // documented intent of this routine — with ties broken by the
+                // lowest vertex index (`common` is index-sorted and the
+                // comparison below is strict).
+                let mut best_vc: Option<(f64, u32)> = None; // (area, vertex)
                 for &vc in &common {
                     // Compute the fill triangle's centroid in UV space
                     let pa = mesh.vertices[va as usize];
@@ -5568,12 +5582,24 @@ pub fn triangulate_surface_consistent(
                     // the domain (i.e., not inside a hole and not outside
                     // the outer boundary).
                     if domain.contains_ray(&centroid_uv) {
-                        best_vc = Some(vc);
-                        break;
+                        // Twice the triangle area via the cross-product norm.
+                        let ux = pb.x - pa.x;
+                        let uy = pb.y - pa.y;
+                        let uz = pb.z - pa.z;
+                        let vx = pc.x - pa.x;
+                        let vy = pc.y - pa.y;
+                        let vz = pc.z - pa.z;
+                        let area2 = ((uy * vz - uz * vy).powi(2)
+                            + (uz * vx - ux * vz).powi(2)
+                            + (ux * vy - uy * vx).powi(2))
+                            .sqrt();
+                        if best_vc.map_or(true, |(best, _)| area2 < best) {
+                            best_vc = Some((area2, vc));
+                        }
                     }
                 }
 
-                if let Some(best_vc) = best_vc {
+                if let Some((_, best_vc)) = best_vc {
                     // Add the fill triangle — use the orientation that matches
                     // the face's forward flag
                     if forward {
@@ -5852,9 +5878,14 @@ fn refine_mesh_chord_error(
             break; // No more edges to split
         }
 
-        // Now insert the surface points and update the map
+        // Now insert the surface points and update the map.
+        // DETERMINISM FIX (2026-09-06): new vertex indices are assigned
+        // in this loop's order — HashMap iteration is per-process random,
+        // which reshuffled the refined mesh on every run. Iterate sorted.
+        let mut split_order: Vec<(u32, u32)> = edges_to_split.keys().copied().collect();
+        split_order.sort_unstable();
         let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
-        for (edge, _) in &edges_to_split {
+        for edge in &split_order {
             let p0 = mesh.vertices[edge.0 as usize];
             let p1 = mesh.vertices[edge.1 as usize];
 
@@ -6249,9 +6280,14 @@ fn refine_mesh_chord_error_uv(
             break; // No more edges to split
         }
 
-        // Insert surface points for each edge to split
+        // Insert surface points for each edge to split.
+        // DETERMINISM FIX (2026-09-06): new vertex indices are assigned
+        // in this loop's order — HashMap iteration is per-process random,
+        // which reshuffled the refined mesh on every run. Iterate sorted.
+        let mut split_order: Vec<(u32, u32)> = edges_to_split.keys().copied().collect();
+        split_order.sort_unstable();
         let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
-        for (edge, _) in &edges_to_split {
+        for edge in &split_order {
             let v0 = edge.0;
             let v1 = edge.1;
 

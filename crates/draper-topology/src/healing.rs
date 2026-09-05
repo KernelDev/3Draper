@@ -984,7 +984,11 @@ fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
         }
     }
 
-    // Boundary edges: those referenced only once in coedges
+    // Boundary edges: those referenced only once in coedges.
+    // DETERMINISM FIX (2026-09-06): the greedy merge below is
+    // order-dependent (an edge consumed by an earlier pair is excluded
+    // from later ones), and HashMap iteration order is randomized per
+    // process — sort so the pairing is a pure function of the topology.
     let boundary_edge_ids: Vec<TopoId> = {
         let mut coedge_use_count: std::collections::HashMap<TopoId, u32> =
             std::collections::HashMap::new();
@@ -1000,11 +1004,13 @@ fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
                 }
             }
         }
-        coedge_use_count
+        let mut ids: Vec<TopoId> = coedge_use_count
             .iter()
             .filter(|(_, &count)| count == 1)
             .map(|(&id, _)| id)
-            .collect()
+            .collect();
+        ids.sort_unstable();
+        ids
     };
 
     // Find pairs of boundary edges that are close
@@ -1085,6 +1091,14 @@ fn fill_holes(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
         .map(|(&id, _)| id)
         .collect();
 
+    // DETERMINISM FIX (2026-09-06): iterate the boundary ids in sorted
+    // order — `find_boundary_loops` is order-sensitive (junction
+    // tie-breaks, loop rotation), and HashSet iteration is randomized
+    // per process.
+    let mut boundary_edge_ids_sorted: Vec<TopoId> =
+        boundary_edge_ids.iter().copied().collect();
+    boundary_edge_ids_sorted.sort_unstable();
+
     if boundary_edge_ids.is_empty() {
         return;
     }
@@ -1102,8 +1116,12 @@ fn fill_holes(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
         }
     }
 
-    // Find boundary loops by chaining edges end-to-start
-    let loops = find_boundary_loops(&boundary_edge_ids, &edge_points, params.tolerance);
+    // Find boundary loops by chaining edges end-to-start.
+    // DETERMINISM FIX (2026-09-06): the caller passes the boundary ids
+    // SORTED (they used to arrive in HashSet order — random per process
+    // — making the loop discovery order, each loop's starting rotation,
+    // and the junction tie-breaks nondeterministic).
+    let loops = find_boundary_loops(&boundary_edge_ids_sorted, &edge_points, params.tolerance);
 
     let mut holes_filled = 0u32;
     for hole_loop in &loops {
@@ -1300,7 +1318,8 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
     let mut adjacent_pairs: std::collections::HashSet<(usize, usize)> =
         std::collections::HashSet::new();
     for face_set in edge_to_faces.values() {
-        let face_vec: Vec<usize> = face_set.iter().copied().collect();
+        let mut face_vec: Vec<usize> = face_set.iter().copied().collect();
+        face_vec.sort_unstable();
         for i in 0..face_vec.len() {
             for j in (i + 1)..face_vec.len() {
                 let a = face_vec[i].min(face_vec[j]);
@@ -1309,6 +1328,16 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
             }
         }
     }
+
+    // DETERMINISM FIX (2026-09-06): the greedy merge below is
+    // order-dependent (a face removed by an earlier merge cannot join a
+    // later pair), and HashSet iteration order is randomized per
+    // process — the healed topology (which faces get merged, which
+    // synthetic faces the converter sees) differed on every run. Sort
+    // the pairs so healing is a pure function of the input.
+    let mut adjacent_pairs: Vec<(usize, usize)> =
+        adjacent_pairs.into_iter().collect();
+    adjacent_pairs.sort_unstable();
 
     // Check each adjacent pair for surface compatibility and merge
     // (C5 Stage 7.4b: geometry comes from the working lists — the scan
@@ -2736,7 +2765,7 @@ fn replace_coedge_edge_refs(faces: &mut [Face], old_id: TopoId, new_id: TopoId) 
 ///
 /// Each loop is returned as a `Vec<TopoId>` of edge IDs forming a closed loop.
 fn find_boundary_loops(
-    boundary_edge_ids: &std::collections::HashSet<TopoId>,
+    boundary_edge_ids: &[TopoId],
     edge_points: &std::collections::HashMap<TopoId, (Point3d, Point3d)>,
     tolerance: f64,
 ) -> Vec<Vec<TopoId>> {

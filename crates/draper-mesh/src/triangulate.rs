@@ -6417,7 +6417,6 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
     if boundary_points.is_empty() {
         return TriangleMesh::new();
     }
-
     // ============================================================
     // Decimate collinear boundary points
     //

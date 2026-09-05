@@ -308,7 +308,11 @@ pub fn quadrangulate(
             use std::collections::HashSet;
             let set1: HashSet<u32> = [a1, b1, c1].iter().copied().collect();
             let set2: HashSet<u32> = [a2, b2, c2].iter().copied().collect();
-            let shared: Vec<u32> = set1.intersection(&set2).copied().collect();
+            // DETERMINISM FIX (2026-09-06): HashSet::intersection order
+            // is per-process random — sort the shared pair so the quad
+            // winding is a pure function of the mesh.
+            let mut shared: Vec<u32> = set1.intersection(&set2).copied().collect();
+            shared.sort_unstable();
 
             if shared.len() == 2 {
                 // The quad is: non-shared vertices of tri1, shared, non-shared vertices of tri2

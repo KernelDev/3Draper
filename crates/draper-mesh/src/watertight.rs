@@ -934,8 +934,15 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
     }
 
     // Build triangle adjacency: for each triangle, list of (neighbor_tri, shared_edge)
+    // DETERMINISM FIX (2026-09-06): `edge_to_tris` is a HashMap — building the
+    // adjacency lists in its iteration order randomizes the BFS neighbor
+    // visitation below, which changes the flip set for non-orientable
+    // (conflicting) components. Build the adjacency in SORTED edge order.
+    let mut adjacency_edges: Vec<(u32, u32)> = edge_to_tris.keys().copied().collect();
+    adjacency_edges.sort_unstable();
     let mut tri_adjacency: HashMap<usize, Vec<(usize, u32, u32)>> = HashMap::new();
-    for (edge, tris) in &edge_to_tris {
+    for edge in adjacency_edges {
+        let tris = &edge_to_tris[&edge];
         if tris.len() == 2 {
             tri_adjacency.entry(tris[0]).or_default().push((tris[1], edge.0, edge.1));
             tri_adjacency.entry(tris[1]).or_default().push((tris[0], edge.0, edge.1));
@@ -1501,7 +1508,11 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         }
     }
 
-    // Find short boundary edges (count == 1, length < tolerance)
+    // Find short boundary edges (count == 1, length < tolerance).
+    // DETERMINISM FIX (2026-09-06): `edge_count` is a HashMap — its
+    // iteration order is randomized per process, and PASS 1 below merges
+    // vertices through union-find in this order (the merge CHAIN depends
+    // on it). Sort so the weld result is a pure function of the mesh.
     let mut short_boundary_edges: Vec<(u32, u32)> = Vec::new();
     for (edge, &count) in &edge_count {
         if count == 1 {
@@ -1516,6 +1527,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             }
         }
     }
+    short_boundary_edges.sort_unstable();
 
     // Collect ALL boundary vertices (not just short-edge endpoints).
     // Long boundary edges often have endpoints that ARE close to other
@@ -1551,7 +1563,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
     let mut boundary_verts_sorted: Vec<u32> = boundary_vertices.iter().copied().collect();
     boundary_verts_sorted.sort_unstable();
     let mut spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-    for vi in boundary_verts_sorted {
+    for &vi in &boundary_verts_sorted {
         let v = mesh.vertices[vi as usize];
         let cell = (
             (v.x / cell_size).floor() as i64,
@@ -1729,9 +1741,13 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         .collect();
 
     // Build a SEPARATE spatial hash for PASS 2 with the tighter cell size.
+    // DETERMINISM FIX (2026-09-06): iterate the SORTED boundary vertex
+    // list (both here and in the PASS 2 loop below) — the HashSet order
+    // is randomized per process, and PASS 2's union-find merges chain in
+    // iteration order.
     let pass2_cell_size = pass2_tolerance;
     let mut pass2_spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-    for &vi in &boundary_vertices {
+    for &vi in &boundary_verts_sorted {
         let v = mesh.vertices[vi as usize];
         let cell = (
             (v.x / pass2_cell_size).floor() as i64,
@@ -1742,7 +1758,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
     }
 
     let mut pass2_count = 0usize;
-    for &v1 in &boundary_vertices {
+    for &v1 in &boundary_verts_sorted {
         if short_edge_vertices.contains(&v1) {
             continue; // Already processed in PASS 1
         }
@@ -1838,10 +1854,12 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         let pass3_tolerance = weld_tolerance;
         let pass3_tol_sq = pass3_tolerance * pass3_tolerance;
 
-        // Build spatial hash for PASS 3
+        // Build spatial hash for PASS 3.
+        // DETERMINISM FIX (2026-09-06): iterate the SORTED boundary list —
+        // the HashSet order is randomized per process.
         let pass3_cell_size = pass3_tolerance;
         let mut pass3_spatial: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
-        for &vi in &boundary_vertices {
+        for &vi in &boundary_verts_sorted {
             let v = mesh.vertices[vi as usize];
             let cell = (
                 (v.x / pass3_cell_size).floor() as i64,
@@ -1854,7 +1872,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
         let mut pass3_count = 0usize;
         // Only check vertices that are on boundary edges but NOT already welded
         // (i.e., they still have a different root in the union-find)
-        for &v1 in &boundary_vertices {
+        for &v1 in &boundary_verts_sorted {
             let p1 = mesh.vertices[v1 as usize];
             let cell = (
                 (p1.x / pass3_cell_size).floor() as i64,
@@ -2238,9 +2256,16 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
 
         // Step 1: Build triangle → list of (edge_endpoint_a, edge_endpoint_b, t_junctions)
         // The edge endpoints are in the triangle's winding order (not canonical).
+        //
+        // DETERMINISM FIX (2026-09-06): `splits` is a HashMap — its key order
+        // is randomized per process, and the per-triangle `edge_splits` lists
+        // below are appended in that order (the boundary polygon assembly
+        // consumes them in order). Iterate the split edges SORTED.
         let mut tri_splits: HashMap<usize, Vec<(u32, u32, Vec<(f64, u32)>)>> = HashMap::new();
 
-        for &(a, b) in splits.keys() {
+        let mut split_edges_sorted: Vec<(u32, u32)> = splits.keys().copied().collect();
+        split_edges_sorted.sort_unstable();
+        for &(a, b) in &split_edges_sorted {
             let edge_key = if a < b { (a, b) } else { (b, a) };
             let tris_on_edge = match edge_tris.get(&edge_key) {
                 Some(t) => t,
@@ -2281,16 +2306,23 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
         }
 
         // Step 2: For each affected triangle, build boundary polygon and ear-clip.
+        // DETERMINISM FIX (2026-09-06): `tri_splits` is a HashMap — its key
+        // order is randomized per process, and the repaired triangles are
+        // pushed to `new_triangles` in this order. Iterate the affected
+        // triangles SORTED so the output mesh is a pure function of the input.
         let mut triangles_to_remove: HashSet<usize> = HashSet::new();
         let mut new_triangles: Vec<[u32; 3]> = Vec::new();
         let mut new_face_ids: Vec<u64> = Vec::new();
         let face_ids = mesh.triangle_face_ids.as_ref();
 
-        for (ti, edge_splits) in &tri_splits {
-            triangles_to_remove.insert(*ti);
-            let tri = mesh.triangles[*ti];
+        let mut affected_tris_sorted: Vec<usize> = tri_splits.keys().copied().collect();
+        affected_tris_sorted.sort_unstable();
+        for ti in affected_tris_sorted {
+            let edge_splits = &tri_splits[&ti];
+            triangles_to_remove.insert(ti);
+            let tri = mesh.triangles[ti];
             let [a, b, c] = tri;
-            let fid = face_ids.and_then(|ids| ids.get(*ti).copied()).unwrap_or(u64::MAX);
+            let fid = face_ids.and_then(|ids| ids.get(ti).copied()).unwrap_or(u64::MAX);
 
             // Build boundary polygon in CCW (triangle winding) order:
             //   a, [T-junctions on edge a→b], b, [T-junctions on edge b→c], c, [T-junctions on edge c→a]
@@ -2698,9 +2730,15 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
             break;
         }
 
-        // Step 3: Build vertex → neighbors adjacency (UNDIRECTED)
+        // Step 3: Build vertex → neighbors adjacency (UNDIRECTED).
+        // DETERMINISM FIX (2026-09-06): `boundary_undirected` is a HashSet —
+        // iterate a SORTED copy so the adjacency neighbor lists (and every
+        // first-match neighbor choice below) are deterministic.
+        let mut boundary_edges_sorted: Vec<(u32, u32)> =
+            boundary_undirected.iter().copied().collect();
+        boundary_edges_sorted.sort_unstable();
         let mut adjacency: HashMap<u32, Vec<u32>> = HashMap::new();
-        for &(a, b) in &boundary_undirected {
+        for &(a, b) in &boundary_edges_sorted {
             adjacency.entry(a).or_default().push(b);
             adjacency.entry(b).or_default().push(a);
         }
@@ -2709,7 +2747,7 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
         let mut loops: Vec<Vec<u32>> = Vec::new();
         let mut used_edges: HashSet<(u32, u32)> = HashSet::new();
 
-        for &start_edge in &boundary_undirected {
+        for &start_edge in &boundary_edges_sorted {
             if used_edges.contains(&start_edge) {
                 continue;
             }
