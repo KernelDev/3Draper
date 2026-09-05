@@ -3557,79 +3557,424 @@ fn solve_4x4(a: &[[f64; 4]; 4], b: &[f64; 4]) -> Option<[f64; 4]> {
     Some(x)
 }
 
-/// Marching-based surface-surface intersection for NURBS.
+/// Marching-based surface-surface intersection (generic fallback).
 ///
-/// Audit item 6.2 (2026-07-19): Implements a grid-marching approach:
-/// 1. Sample both surfaces on a grid
-/// 2. Find grid cells where the surfaces cross (sign change of distance)
-/// 3. Use 4D Newton-Raphson to refine intersection points
-/// 4. Connect points into polylines
+/// Audit item 6.2 (2026-07-19); redesigned 2026-09-05 (marching
+/// acceptance fix). The previous implementation filtered converged
+/// Newton solutions with `|ip − grid point| < tolerance·100`. The 4D
+/// Newton moves ALL four parameters, so genuine intersection points —
+/// which typically drift far from the grid node that spawned the
+/// iteration — were almost always discarded: a perpendicular cone×torus
+/// pair with a real intersection curve returned `vec![]`.
 ///
-/// This is a simplified implementation suitable for most NURBS surfaces.
-/// For complex self-intersecting cases, a subdivision-based approach
-/// would be needed (TODO).
+/// Redesigned pipeline (two-sided seeding + curve continuation):
+///
+/// 1. **Distance field.** Sample one surface on a `MARCHING_GRID_N ×
+///    MARCHING_GRID_N` parametric grid; project every sample onto the
+///    other surface and record the gap. The zero level set of this
+///    field is the intersection curve.
+/// 2. **Seed flagging.** A grid cell is a seed candidate when its
+///    smallest corner gap is below `max(8·tol, 2·max_adjacent_node_
+///    distance)`: any cell whose interior contains an intersection
+///    point necessarily has a corner within half the cell diagonal of
+///    the curve, so flagging never misses a crossing; the 2× factor
+///    absorbs projection inaccuracies of the distance field.
+/// 3. **Two-sided passes.** The seeding pass runs with BOTH grid roles
+///    (grid over A / project to B, and grid over B / project to A):
+///    one surface may own a much denser view of the curve than the
+///    other (e.g. a cone's coarse v-sampling box vs. a torus covering
+///    the whole tube), and the union of seeds repairs that.
+/// 4. **Seed Newton + geometric acceptance.** The 4D Newton starts from
+///    the closest corner of every flagged cell, seeded with the
+///    projection parameters on the opposite surface. A converged
+///    solution is accepted when the residual `|A(u1,v1) − B(u2,v2)| ≤
+///    10·tol` is re-verified by independent evaluation AND the cone
+///    nappe guard ([`cone_v_on_nappe`]) passes. No other surface kind
+///    needs a domain check: every `point_at` in this code base
+///    evaluates a genuine on-surface point for any parameter (the
+///    formulas are periodic, linear, or clamped to the knot domain).
+/// 5. **Curve continuation.** Every accepted seed is marched along the
+///    intersection curve in both directions: tangent `t = n_A × n_B`
+///    from analytic surface derivatives, first-order parametric steps
+///    along `t`, Newton re-projection after every step, step halving
+///    on convergence failure, closed-loop detection. This fills the
+///    gaps between sparse seeds instead of relying on grid density.
+/// 6. **Assembly.** Points are deduplicated spatially, chained by
+///    nearest neighbour, and split into separate polylines wherever
+///    consecutive points are far apart (distinct branches).
 fn intersect_marching_ssi(
     a: &Surface,
     b: &Surface,
     tolerance: f64,
 ) -> Vec<Vec<Point3d>> {
-    let (au_min, au_max) = surface_param_range_u_safe(a);
-    let (av_min, av_max) = surface_param_range_v_safe(a);
-    let (bu_min, bu_max) = surface_param_range_u_safe(b);
-    let (bv_min, bv_max) = surface_param_range_v_safe(b);
-
-    let grid_n = 16; // Grid resolution per dimension
-    let mut intersection_points: Vec<Point3d> = Vec::new();
-
-    // Sample surface A on a grid
-    for i in 0..grid_n {
-        let ua = au_min + (au_max - au_min) * i as f64 / (grid_n - 1) as f64;
-        for j in 0..grid_n {
-            let va = av_min + (av_max - av_min) * j as f64 / (grid_n - 1) as f64;
-            let pa = a.point_at(ua, va);
-
-            // Find closest point on surface B using inverse evaluation
-            // Use 4D Newton from a reasonable starting guess
-            let ub0 = (bu_min + bu_max) / 2.0;
-            let vb0 = (bv_min + bv_max) / 2.0;
-
-            if let Some((ip, _, _, _, _)) = newton_surface_surface(
-                a, b, ua, va, ub0, vb0, tolerance * 10.0, 10,
-            ) {
-                // Verify the point is actually on both surfaces
-                let dist = ((ip.x - pa.x).powi(2)
-                    + (ip.y - pa.y).powi(2)
-                    + (ip.z - pa.z).powi(2))
-                .sqrt();
-                if dist < tolerance * 100.0 {
-                    intersection_points.push(ip);
-                }
-            }
-        }
-    }
-
-    if intersection_points.is_empty() {
-        vec![]
+    let tol = if tolerance.is_finite() && tolerance > 0.0 {
+        tolerance
     } else {
-        // Sort points by spatial proximity to form a polyline
-        let mut polyline = intersection_points.clone();
-        // Simple nearest-neighbor ordering
-        for i in 1..polyline.len() {
-            let mut min_dist = f64::MAX;
-            let mut min_idx = i;
-            for j in i..polyline.len() {
-                let d = (polyline[j].x - polyline[i - 1].x).powi(2)
-                    + (polyline[j].y - polyline[i - 1].y).powi(2)
-                    + (polyline[j].z - polyline[i - 1].z).powi(2);
-                if d < min_dist {
-                    min_dist = d;
-                    min_idx = j;
+        1e-6
+    };
+
+    // ── Passes 1–4 for both grid roles ──────────────────────────────
+    let (sols_ab, max_adj_a) = marching_seed_pass(a, b, tol);
+    let (sols_ba, max_adj_b) = marching_seed_pass(b, a, tol);
+    // Normalize the (b-grid) solutions to (point, u1, v1, u2, v2) with
+    // the A-side parameters first.
+    let mut seeds: Vec<(Point3d, f64, f64, f64, f64)> = sols_ab;
+    for (p, ub, vb, ua, va) in sols_ba {
+        seeds.push((p, ua, va, ub, vb));
+    }
+    let max_adj = max_adj_a.max(max_adj_b);
+    if seeds.is_empty() {
+        return vec![]; // surfaces nowhere near each other on both grids
+    }
+
+    // ── Pass 5: curve continuation from every deduplicated seed ─────
+    let dedup_sep = (20.0 * tol).max(0.25 * max_adj);
+    let mut uniq_seeds: Vec<(Point3d, f64, f64, f64, f64)> = Vec::new();
+    for s in &seeds {
+        if uniq_seeds
+            .iter()
+            .all(|u| u.0.distance_to(&s.0) > dedup_sep)
+        {
+            uniq_seeds.push(*s);
+        }
+    }
+
+    let mut curve_points: Vec<Point3d> =
+        uniq_seeds.iter().map(|s| s.0).collect();
+    // Points produced by continuation walks so far. A seed is skipped
+    // only when a PREVIOUS walk's trajectory passed near it — NOT when
+    // the seed merely exists (every seed is trivially within `dedup_sep`
+    // of itself, so pre-seeding `walked` with the seed points would
+    // disable the entire continuation pass).
+    let mut walked: Vec<Point3d> = Vec::new();
+    let step_len0 = (0.5 * max_adj).max(20.0 * tol);
+    let mut budget: usize = 4096; // global continuation-step budget
+
+    for seed in &uniq_seeds {
+        // Skip seeds already covered by a previous walk.
+        if walked
+            .iter()
+            .any(|w| w.distance_to(&seed.0) <= dedup_sep)
+        {
+            continue;
+        }
+        for dir_sign in [1.0_f64, -1.0_f64] {
+            let (mut u1, mut v1) = (seed.1, seed.2);
+            let (mut u2, mut v2) = (seed.3, seed.4);
+            let mut cur_p = seed.0;
+            let mut step_len = step_len0;
+            let mut last_move: Option<Vec3d> = None;
+            for _ in 0..256 {
+                if budget == 0 {
+                    break;
+                }
+                budget -= 1;
+                // Curve tangent from analytic surface normals.
+                let da = a.derivatives_at(u1, v1);
+                let db = b.derivatives_at(u2, v2);
+                let na = da.du.cross(&da.dv);
+                let nb = db.du.cross(&db.dv);
+                let na_ls = na.length_sq();
+                let nb_ls = nb.length_sq();
+                if !na_ls.is_finite() || !nb_ls.is_finite() || na_ls < 1e-24 || nb_ls < 1e-24 {
+                    break; // degenerate frame — stop this direction
+                }
+                let mut t = na.cross(&nb);
+                let t_ls = t.length_sq();
+                if !t_ls.is_finite() || t_ls < 1e-24 * na_ls * nb_ls {
+                    break; // (near-)parallel normals: tangency — stop
+                }
+                let t_len = t_ls.sqrt();
+                t = Vec3d::new(t.x / t_len, t.y / t_len, t.z / t_len);
+                // Maintain the walk direction by continuity with the
+                // previous move (or the requested sign on the first step).
+                let flip = match last_move {
+                    Some(m) => t.dot(&m) < 0.0,
+                    None => dir_sign < 0.0,
+                };
+                if flip {
+                    t = Vec3d::new(-t.x, -t.y, -t.z);
+                }
+                // First-order parametric steps along t (length units).
+                let da_u_ls = da.du.length_sq();
+                let da_v_ls = da.dv.length_sq();
+                let db_u_ls = db.du.length_sq();
+                let db_v_ls = db.dv.length_sq();
+                let du1 = if da_u_ls > 1e-24 { step_len * t.dot(&da.du) / da_u_ls } else { 0.0 };
+                let dv1 = if da_v_ls > 1e-24 { step_len * t.dot(&da.dv) / da_v_ls } else { 0.0 };
+                let du2 = if db_u_ls > 1e-24 { step_len * t.dot(&db.du) / db_u_ls } else { 0.0 };
+                let dv2 = if db_v_ls > 1e-24 { step_len * t.dot(&db.dv) / db_v_ls } else { 0.0 };
+                if du1 == 0.0 && dv1 == 0.0 && du2 == 0.0 && dv2 == 0.0 {
+                    break; // no tangential room left
+                }
+                // Newton re-projection with step halving on failure.
+                let sol = match marching_newton_solution(
+                    a, b, u1 + du1, v1 + dv1, u2 + du2, v2 + dv2, tol,
+                ) {
+                    Some(s) => s,
+                    None => {
+                        step_len *= 0.5;
+                        if step_len < 20.0 * tol {
+                            break; // curve end (or step too small to matter)
+                        }
+                        continue;
+                    }
+                };
+                // Closed-loop detection: back near the walk start.
+                if sol.0.distance_to(&seed.0) <= dedup_sep {
+                    break;
+                }
+                let move_vec = Vec3d::new(
+                    sol.0.x - cur_p.x,
+                    sol.0.y - cur_p.y,
+                    sol.0.z - cur_p.z,
+                );
+                if move_vec.length_sq() < (10.0 * tol) * (10.0 * tol) {
+                    break; // stalled — the step does not move along the curve
+                }
+                last_move = Some(move_vec);
+                u1 = sol.1;
+                v1 = sol.2;
+                u2 = sol.3;
+                v2 = sol.4;
+                cur_p = sol.0;
+                walked.push(sol.0);
+                curve_points.push(sol.0);
+                // Recover the step length gradually after a halving.
+                step_len = (step_len * 2.0).min(step_len0);
+            }
+        }
+    }
+
+    // ── Pass 6: dedup, chain, and split into branches ───────────────
+    let mut uniq: Vec<Point3d> = Vec::new();
+    for p in curve_points {
+        if !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite() {
+            continue;
+        }
+        if uniq.iter().all(|q| q.distance_to(&p) > dedup_sep) {
+            uniq.push(p);
+        }
+    }
+    if uniq.len() < 2 {
+        return vec![]; // a single isolated point is not a curve
+    }
+
+    let split_gap = 4.0 * max_adj + 20.0 * tol;
+    let mut pool: Vec<Point3d> = uniq;
+    let mut curves: Vec<Vec<Point3d>> = Vec::new();
+    while !pool.is_empty() {
+        let mut chain: Vec<Point3d> = vec![pool.remove(0)];
+        loop {
+            let advance = match chain.last() {
+                Some(last) => {
+                    let mut best_d = f64::MAX;
+                    let mut best_k: Option<usize> = None;
+                    for (k, q) in pool.iter().enumerate() {
+                        let d = last.distance_to(q);
+                        if d < best_d {
+                            best_d = d;
+                            best_k = Some(k);
+                        }
+                    }
+                    match best_k {
+                        Some(k) if best_d <= split_gap => Some(k),
+                        _ => None,
+                    }
+                }
+                None => None,
+            };
+            match advance {
+                Some(k) => {
+                    let p = pool.remove(k);
+                    chain.push(p);
+                }
+                None => break,
+            }
+        }
+        if chain.len() >= 2 {
+            curves.push(chain);
+        }
+    }
+    curves
+}
+
+/// Grid resolution per dimension for the marching SSI fallback.
+const MARCHING_GRID_N: usize = 20;
+
+/// One seeding pass of the marching SSI fallback.
+///
+/// Samples `s_grid` on a parametric grid, projects every sample onto
+/// `s_other` to build a distance field, flags near-curve cells, and runs
+/// the 4D Newton from the closest corner of every flagged cell.
+///
+/// Returns the accepted solutions as `(point, u_grid, v_grid, u_other,
+/// v_other)` — with the GRID-side parameters first — plus the maximum
+/// physical distance between adjacent grid nodes (the grid cell size
+/// estimate used by the flagging threshold and the continuation step).
+fn marching_seed_pass(
+    s_grid: &Surface,
+    s_other: &Surface,
+    tol: f64,
+) -> (Vec<(Point3d, f64, f64, f64, f64)>, f64) {
+    let grid_n = MARCHING_GRID_N;
+    let (gu_min, gu_max) = surface_param_range_u_safe(s_grid);
+    let (gv_min, gv_max) = surface_param_range_v_safe(s_grid);
+    let span_u = (gu_max - gu_min).max(0.0);
+    let span_v = (gv_max - gv_min).max(0.0);
+    if span_u == 0.0 && span_v == 0.0 {
+        return (vec![], 0.0); // degenerate parameter domain
+    }
+
+    // Node record: grid sample point, other-surface projection params,
+    // and the gap |sample − projected point|.
+    let mut nodes: Vec<(Point3d, f64, f64, f64)> = Vec::with_capacity(grid_n * grid_n);
+    let mut max_adj = 0.0_f64;
+    let mut min_gap = f64::MAX;
+
+    for i in 0..grid_n {
+        let ua = gu_min + span_u * i as f64 / (grid_n - 1) as f64;
+        for j in 0..grid_n {
+            let va = gv_min + span_v * j as f64 / (grid_n - 1) as f64;
+            let pa = s_grid.point_at(ua, va);
+            let (ub, vb) = s_other.project_point(&pa);
+            let pb = s_other.point_at(ub, vb);
+            let gap = pa.distance_to(&pb);
+            nodes.push((pa, ub, vb, gap));
+            if gap.is_finite() && gap < min_gap {
+                min_gap = gap;
+            }
+            if i > 0 {
+                let d = pa.distance_to(&nodes[(i - 1) * grid_n + j].0);
+                if d.is_finite() && d > max_adj {
+                    max_adj = d;
                 }
             }
-            polyline.swap(i, min_idx);
+            if j > 0 {
+                let d = pa.distance_to(&nodes[i * grid_n + j - 1].0);
+                if d.is_finite() && d > max_adj {
+                    max_adj = d;
+                }
+            }
         }
-        vec![polyline]
     }
+
+    // Any cell whose interior contains an intersection point has a
+    // corner within half the cell diagonal (≤ 0.71·max_adj) of the
+    // curve; the 2× factor absorbs projection inaccuracies.
+    let skip_threshold = (8.0 * tol).max(2.0 * max_adj);
+    if min_gap > skip_threshold {
+        return (vec![], max_adj); // grid never gets near the other surface
+    }
+
+    let mut solutions: Vec<(Point3d, f64, f64, f64, f64)> = Vec::new();
+    for i in 0..grid_n - 1 {
+        for j in 0..grid_n - 1 {
+            let corners = [(i, j), (i + 1, j), (i, j + 1), (i + 1, j + 1)];
+            let mut best = corners[0];
+            let mut best_gap = nodes[best.0 * grid_n + best.1].3;
+            for c in &corners[1..] {
+                let g = nodes[c.0 * grid_n + c.1].3;
+                if g < best_gap {
+                    best_gap = g;
+                    best = *c;
+                }
+            }
+            if best_gap > skip_threshold {
+                continue;
+            }
+            let ug = gu_min + span_u * best.0 as f64 / (grid_n - 1) as f64;
+            let vg = gv_min + span_v * best.1 as f64 / (grid_n - 1) as f64;
+            let node = &nodes[best.0 * grid_n + best.1];
+            if let Some((p, u1, v1, u2, v2)) = marching_newton_solution(
+                s_grid, s_other, ug, vg, node.1, node.2, tol,
+            ) {
+                solutions.push((p, u1, v1, u2, v2));
+            }
+        }
+    }
+    (solutions, max_adj)
+}
+
+/// Run the 4D Newton from a marching seed and verify the solution
+/// geometrically.
+///
+/// Returns `(point_on_grid_surface, u1, v1, u2, v2)` when the solution
+/// is a genuine intersection: the residual `|A(u1,v1) − B(u2,v2)|` is
+/// re-verified by independent evaluation (catching non-finite parameter
+/// drift and any early-return quirks of the Newton loop) and the cone
+/// nappe guard passes on both sides.
+///
+/// The iteration budget is 80, not the historical 24: the damped Newton
+/// (`delta_scale = 0.5` in [`newton_surface_surface`]) converges LINEARLY
+/// — the residual exactly halves per iteration — so reaching 1e-8 from
+/// an O(1) residual (a continuation step lands ~0.1–0.4 off the curve)
+/// needs ⌈log2(0.4/1e-8)⌉ ≈ 25 iterations; 24 ran out one iteration
+/// short and the continuation re-projection silently failed. 80 covers
+/// residuals up to ~1e16 (beyond any physical configuration) at
+/// negligible per-iteration cost (4 surface evaluations + a 4×4 solve).
+fn marching_newton_solution(
+    a: &Surface,
+    b: &Surface,
+    ua: f64,
+    va: f64,
+    ub: f64,
+    vb: f64,
+    tol: f64,
+) -> Option<(Point3d, f64, f64, f64, f64)> {
+    let (ip, u1, v1, u2, v2) =
+        newton_surface_surface(a, b, ua, va, ub, vb, tol * 10.0, 80)?;
+    // Independent geometric verification: the point must lie on BOTH
+    // surfaces (re-evaluated, not trusted from the Newton loop).
+    let p1 = a.point_at(u1, v1);
+    let p2 = b.point_at(u2, v2);
+    for c in [
+        p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, ip.x, ip.y, ip.z,
+    ] {
+        if !c.is_finite() {
+            return None;
+        }
+    }
+    if p1.distance_to(&p2) > tol * 10.0 {
+        return None;
+    }
+    if p1.distance_to(&ip) > tol * 10.0 {
+        return None;
+    }
+    if let Surface::Cone(c) = a {
+        if !cone_v_on_nappe(c, v1, tol) {
+            return None;
+        }
+    }
+    if let Surface::Cone(c) = b {
+        if !cone_v_on_nappe(c, v2, tol) {
+            return None;
+        }
+    }
+    Some((p1, u1, v1, u2, v2))
+}
+
+/// Cone nappe guard for marching solutions.
+///
+/// `ConeSurface::point_at` clamps the radius to zero beyond the apex
+/// (`r = max(radius + v·tan(α), 0)`), silently mapping the parameter band
+/// past the apex onto the cone AXIS instead of the nappe. Newton can
+/// converge to such axis points whenever the opposite surface happens to
+/// cross the axis — they satisfy the residual equation but are not on
+/// the cone surface. The guard keeps parameters whose signed radius is
+/// positive (both narrowing `tan(α) > 0` and inverted `tan(α) < 0`
+/// cones), plus a small apex-contact band for genuine apex touch.
+fn cone_v_on_nappe(cone: &ConeSurface, v: f64, tol: f64) -> bool {
+    let t = cone.half_angle.tan();
+    if !t.is_finite() || t.abs() < 1e-12 {
+        return true; // cylindrical band — no apex in reach
+    }
+    let apex_v = cone.apex_v();
+    if (v - apex_v).abs() <= 10.0 * tol {
+        return true; // genuine apex contact
+    }
+    let r_signed = if cone.expanding { v * t } else { cone.radius + v * t };
+    r_signed > 0.0
 }
 
 /// Safe parameter range extraction for any surface type.
@@ -6298,12 +6643,13 @@ mod torus_cone_tests {
     fn skew_axes_marching_fallback() {
         let t = torus_z();
         // Cone axis +X through (−2,0,0), radius 9, 45°: perpendicular
-        // axes — the documented quartic gap → marching fallback. The
-        // marching acceptance filter requires |ip − grid point| <
-        // tol·100 while the 4D Newton moves ALL parameters, so the
-        // coarse path usually emits nothing for generic pairs (a known
-        // marching defect, candidate future fix). The contract here:
-        // no panic, and every emitted point lies on BOTH surfaces.
+        // axes — the documented quartic gap → marching fallback.
+        // 2026-09-05 marching acceptance fix: the redesigned marching
+        // (two-sided projection-guided seeds + curve continuation) must
+        // find the real intersection curve — the cone nappe pierces the
+        // torus tube around x ≈ 2..3 — where the old acceptance filter
+        // (`|ip − grid point| < tol·100` with all four Newton parameters
+        // drifting) rejected every converged solution.
         let cone = ConeSurface::new(
             Point3d::new(-2.0, 0.0, 0.0),
             Direction3d::X,
@@ -6311,9 +6657,73 @@ mod torus_cone_tests {
             std::f64::consts::FRAC_PI_4,
         );
         let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert!(
+            !out.is_empty(),
+            "marching must find the real cone×torus intersection"
+        );
+        let total: usize = out.iter().map(|c| c.len()).sum();
+        assert!(
+            total >= 8,
+            "curve continuation must densify the curve, got {total} pts"
+        );
         for p in out.iter().flatten() {
             assert_on_torus(p, &t, 1e-5, "skew/torus");
             assert_on_cone(p, &cone, 1e-5, "skew/cone");
+        }
+    }
+
+    #[test]
+    fn marching_disjoint_pair_empty() {
+        // Torus at the origin vs a perpendicular cone far away: the
+        // distance field never dips below the flagging threshold on
+        // either grid, so the marching fallback must return empty —
+        // no spurious points from the extended surfaces.
+        let t = torus_z();
+        let cone = ConeSurface::new(
+            Point3d::new(-2.0, 0.0, 60.0),
+            Direction3d::X,
+            9.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert!(
+            out.is_empty(),
+            "disjoint pair must not produce intersection points, got {} curves",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn marching_both_orders_find_curve() {
+        // Dispatcher symmetry: (Cone, Torus) and (Torus, Cone) both hit
+        // the marching path for perpendicular axes; the grid role
+        // differs between orders, but the geometric contract does not.
+        let t = torus_z();
+        let cone = ConeSurface::new(
+            Point3d::new(-2.0, 0.0, 0.0),
+            Direction3d::X,
+            9.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let cone_s = Surface::Cone(cone.clone());
+        let torus_s = Surface::Torus(t.clone());
+        let out_ab = intersect_surfaces(&cone_s, &torus_s, 1e-9);
+        let out_ba = intersect_surfaces(&torus_s, &cone_s, 1e-9);
+        assert!(
+            !out_ab.polylines.is_empty(),
+            "(Cone, Torus) order must find the curve"
+        );
+        assert!(
+            !out_ba.polylines.is_empty(),
+            "(Torus, Cone) order must find the curve"
+        );
+        for p in out_ab.polylines.iter().flatten() {
+            assert_on_torus(p, &t, 1e-5, "order-ab/torus");
+            assert_on_cone(p, &cone, 1e-5, "order-ab/cone");
+        }
+        for p in out_ba.polylines.iter().flatten() {
+            assert_on_torus(p, &t, 1e-5, "order-ba/torus");
+            assert_on_cone(p, &cone, 1e-5, "order-ba/cone");
         }
     }
 }
