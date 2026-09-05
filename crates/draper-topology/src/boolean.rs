@@ -660,6 +660,12 @@ pub fn intersect_surfaces(
         (Surface::Cylinder(c), Surface::Torus(t)) => {
             intersect_torus_cylinder_pair(c, t, tol)
         }
+        (Surface::Torus(t), Surface::Cone(c)) => {
+            intersect_torus_cone_pair(c, t, tol)
+        }
+        (Surface::Cone(c), Surface::Torus(t)) => {
+            intersect_torus_cone_pair(c, t, tol)
+        }
         _ => {
             // General case: subdivision/Newton-Raphson
             intersect_surfaces_general(surface_a, surface_b, tol)
@@ -1305,6 +1311,61 @@ fn intersect_torus_cylinder_pair(
             cyl.origin.x - torus.center.x,
             cyl.origin.y - torus.center.y,
             cyl.origin.z - torus.center.z,
+        );
+        let w_ax = w.dot(&n_t);
+        let w_perp = Vec3d::new(
+            w.x - w_ax * n_t.x,
+            w.y - w_ax * n_t.y,
+            w.z - w_ax * n_t.z,
+        );
+        w_perp.length() <= tol.max(1e-9)
+    };
+
+    polylines
+        .into_iter()
+        .filter(|pts| !pts.is_empty())
+        .map(|points| {
+            let curve = if coaxial && points.len() >= 8 {
+                coaxial_circle_from_points(&points, &torus.center, &torus.axis, tol)
+                    .map(Curve3d::Circle)
+            } else {
+                None
+            };
+            IntersectionCurve {
+                points,
+                curve,
+                pcurve_a: None,
+                pcurve_b: None,
+                tolerance: tol,
+            }
+        })
+        .collect()
+}
+
+/// [`draper_geometry::intersection::intersect_torus_cone`]: coaxial
+/// (cone axis ∥ torus axis, origin on the axis) → 0/1/2 latitude
+/// circles with the EXACT `Circle` geometry around the torus axis (the
+/// near-cylindrical and near-flat degenerate routes inherit the same
+/// circle family); parallel offset / perpendicular / skew → marching
+/// fallback (polyline-only).
+fn intersect_torus_cone_pair(
+    cone: &ConeSurface,
+    torus: &TorusSurface,
+    tol: f64,
+) -> Vec<IntersectionCurve> {
+    let polylines = draper_geometry::intersection::intersect_torus_cone(cone, torus, tol);
+
+    // Coaxial guard: parallel axes and the cone origin on the torus
+    // axis (radial offset ≈ 0) — the latitude-circle regime.
+    let n_c = Vec3d::new(cone.axis.x, cone.axis.y, cone.axis.z);
+    let n_t = Vec3d::new(torus.axis.x, torus.axis.y, torus.axis.z);
+    let cross = n_c.cross(&n_t);
+    let axes_parallel = cross.length_sq() < 1e-12;
+    let coaxial = axes_parallel && {
+        let w = Vec3d::new(
+            cone.origin.x - torus.center.x,
+            cone.origin.y - torus.center.y,
+            cone.origin.z - torus.center.z,
         );
         let w_ax = w.dot(&n_t);
         let w_perp = Vec3d::new(
@@ -5393,6 +5454,110 @@ mod tests {
                 assert!((c - 3.0).abs() < 1e-9, "on cylinder, radial={c:.9}");
             }
         }
+    }
+
+    #[test]
+    fn test_torus_cone_coaxial_exact_circles() {
+        // Coaxial 45° cone (base radius 8 at z=0) on a (10, 3) torus →
+        // 2 latitude circles z = 1 ± √14/2 with the EXACT `Circle`
+        // geometry (radius ρ = 8 + z around the common axis).
+        let tol = ToleranceContext::new();
+        let torus = TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0);
+        let cone = ConeSurface::new_z(8.0, std::f64::consts::FRAC_PI_4);
+        for (a, b) in [
+            (&Surface::Torus(torus.clone()), &Surface::Cone(cone.clone())),
+            (&Surface::Cone(cone.clone()), &Surface::Torus(torus.clone())),
+        ] {
+            let curves = intersect_surfaces(a, b, &tol);
+            assert_eq!(curves.len(), 2, "coaxial cone → 2 circles both orders");
+            let z_hi = 1.0 + (14.0f64).sqrt() / 2.0;
+            let z_lo = 2.0 - z_hi;
+            let mut zs: Vec<f64> = curves
+                .iter()
+                .map(|c| match &c.curve {
+                    Some(Curve3d::Circle(circle)) => {
+                        assert!(
+                            circle.center.x.abs() < 1e-9 && circle.center.y.abs() < 1e-9,
+                            "center on the Z axis"
+                        );
+                        // ρ = 8 + z must hold for the circle radius.
+                        assert!(
+                            (circle.radius - (8.0 + circle.center.z)).abs() < 1e-8,
+                            "radius = 8+z, got {} at z={}",
+                            circle.radius,
+                            circle.center.z
+                        );
+                        circle.center.z
+                    }
+                    other => panic!("expected exact Circle, got {:?}", other),
+                })
+                .collect();
+            zs.sort_by(|x, y| x.partial_cmp(y).unwrap());
+            assert!((zs[0] - z_lo).abs() < 1e-9, "z_lo = 1−√14/2, got {}", zs[0]);
+            assert!((zs[1] - z_hi).abs() < 1e-9, "z_hi = 1+√14/2, got {}", zs[1]);
+            for curve in &curves {
+                for p in &curve.points {
+                    // On torus: profile-circle distance = r.
+                    let rho = (p.x * p.x + p.y * p.y).sqrt();
+                    let d = ((rho - 10.0) * (rho - 10.0) + p.z * p.z).sqrt();
+                    assert!((d - 3.0).abs() < 1e-7, "on torus, tube-dist={d:.9}");
+                    // On cone: radial = 8 + z.
+                    assert!((rho - (8.0 + p.z)).abs() < 1e-7, "on cone, rho={rho:.9}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_torus_cone_tangent_one_exact_circle() {
+        // β = R − r√2 (narrow tangent cone) → 1 tangent circle at
+        // z = 3√2/2 with the EXACT Circle geometry.
+        let tol = ToleranceContext::new();
+        let torus = TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0);
+        let cone = ConeSurface::new_z(10.0 - 3.0 * (2.0f64).sqrt(), std::f64::consts::FRAC_PI_4);
+        let curves = intersect_surfaces(&Surface::Torus(torus), &Surface::Cone(cone), &tol);
+        assert_eq!(curves.len(), 1, "tangent cone → 1 circle");
+        let z_star = 3.0 * (2.0f64).sqrt() / 2.0;
+        match &curves[0].curve {
+            Some(Curve3d::Circle(circle)) => {
+                assert!((circle.center.z - z_star).abs() < 1e-8, "z = 3√2/2, got {}", circle.center.z);
+            }
+            other => panic!("expected exact Circle, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_torus_cone_axis_flipped_exact_circles() {
+        // Cone axis −Z, origin (0,0,5), radius 8, 45° → sheet ρ = 13−z
+        // → circles at (z=3, ρ=10) and (z=0, ρ=13).
+        let tol = ToleranceContext::new();
+        let torus = TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0);
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 5.0),
+            Direction3d::NEG_Z,
+            8.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let curves = intersect_surfaces(&Surface::Cone(cone), &Surface::Torus(torus), &tol);
+        assert_eq!(curves.len(), 2, "flipped-axis coaxial → 2 circles");
+        let mut circles: Vec<(f64, f64)> = curves
+            .iter()
+            .map(|c| match &c.curve {
+                Some(Curve3d::Circle(circle)) => (circle.center.z, circle.radius),
+                other => panic!("expected exact Circle, got {:?}", other),
+            })
+            .collect();
+        circles.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert!(
+            (circles[0].0 - 0.0).abs() < 1e-9 && (circles[0].1 - 13.0).abs() < 1e-9,
+            "(z=0, ρ=13), got {:?}",
+            circles[0]
+        );
+        assert!(
+            (circles[1].0 - 3.0).abs() < 1e-9 && (circles[1].1 - 10.0).abs() < 1e-8,
+            "(z=3, ρ=10), got {:?}",
+            circles[1]
+        );
     }
 
     #[test]

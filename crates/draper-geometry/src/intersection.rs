@@ -3124,6 +3124,151 @@ fn mirror_about_equator(p: &Point3d, tv: &TorusView) -> Point3d {
     )
 }
 
+/// Torus×Cone analytic SSI (T-series, 2026-09-05).
+///
+/// With the cone axis parallel to the torus axis the cone constraint is
+/// LINEAR in the torus cylindrical coordinates: `rho = beta + gamma*z`
+/// with `gamma = s*tan(alpha)` (s = orientation sign of the cone axis
+/// vs the torus axis), `beta = radius0 - gamma*h` (`h` = the cone
+/// origin height over the torus equatorial plane, `radius0 = radius`
+/// standard / `0` expanding). Substituting into the tube equation
+/// `(rho - R)^2 + z^2 = r^2` yields a theta-free QUADRATIC in z:
+///
+/// ```text
+/// (1 + gamma^2)*z^2 + 2*gamma*q*z + (q^2 - r^2) = 0,   q = beta - R
+/// ```
+///
+/// Both surfaces are revolutions about the common axis, so every real
+/// root is a latitude circle `(C + z*·n, rho* = beta + gamma*z*)`.
+///
+/// Classification (the torus_cylinder coaxial idiom via the effective
+/// tube mismatch `u_eff = q / sqrt(1 + gamma^2)`):
+///
+/// - **coaxial** (lateral offset ~ 0): `|u_eff| < r` -> 2 circles,
+///   `~ r` -> 1 tangent circle, `> r` -> empty; roots with
+///   `rho* <= 0` are off-sheet (beyond the apex — reachable only for
+///   spindle tori, `R < r`) and dropped;
+/// - **nearly-cylindrical cone** (`|tan(alpha)| ~ 0`): the sheet is
+///   `rho = radius0` — routed to [`intersect_torus_cylinder`];
+/// - **nearly-flat cone** (`|tan(alpha)|*eps*scale >= 1`): the sheet
+///   tends to the base plane `v = 0` — routed to
+///   [`intersect_torus_plane`];
+/// - **parallel offset / perpendicular / skew axes**: the per-theta
+///   constraint mixes `cos^2(phi)`, `cos(phi)` AND `sin(phi)` — a
+///   quartic in `tan(phi/2)` — delegated to marching SSI (documented
+///   gap, the torus_cylinder skew family).
+pub fn intersect_torus_cone(
+    cone: &ConeSurface,
+    torus: &TorusSurface,
+    tolerance: f64,
+) -> Vec<Vec<Point3d>> {
+    let eps = tolerance.max(1e-9);
+    let tv = TorusView::of(torus);
+    let r = tv.minor;
+    let big_r = tv.major;
+    let scale = big_r.max(r).max(cone.radius).max(1.0);
+    if r <= eps * scale || big_r <= eps * scale {
+        return vec![]; // degenerate torus (no tube / no ring)
+    }
+
+    let tan_a = cone.half_angle.tan();
+    if cone.expanding && tan_a <= 0.0 {
+        return vec![]; // expanding sheet with non-positive slope — empty
+    }
+    if tan_a.abs() <= 1e-12 {
+        // Cone degenerated to a cylinder: rho = radius (standard) —
+        // reuse the torus*cylinder solve. Expanding + alpha~0 has no
+        // sheet at all.
+        if cone.expanding {
+            return vec![];
+        }
+        let cyl = CylinderSurface::new(cone.origin, cone.axis, cone.radius);
+        return intersect_torus_cylinder(&cyl, torus, tolerance);
+    }
+    if !tan_a.is_finite() || tan_a.abs() * eps * scale >= 1.0 {
+        // Nearly-flat cone (alpha -> pi/2): the sheet tends to the base
+        // plane v = 0 (through the cone origin, normal = axis).
+        let plane = Plane::from_origin_and_normal(cone.origin, cone.axis);
+        return intersect_torus_plane(&plane, torus, tolerance);
+    }
+
+    let n_c = Vec3d::new(cone.axis.x, cone.axis.y, cone.axis.z);
+    let axes_cross = n_c.cross(&tv.n);
+    if axes_cross.length_sq() > 1e-10 {
+        // Perpendicular / skew: per-theta quartic in tan(phi/2) —
+        // marching (documented gap).
+        return intersect_marching_ssi(
+            &Surface::Cone(cone.clone()),
+            &Surface::Torus(torus.clone()),
+            tolerance,
+        );
+    }
+
+    // w = cone origin − torus center; the axial part is h, the radial
+    // part measures the coaxiality.
+    let w = Vec3d::new(
+        cone.origin.x - tv.center.x,
+        cone.origin.y - tv.center.y,
+        cone.origin.z - tv.center.z,
+    );
+    let h = w.dot(&tv.n);
+    let w_perp = Vec3d::new(
+        w.x - h * tv.n.x,
+        w.y - h * tv.n.y,
+        w.z - h * tv.n.z,
+    );
+    if w_perp.length() > eps {
+        // Parallel but offset: per-theta quartic in tan(phi/2) —
+        // marching (documented gap).
+        return intersect_marching_ssi(
+            &Surface::Cone(cone.clone()),
+            &Surface::Torus(torus.clone()),
+            tolerance,
+        );
+    }
+
+    // ── Coaxial: theta-free quadratic → latitude circles ─────────────
+    let s = n_c.dot(&tv.n).signum();
+    let gamma = s * tan_a;
+    let radius0 = if cone.expanding { 0.0 } else { cone.radius };
+    let beta = radius0 - gamma * h;
+    let q = beta - big_r;
+    let g1 = 1.0 + gamma * gamma;
+    // Effective tube mismatch (the torus_cylinder coaxial idiom):
+    // |u_eff| vs r classifies miss / tangent / two circles.
+    let u_eff = q / g1.sqrt();
+    if u_eff.abs() > r + eps {
+        return vec![]; // cone sheet misses the tube
+    }
+
+    let emit = |z: f64| -> Option<Vec<Point3d>> {
+        let rho = beta + gamma * z;
+        if rho <= eps * scale {
+            return None; // off-sheet (beyond the apex) / degenerate axis point
+        }
+        let center = Point3d::new(
+            tv.center.x + z * tv.n.x,
+            tv.center.y + z * tv.n.y,
+            tv.center.z + z * tv.n.z,
+        );
+        Some(sample_circle_xyz(&center, &tv.e1, &tv.e2, rho))
+    };
+
+    if u_eff.abs() > r - eps {
+        // Tangent along a latitude circle (double root).
+        let z_star = -gamma * q / g1;
+        return match emit(z_star) {
+            Some(circle) => vec![circle],
+            None => vec![],
+        };
+    }
+
+    let delta = (r * r - u_eff * u_eff).sqrt() * g1.sqrt();
+    let z_hi = (-gamma * q + delta) / g1;
+    let z_lo = (-gamma * q - delta) / g1;
+    [z_hi, z_lo].into_iter().filter_map(emit).collect()
+}
+
 /// General surface-surface intersection dispatcher.
 ///
 /// Audit item 2.1 (2026-07-19): Dispatches to specialized intersection
@@ -3168,6 +3313,10 @@ pub fn intersect_surfaces(
         (Surface::Torus(t), Surface::Cylinder(c))
         | (Surface::Cylinder(c), Surface::Torus(t)) => {
             intersect_torus_cylinder(c, t, tolerance)
+        }
+        (Surface::Torus(t), Surface::Cone(c))
+        | (Surface::Cone(c), Surface::Torus(t)) => {
+            intersect_torus_cone(c, t, tolerance)
         }
         (Surface::Plane(_), Surface::Nurbs(_)) | (Surface::Nurbs(_), Surface::Plane(_)) => {
             intersect_marching_ssi(a, b, tolerance)
@@ -5858,5 +6007,313 @@ mod torus_cylinder_tests {
         };
         assert_eq!(count(&out_ab), count(&out_ba));
         let _ = Plane::xy(); // keep import used
+    }
+}
+
+#[cfg(test)]
+mod torus_cone_tests {
+    use super::*;
+    use crate::{ConeSurface, Direction3d, Point3d, Surface, TorusSurface};
+
+    fn torus_z() -> TorusSurface {
+        TorusSurface::new_z(Point3d::ORIGIN, 10.0, 3.0)
+    }
+
+    /// |dist(P, tube-center circle) − r| ≤ eps — the profile-circle
+    /// absolute-residual form (robust for ring AND spindle tori).
+    fn assert_on_torus(p: &Point3d, t: &TorusSurface, eps: f64, label: &str) {
+        let z = p.z * t.axis.z + p.x * t.axis.x + p.y * t.axis.y;
+        let rho = (p.x * p.x + p.y * p.y + p.z * p.z - z * z).sqrt();
+        let d = ((rho - t.major_radius) * (rho - t.major_radius) + z * z).sqrt();
+        assert!(
+            (d - t.minor_radius).abs() <= eps * (1.0 + t.major_radius + t.minor_radius),
+            "{label}: off torus: rho={rho:.9}, z={z:.9}, tube-dist={d:.9} (r={})",
+            t.minor_radius
+        );
+    }
+
+    /// |radial(P) − (radius₀ + v·tanα)| ≤ eps — the infinite-sheet
+    /// residual (the marching/cone family convention; consumers trim).
+    fn assert_on_cone(p: &Point3d, cone: &ConeSurface, eps: f64, label: &str) {
+        let dx = p.x - cone.origin.x;
+        let dy = p.y - cone.origin.y;
+        let dz = p.z - cone.origin.z;
+        let v = dx * cone.axis.x + dy * cone.axis.y + dz * cone.axis.z;
+        let px = dx - v * cone.axis.x;
+        let py = dy - v * cone.axis.y;
+        let pz = dz - v * cone.axis.z;
+        let rho = (px * px + py * py + pz * pz).sqrt();
+        let target = if cone.expanding {
+            v * cone.half_angle.tan()
+        } else {
+            cone.radius + v * cone.half_angle.tan()
+        };
+        assert!(
+            (rho - target).abs() <= eps * (1.0 + cone.radius + target.abs()),
+            "{label}: off cone: radial={rho:.9}, target={target:.9}, v={v:.9}"
+        );
+        assert!(
+            rho >= -1e-12,
+            "{label}: off-sheet point (radial={rho:.9} < 0) leaked"
+        );
+        if cone.expanding {
+            assert!(v >= -eps, "{label}: expanding sheet needs v>=0, v={v:.9}");
+        }
+    }
+
+    #[test]
+    fn coaxial_two_circles() {
+        let t = torus_z();
+        // Cone 45°, base radius 8 at z=0, expanding upward: sheet
+        // ρ = 8 + z. Quadratic roots z = 1 ± √14/2.
+        let cone = ConeSurface::new_z(8.0, std::f64::consts::FRAC_PI_4);
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "coaxial 45° cone → 2 latitude circles");
+        let z_exp = 1.0 + (14.0f64).sqrt() / 2.0;
+        let mut zs: Vec<f64> = out.iter().map(|c| c[0].z).collect();
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((zs[0] - (2.0 - z_exp)).abs() <= 1e-9, "z_lo = 1−√14/2, got {}", zs[0]);
+        assert!((zs[1] - z_exp).abs() <= 1e-9, "z_hi = 1+√14/2, got {}", zs[1]);
+        for curve in &out {
+            assert_eq!(curve.len(), 128, "full-circle sampling convention");
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "coax/torus");
+                assert_on_cone(p, &cone, 1e-9, "coax/cone");
+            }
+        }
+    }
+
+    #[test]
+    fn coaxial_tangent_one_circle() {
+        let t = torus_z();
+        // |q| = r·√2 ⟹ β = R ∓ 3√2 → tangent double root.
+        let r_narrow = 10.0 - 3.0 * (2.0f64).sqrt();
+        let cone_in = ConeSurface::new_z(r_narrow, std::f64::consts::FRAC_PI_4);
+        let out_in = intersect_torus_cone(&cone_in, &t, 1e-9);
+        assert_eq!(out_in.len(), 1, "inner tangent cone → 1 circle");
+        let p = out_in[0][0];
+        let z_star = 3.0 * (2.0f64).sqrt() / 2.0;
+        assert!((p.z - z_star).abs() <= 1e-8, "tangent z = 3√2/2, got {}", p.z);
+        for q in &out_in[0] {
+            assert_on_torus(q, &t, 1e-9, "tangent-in/torus");
+            assert_on_cone(q, &cone_in, 1e-9, "tangent-in/cone");
+        }
+        let r_wide = 10.0 + 3.0 * (2.0f64).sqrt();
+        let cone_out = ConeSurface::new_z(r_wide, std::f64::consts::FRAC_PI_4);
+        let out_out = intersect_torus_cone(&cone_out, &t, 1e-9);
+        assert_eq!(out_out.len(), 1, "outer tangent cone → 1 circle");
+        for q in &out_out[0] {
+            assert_on_torus(q, &t, 1e-9, "tangent-out/torus");
+            assert_on_cone(q, &cone_out, 1e-9, "tangent-out/cone");
+        }
+    }
+
+    #[test]
+    fn coaxial_miss_empty() {
+        let t = torus_z();
+        // Wide sheet (β=20): |ũ| = 10/√2 > 3 — misses the tube.
+        let wide = ConeSurface::new_z(20.0, std::f64::consts::FRAC_PI_4);
+        assert!(intersect_torus_cone(&wide, &t, 1e-9).is_empty());
+        // Narrow sheet entirely inside the hole (β=2): misses the tube.
+        let narrow = ConeSurface::new_z(2.0, std::f64::consts::FRAC_PI_4);
+        assert!(intersect_torus_cone(&narrow, &t, 1e-9).is_empty());
+        // Tiny half-angle, radius inside the hole — cylinder-equivalent
+        // miss via the routing.
+        let thin = ConeSurface::new_z(2.0, 0.087);
+        assert!(intersect_torus_cone(&thin, &t, 1e-9).is_empty());
+    }
+
+    #[test]
+    fn coaxial_axis_flipped() {
+        let t = torus_z();
+        // Cone axis −Z, origin (0,0,5), radius 8, 45°: sheet
+        // ρ = 13 − z → circles at (z=3, ρ=10) and (z=0, ρ=13).
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, 5.0),
+            Direction3d::NEG_Z,
+            8.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "flipped-axis coaxial → 2 circles");
+        let mut circles: Vec<(f64, f64)> = out
+            .iter()
+            .map(|c| {
+                let p = c[0];
+                (p.z, (p.x * p.x + p.y * p.y).sqrt())
+            })
+            .collect();
+        circles.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        assert!((circles[0].0 - 0.0).abs() <= 1e-9 && (circles[0].1 - 13.0).abs() <= 1e-9,
+            "(z=0, ρ=13), got {:?}", circles[0]);
+        assert!((circles[1].0 - 3.0).abs() <= 1e-9 && (circles[1].1 - 10.0).abs() <= 1e-8,
+            "(z=3, ρ=10), got {:?}", circles[1]);
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "flip/torus");
+                assert_on_cone(p, &cone, 1e-9, "flip/cone");
+            }
+        }
+    }
+
+    #[test]
+    fn coaxial_origin_offset() {
+        let t = torus_z();
+        // Origin (0,0,−2): β = 8−(−2) = 10 = R ⟹ q = 0, symmetric
+        // roots z = ±3√2/2, ρ = 10 ± 3√2/2.
+        let cone = ConeSurface::new(
+            Point3d::new(0.0, 0.0, -2.0),
+            Direction3d::Z,
+            8.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "offset-origin coaxial → 2 circles");
+        let z_exp = 3.0 * (2.0f64).sqrt() / 2.0;
+        let mut zs: Vec<f64> = out.iter().map(|c| c[0].z).collect();
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((zs[0] + z_exp).abs() <= 1e-9, "z = −3√2/2, got {}", zs[0]);
+        assert!((zs[1] - z_exp).abs() <= 1e-9, "z = +3√2/2, got {}", zs[1]);
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "offset/torus");
+                assert_on_cone(p, &cone, 1e-9, "offset/cone");
+            }
+        }
+    }
+
+    #[test]
+    fn expanding_cone_circles() {
+        let t = torus_z();
+        // Apex at (0,0,−10), 45° opening upward: sheet ρ = z + 10 —
+        // same β = 10 as the offset-origin case.
+        let cone = ConeSurface::new_expanding(
+            Point3d::new(0.0, 0.0, -10.0),
+            Direction3d::Z,
+            std::f64::consts::FRAC_PI_4,
+            Direction3d::X,
+        );
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "expanding coaxial → 2 circles");
+        let z_exp = 3.0 * (2.0f64).sqrt() / 2.0;
+        let mut zs: Vec<f64> = out.iter().map(|c| c[0].z).collect();
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((zs[0] + z_exp).abs() <= 1e-9, "z = −3√2/2, got {}", zs[0]);
+        assert!((zs[1] - z_exp).abs() <= 1e-9, "z = +3√2/2, got {}", zs[1]);
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-9, "expanding/torus");
+                assert_on_cone(p, &cone, 1e-9, "expanding/cone");
+            }
+        }
+    }
+
+    #[test]
+    fn spindle_off_sheet_root_dropped() {
+        // Spindle torus (R=2 < r=3): the tube crosses the axis, so the
+        // quadratic can yield a ρ* < 0 root — off-sheet, must be dropped.
+        let t = TorusSurface::new_z(Point3d::ORIGIN, 2.0, 3.0);
+        let cone = ConeSurface::new_z(1.0, std::f64::consts::FRAC_PI_4);
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 1, "one off-sheet root dropped → 1 circle");
+        let p = out[0][0];
+        let z_exp = (1.0 + (17.0f64).sqrt()) / 2.0;
+        let rho_exp = 1.0 + z_exp;
+        assert!((p.z - z_exp).abs() <= 1e-9, "z = (1+√17)/2, got {}", p.z);
+        let rho = (p.x * p.x + p.y * p.y).sqrt();
+        assert!((rho - rho_exp).abs() <= 1e-9, "ρ = 1+z, got {}", rho);
+        for q in &out[0] {
+            assert_on_torus(q, &t, 1e-9, "spindle/torus");
+            assert_on_cone(q, &cone, 1e-9, "spindle/cone");
+        }
+    }
+
+    #[test]
+    fn near_cylindrical_routes_to_cylinder() {
+        let t = torus_z();
+        // half_angle ≈ 0: the sheet is the cylinder ρ = 8 — must match
+        // the torus×cylinder coaxial contract (2 circles at z = ±√5).
+        let cone = ConeSurface::new_z(8.0, 1e-13);
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "cylindrical cone → 2 circles");
+        let z_exp = (5.0f64).sqrt();
+        let mut zs: Vec<f64> = out.iter().map(|c| c[0].z).collect();
+        zs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((zs[0] + z_exp).abs() <= 1e-8, "z = −√5, got {}", zs[0]);
+        assert!((zs[1] - z_exp).abs() <= 1e-8, "z = +√5, got {}", zs[1]);
+        for curve in &out {
+            for p in curve {
+                let rho = (p.x * p.x + p.y * p.y).sqrt();
+                assert!((rho - 8.0).abs() <= 1e-8, "ρ = 8, got {}", rho);
+                assert_on_torus(p, &t, 1e-9, "cyl-equiv/torus");
+            }
+        }
+    }
+
+    #[test]
+    fn near_flat_routes_to_plane() {
+        let t = torus_z();
+        // half_angle = π/2 − 1e-9: tanα ≈ 1e9 — the sheet is the base
+        // plane z = 0 within tolerance → 2 equatorial circles ρ = 7, 13.
+        let cone = ConeSurface::new_z(8.0, std::f64::consts::FRAC_PI_2 - 1e-9);
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        assert_eq!(out.len(), 2, "flat cone → 2 equatorial circles");
+        let mut radii: Vec<f64> = out
+            .iter()
+            .map(|c| {
+                let p = c[0];
+                assert!(p.z.abs() <= 1e-6, "circle at z≈0, z={}", p.z);
+                (p.x * p.x + p.y * p.y).sqrt()
+            })
+            .collect();
+        radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert!((radii[0] - 7.0).abs() <= 1e-6, "inner ρ=7, got {}", radii[0]);
+        assert!((radii[1] - 13.0).abs() <= 1e-6, "outer ρ=13, got {}", radii[1]);
+        for curve in &out {
+            for p in curve {
+                assert_on_torus(p, &t, 1e-6, "flat-equiv/torus");
+            }
+        }
+    }
+
+    #[test]
+    fn dispatcher_routes_both_orders() {
+        let t = Surface::Torus(torus_z());
+        let cone = Surface::Cone(ConeSurface::new_z(8.0, std::f64::consts::FRAC_PI_4));
+        let out_ab = intersect_surfaces(&t, &cone, 1e-9);
+        let out_ba = intersect_surfaces(&cone, &t, 1e-9);
+        assert_eq!(out_ab.polylines.len(), 2, "Torus×Cone → 2 circles");
+        assert_eq!(
+            out_ab.polylines.len(),
+            out_ba.polylines.len(),
+            "same count both orders"
+        );
+        let count = |r: &SurfaceSurfaceIntersection| -> usize {
+            r.polylines.iter().map(|c| c.len()).sum()
+        };
+        assert_eq!(count(&out_ab), count(&out_ba));
+    }
+
+    #[test]
+    fn skew_axes_marching_fallback() {
+        let t = torus_z();
+        // Cone axis +X through (−2,0,0), radius 9, 45°: perpendicular
+        // axes — the documented quartic gap → marching fallback. The
+        // marching acceptance filter requires |ip − grid point| <
+        // tol·100 while the 4D Newton moves ALL parameters, so the
+        // coarse path usually emits nothing for generic pairs (a known
+        // marching defect, candidate future fix). The contract here:
+        // no panic, and every emitted point lies on BOTH surfaces.
+        let cone = ConeSurface::new(
+            Point3d::new(-2.0, 0.0, 0.0),
+            Direction3d::X,
+            9.0,
+            std::f64::consts::FRAC_PI_4,
+        );
+        let out = intersect_torus_cone(&cone, &t, 1e-9);
+        for p in out.iter().flatten() {
+            assert_on_torus(p, &t, 1e-5, "skew/torus");
+            assert_on_cone(p, &cone, 1e-5, "skew/cone");
+        }
     }
 }

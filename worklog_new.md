@@ -3318,3 +3318,92 @@ resolve_face_edges дедупит seam-инстансы по id.
 Stage 7.6b ПОЛНОСТЬЮ завершён: поле `Face.edges` удалено, вся кодовая
 база store-only, все сьюты зелёные, main = `f26c524`. Следующий шаг по
 ROADMAP — см. PLAN/ROADMAP разделы после C5.
+
+# Worklog — Torus×Cone analytic SSI (T-series continuation, 2026-09-05, шестая сессия суток)
+
+**Baseline:** commit `9de97a3` (после C5 Stage 7.6b post-merge + draper-testing fixtures)
+**Задача:** Закрыть первый пункт «Осталось (SSI-пробелы)» — Torus×Cone: коаксиальный
+случай аналитически, остальные конфигурации — документированный fallback.
+
+## Контекст сессии
+
+- Sandbox перезагружался (Rust 1.98.0 переустановлен, minimal profile);
+  git при этом НЕ откатился — HEAD=9de97a3, origin/main синхронен, дерево
+  чистое (проверено fetch'ем до начала работы — урок прошлых сессий).
+- C5 полностью завершён (Stage 7.6b: Face.edges физически удалён, store-only).
+  ROADMAP.md выполнен на 100% (192/192); следующий приоритет — SSI-пробелы
+  из «Осталось» T-серии + Vision 2036 §2.
+
+## Реализация — draper-geometry (intersection.rs)
+
+`intersect_torus_cone(cone, torus, tol)` — T-series продолжение:
+
+- **Коаксиальные оси** (конус ∥ оси тора, origin на оси, латеральный
+  сдвиг ≤ eps): конус линеен в цилиндрических координатах тора
+  `ρ = β + γ·z` (γ = s·tanα, β = radius₀ − γ·h) → подстановка в
+  `(ρ−R)² + z² = r²` даёт **θ-свободное квадратное уравнение**:
+  `(1+γ²)z² + 2γq·z + (q²−r²) = 0`, q = β−R. Обе поверхности —
+  поверхности вращения ⇒ корни = круги широты (C + z*·n, ρ*).
+  Классификация через эффективный промах `ũ = q/√(1+γ²)` (идиома
+  torus_cylinder coaxial): |ũ| < r → 2 круга, ≈r → 1 касательный,
+  > r → пусто. Корни с ρ* ≤ 0 — за апексом (off-sheet, достижимо
+  только для spindle-торов R<r) — отбрасываются.
+- **Вырождения**: |tanα| ≤ 1e-12 → роут в intersect_torus_cylinder
+  (лист ≡ цилиндр ρ=radius); |tanα|·eps·scale ≥ 1 → роут в
+  intersect_torus_plane (лист → базовая плоскость v=0);
+  expanding + tanα ≤ 0 → пусто.
+- **Parallel-offset / перпендикуляр / skew**: per-θ уравнение смешивает
+  cos²φ, cosφ И sinφ — квартка в tan(φ/2) → marching (документированный
+  пробел, как и у cylinder-skew).
+- Диспетчер `intersect_surfaces`: ветка (Torus, Cone) | (Cone, Torus).
+
+## Реализация — draper-topology (boolean.rs)
+
+`intersect_torus_cone_pair` + ветки диспетчера: все не-marching выходы —
+круги широты ⇒ коаксиальный guard → точная геометрия `Curve3d::Circle`
+через coaxial_circle_from_points (_boolean-пайплайн получает точные
+круги, не полилинии). Ранее Torus×Cone в topology-boolean уходил в
+generic Newton-путь.
+
+## Тесты (14 новых)
+
+- geometry `torus_cone_tests` (11): коаксиальные 2 круга (z = 1±√14/2),
+  касание (β = R∓r√2 → 1 круг), промахи (широкий/узкий/тонкий конус),
+  инвертированная ось ((z=3,ρ=10),(z=0,ρ=13)), offset origin,
+  expanding-конус (апекс на (0,0,−10)), spindle off-sheet корень
+  отброшен (R=2<r=3), near-cylindrical → контракт цилиндра (z=±√5),
+  near-flat → контракт плоскости (ρ=7/13), диспетчер оба порядка,
+  skew → marching-контракт.
+- topology `boolean::test_torus_cone_*` (3): коаксиальные точные Circle
+  (оба порядка + ρ=8+z инвариант), касательный точный Circle,
+  инвертированная ось точные Circle.
+
+## Найденный дефект marching (НЕ фиксирован — задокументирован)
+
+`intersect_marching_ssi` фильтрует Ньютоновские решения условием
+`|ip − grid point| < tol·100`, при этом 4D-Ньютон двигает ВСЕ параметры
+(в т.ч. стартовые u1,v1) — найденные настоящие точки пересечения почти
+всегда отбрасываются. Skew-тест подтверждает: для реально пересекающихся
+конуса×тора marching возвращает пусто. Кандидат на отдельный фикс
+(перепроектирование acceptance-фильтра или grid-sign marching-squares).
+
+## Верификация
+
+- draper-geometry: 221 lib + 148 integration = **375 зелёных** (374+11... точнее
+  221 lib вкл. 11 новых; интеграционные без изменений)
+- draper-topology: **222 lib + 31 integration** (219+3 новых) зелёные
+- draper-mesh: 268 lib + integration зелёные (SSI-изменение их не
+  затрагивает — mesh не вызывает intersect_surfaces)
+- draper-core: 75+2 зелёные
+- `cargo check --workspace --lib`: 0 ошибок; новый код — 0 предупреждений
+- draper-step НЕ прогонялся: конвертер не использует SSI
+  (parse→extract→triangulate), полный прогон тяжёлый (load-флейки)
+- Диск: 4.2G free после всех сборок; CARGO_INCREMENTAL=0
+
+## Осталось (SSI-пробелы — обновление)
+
+- Cylinder×Torus skew-оси (quartic в tan(φ/2)) — на marching
+- Torus×Torus (степень 8 общий случай; коаксиальный случай — тривиален
+  аналитически, кандидат на следующий шаг)
+- **marching acceptance-дефект** (см. выше) — новый пункт
+- Недетерминизм all_files_test (HashMap-порядок в pre-compute фазах)
