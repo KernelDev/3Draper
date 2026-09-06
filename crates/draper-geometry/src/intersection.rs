@@ -2,7 +2,8 @@
 // Copyright (c) 2026 KernelDev
 //! Geometric intersection algorithms.
 
-use crate::{Point3d, Vec3d, Direction3d, curve::*, surface::*, tolerance::ToleranceContext};
+use crate::{Point2d, Point3d, Vec3d, Direction3d, curve::*, surface::*, tolerance::ToleranceContext};
+use crate::curve2d::{Curve2d, Line2d, Nurbs2d};
 
 /// Error type for B-spline fitting failures.
 #[derive(Clone, Debug)]
@@ -55,6 +56,21 @@ pub struct SurfaceSurfaceIntersection {
     /// Branches that cannot be fitted within tolerance keep their polyline
     /// representation only (per-branch fallback, no global failure).
     pub b_spline_curves: Vec<NurbsCurve>,
+    /// PCURVEs on surface A (Vision 2036 §2.2): 2D parametric curves in the
+    /// UV domain of surface A, one per fitted B-spline branch, in positional
+    /// correspondence with `b_spline_curves`.
+    ///
+    /// Derivation (per §2.2): plane×cylinder pairs use the analytical
+    /// parametric substitution; all other pairs project the 3D B-spline
+    /// branch onto the surface's UV space via Newton-Raphson inversion
+    /// (`Surface::project_point`). Storage is `Curve2d::Nurbs` (least-
+    /// squares fit within a metric-scaled tolerance) or `Curve2d::Line`
+    /// (exact straight UV image); a `Curve2d::Composite` polyline fallback
+    /// mirrors §2.1's per-branch polyline fallback when the 2D fit fails.
+    pub pcurves_a: Vec<Curve2d>,
+    /// PCURVEs on surface B (Vision 2036 §2.2): same contract as `pcurves_a`,
+    /// for the second intersection surface.
+    pub pcurves_b: Vec<Curve2d>,
 }
 
 impl SurfaceSurfaceIntersection {
@@ -68,6 +84,78 @@ impl SurfaceSurfaceIntersection {
     /// Empty when no branch could be fitted within tolerance.
     pub fn b_splines(&self) -> &[NurbsCurve] {
         &self.b_spline_curves
+    }
+
+    /// Get the first branch's PCURVE on surface A (Vision 2036 §2.2).
+    /// Returns `None` when no branch was fitted.
+    pub fn pcurve_a(&self) -> Option<&Curve2d> {
+        self.pcurves_a.first()
+    }
+
+    /// Get PCURVEs on surface A for all fitted branches, positionally
+    /// aligned with `b_splines()` (Vision 2036 §2.2).
+    pub fn pcurves_a(&self) -> &[Curve2d] {
+        &self.pcurves_a
+    }
+
+    /// Get the first branch's PCURVE on surface B (Vision 2036 §2.2).
+    /// Returns `None` when no branch was fitted.
+    pub fn pcurve_b(&self) -> Option<&Curve2d> {
+        self.pcurves_b.first()
+    }
+
+    /// Get PCURVEs on surface B for all fitted branches, positionally
+    /// aligned with `b_splines()` (Vision 2036 §2.2).
+    pub fn pcurves_b(&self) -> &[Curve2d] {
+        &self.pcurves_b
+    }
+
+    /// Compute PCURVEs for all fitted B-spline branches (Vision 2036
+    /// §2.2). Overwrites `pcurves_a`/`pcurves_b`; one entry per
+    /// `b_spline_curves` entry (positional correspondence is guaranteed).
+    ///
+    /// * Plane×cylinder pairs (either order): analytical parametric
+    ///   substitution — the cylinder-side `v` comes from substituting the
+    ///   cylinder parametrization into the plane equation, so it satisfies
+    ///   the plane constraint exactly; the plane-side UV comes from exact
+    ///   orthogonal projection.
+    /// * All other pairs: Newton-Raphson inversion of the 3D branch onto
+    ///   each surface's UV space.
+    pub fn fit_pcurves_on_surfaces(&mut self, s1: &Surface, s2: &Surface, tolerance: f64) {
+        let (pa, pb) = self.try_fit_pcurves_on_surfaces(s1, s2, tolerance);
+        self.pcurves_a = pa;
+        self.pcurves_b = pb;
+    }
+
+    /// Immutable variant of `fit_pcurves_on_surfaces` (mirrors the
+    /// `try_fit_b_splines_on_surfaces` pattern). Branches without a fitted
+    /// 3D B-spline get no PCURVE (polylines remain their fallback
+    /// representation, per §2.1).
+    pub fn try_fit_pcurves_on_surfaces(
+        &self,
+        s1: &Surface,
+        s2: &Surface,
+        tolerance: f64,
+    ) -> (Vec<Curve2d>, Vec<Curve2d>) {
+        let mut pa = Vec::with_capacity(self.b_spline_curves.len());
+        let mut pb = Vec::with_capacity(self.b_spline_curves.len());
+        for branch in &self.b_spline_curves {
+            // §2.2 step 1: analytical parametric substitution for the
+            // plane×cylinder pair (either argument order). Produces the
+            // (curve-on-A, curve-on-B) pair directly.
+            if let Some((c_on_a, c_on_b)) =
+                analytic_pcurves_plane_cylinder(s1, s2, branch, tolerance)
+            {
+                pa.push(c_on_a);
+                pb.push(c_on_b);
+                continue;
+            }
+            // §2.2 step 2: Newton-Raphson inversion of the 3D branch onto
+            // each surface's UV space, then a 2D least-squares fit.
+            pa.push(project_pcurve_branch(branch, s1, tolerance));
+            pb.push(project_pcurve_branch(branch, s2, tolerance));
+        }
+        (pa, pb)
     }
 
     /// Fit B-spline curves to ALL intersection branches, with Newton-Raphson
@@ -94,15 +182,33 @@ impl SurfaceSurfaceIntersection {
         let mut out = Vec::with_capacity(self.polylines.len());
         for branch in &self.polylines {
             // §2.1 step 1–2: marching points + chord-length least-squares fit.
-            let fitted = match lsq_fit_branch(branch, tolerance) {
+            //
+            // The initial fit is gated strictly first; when the raw marching
+            // data carries discretization noise above `tolerance` (marching
+            // output is not exact), the strict gate fails BEFORE the Newton
+            // refinement — the pipeline stage that exists precisely to
+            // remove that noise — could run. Retry with a relaxed gate
+            // scaled to the branch extent: the resulting curve is only a
+            // sampling vehicle for the refinement; the branch is certified
+            // (or rejected) by the gate on the REFINED re-fit below.
+            let strict_fit = lsq_fit_branch(branch, tolerance);
+            let strict_ok = strict_fit.is_ok();
+            let fitted = match strict_fit {
                 Ok(c) => c,
-                Err(e) => {
-                    log::debug!(
-                        "SSI §2.1: branch LSQ fit failed ({} pts): {} — polyline fallback",
-                        branch.len(),
-                        e
-                    );
-                    continue;
+                Err(strict_err) => {
+                    let relaxed = relaxed_initial_gate(branch, tolerance);
+                    match lsq_fit_branch(branch, relaxed) {
+                        Ok(c) => c,
+                        Err(relaxed_err) => {
+                            log::debug!(
+                                "SSI §2.1: branch LSQ fit failed ({} pts): strict {}, relaxed {} — polyline fallback",
+                                branch.len(),
+                                strict_err,
+                                relaxed_err
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
             // §2.1 step 3: Newton-Raphson refinement on both surfaces.
@@ -113,10 +219,27 @@ impl SurfaceSurfaceIntersection {
                 Some(refined) if refined.len() >= 4 => {
                     match lsq_fit_branch(&refined, tolerance) {
                         Ok(refit) => refit,
-                        Err(_) => fitted, // refined re-fit failed — keep original LSQ curve
+                        // Refined re-fit failed: the original curve may be
+                        // kept only if it already passed the strict gate.
+                        Err(_) if strict_ok => fitted,
+                        Err(refit_err) => {
+                            log::debug!(
+                                "SSI §2.1: refined re-fit failed: {} — polyline fallback (relaxed vehicle curve uncertifiable)",
+                                refit_err
+                            );
+                            continue;
+                        }
                     }
                 }
-                _ => fitted, // refinement did not converge — keep original LSQ curve
+                // Refinement did not converge: keep the strict-gated curve;
+                // a relaxed-gated vehicle curve is uncertifiable without it.
+                _ if strict_ok => fitted,
+                _ => {
+                    log::debug!(
+                        "SSI §2.1: Newton refinement not converged and initial fit above tolerance — polyline fallback"
+                    );
+                    continue;
+                }
             };
             out.push(final_curve);
         }
@@ -319,6 +442,21 @@ fn solve_dense_system(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
+/// Relaxed gate for the INITIAL (pre-refinement) fit of a marching branch:
+/// marching output carries discretization noise proportional to the branch
+/// extent, so the strict tolerance may be unattainable on the raw data even
+/// though the Newton-refined re-fit meets it. The initial curve only serves
+/// as the sampling vehicle for the refinement (§2.1 step 3); certification
+/// happens on the refined re-fit.
+fn relaxed_initial_gate(pts: &[Point3d], tolerance: f64) -> f64 {
+    let (mn, mx) = bounding_extent(pts);
+    let dx = mx.0 - mn.0;
+    let dy = mx.1 - mn.1;
+    let dz = mx.2 - mn.2;
+    let diag = (dx * dx + dy * dy + dz * dz).sqrt();
+    tolerance.max(1e-3 * diag)
+}
+
 /// Global least-squares B-spline fit of one intersection branch
 /// (Vision 2036 §2.1 steps 1–2).
 ///
@@ -515,6 +653,411 @@ fn newton_refine_curve(
     } else {
         None
     }
+}
+
+// ============================================================
+// Vision 2036 §2.2: analytical PCURVE machinery
+// ============================================================
+
+/// Number of branch samples used for PCURVE projection and fitting.
+const PCURVE_SAMPLE_COUNT: usize = 64;
+
+/// Period of the u parameter if the surface is u-periodic, else `None`.
+/// Analytic periodic surfaces have period 2π; closed NURBS surfaces have
+/// the knot-span as their period.
+fn surface_u_period(s: &Surface) -> Option<f64> {
+    match s {
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_)
+        | Surface::Revolution(_) => Some(2.0 * std::f64::consts::PI),
+        Surface::Nurbs(n) if n.u_closed => {
+            let (u0, u1) = n.u_range();
+            Some(u1 - u0)
+        }
+        _ => None,
+    }
+}
+
+/// Period of the v parameter if the surface is v-periodic, else `None`.
+fn surface_v_period(s: &Surface) -> Option<f64> {
+    match s {
+        Surface::Sphere(_) | Surface::Torus(_) => Some(2.0 * std::f64::consts::PI),
+        Surface::Nurbs(n) if n.v_closed => {
+            let (v0, v1) = n.v_range();
+            Some(v1 - v0)
+        }
+        _ => None,
+    }
+}
+
+/// Unwrap u/v seams in a projected UV polyline: `Surface::project_point`
+/// normalizes periodic parameters into their canonical range, so a curve
+/// crossing the seam produces ±period jumps between consecutive samples.
+/// Each jump is corrected by shifting the remainder of the polyline by the
+/// corresponding multiple of the period (progressive unwrap — works for
+/// multiple crossings). Unwrapped parameters remain valid surface
+/// parameters because `point_at` is periodic.
+fn unwrap_periodic_seams(surface: &Surface, uvs: &mut [Point2d]) {
+    let pu = surface_u_period(surface);
+    let pv = surface_v_period(surface);
+    if pu.is_none() && pv.is_none() {
+        return;
+    }
+    for i in 1..uvs.len() {
+        if let Some(p) = pu {
+            let du = uvs[i].u - uvs[i - 1].u;
+            if du.abs() > 0.5 * p {
+                uvs[i].u -= (du / p).round() * p;
+            }
+        }
+        if let Some(p) = pv {
+            let dv = uvs[i].v - uvs[i - 1].v;
+            if dv.abs() > 0.5 * p {
+                uvs[i].v -= (dv / p).round() * p;
+            }
+        }
+    }
+}
+
+/// UV-space tolerance gate derived from the 3D tolerance: a UV deviation of
+/// `uv_tol` composes (via the surface's first fundamental form) to a 3D
+/// deviation of at most `uv_tol * metric`, where `metric` = max(|dS/du|,
+/// |dS/dv|) probed over the sample sites. Guarantees the composed error of
+/// the fitted PCURVE stays within the caller's 3D tolerance.
+fn uv_tolerance_for(surface: &Surface, uvs: &[Point2d], tolerance: f64) -> f64 {
+    let mut metric = 1e-12_f64;
+    let m = uvs.len();
+    if m > 0 {
+        // Probe up to 8 evenly spaced sites (deterministic).
+        let probe = m.min(8);
+        let step = if probe > 1 { (m - 1) / (probe - 1) } else { 0 }.max(1);
+        let mut k = 0usize;
+        while k < m {
+            let d = surface.derivatives_at(uvs[k].u, uvs[k].v);
+            metric = metric.max(d.du.length()).max(d.dv.length());
+            k += step;
+        }
+    }
+    (tolerance / metric).max(1e-9)
+}
+
+/// Fit a `Curve2d` through UV samples parameter-aligned with the 3D branch
+/// (parameter `ts[i] ∈ [0,1]` corresponds to sample `uvs[i]`).
+///
+/// Storage per §2.2 step 3:
+/// * `Curve2d::Line` — when the samples are collinear (exact straight UV
+///   image) and near-linear in the branch parameter;
+/// * `Curve2d::Nurbs` — global least-squares fit with control-point
+///   escalation (mirrors the §2.1 3D fitter) within `uv_tol`;
+/// * `Curve2d::Composite` — polyline fallback when the LSQ gate cannot be
+///   met (mirrors §2.1's per-branch polyline fallback).
+fn fit_curve2d_from_samples(ts: &[f64], uvs: &[Point2d], uv_tol: f64) -> Curve2d {
+    if uvs.len() < 2 {
+        // Degenerate branch (cannot happen for a fitted 3D B-spline, but
+        // guard anyway): a zero-length line at the single sample.
+        let p = uvs.first().copied().unwrap_or(Point2d::ORIGIN);
+        return Curve2d::Line(Line2d::new(p, p));
+    }
+    if let Some(line) = try_line_from_samples(ts, uvs, uv_tol) {
+        return Curve2d::Line(line);
+    }
+    match lsq_fit_curve2d(ts, uvs, uv_tol) {
+        Ok(nurbs) => Curve2d::Nurbs(nurbs),
+        Err(e) => {
+            log::debug!(
+                "SSI §2.2: PCURVE LSQ fit failed ({} samples): {} — polyline fallback",
+                uvs.len(),
+                e
+            );
+            composite_polyline2d(uvs)
+        }
+    }
+}
+
+/// Detect an exact straight UV image: all samples within `uv_tol` of the
+/// first→last segment AND near-linear in the branch parameter (2% of the
+/// segment length, absorbing marching step non-uniformity). Returns the
+/// `Line2d` whose own [0,1] parameterization matches the branch parameter.
+fn try_line_from_samples(ts: &[f64], uvs: &[Point2d], uv_tol: f64) -> Option<Line2d> {
+    let a = uvs[0];
+    let b = uvs[uvs.len() - 1];
+    let du = b.u - a.u;
+    let dv = b.v - a.v;
+    let len = (du * du + dv * dv).sqrt();
+    if len < 1e-12 {
+        return None; // degenerate — not a line
+    }
+    let perp_gate = uv_tol;
+    let param_gate = (uv_tol).max(0.02 * len);
+    for (i, uv) in uvs.iter().enumerate() {
+        // Perpendicular distance to the infinite line through a→b.
+        let perp = ((uv.u - a.u) * dv - (uv.v - a.v) * du).abs() / len;
+        if perp > perp_gate {
+            return None;
+        }
+        // Parameter-linearity: lerp at the branch parameter vs the sample.
+        let t = ts.get(i).copied().unwrap_or(i as f64 / (uvs.len() - 1) as f64);
+        let lu = a.u + t * du;
+        let lv = a.v + t * dv;
+        let dev = ((uv.u - lu) * (uv.u - lu) + (uv.v - lv) * (uv.v - lv)).sqrt();
+        if dev > param_gate {
+            return None;
+        }
+    }
+    Some(Line2d::new(a, b))
+}
+
+/// Global least-squares 2D fit (mirror of `lsq_fit_branch`, §2.1): fixed
+/// endpoint interpolation, averaged clamped knots over the branch
+/// parameters, control-point escalation ×2 up to the data count.
+fn lsq_fit_curve2d(ts: &[f64], uvs: &[Point2d], uv_tol: f64) -> Result<Nurbs2d, FittingError> {
+    if uvs.len() < 4 {
+        return Err(FittingError::TooFewPoints { got: uvs.len(), min: 4 });
+    }
+    let m = uvs.len();
+    let degree = 3usize;
+    let n_cp_cap = m.saturating_sub(1).max(degree + 1);
+    let mut n_cp = (m / 8).max(degree + 1).min(n_cp_cap);
+    loop {
+        match lsq_attempt_curve2d(ts, uvs, n_cp, degree) {
+            Ok((curve, max_dev)) => {
+                if max_dev < uv_tol {
+                    log::debug!(
+                        "SSI §2.2: PCURVE LSQ fit ({} samples → {} control points, max_dev={:.2e}, uv_tol={:.2e})",
+                        m, n_cp, max_dev, uv_tol
+                    );
+                    return Ok(curve);
+                }
+                if n_cp >= n_cp_cap {
+                    return Err(FittingError::DeviationTooHigh { max_dev, tolerance: uv_tol });
+                }
+                n_cp = (n_cp * 2).min(n_cp_cap);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Single 2D least-squares attempt with a fixed control-point count
+/// (mirror of `lsq_attempt`): endpoint-interpolating, two RHS columns
+/// (u, v).
+fn lsq_attempt_curve2d(
+    ts: &[f64],
+    uvs: &[Point2d],
+    n_cp: usize,
+    degree: usize,
+) -> Result<(Nurbs2d, f64), FittingError> {
+    let m = uvs.len();
+    let knots = averaged_clamped_knots(ts, n_cp, degree);
+    let n_unk = n_cp - 2;
+    let mut ata = vec![vec![0.0_f64; n_unk]; n_unk];
+    let mut atb = vec![vec![0.0_f64; 2]; n_unk];
+
+    for k in 1..m - 1 {
+        let t = ts[k];
+        let span = lsq_knot_span(&knots, degree, n_cp, t);
+        let basis = bspline_basis_values(&knots, degree, span, t);
+        let b0 = if span - degree == 0 { basis[0] } else { 0.0 };
+        let bn = if span == n_cp - 1 {
+            basis[basis.len() - 1]
+        } else {
+            0.0
+        };
+        let ru = uvs[k].u - b0 * uvs[0].u - bn * uvs[m - 1].u;
+        let rv = uvs[k].v - b0 * uvs[0].v - bn * uvs[m - 1].v;
+        for (i, &bval) in basis.iter().enumerate() {
+            if bval.abs() < 1e-14 {
+                continue;
+            }
+            let ci = span as isize - degree as isize + i as isize;
+            if ci <= 0 || ci >= n_cp as isize - 1 {
+                continue;
+            }
+            let ui = (ci - 1) as usize;
+            for (j, &bval2) in basis.iter().enumerate() {
+                if bval2.abs() < 1e-14 {
+                    continue;
+                }
+                let cj = span as isize - degree as isize + j as isize;
+                if cj <= 0 || cj >= n_cp as isize - 1 {
+                    continue;
+                }
+                let uj = (cj - 1) as usize;
+                ata[ui][uj] += bval * bval2;
+            }
+            atb[ui][0] += bval * ru;
+            atb[ui][1] += bval * rv;
+        }
+    }
+
+    // Solve the two normal-equation systems (same matrix, two RHS).
+    let mut sol = vec![Vec::new(); 2];
+    for d in 0..2 {
+        let mut a_d = ata.clone();
+        let mut b_d: Vec<f64> = atb.iter().map(|r| r[d]).collect();
+        match solve_dense_system(&mut a_d, &mut b_d) {
+            Some(x) => sol[d] = x,
+            None => return Err(FittingError::DegenerateGeometry),
+        }
+    }
+
+    let mut control_points = Vec::with_capacity(n_cp);
+    control_points.push(uvs[0]);
+    for i in 0..n_unk {
+        control_points.push(Point2d::new(sol[0][i], sol[1][i]));
+    }
+    control_points.push(uvs[m - 1]);
+
+    let weights = vec![1.0_f64; n_cp];
+    let curve = Nurbs2d { degree, control_points, weights, knots };
+
+    // Max deviation over ALL samples.
+    let mut max_dev = 0.0_f64;
+    for i in 0..m {
+        let eval = curve.point_at(ts[i]);
+        let du = uvs[i].u - eval.u;
+        let dv = uvs[i].v - eval.v;
+        let dev = (du * du + dv * dv).sqrt();
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+    Ok((curve, max_dev))
+}
+
+/// Polyline fallback: a `Curve2d::Composite` of line segments through the
+/// samples with arc-length proportional global parameterization (the §2.2
+/// analogue of §2.1's polyline fallback).
+fn composite_polyline2d(uvs: &[Point2d]) -> Curve2d {
+    if uvs.len() < 2 {
+        let p = uvs.first().copied().unwrap_or(Point2d::ORIGIN);
+        return Curve2d::Line(Line2d::new(p, p));
+    }
+    let mut segments = Vec::with_capacity(uvs.len() - 1);
+    let mut lengths = Vec::with_capacity(uvs.len() - 1);
+    for i in 1..uvs.len() {
+        let seg = Line2d::new(uvs[i - 1], uvs[i]);
+        lengths.push(seg.length());
+        segments.push(Curve2d::Line(seg));
+    }
+    let total: f64 = lengths.iter().sum();
+    let cum_lengths: Vec<f64> = if total > 1e-12 {
+        let mut acc = 0.0;
+        lengths
+            .iter()
+            .map(|&l| {
+                acc += l;
+                acc / total
+            })
+            .collect()
+    } else {
+        // All segments degenerate — uniform fractions keep the composite
+        // parameterization well-defined.
+        let n = lengths.len() as f64;
+        lengths.iter().enumerate().map(|(i, _)| (i + 1) as f64 / n).collect()
+    };
+    Curve2d::Composite { segments, cum_lengths }
+}
+
+/// §2.2 step 2 (generic path): project the 3D B-spline branch onto a
+/// surface's UV space via Newton-Raphson inversion (`project_point`), then
+/// fit a parameter-aligned `Curve2d`.
+fn project_pcurve_branch(curve: &NurbsCurve, surface: &Surface, tolerance: f64) -> Curve2d {
+    let eval = Curve3d::Nurbs(curve.clone());
+    let n = PCURVE_SAMPLE_COUNT.max(2);
+    let ts: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
+    let mut uvs: Vec<Point2d> = Vec::with_capacity(n);
+    for &t in &ts {
+        let p = eval.point_at(t);
+        let (u, v) = surface.project_point(&p);
+        uvs.push(Point2d::new(u, v));
+    }
+    unwrap_periodic_seams(surface, &mut uvs);
+    let uv_tol = uv_tolerance_for(surface, &uvs, tolerance);
+    fit_curve2d_from_samples(&ts, &uvs, uv_tol)
+}
+
+/// §2.2 step 1 (plane×cylinder analytical path): derive the PCURVEs by
+/// parametric substitution.
+///
+/// Substituting the cylinder parametrization
+///   P(u,v) = o_c + R·(cos u·x + sin u·y) + v·a
+/// into the plane equation (X − o_p)·n = 0 yields the closed-form relation
+///   v(u) = (d − R·α·cos u − R·β·sin u)/γ,
+/// with d = (o_p − o_c)·n, α = x·n, β = y·n, γ = a·n.
+///
+/// The cylinder-side PCURVE samples use the branch's exact angular
+/// coordinate u with v from this relation (satisfying the plane constraint
+/// exactly); the plane-side samples come from orthogonal projection (the
+/// normal offset of a sample does not affect its in-plane coordinates).
+///
+/// Returns `None` when the pair is not plane×cylinder or the plane is
+/// parallel to the cylinder axis (γ ≈ 0: v is unbounded — the generic
+/// projection path handles the generator-line case exactly).
+fn analytic_pcurves_plane_cylinder(
+    s1: &Surface,
+    s2: &Surface,
+    branch: &NurbsCurve,
+    tolerance: f64,
+) -> Option<(Curve2d, Curve2d)> {
+    // Normalize to (plane, cylinder); remember which surface is A.
+    let (plane, cyl, plane_is_a) = match (s1, s2) {
+        (Surface::Plane(p), Surface::Cylinder(c)) => (p, c, true),
+        (Surface::Cylinder(c), Surface::Plane(p)) => (p, c, false),
+        _ => return None,
+    };
+
+    let n = plane.normal;
+    let a = cyl.axis;
+    let x = cyl.x_dir;
+    let y = a.cross(&x);
+    let gamma = a.x * n.x + a.y * n.y + a.z * n.z;
+    if gamma.abs() < 1e-9 {
+        // Plane parallel to the axis — the substitution degenerates (v is
+        // unbounded); the generic path represents generator lines exactly.
+        return None;
+    }
+    let r = cyl.radius;
+    let oc_op = Vec3d::new(
+        plane.origin.x - cyl.origin.x,
+        plane.origin.y - cyl.origin.y,
+        plane.origin.z - cyl.origin.z,
+    );
+    let d = oc_op.x * n.x + oc_op.y * n.y + oc_op.z * n.z;
+    let alpha = x.x * n.x + x.y * n.y + x.z * n.z;
+    let beta = y.x * n.x + y.y * n.y + y.z * n.z;
+
+    let eval = Curve3d::Nurbs(branch.clone());
+    let n_samples = PCURVE_SAMPLE_COUNT.max(2);
+    let ts: Vec<f64> = (0..n_samples)
+        .map(|i| i as f64 / (n_samples - 1) as f64)
+        .collect();
+    let mut cyl_uv: Vec<Point2d> = Vec::with_capacity(n_samples);
+    let mut plane_uv: Vec<Point2d> = Vec::with_capacity(n_samples);
+    for &t in &ts {
+        let p = eval.point_at(t);
+        // Cylinder u: exact angular coordinate of the 3D branch sample.
+        let (u, _) = cyl.project_point(&p);
+        // Cylinder v: analytical substitution — v of the EXACT intersection
+        // point at angle u (lies on the plane by construction).
+        let v = (d - r * alpha * u.cos() - r * beta * u.sin()) / gamma;
+        cyl_uv.push(Point2d::new(u, v));
+        // Plane UV: orthogonal projection — exact in-plane coordinates.
+        let (pu, pv) = plane.project_point(&p);
+        plane_uv.push(Point2d::new(pu, pv));
+    }
+    // Unwrap the cylinder u seam (2π-periodic) for a smooth fit.
+    let cyl_surface = if plane_is_a { s2 } else { s1 };
+    unwrap_periodic_seams(cyl_surface, &mut cyl_uv);
+
+    // Metric-scaled UV gates: cylinder |dS/du| = R, |dS/dv| = 1; plane
+    // parametrization is orthonormal (metric 1).
+    let cyl_metric = r.max(1.0);
+    let cyl_uv_tol = (tolerance / cyl_metric).max(1e-9);
+    let plane_uv_tol = tolerance.max(1e-9);
+
+    let c_cyl = fit_curve2d_from_samples(&ts, &cyl_uv, cyl_uv_tol);
+    let c_plane = fit_curve2d_from_samples(&ts, &plane_uv, plane_uv_tol);
+    Some(if plane_is_a { (c_plane, c_cyl) } else { (c_cyl, c_plane) })
 }
 
 /// Intersect a line with a plane.
@@ -3832,10 +4375,15 @@ pub fn intersect_surfaces(
         polylines,
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        pcurves_a: Vec::new(),
+        pcurves_b: Vec::new(),
     };
     // Vision 2036 §2.1: B-spline fitting of every intersection branch with
     // Newton-Raphson refinement on both surfaces; polyline fallback per branch.
     result.fit_b_splines_on_surfaces(a, b, tolerance);
+    // Vision 2036 §2.2: analytical/Newton-inverted PCURVEs per fitted branch
+    // (positional correspondence with `b_spline_curves`).
+    result.fit_pcurves_on_surfaces(a, b, tolerance);
     result
 }
 

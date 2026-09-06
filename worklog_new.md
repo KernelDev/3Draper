@@ -3738,3 +3738,107 @@ healed_list identical → alias map identical → edge-cache points identical
   только через компиляцию (workspace-check зелёный) и через topology
   (225+31 зелёные). Полный прогон draper-step — следующей сессией с
   прогретым кэшем.
+
+# Worklog — Vision 2036 §2.2: аналитические PCURVE (2026-09-06, одиннадцатая сессия)
+
+**Baseline:** commit `2206b58` (§2.1 verification addendum).
+**Задача:** ROADMAP_VISION_2036 §2.2 — PCURVE в UV-пространстве аналитические,
+не аппроксимированные. §2.1 (точный B-spline выход SSI) завершён предыдущей
+сессией; по порядку плана следующий пункт — §2.2.
+
+## Диагностика (что было)
+
+- `SurfaceSurfaceIntersection` не содержал никакого UV-представления веток
+  пересечения — только 3D полилинии + B-spline (§2.1).
+- `Curve2d` (Line2d/Circle2d/.../Nurbs2d/Composite) уже существовал
+  (использовался STEP-парсером PCURVE) — переиспользован без изменений.
+- `Surface::project_point` уже реализован для всех типов поверхностей
+  (аналитика для plane/cyl/cone/sphere/torus; grid+Newton для NurbsSurface).
+
+## Реализация (draper-geometry/src/intersection.rs)
+
+**Контракт:** `pcurves_a[i]`/`pcurves_b[i]` — PCURVE i-й СФИТИРОВАННОЙ ветки
+(`b_spline_curves`, позиционное соответствие), параметризованы тем же
+нормированным t ∈ [0,1], что и 3D кривая ветки.
+
+**Шаг 1 спеки (plane×cylinder, подстановка):**
+`analytic_pcurves_plane_cylinder` — подстановка параметризации цилиндра
+P(u,v) = o_c + R(cos u·x + sin u·y) + v·a в уравнение плоскости даёт
+v(u) = (d − R·α·cos u − R·β·sin u)/γ. Цилиндровая сторона: u — точный
+угловая координата сэмпла ветки, v — из этой формулы (лежит на плоскости
+ТОЧНО); плоская сторона — ортогональная проекция (смещение по нормали не
+влияет на in-plane координаты). γ≈0 (плоскость ∥ оси) → дегенерация,
+generic-путь.
+
+**Шаг 2 спеки (NURBS-пары, Ньютон-инверсия):**
+`project_pcurve_branch` — сэмплы 3D B-spline ветки → `project_point`
+(для NurbsSurface: multi-resolution grid + Newton-Raphson) →
+`unwrap_periodic_seams` (u/v периодичность: cylinder/cone/sphere/torus/
+revolution 2π, closed NURBS — knot span; прогрессивный анврап швов).
+
+**Шаг 3 спеки (хранение):** `fit_curve2d_from_samples`:
+- `Curve2d::Line` — коллинеарные UV-сэмплы (точный прямой образ) +
+  параметрическая близость к линейной по t (2% длины сегмента);
+- `Curve2d::Nurbs` — глобальный LSQ `lsq_fit_curve2d` (зеркало §2.1
+  `lsq_fit_branch`: endpoint-интерполяция, averaged clamped knots,
+  эскалация CP ×2, 2 RHS) с гейтом uv_tol = tolerance/metric
+  (metric = max|dS/du|,|dS/dv| по 8 пробным сэмплам → композиционная
+  3D ошибка ≤ tolerance);
+- `Curve2d::Composite` — полилиния-фолбэк (аналог §2.1 по-веточного
+  фолбэка).
+
+**Интеграция:** `intersect_surfaces` → `fit_pcurves_on_surfaces(a, b, tol)`
+после `fit_b_splines_on_surfaces`. API: `pcurve_a()/pcurves_a()/pcurve_b()/
+pcurves_b()` + immutable `try_fit_pcurves_on_surfaces`.
+
+## Bug fix §2.1-пайплайна (найден тестом NURBS-пары)
+
+Симптом: NURBS-патч×цилиндр — marching находил 48-точечную ветку, но 3D
+фит проваливался при tol ≤ 5e-4 (DeviationTooHigh 5.1e-4 даже при 47 CP).
+Причина: marching-полилиния несёт дискретизационный шум ~1e-3; строгий
+гейт на ПЕРВОМ фите отбрасывал ветку ДО Newton-уточнения (§2.1 шаг 3) —
+единственной стадии, которая этот шум убирает. При m−1 CP остаётся
+1-мерное нефитируемое направление — на шумных данных остаток ~ шума.
+Фикс: первый фит со строгим гейтом; при провале — ретрай с ослабленным
+гейтом `relaxed_initial_gate = max(tol, 1e-3·diag)` (кривая — только
+«транспорт» для сэмплирования уточнения); сертификация ветки — гейтом на
+ре-фите УТОЧНЁННЫХ точек; неcertифицируемый транспорт (ре-фит не прошёл,
+уточнение не сошлось) → polyline-фолбэк, как раньше.
+
+## Тесты (новый файл vision2036_pcurve_tests.rs, 6 шт.)
+
+- Tilted plane(30°)×cyl R=10: подстановка v(u) держится < 1e-5;
+  composed S_cyl(pcurve) на плоскости < 1e-5; composed S_plane(pcurve) на
+  цилиндре < 1e-4; обе стороны Nurbs; param_range (0,1).
+- Perpendicular (плоскость z=2 ⊥ оси, круг): цилиндровая v ≡ 2 (< 1e-6),
+  u размах > π; плоская сторона — круг R=5 (< 1e-4).
+- Parallel (плоскость x=2 ∥ оси): 2 образующие; все цилиндровые PCURVE —
+  Curve2d::Line с u = ±arccos(0.4) const (< 1e-6); плоские — Line.
+- NURBS-патч (билинейный)×cyl: Ньютон-инверсия, composed обеих сторон
+  на окружности пересечения < 1e-2 (шум marching ~1e-3).
+- Мультиветвенность torus(10,2)×plane z=1: 2 ветки, PCURVE с обеих
+  сторон, composed на широтных окружностях 10±√3 (анврап u-шва тора).
+- API-контракт: позиционное соответствие, param_range (0,1) для всех,
+  immutable try_fit согласуется.
+
+## Верификация
+
+- draper-geometry: **232 lib + 170 integration зелёные** (164 + 6 новых)
+- draper-topology: **225 lib + 31 integration зелёные**
+- draper-mesh: **268 lib + 39 integration зелёные**
+- `cargo check -p draper-step --tests`: 0 ошибок (правило среды)
+- `cargo check --workspace --lib`: 0 ошибок; 21 предупреждение
+  draper-geometry — все pre-existing (fuzz_tests/proptest/nurbs_tools/
+  intersection_curve), в новом коде 0
+- Детерминизм: новый код — чистые циклы по индексам Vec, без
+  HashMap-итераций
+- Диск: 5.1G free
+
+## Осталось (обновление)
+
+- Потребители PCURVE: boolean.rs (свой SSI-конвейер), STEP-экспорт
+  BREP PCURVE, viewer — отдельная задача (как и для §2.1 b_splines)
+- §2.3 Dedicated Steiner Grids (OffsetSurface/SweptSurface) — следующий
+  пункт спринта 3–4
+- Замыкание замкнутых веток (шов 2π/128) — без изменений
+- Cylinder×Torus parallel-offset аналитика — без изменений

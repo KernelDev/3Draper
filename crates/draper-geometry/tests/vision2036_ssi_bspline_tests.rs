@@ -84,6 +84,8 @@ fn test_lsq_quarter_circle_quality() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        pcurves_a: Vec::new(),
+        pcurves_b: Vec::new(),
     };
     let curve = ssi.try_fit_b_spline(1e-3).expect("quarter arc must LSQ-fit");
     let dev = circle_deviation(&curve, 200);
@@ -109,6 +111,8 @@ fn test_lsq_line_exact() {
         polylines: vec![pts.clone()],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        pcurves_a: Vec::new(),
+        pcurves_b: Vec::new(),
     };
     let curve = ssi.try_fit_b_spline(1e-6).expect("line must LSQ-fit");
     let dev = line_deviation(&curve, &pts[0], &pts[n - 1], 100);
@@ -143,6 +147,8 @@ fn test_newton_refinement_improves_plane_cylinder() {
         polylines: vec![noisy],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        pcurves_a: Vec::new(),
+        pcurves_b: Vec::new(),
     };
 
     // BEFORE: pure LSQ fit (no refinement) — tracks the noisy data.
