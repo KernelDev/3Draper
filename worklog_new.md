@@ -3728,3 +3728,13 @@ healed_list identical → alias map identical → edge-cache points identical
   наследует разрыв 2π/128; кандидат — периодические узлы/замыкание шва).
 - Cylinder×Torus parallel-offset аналитика (квартка) — без изменений.
 - Legacy eprintln в converter.rs — без изменений.
+
+## Верификация draper-step (дополнение)
+
+- `cargo check -p draper-step --tests`: 0 ошибок (правило среды — полный
+  тест-ран draper-step на холодном кэше после переустановки Rust-тулчейна
+  не выполняется; lib-крейты draper-step собраны в workspace-check).
+- Изменения сессии не трогают draper-step; его зависимости от geometry —
+  только через компиляцию (workspace-check зелёный) и через topology
+  (225+31 зелёные). Полный прогон draper-step — следующей сессией с
+  прогретым кэшем.
