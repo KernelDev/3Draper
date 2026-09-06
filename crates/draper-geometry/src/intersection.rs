@@ -181,6 +181,21 @@ impl SurfaceSurfaceIntersection {
     ) -> Vec<NurbsCurve> {
         let mut out = Vec::with_capacity(self.polylines.len());
         for branch in &self.polylines {
+            // §2.1 seam closure: near-closed branches (full loops sampled
+            // [0, 2π) without the wrap point — analytic intersectors and
+            // marching loops stopped within a step of closing) carry a
+            // one-step gap; the fitted B-spline inherits it as a visible
+            // seam. Appending the first point closes the loop so the
+            // endpoint-interpolating fit welds the seam (P0 == P_last).
+            // `polylines` themselves stay untouched (bit-stability).
+            let closed_storage;
+            let branch: &[Point3d] = match close_near_closed_branch(branch) {
+                Some(closed) => {
+                    closed_storage = closed;
+                    &closed_storage
+                }
+                None => branch,
+            };
             // §2.1 step 1–2: marching points + chord-length least-squares fit.
             //
             // The initial fit is gated strictly first; when the raw marching
@@ -440,6 +455,57 @@ fn solve_dense_system(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
         x[i] = s / a[i][i];
     }
     Some(x)
+}
+
+/// Detect and close near-closed intersection branches (§2.1 seam welding).
+///
+/// Full-loop branches are sampled over [0, 2π) WITHOUT the wrap point — the
+/// polyline endpoints sit exactly one sampling step apart, and the fitted
+/// B-spline inherits the gap as a visible seam. A branch is treated as a
+/// closed loop when BOTH hold:
+///   * the endpoint gap is at most 1.5 × the largest sampling step (the
+///     analytic intersectors' wrap gap is exactly 1.0 steps; a marching
+///     continuation may stop within ~1.3 steps of closing), and
+///   * the gap is at most 5% of the total polyline length (an open branch
+///     bounded by a marching span has its endpoints O(100%) apart; a
+///     trimmed partial arc does not occur at the SSI level — trimming is
+///     a downstream, face-level concern).
+///
+/// Returns `Some(closed_polyline)` with the first point appended as the
+/// last (welding the seam for the endpoint-interpolating LSQ fit), or
+/// `None` when the branch is genuinely open or degenerate. Already
+/// coincident endpoints (< 1e-12) are not re-appended.
+fn close_near_closed_branch(branch: &[Point3d]) -> Option<Vec<Point3d>> {
+    let n = branch.len();
+    if n < 8 {
+        return None;
+    }
+    let mut max_step = 0.0_f64;
+    let mut total = 0.0_f64;
+    for i in 1..n {
+        let d = branch[i - 1].distance_to(&branch[i]);
+        if !d.is_finite() || d <= 0.0 {
+            return None; // degenerate segment
+        }
+        if d > max_step {
+            max_step = d;
+        }
+        total += d;
+    }
+    if total <= 0.0 || !total.is_finite() {
+        return None;
+    }
+    let gap = branch[0].distance_to(&branch[n - 1]);
+    if gap < 1e-12 {
+        return None; // already closed — nothing to weld
+    }
+    if gap > 1.5 * max_step || gap > 0.05 * total {
+        return None; // genuinely open branch
+    }
+    let mut closed = Vec::with_capacity(n + 1);
+    closed.extend_from_slice(branch);
+    closed.push(branch[0]);
+    Some(closed)
 }
 
 /// Relaxed gate for the INITIAL (pre-refinement) fit of a marching branch:

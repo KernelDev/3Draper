@@ -264,3 +264,75 @@ fn test_intersect_surfaces_plane_cylinder_bspline_primary() {
     let dev = circle_deviation(&out.b_splines()[0], 128);
     assert!(dev < 5e-4, "primary curve deviation {:.3e} exceeds 5e-4", dev);
 }
+
+// ---------------------------------------------------------------
+// 4. Seam closure of closed branches (§2.1 follow-up)
+// ---------------------------------------------------------------
+
+#[test]
+fn test_closed_branch_seam_welded_analytic_circle() {
+    // Plane z = 0 ∩ cylinder R = 1 → full circle sampled over [0, 2π)
+    // WITHOUT the wrap point: the polyline endpoints sit one step
+    // (~2π/128) apart and the fitted B-spline used to inherit the gap
+    // as a visible seam. The closure must weld it: curve(0) == curve(1).
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::ORIGIN,
+        Direction3d::Z,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(1.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-4);
+    assert!(!out.b_splines().is_empty());
+    let eval = Curve3d::Nurbs(out.b_splines()[0].clone());
+    let seam_gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+    assert!(
+        seam_gap < 1e-9,
+        "closed branch seam must be welded (C0), gap = {seam_gap:.3e}"
+    );
+    // Circle quality must not regress from the closure.
+    let dev = circle_deviation(&out.b_splines()[0], 128);
+    assert!(dev < 5e-4, "circle deviation after closure {dev:.3e}");
+}
+
+#[test]
+fn test_closed_branch_seam_welded_marching_torus() {
+    // Torus (R = 10, r = 2) ∩ plane z = 1 → two latitude circles. The
+    // marching continuation stops ~1.3 steps short of closing; the
+    // closure welds both branches' seams.
+    let torus = Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, 10.0, 2.0));
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(0.0, 0.0, 1.0),
+        Direction3d::Z,
+    ));
+    let out = intersect_surfaces(&torus, &plane, 1e-6);
+    assert_eq!(out.b_splines().len(), 2, "two latitude branches");
+    for curve in out.b_splines() {
+        let eval = Curve3d::Nurbs(curve.clone());
+        let seam_gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+        assert!(
+            seam_gap < 1e-9,
+            "marching branch seam must be welded, gap = {seam_gap:.3e}"
+        );
+    }
+}
+
+#[test]
+fn test_open_branch_not_falsely_closed() {
+    // Plane x = 2 ∥ cylinder R = 5 axis → two open generator lines
+    // (bounded by the marching span). Their endpoints are O(span) apart —
+    // the closure heuristic must NOT weld them.
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(2.0, 0.0, 0.0),
+        Direction3d::X,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(5.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-6);
+    assert!(out.b_splines().len() >= 2, "two generator lines");
+    for curve in out.b_splines() {
+        let eval = Curve3d::Nurbs(curve.clone());
+        let endpoint_gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+        assert!(
+            endpoint_gap > 0.5,
+            "open generator branch must keep its endpoints, gap = {endpoint_gap:.3e}"
+        );
+    }
+}
