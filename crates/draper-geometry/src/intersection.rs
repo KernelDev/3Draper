@@ -47,7 +47,14 @@ pub struct SurfaceSurfaceIntersection {
     /// B-spline curve fitted to the first polyline (if fitting succeeded).
     /// Per ROADMAP_VISION_2036 §2.1: the primary output should be an exact
     /// B-spline curve, with polylines as fallback only.
+    ///
+    /// NOTE: this is the legacy single-curve accessor; for multi-branch
+    /// intersections prefer `b_spline_curves` (all branches are fitted).
     pub b_spline_curve: Option<NurbsCurve>,
+    /// B-spline curves fitted to ALL polyline branches (Vision 2036 §2.1).
+    /// Branches that cannot be fitted within tolerance keep their polyline
+    /// representation only (per-branch fallback, no global failure).
+    pub b_spline_curves: Vec<NurbsCurve>,
 }
 
 impl SurfaceSurfaceIntersection {
@@ -57,10 +64,70 @@ impl SurfaceSurfaceIntersection {
         self.b_spline_curve.as_ref()
     }
 
+    /// Get B-spline curves for all fitted branches (Vision 2036 §2.1).
+    /// Empty when no branch could be fitted within tolerance.
+    pub fn b_splines(&self) -> &[NurbsCurve] {
+        &self.b_spline_curves
+    }
+
+    /// Fit B-spline curves to ALL intersection branches, with Newton-Raphson
+    /// refinement on both surfaces (Vision 2036 §2.1, full pipeline).
+    ///
+    /// Per branch: least-squares fit → sample curve → snap each sample onto
+    /// the exact intersection via 4D Newton → re-fit refined points. Stores
+    /// successful curves in `b_spline_curves` and the first one in
+    /// `b_spline_curve` (legacy compat). Branches that fail keep their
+    /// polyline representation (spec fallback).
+    pub fn fit_b_splines_on_surfaces(&mut self, s1: &Surface, s2: &Surface, tolerance: f64) {
+        self.b_spline_curves = self.try_fit_b_splines_on_surfaces(s1, s2, tolerance);
+        self.b_spline_curve = self.b_spline_curves.first().cloned();
+    }
+
+    /// Multi-branch fitting pipeline — see `fit_b_splines_on_surfaces`.
+    /// Returns the fitted curves without mutating `self`.
+    pub fn try_fit_b_splines_on_surfaces(
+        &self,
+        s1: &Surface,
+        s2: &Surface,
+        tolerance: f64,
+    ) -> Vec<NurbsCurve> {
+        let mut out = Vec::with_capacity(self.polylines.len());
+        for branch in &self.polylines {
+            // §2.1 step 1–2: marching points + chord-length least-squares fit.
+            let fitted = match lsq_fit_branch(branch, tolerance) {
+                Ok(c) => c,
+                Err(e) => {
+                    log::debug!(
+                        "SSI §2.1: branch LSQ fit failed ({} pts): {} — polyline fallback",
+                        branch.len(),
+                        e
+                    );
+                    continue;
+                }
+            };
+            // §2.1 step 3: Newton-Raphson refinement on both surfaces.
+            let n_samples = branch.len().clamp(16, 64);
+            let final_curve = match newton_refine_curve(&fitted, s1, s2, n_samples) {
+                Some(refined) if refined.len() >= 4 => {
+                    match lsq_fit_branch(&refined, tolerance) {
+                        Ok(refit) => refit,
+                        Err(_) => fitted, // refined re-fit failed — keep original LSQ curve
+                    }
+                }
+                _ => fitted, // refinement did not converge — keep original LSQ curve
+            };
+            out.push(final_curve);
+        }
+        out
+    }
+
     /// Fit a B-spline curve to the first polyline using chord-length
-    /// parameterized least-squares approximation.
+    /// parameterized least-squares approximation (no surface refinement).
     ///
     /// Per Vision 2030 Task 1: Chord-Length Parameterized B-Spline Fitting.
+    /// Vision 2036 §2.1 upgrades the method to a true global least-squares
+    /// solve (see `lsq_fit_branch`); use `fit_b_splines_on_surfaces` for the
+    /// full pipeline with Newton refinement.
     ///
     /// Returns `Ok(NurbsCurve)` on success, or `Err(FittingError)` on failure.
     /// The caller can fall back to polylines on error.
@@ -68,6 +135,9 @@ impl SurfaceSurfaceIntersection {
         match self.try_fit_b_spline(tolerance) {
             Ok(curve) => {
                 self.b_spline_curve = Some(curve);
+                if self.b_spline_curves.is_empty() {
+                    self.b_spline_curves.push(curve);
+                }
             }
             Err(e) => {
                 log::debug!("SSI: B-spline fitting failed: {} — using polyline fallback", e);
@@ -75,96 +145,330 @@ impl SurfaceSurfaceIntersection {
         }
     }
 
-    /// Try to fit a B-spline curve, returning Result.
+    /// Try to fit a B-spline curve to the first polyline via global
+    /// least-squares (Vision 2036 §2.1 steps 1–2, without refinement).
     pub fn try_fit_b_spline(&self, tolerance: f64) -> Result<NurbsCurve, FittingError> {
         if self.polylines.is_empty() {
             return Err(FittingError::TooFewPoints { got: 0, min: 4 });
         }
-        let pts = &self.polylines[0];
-        if pts.len() < 4 {
-            return Err(FittingError::TooFewPoints { got: pts.len(), min: 4 });
-        }
+        lsq_fit_branch(&self.polylines[0], tolerance)
+    }
+}
 
-        // Step 1: Compute chord-length parameters
-        let mut params = vec![0.0_f64; pts.len()];
-        let mut total_len = 0.0_f64;
-        for i in 1..pts.len() {
-            let dx = pts[i].x - pts[i-1].x;
-            let dy = pts[i].y - pts[i-1].y;
-            let dz = pts[i].z - pts[i-1].z;
-            total_len += (dx*dx + dy*dy + dz*dz).sqrt();
-            params[i] = total_len;
-        }
-        if total_len < 1e-15 {
-            return Err(FittingError::DegenerateGeometry);
-        }
-        for p in &mut params {
-            *p /= total_len;
-        }
+// ============================================================
+// Vision 2036 §2.1: least-squares B-spline fitting machinery
+// ============================================================
 
-        // Step 2: Adaptive control point selection based on curvature.
-        // Instead of a fixed cap of 20, scale control points with curvature.
-        let n_cp_target = adaptive_cp_count(pts);
-        let degree = 3;
-        let n_cp = n_cp_target.max(degree + 1).min(pts.len());
+/// Compute normalized chord-length parameters for a polyline.
+/// Returns `None` for degenerate (zero-length) input.
+fn chord_length_params(pts: &[Point3d]) -> Option<Vec<f64>> {
+    let mut params = vec![0.0_f64; pts.len()];
+    let mut total_len = 0.0_f64;
+    for i in 1..pts.len() {
+        let dx = pts[i].x - pts[i - 1].x;
+        let dy = pts[i].y - pts[i - 1].y;
+        let dz = pts[i].z - pts[i - 1].z;
+        total_len += (dx * dx + dy * dy + dz * dz).sqrt();
+        params[i] = total_len;
+    }
+    if total_len < 1e-15 {
+        return None;
+    }
+    for p in &mut params {
+        *p /= total_len;
+    }
+    Some(params)
+}
 
-        // Step 3: Select control points via chord-length-weighted subsampling.
-        let mut control_points: Vec<Point3d> = Vec::with_capacity(n_cp);
-        control_points.push(pts[0]);
+/// Cox–de Boor recurrence: the `degree + 1` nonzero basis values
+/// `N_{span-degree+i,degree}(t)` for `i = 0..=degree` (Piegl & Tiller A2.2).
+fn bspline_basis_values(knots: &[f64], degree: usize, span: usize, t: f64) -> Vec<f64> {
+    let p = degree;
+    let mut n = vec![0.0_f64; p + 1];
+    // Clamped-domain edges: only the first (resp. last) basis is nonzero.
+    if t <= 0.0 {
+        n[0] = 1.0;
+        return n;
+    }
+    if t >= *knots.last().unwrap_or(&1.0) {
+        n[p] = 1.0;
+        return n;
+    }
+    let mut left = vec![0.0_f64; p + 1];
+    let mut right = vec![0.0_f64; p + 1];
+    n[0] = 1.0;
+    for j in 1..=p {
+        left[j] = t - knots[span + 1 - j];
+        right[j] = knots[span + j] - t;
+        let mut saved = 0.0_f64;
+        for r in 0..j {
+            let denom = right[r + 1] + left[j - r];
+            if denom.abs() < 1e-15 {
+                continue; // basis degenerates to zero in this branch
+            }
+            let temp = n[r] / denom;
+            n[r] = saved + right[r + 1] * temp;
+            saved = left[j - r] * temp;
+        }
+        n[j] = saved;
+    }
+    n
+}
 
-        let interval = 1.0 / (n_cp - 1) as f64;
-        let mut next_target = interval;
-        for i in 1..pts.len() - 1 {
-            if params[i] >= next_target {
-                control_points.push(pts[i]);
-                next_target += interval;
+/// Find the knot span index for parameter `t` in a clamped knot vector:
+/// the largest `span` with `knots[span] <= t < knots[span+1]`,
+/// `span ∈ [degree, n_cp - 1]`. Linear scan — the systems here are small
+/// (n_cp ≤ ~64) and a scan is trivially deterministic.
+fn lsq_knot_span(knots: &[f64], degree: usize, n_cp: usize, t: f64) -> usize {
+    if t >= knots[n_cp] {
+        return n_cp - 1;
+    }
+    let mut span = degree;
+    while span < n_cp - 1 && !(knots[span] <= t && t < knots[span + 1]) {
+        span += 1;
+    }
+    span
+}
+
+/// Build a clamped knot vector with interior knots placed by parameter
+/// averaging (Piegl & Tiller §9.2.1) — the standard technique for
+/// least-squares fitting: knot positions reflect the actual data spacing.
+fn averaged_clamped_knots(params: &[f64], n_cp: usize, degree: usize) -> Vec<f64> {
+    let n_knots = n_cp + degree + 1;
+    let mut knots = vec![0.0_f64; n_knots];
+    // Clamped ends.
+    for k in knots.iter_mut().take(degree + 1) {
+        *k = 0.0;
+    }
+    for k in knots.iter_mut().rev().take(degree + 1) {
+        *k = 1.0;
+    }
+    // Interior knots: u_{j+degree} = (1/degree) * sum(params[j .. j+degree]).
+    for j in 1..(n_cp - degree) {
+        let mut sum = 0.0_f64;
+        for i in j..(j + degree) {
+            sum += params[i];
+        }
+        knots[j + degree] = sum / degree as f64;
+    }
+    knots
+}
+
+/// Solve a small dense linear system `A x = b` via Gaussian elimination with
+/// partial pivoting. Mutates `a` (row-reduced form) and `b` (rhs). Returns
+/// `None` when the matrix is (numerically) singular.
+fn solve_dense_system(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
+    let n = b.len();
+    if n == 0 || a.len() != n {
+        return None;
+    }
+    for col in 0..n {
+        // Partial pivoting: largest |a[r][col]| for r >= col.
+        let mut pivot = col;
+        let mut best = a[col][col].abs();
+        for r in (col + 1)..n {
+            let v = a[r][col].abs();
+            if v > best {
+                best = v;
+                pivot = r;
             }
         }
-        if control_points.last() != Some(&pts[pts.len() - 1]) {
-            control_points.push(pts[pts.len() - 1]);
+        if best < 1e-12 {
+            return None;
         }
-
-        let n = control_points.len();
-        if n < degree + 1 {
-            return Err(FittingError::TooFewPoints { got: n, min: degree + 1 });
+        if pivot != col {
+            a.swap(col, pivot);
+            b.swap(col, pivot);
         }
-
-        // Step 4: Build clamped B-spline knot vector.
-        let n_knots = n + degree + 1;
-        let mut knots = vec![0.0; n_knots];
-        for i in 0..n_knots {
-            if i <= degree {
-                knots[i] = 0.0;
-            } else if i >= n {
-                knots[i] = 1.0;
-            } else {
-                knots[i] = (i - degree) as f64 / (n - degree) as f64;
+        let d = a[col][col];
+        for r in (col + 1)..n {
+            let f = a[r][col] / d;
+            if f == 0.0 {
+                continue;
             }
-        }
-
-        let weights = vec![1.0; n];
-        let curve = NurbsCurve { degree, control_points, weights, knots };
-
-        // Step 5: Verify max deviation
-        let mut max_dev = 0.0_f64;
-        for (i, &p) in pts.iter().enumerate() {
-            let t = params[i];
-            let eval = Curve3d::Nurbs(curve.clone()).point_at(t);
-            let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
-            if dev > max_dev {
-                max_dev = dev;
+            for c in col..n {
+                a[r][c] -= f * a[col][c];
             }
+            b[r] -= f * b[col];
         }
+    }
+    // Back substitution.
+    let mut x = vec![0.0_f64; n];
+    for i in (0..n).rev() {
+        let mut s = b[i];
+        for c in (i + 1)..n {
+            s -= a[i][c] * x[c];
+        }
+        x[i] = s / a[i][i];
+    }
+    Some(x)
+}
 
-        if max_dev < tolerance {
-            log::info!(
-                "SSI: fitted B-spline curve ({} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
-                n, degree, max_dev, tolerance
-            );
-            Ok(curve)
+/// Global least-squares B-spline fit of one intersection branch
+/// (Vision 2036 §2.1 steps 1–2).
+///
+/// Method: chord-length parameterization → averaged clamped knots →
+/// endpoint-interpolating least-squares solve of the normal equations for
+/// the interior control points (Gaussian elimination with partial pivoting).
+/// The first and last control points equal the branch endpoints exactly,
+/// which anchors the curve to the marching data.
+///
+/// `tolerance` gates the maximum curve-to-data deviation. The control-point
+/// count is capped below the data count so the fit remains a genuine
+/// approximation (never an interpolant that hides marching noise).
+fn lsq_fit_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, FittingError> {
+    if pts.len() < 4 {
+        return Err(FittingError::TooFewPoints { got: pts.len(), min: 4 });
+    }
+    // Step 1: chord-length parameters.
+    let params = match chord_length_params(pts) {
+        Some(p) => p,
+        None => return Err(FittingError::DegenerateGeometry),
+    };
+    let m = pts.len();
+    let degree = 3usize;
+
+    // Step 2: adaptive control-point count (curvature-scaled, capped below
+    // the data count so the solve stays over-determined).
+    let n_cp = adaptive_cp_count(pts)
+        .max(degree + 1)
+        .min(m.saturating_sub(1))
+        .max(degree + 1);
+
+    // Step 3: knot vector + basis matrix per data point.
+    let knots = averaged_clamped_knots(&params, n_cp, degree);
+
+    // Unknowns: control points 1..=n_cp-2 (P0 and P_{n-1} are fixed to the
+    // branch endpoints by interpolation constraints). Normal equations:
+    //   (A^T A) x = A^T (D - fixed contributions)
+    let n_unk = n_cp - 2;
+    let mut ata = vec![vec![0.0_f64; n_unk]; n_unk];
+    // RHS columns for x, y, z.
+    let mut atb = vec![vec![0.0_f64; 3]; n_unk];
+
+    for k in 1..m - 1 {
+        let t = params[k];
+        let span = lsq_knot_span(&knots, degree, n_cp, t);
+        let basis = bspline_basis_values(&knots, degree, span, t);
+        // Residual RHS: D_k - N_0(t) * P_0 - N_{n-1}(t) * P_{n-1}.
+        let b0 = if span - degree == 0 { basis[0] } else { 0.0 };
+        let bn = if span == n_cp - 1 {
+            basis[basis.len() - 1]
         } else {
-            Err(FittingError::DeviationTooHigh { max_dev, tolerance })
+            0.0
+        };
+        let rx = pts[k].x - b0 * pts[0].x - bn * pts[m - 1].x;
+        let ry = pts[k].y - b0 * pts[0].y - bn * pts[m - 1].y;
+        let rz = pts[k].z - b0 * pts[0].z - bn * pts[m - 1].z;
+        for (i, &bval) in basis.iter().enumerate() {
+            if bval.abs() < 1e-14 {
+                continue;
+            }
+            let ci = span as isize - degree as isize + i as isize;
+            if ci <= 0 || ci >= n_cp as isize - 1 {
+                continue; // fixed control points — already in the residual
+            }
+            let ui = (ci - 1) as usize;
+            for (j, &bval2) in basis.iter().enumerate() {
+                if bval2.abs() < 1e-14 {
+                    continue;
+                }
+                let cj = span as isize - degree as isize + j as isize;
+                if cj <= 0 || cj >= n_cp as isize - 1 {
+                    continue;
+                }
+                let uj = (cj - 1) as usize;
+                ata[ui][uj] += bval * bval2;
+            }
+            atb[ui][0] += bval * rx;
+            atb[ui][1] += bval * ry;
+            atb[ui][2] += bval * rz;
         }
+    }
+
+    // Solve the three normal-equation systems (same matrix, three RHS).
+    let mut sol = vec![Vec::new(); 3];
+    for d in 0..3 {
+        let mut a_d = ata.clone();
+        let mut b_d: Vec<f64> = atb.iter().map(|r| r[d]).collect();
+        match solve_dense_system(&mut a_d, &mut b_d) {
+            Some(x) => sol[d] = x,
+            None => return Err(FittingError::DegenerateGeometry),
+        }
+    }
+
+    // Assemble control points.
+    let mut control_points = Vec::with_capacity(n_cp);
+    control_points.push(pts[0]);
+    for i in 0..n_unk {
+        control_points.push(Point3d::new(sol[0][i], sol[1][i], sol[2][i]));
+    }
+    control_points.push(pts[m - 1]);
+
+    let weights = vec![1.0_f64; n_cp];
+    let curve = NurbsCurve { degree, control_points, weights, knots };
+
+    // Step 4: verify max deviation over ALL data points.
+    let mut max_dev = 0.0_f64;
+    let eval_curve = Curve3d::Nurbs(curve.clone());
+    for (i, &p) in pts.iter().enumerate() {
+        let eval = eval_curve.point_at(params[i]);
+        let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+
+    if max_dev < tolerance {
+        log::debug!(
+            "SSI §2.1: LSQ fit ({} data pts → {} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
+            m, n_cp, degree, max_dev, tolerance
+        );
+        Ok(curve)
+    } else {
+        Err(FittingError::DeviationTooHigh { max_dev, tolerance })
+    }
+}
+
+/// Newton-Raphson refinement of a fitted intersection curve on both surfaces
+/// (Vision 2036 §2.1 step 3).
+///
+/// Samples the curve, projects each sample onto both input surfaces
+/// (`Surface::project_point`), then runs the 4D Newton solver
+/// (`newton_surface_surface`) to snap the projected parameter pair onto the
+/// exact intersection. Refined points therefore lie on BOTH surfaces (up to
+/// the Newton convergence radius), removing marching-cells discretization
+/// error from the fitted curve.
+///
+/// Returns the refined sample points when at least 80% of the samples
+/// converged; otherwise `None` (caller keeps the unrefined fit).
+fn newton_refine_curve(
+    curve: &NurbsCurve,
+    s1: &Surface,
+    s2: &Surface,
+    n_samples: usize,
+) -> Option<Vec<Point3d>> {
+    let eval_curve = Curve3d::Nurbs(curve.clone());
+    let n = n_samples.max(2);
+    let mut refined = Vec::with_capacity(n);
+    let mut converged = 0usize;
+    for i in 0..n {
+        let t = i as f64 / (n - 1) as f64;
+        let p = eval_curve.point_at(t);
+        let (u1, v1) = s1.project_point(&p);
+        let (u2, v2) = s2.project_point(&p);
+        match newton_surface_surface(s1, s2, u1, v1, u2, v2, 1e-10, 16) {
+            Some((ip, _, _, _, _)) => {
+                refined.push(ip);
+                converged += 1;
+            }
+            None => refined.push(p),
+        }
+    }
+    if converged * 10 >= n * 8 {
+        Some(refined)
+    } else {
+        None
     }
 }
 
@@ -3479,9 +3783,14 @@ pub fn intersect_surfaces(
         }
     };
 
-    let mut result = SurfaceSurfaceIntersection { polylines, b_spline_curve: None };
-    // Attempt B-spline fitting (ROADMAP_VISION_2036 §2.1)
-    result.fit_b_spline(tolerance);
+    let mut result = SurfaceSurfaceIntersection {
+        polylines,
+        b_spline_curve: None,
+        b_spline_curves: Vec::new(),
+    };
+    // Vision 2036 §2.1: B-spline fitting of every intersection branch with
+    // Newton-Raphson refinement on both surfaces; polyline fallback per branch.
+    result.fit_b_splines_on_surfaces(a, b, tolerance);
     result
 }
 

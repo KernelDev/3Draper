@@ -14,6 +14,7 @@ fn test_fit_b_spline_line() {
     let ssi = SurfaceSurfaceIntersection {
         polylines: vec![pts],
         b_spline_curve: None,
+        b_spline_curves: Vec::new(),
     };
     let result = ssi.try_fit_b_spline(10.0);
     assert!(result.is_ok(), "Line should fit: {:?}", result.err());
@@ -37,6 +38,7 @@ fn test_fit_b_spline_circle_arc() {
     let ssi = SurfaceSurfaceIntersection {
         polylines: vec![pts],
         b_spline_curve: None,
+        b_spline_curves: Vec::new(),
     };
     // Circle arc needs looser tolerance (non-rational B-spline can't represent
     // exact circle, only approximate)
@@ -58,6 +60,7 @@ fn test_fit_b_spline_rejects_bad_fit() {
     let ssi = SurfaceSurfaceIntersection {
         polylines: vec![pts],
         b_spline_curve: None,
+        b_spline_curves: Vec::new(),
     };
     // Very tight tolerance — should reject
     let result = ssi.try_fit_b_spline(1e-10);
@@ -77,6 +80,7 @@ fn test_fit_b_spline_too_few_points() {
     let ssi = SurfaceSurfaceIntersection {
         polylines: vec![pts],
         b_spline_curve: None,
+        b_spline_curves: Vec::new(),
     };
     let result = ssi.try_fit_b_spline(1e-6);
     assert!(result.is_err());
@@ -91,6 +95,7 @@ fn test_fit_b_spline_empty() {
     let ssi = SurfaceSurfaceIntersection {
         polylines: vec![],
         b_spline_curve: None,
+        b_spline_curves: Vec::new(),
     };
     let result = ssi.try_fit_b_spline(1e-6);
     assert!(result.is_err());
