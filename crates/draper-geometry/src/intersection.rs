@@ -56,6 +56,15 @@ pub struct SurfaceSurfaceIntersection {
     /// Branches that cannot be fitted within tolerance keep their polyline
     /// representation only (per-branch fallback, no global failure).
     pub b_spline_curves: Vec<NurbsCurve>,
+    /// Polyline branch index of each fitted B-spline curve (Vision 2036
+    /// §2.1 consumer contract): `b_spline_branch_indices[j]` is the index
+    /// into `polylines` of the branch that `b_spline_curves[j]` was fitted
+    /// from. Positionally aligned with `b_spline_curves`, `pcurves_a` and
+    /// `pcurves_b`. Because fitting is per-branch with fallback, the fitted
+    /// set is a subsequence of `polylines` — this map lets consumers attach
+    /// the exact 3D curve and both PCURVEs to the correct polyline branch
+    /// (unfitted branches keep their polyline representation only).
+    pub b_spline_branch_indices: Vec<usize>,
     /// PCURVEs on surface A (Vision 2036 §2.2): 2D parametric curves in the
     /// UV domain of surface A, one per fitted B-spline branch, in positional
     /// correspondence with `b_spline_curves`.
@@ -167,7 +176,9 @@ impl SurfaceSurfaceIntersection {
     /// `b_spline_curve` (legacy compat). Branches that fail keep their
     /// polyline representation (spec fallback).
     pub fn fit_b_splines_on_surfaces(&mut self, s1: &Surface, s2: &Surface, tolerance: f64) {
-        self.b_spline_curves = self.try_fit_b_splines_on_surfaces(s1, s2, tolerance);
+        let fitted = self.fit_branches_with_indices(s1, s2, tolerance);
+        self.b_spline_branch_indices = fitted.iter().map(|(i, _)| *i).collect();
+        self.b_spline_curves = fitted.into_iter().map(|(_, c)| c).collect();
         self.b_spline_curve = self.b_spline_curves.first().cloned();
     }
 
@@ -179,8 +190,26 @@ impl SurfaceSurfaceIntersection {
         s2: &Surface,
         tolerance: f64,
     ) -> Vec<NurbsCurve> {
+        self.fit_branches_with_indices(s1, s2, tolerance)
+            .into_iter()
+            .map(|(_, c)| c)
+            .collect()
+    }
+
+    /// §2.1 multi-branch fitting with branch-index tracking (consumer
+    /// contract): returns `(polyline_index, fitted_curve)` pairs in
+    /// polyline order, skipping branches that keep polyline fallback.
+    /// Powers both `fit_b_splines_on_surfaces` (which stores the indices in
+    /// `b_spline_branch_indices`) and the immutable
+    /// `try_fit_b_splines_on_surfaces`.
+    fn fit_branches_with_indices(
+        &self,
+        s1: &Surface,
+        s2: &Surface,
+        tolerance: f64,
+    ) -> Vec<(usize, NurbsCurve)> {
         let mut out = Vec::with_capacity(self.polylines.len());
-        for branch in &self.polylines {
+        for (branch_idx, branch) in self.polylines.iter().enumerate() {
             // §2.1 seam closure: near-closed branches (full loops sampled
             // [0, 2π) without the wrap point — analytic intersectors and
             // marching loops stopped within a step of closing) carry a
@@ -256,7 +285,7 @@ impl SurfaceSurfaceIntersection {
                     continue;
                 }
             };
-            out.push(final_curve);
+            out.push((branch_idx, final_curve));
         }
         out
     }
@@ -4441,6 +4470,7 @@ pub fn intersect_surfaces(
         polylines,
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };

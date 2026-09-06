@@ -15,6 +15,7 @@ fn test_fit_b_spline_line() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -41,6 +42,7 @@ fn test_fit_b_spline_circle_arc() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -65,6 +67,7 @@ fn test_fit_b_spline_rejects_bad_fit() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -87,6 +90,7 @@ fn test_fit_b_spline_too_few_points() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -104,6 +108,7 @@ fn test_fit_b_spline_empty() {
         polylines: vec![],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };

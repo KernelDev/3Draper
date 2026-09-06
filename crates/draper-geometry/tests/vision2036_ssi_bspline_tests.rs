@@ -84,6 +84,7 @@ fn test_lsq_quarter_circle_quality() {
         polylines: vec![pts],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -111,6 +112,7 @@ fn test_lsq_line_exact() {
         polylines: vec![pts.clone()],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };
@@ -147,6 +149,7 @@ fn test_newton_refinement_improves_plane_cylinder() {
         polylines: vec![noisy],
         b_spline_curve: None,
         b_spline_curves: Vec::new(),
+        b_spline_branch_indices: Vec::new(),
         pcurves_a: Vec::new(),
         pcurves_b: Vec::new(),
     };

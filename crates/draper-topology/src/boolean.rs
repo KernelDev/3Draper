@@ -602,6 +602,12 @@ pub fn intersect_surfaces(
             // Reverse the curve orientation for consistency
             for curve in &mut curves {
                 curve.points.reverse();
+                // The intersector is plane-first: its pcurve_a/pcurve_b
+                // belong to (plane, cylinder). This arm received
+                // (cylinder, plane), so the PCURVEs must swap sides to
+                // keep pcurve_a <-> surface_a (face A) — otherwise the
+                // cylinder-side split would receive the plane's UV curve.
+                std::mem::swap(&mut curve.pcurve_a, &mut curve.pcurve_b);
             }
             curves
         }
@@ -1656,441 +1662,64 @@ fn intersect_sphere_sphere(
         .collect()
 }
 
-/// General surface-surface intersection using subdivision/Newton-Raphson.
+/// General surface-surface intersection — exact draper-geometry pipeline
+/// (Vision 2036 §2.1/§2.2 consumer contract).
 ///
-/// Algorithm:
-/// 1. Sample both surfaces on a grid
-/// 2. Find cells where the signed distance changes sign (indicating intersection)
-/// 3. Refine intersection points using Newton-Raphson
-/// 4. Connect points into curves
+/// The legacy implementation here was a 40×40 grid sampling of both
+/// surfaces with proximity pairing and point chaining — a crude
+/// approximation with no curve continuity. It is replaced by the
+/// geometry crate's marching SSI (two-sided seeding + curve
+/// continuation + 4D Newton refinement), whose per-branch outputs this
+/// adapter maps onto [`IntersectionCurve`]:
+///
+/// - `points` — the marching polyline (bit-stable geometry output);
+/// - `curve` — `Curve3d::Nurbs`: the §2.1 exact B-spline fit (global
+///   least-squares + Newton refinement on BOTH surfaces), when the
+///   branch passed the tolerance gate; branches that fail keep the
+///   polyline fallback (per-branch, no global failure);
+/// - `pcurve_a`/`pcurve_b` — the §2.2 PCURVEs (analytic plane×cylinder
+///   substitution, or Newton inversion + 2D LSQ fit), attached to the
+///   branch via `b_spline_branch_indices` so each split face can
+///   evaluate the shared edge in its own UV space;
+/// - `tolerance` — the gate tolerance the curve was certified against.
 fn intersect_surfaces_general(
     surface_a: &Surface,
     surface_b: &Surface,
     tol: f64,
 ) -> Vec<IntersectionCurve> {
-    sample_surface_intersection(surface_a, surface_b, tol)
-}
-
-/// Sample-based surface intersection.
-fn sample_surface_intersection(
-    surface_a: &Surface,
-    surface_b: &Surface,
-    tol: f64,
-) -> Vec<IntersectionCurve> {
-    let (u_min_a, u_max_a, v_min_a, v_max_a) = surface_param_range(surface_a);
-    let (u_min_b, u_max_b, v_min_b, v_max_b) = surface_param_range(surface_b);
-
-    let n_a = 40;
-    let n_b = 40;
-
-    // Sample surface A on a grid
-    let mut points_a: Vec<(f64, f64, Point3d)> = Vec::with_capacity((n_a + 1) * (n_a + 1));
-    for i in 0..=n_a {
-        for j in 0..=n_a {
-            let u = u_min_a + (u_max_a - u_min_a) * (i as f64 / n_a as f64);
-            let v = v_min_a + (v_max_a - v_min_a) * (j as f64 / n_a as f64);
-            points_a.push((u, v, surface_a.point_at(u, v)));
-        }
-    }
-
-    // Sample surface B on a grid
-    let mut points_b: Vec<(f64, f64, Point3d)> = Vec::with_capacity((n_b + 1) * (n_b + 1));
-    for i in 0..=n_b {
-        for j in 0..=n_b {
-            let u = u_min_b + (u_max_b - u_min_b) * (i as f64 / n_b as f64);
-            let v = v_min_b + (v_max_b - v_min_b) * (j as f64 / n_b as f64);
-            points_b.push((u, v, surface_b.point_at(u, v)));
-        }
-    }
-
-    // Find approximate intersection points by finding close point pairs
-    let mut intersection_points: Vec<Point3d> = Vec::new();
-
-    for (_, _, pa) in &points_a {
-        for (_, _, pb) in &points_b {
-            if pa.distance_to(pb) < tol * 10.0 {
-                let midpoint = pa.midpoint(pb);
-                intersection_points.push(midpoint);
-            }
-        }
-    }
-
-    // Refine intersection points using Newton-Raphson
-    let mut refined_points: Vec<Point3d> = Vec::new();
-    for p in &intersection_points {
-        if let Some(rp) = refine_intersection_point(p, surface_a, surface_b, tol) {
-            // Check for duplicates
-            let is_dup = refined_points.iter().any(|ep| ep.distance_to(&rp) < tol * 10.0);
-            if !is_dup {
-                refined_points.push(rp);
-            }
-        }
-    }
-
-    if refined_points.is_empty() {
-        return Vec::new();
-    }
-
-    // Sort points into curves by proximity
-    let curves = chain_points_into_curves(&refined_points, tol * 100.0);
-
-    // Refine each curve with more sampling along the intersection
-    curves
-        .into_iter()
-        .map(|mut curve| {
-            if curve.points.len() >= 2 {
-                // Resample the curve to get smoother results
-                curve.points = resample_curve_points(&curve.points, 100);
-            }
-            curve
-        })
-        .collect()
-}
-
-/// Refine an approximate intersection point using Newton-Raphson.
-///
-/// The intersection condition is: S_a(u_a, v_a) = S_b(u_b, v_b)
-/// We solve for (u_a, v_a, u_b, v_b) such that S_a - S_b = 0.
-fn refine_intersection_point(
-    initial: &Point3d,
-    surface_a: &Surface,
-    surface_b: &Surface,
-    tol: f64,
-) -> Option<Point3d> {
-    // Project the initial point onto both surfaces to get initial UV params
-    let (mut ua, mut va) = project_point_to_surface_uv(initial, surface_a);
-    let (mut ub, mut vb) = project_point_to_surface_uv(initial, surface_b);
-
-    let max_iter = 20;
-    let eps = 1e-10;
-
-    for _ in 0..max_iter {
-        let pa = surface_a.point_at(ua, va);
-        let pb = surface_b.point_at(ub, vb);
-
-        // Residual: pa - pb
-        let rx = pa.x - pb.x;
-        let ry = pa.y - pb.y;
-        let rz = pa.z - pb.z;
-        let residual = (rx * rx + ry * ry + rz * rz).sqrt();
-
-        if residual < tol {
-            return Some(Point3d::new(
-                (pa.x + pb.x) / 2.0,
-                (pa.y + pb.y) / 2.0,
-                (pa.z + pb.z) / 2.0,
-            ));
-        }
-
-        // Compute Jacobian numerically
-        let h = 1e-6;
-
-        // Partial derivatives of S_a
-        let pa_du = surface_a.point_at(ua + h, va);
-        let pa_dv = surface_a.point_at(ua, va + h);
-        let da_du = Vec3d::new((pa_du.x - pa.x) / h, (pa_du.y - pa.y) / h, (pa_du.z - pa.z) / h);
-        let da_dv = Vec3d::new((pa_dv.x - pa.x) / h, (pa_dv.y - pa.y) / h, (pa_dv.z - pa.z) / h);
-
-        // Partial derivatives of S_b
-        let pb_du = surface_b.point_at(ub + h, vb);
-        let pb_dv = surface_b.point_at(ub, vb + h);
-        let db_du = Vec3d::new((pb_du.x - pb.x) / h, (pb_du.y - pb.y) / h, (pb_du.z - pb.z) / h);
-        let db_dv = Vec3d::new((pb_dv.x - pb.x) / h, (pb_dv.y - pb.y) / h, (pb_dv.z - pb.z) / h);
-
-        // Jacobian: J = [da_du, da_dv, -db_du, -db_dv]
-        // System: J * [dua, dva, dub, dvb]^T = -[rx, ry, rz]^T
-        // This is an underdetermined system (3 equations, 4 unknowns)
-        // Use pseudo-inverse or least-squares
-
-        // Build 3x4 Jacobian matrix
-        let j = [
-            [da_du.x, da_dv.x, -db_du.x, -db_dv.x],
-            [da_du.y, da_dv.y, -db_du.y, -db_dv.y],
-            [da_du.z, da_dv.z, -db_du.z, -db_dv.z],
-        ];
-
-        // Solve using normal equations: J^T J x = J^T b
-        let jtj = mat4_multiply_mat4_transpose(&j);
-        let jtb = [
-            -(j[0][0] * rx + j[1][0] * ry + j[2][0] * rz),
-            -(j[0][1] * rx + j[1][1] * ry + j[2][1] * rz),
-            -(j[0][2] * rx + j[1][2] * ry + j[2][2] * rz),
-            -(j[0][3] * rx + j[1][3] * ry + j[2][3] * rz),
-        ];
-
-        if let Some(delta) = solve_4x4(&jtj, &jtb) {
-            ua += delta[0];
-            va += delta[1];
-            ub += delta[2];
-            vb += delta[3];
-
-            // Clamp to parametric ranges
-            let (ua_min, ua_max, va_min, va_max) = surface_param_range(surface_a);
-            let (ub_min, ub_max, vb_min, vb_max) = surface_param_range(surface_b);
-            ua = ua.clamp(ua_min, ua_max);
-            va = va.clamp(va_min, va_max);
-            ub = ub.clamp(ub_min, ub_max);
-            vb = vb.clamp(vb_min, vb_max);
-
-            let step_norm = delta.iter().map(|d| d * d).sum::<f64>().sqrt();
-            if step_norm < eps {
-                break;
-            }
-        } else {
-            break;
-        }
-    }
-
-    let pa = surface_a.point_at(ua, va);
-    let pb = surface_b.point_at(ub, vb);
-    let residual = pa.distance_to(&pb);
-
-    if residual < tol * 100.0 {
-        Some(Point3d::new(
-            (pa.x + pb.x) / 2.0,
-            (pa.y + pb.y) / 2.0,
-            (pa.z + pb.z) / 2.0,
-        ))
-    } else {
-        None
-    }
-}
-
-/// Multiply J^T * J to get a 4x4 matrix.
-fn mat4_multiply_mat4_transpose(j: &[[f64; 4]; 3]) -> [[f64; 4]; 4] {
-    let mut result = [[0.0f64; 4]; 4];
-    for i in 0..4 {
-        for j_idx in 0..4 {
-            let mut sum = 0.0;
-            for k in 0..3 {
-                sum += j[k][i] * j[k][j_idx];
-            }
-            result[i][j_idx] = sum;
-        }
-    }
-    // Add regularization
-    for i in 0..4 {
-        result[i][i] += 1e-10;
-    }
-    result
-}
-
-/// Solve a 4x4 linear system using Gaussian elimination with partial pivoting.
-fn solve_4x4(a: &[[f64; 4]; 4], b: &[f64; 4]) -> Option<[f64; 4]> {
-    let mut aug = [[0.0f64; 5]; 4];
-    for i in 0..4 {
-        for j in 0..4 {
-            aug[i][j] = a[i][j];
-        }
-        aug[i][4] = b[i];
-    }
-
-    // Forward elimination with partial pivoting
-    for col in 0..4 {
-        // Find pivot
-        let mut max_val = aug[col][col].abs();
-        let mut max_row = col;
-        for row in (col + 1)..4 {
-            if aug[row][col].abs() > max_val {
-                max_val = aug[row][col].abs();
-                max_row = row;
-            }
-        }
-
-        if max_val < 1e-15 {
-            return None; // Singular
-        }
-
-        // Swap rows
-        if max_row != col {
-            for j in 0..5 {
-                let tmp = aug[col][j];
-                aug[col][j] = aug[max_row][j];
-                aug[max_row][j] = tmp;
-            }
-        }
-
-        // Eliminate below
-        for row in (col + 1)..4 {
-            let factor = aug[row][col] / aug[col][col];
-            for j in col..5 {
-                aug[row][j] -= factor * aug[col][j];
-            }
-        }
-    }
-
-    // Back substitution
-    let mut x = [0.0f64; 4];
-    for i in (0..4).rev() {
-        let mut sum = aug[i][4];
-        for j in (i + 1)..4 {
-            sum -= aug[i][j] * x[j];
-        }
-        if aug[i][i].abs() < 1e-15 {
-            return None;
-        }
-        x[i] = sum / aug[i][i];
-    }
-
-    Some(x)
-}
-
-/// Chain intersection points into curves based on proximity.
-fn chain_points_into_curves(points: &[Point3d], max_gap: f64) -> Vec<IntersectionCurve> {
-    if points.is_empty() {
-        return Vec::new();
-    }
-
-    let n = points.len();
-    let mut visited = vec![false; n];
-    let mut curves: Vec<IntersectionCurve> = Vec::new();
-
-    // Build adjacency based on proximity
-    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for i in 0..n {
-        for j in (i + 1)..n {
-            if points[i].distance_to(&points[j]) < max_gap {
-                adjacency[i].push(j);
-                adjacency[j].push(i);
-            }
-        }
-    }
-
-    // Find connected components using DFS
-    for start in 0..n {
-        if visited[start] {
-            continue;
-        }
-
-        let mut component: Vec<usize> = Vec::new();
-        let mut stack = vec![start];
-        while let Some(node) = stack.pop() {
-            if visited[node] {
-                continue;
-            }
-            visited[node] = true;
-            component.push(node);
-            for &neighbor in &adjacency[node] {
-                if !visited[neighbor] {
-                    stack.push(neighbor);
-                }
-            }
-        }
-
-        // Sort the component into a chain
-        if component.len() >= 2 {
-            let chain = order_chain(&component, &adjacency, points);
-            let curve_points: Vec<Point3d> = chain.iter().map(|&i| points[i]).collect();
-            curves.push(IntersectionCurve {
-                points: curve_points,
-                curve: None,
-                pcurve_a: None,
-                pcurve_b: None,
-                tolerance: max_gap,
-            });
-        } else if component.len() == 1 {
-            curves.push(IntersectionCurve {
-                points: vec![points[component[0]]],
-                curve: None,
-                pcurve_a: None,
-                pcurve_b: None,
-                tolerance: max_gap,
-            });
-        }
-    }
-
-    curves
-}
-
-/// Order points in a connected component into a chain (path).
-fn order_chain(
-    component: &[usize],
-    adjacency: &[Vec<usize>],
-    _points: &[Point3d],
-) -> Vec<usize> {
-    if component.len() <= 2 {
-        return component.to_vec();
-    }
-
-    // Find an endpoint (vertex with degree 1)
-    let mut start = component[0];
-    for &idx in component {
-        let degree = adjacency[idx]
+    let ssi = draper_geometry::intersection::intersect_surfaces(surface_a, surface_b, tol);
+    let mut out = Vec::with_capacity(ssi.polylines.len());
+    for (branch_idx, points) in ssi.polylines.iter().enumerate() {
+        // Fitted B-spline for THIS polyline branch: `b_spline_branch_indices`
+        // is positionally aligned with `b_spline_curves`/`pcurves_a`/
+        // `pcurves_b`. Linear scan (branches are few) — deterministic,
+        // no HashMap iteration order.
+        let fitted = ssi
+            .b_spline_branch_indices
             .iter()
-            .filter(|&&n| component.contains(&n))
-            .count();
-        if degree <= 1 {
-            start = idx;
-            break;
-        }
+            .position(|&bi| bi == branch_idx)
+            .map(|j| {
+                (
+                    ssi.b_spline_curves[j].clone(),
+                    ssi.pcurves_a.get(j).cloned(),
+                    ssi.pcurves_b.get(j).cloned(),
+                )
+            });
+        let (curve, pcurve_a, pcurve_b) = match fitted {
+            Some((c, pa, pb)) => (Some(Curve3d::Nurbs(c)), pa, pb),
+            // §2.1 per-branch fallback: unfitted branch — polyline
+            // representation only, no exact curve, no PCURVE.
+            None => (None, None, None),
+        };
+        out.push(IntersectionCurve {
+            points: points.clone(),
+            curve,
+            pcurve_a,
+            pcurve_b,
+            tolerance: tol,
+        });
     }
-
-    // Traverse the chain
-    let mut ordered = vec![start];
-    let mut current = start;
-    let component_set: std::collections::HashSet<usize> = component.iter().copied().collect();
-
-    loop {
-        let next = adjacency[current]
-            .iter()
-            .filter(|&&n| component_set.contains(&n) && !ordered.contains(&n))
-            .copied()
-            .next();
-
-        match next {
-            Some(n) => {
-                ordered.push(n);
-                current = n;
-            }
-            None => break,
-        }
-    }
-
-    ordered
-}
-
-/// Resample curve points to get a smooth, evenly-spaced curve.
-fn resample_curve_points(points: &[Point3d], n_target: usize) -> Vec<Point3d> {
-    if points.len() < 2 {
-        return points.to_vec();
-    }
-
-    // Compute cumulative arc lengths
-    let mut arc_lengths: Vec<f64> = vec![0.0];
-    for i in 1..points.len() {
-        let d = points[i].distance_to(&points[i - 1]);
-        arc_lengths.push(arc_lengths[i - 1] + d);
-    }
-
-    let total_length = arc_lengths[arc_lengths.len() - 1];
-    if total_length < 1e-15 {
-        return points.to_vec();
-    }
-
-    // Resample at evenly-spaced arc lengths
-    let mut resampled: Vec<Point3d> = Vec::with_capacity(n_target);
-    for i in 0..=n_target {
-        let target_len = total_length * (i as f64 / n_target as f64);
-
-        // Find the segment containing this arc length
-        let mut seg = 0;
-        while seg < arc_lengths.len() - 1 && arc_lengths[seg + 1] < target_len {
-            seg += 1;
-        }
-        if seg >= points.len() - 1 {
-            resampled.push(points[points.len() - 1]);
-        } else {
-            let seg_len = arc_lengths[seg + 1] - arc_lengths[seg];
-            let t = if seg_len > 1e-15 {
-                (target_len - arc_lengths[seg]) / seg_len
-            } else {
-                0.0
-            };
-            resampled.push(points[seg].lerp(&points[seg + 1], t));
-        }
-    }
-
-    resampled
+    out
 }
 
 // ============================================================
@@ -3226,6 +2855,10 @@ pub fn boolean_operation(
                         Curve3d::Circle(_) => (0.0, 2.0 * PI),
                         Curve3d::Line(_) => (0.0, 1.0),
                         Curve3d::Ellipse(_) => (0.0, 2.0 * PI),
+                        // Vision 2036 §2.1 consumer: the B-spline's own
+                        // knot domain — discretization and downstream
+                        // evaluation must use the curve's parametrization.
+                        Curve3d::Nurbs(_) => analytic.param_range(),
                         _ => (0.0, 1.0),
                     };
                     (analytic.clone(), pr)
@@ -5379,8 +5012,260 @@ mod tests {
             }
         }
     }
-}
 
+    // ---- Vision 2036 §2.1/§2.2 consumer: exact general-path SSI ----
+
+    /// Bilinear NURBS patch z=0 spanning [0,10]×[0,10] ∩ cylinder R=3 at
+    /// (5,5) → intersection circle. (Nurbs, Cylinder) has no analytic arm
+    /// in the dispatch → general path → geometry marching SSI.
+    fn test_patch() -> Surface {
+        Surface::Nurbs(draper_geometry::NurbsSurface::from_v_rows(
+            1,
+            1,
+            vec![
+                vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(10.0, 0.0, 0.0)],
+                vec![Point3d::new(0.0, 10.0, 0.0), Point3d::new(10.0, 10.0, 0.0)],
+            ],
+            vec![vec![1.0; 2]; 2],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            false,
+            false,
+        ))
+    }
+
+    #[test]
+    fn test_general_ssi_exact_bspline_pcurves() {
+        let patch = test_patch();
+        let cyl = Surface::Cylinder(CylinderSurface::new(
+            Point3d::new(5.0, 5.0, 0.0),
+            Direction3d::Z,
+            3.0,
+        ));
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(&patch, &cyl, &tol);
+        assert!(
+            !curves.is_empty(),
+            "NURBS patch ∩ cylinder must produce intersection curves"
+        );
+
+        // Find a branch that carries the fitted B-spline (per-branch
+        // fallback: at least one branch should be fitted on a clean
+        // analytic circle intersection).
+        let fitted = curves
+            .iter()
+            .find(|c| matches!(c.curve, Some(Curve3d::Nurbs(_))))
+            .expect("general path must attach a fitted B-spline branch");
+        assert!(fitted.pcurve_a.is_some(), "PCURVE on surface A (patch)");
+        assert!(fitted.pcurve_b.is_some(), "PCURVE on surface B (cylinder)");
+        assert!(fitted.points.len() >= 8, "marching polyline, not a segment");
+
+        // The B-spline param range must be its own knot domain (§2.1
+        // consumer contract — `boolean_operation` reads it for the shared
+        // edge).
+        if let Some(Curve3d::Nurbs(nc)) = &fitted.curve {
+            let n = nc.knots.len();
+            let p = nc.degree;
+            let (t_min, t_max) = fitted.curve.as_ref().unwrap().param_range();
+            assert_eq!(t_min, nc.knots[p]);
+            assert_eq!(t_max, nc.knots[n - p - 1]);
+        }
+
+        // Marching polyline lies on the intersection circle.
+        for pt in &fitted.points {
+            let radial = ((pt.x - 5.0) * (pt.x - 5.0) + (pt.y - 5.0) * (pt.y - 5.0)).sqrt();
+            assert!((radial - 3.0).abs() < 5e-2, "point off circle: radial={}", radial);
+            assert!(pt.z.abs() < 5e-2, "point off plane: z={}", pt.z);
+        }
+
+        // Composed PCURVEs reproduce the circle on BOTH surfaces (§2.2):
+        // each 2D sample maps onto a 3D point on the intersection.
+        let sample2d = |c: &Curve2d, n: usize| -> Vec<(f64, f64)> {
+            let (t0, t1) = c.param_range();
+            (0..n)
+                .map(|i| {
+                    let p = c.point_at(t0 + (t1 - t0) * i as f64 / (n - 1) as f64);
+                    (p.u, p.v)
+                })
+                .collect()
+        };
+        let mut max_dev_a = 0.0_f64;
+        for (u, v) in sample2d(fitted.pcurve_a.as_ref().unwrap(), 64) {
+            let q = patch.point_at(u, v);
+            let radial = ((q.x - 5.0) * (q.x - 5.0) + (q.y - 5.0) * (q.y - 5.0)).sqrt();
+            let dev = ((radial - 3.0) * (radial - 3.0) + q.z * q.z).sqrt();
+            max_dev_a = max_dev_a.max(dev);
+        }
+        assert!(
+            max_dev_a < 1e-2,
+            "patch-side PCURVE composed deviation {:.3e}",
+            max_dev_a
+        );
+        let mut max_dev_b = 0.0_f64;
+        for (u, v) in sample2d(fitted.pcurve_b.as_ref().unwrap(), 64) {
+            let q = cyl.point_at(u, v);
+            let radial = ((q.x - 5.0) * (q.x - 5.0) + (q.y - 5.0) * (q.y - 5.0)).sqrt();
+            let dev = ((radial - 3.0) * (radial - 3.0) + q.z * q.z).sqrt();
+            max_dev_b = max_dev_b.max(dev);
+        }
+        assert!(
+            max_dev_b < 1e-2,
+            "cylinder-side PCURVE composed deviation {:.3e}",
+            max_dev_b
+        );
+    }
+
+    #[test]
+    fn test_general_ssi_disjoint_surfaces_empty() {
+        // Two NURBS patches in disjoint regions: the marching SSI must
+        // report no intersection (both seed grids find no near-contact).
+        let far = Surface::Nurbs(draper_geometry::NurbsSurface::from_v_rows(
+            1,
+            1,
+            vec![
+                vec![
+                    Point3d::new(100.0, 100.0, 100.0),
+                    Point3d::new(110.0, 100.0, 100.0),
+                ],
+                vec![
+                    Point3d::new(100.0, 110.0, 100.0),
+                    Point3d::new(110.0, 110.0, 100.0),
+                ],
+            ],
+            vec![vec![1.0; 2]; 2],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            false,
+            false,
+        ));
+        let tol = ToleranceContext::new();
+        let curves = intersect_surfaces(&test_patch(), &far, &tol);
+        assert!(
+            curves.is_empty(),
+            "disjoint patches must produce no curves, got {}",
+            curves.len()
+        );
+    }
+
+    #[test]
+    fn test_plane_cylinder_pcurve_order_swap() {
+        // `intersect_plane_cylinder` is plane-first: its pcurve_a is the
+        // plane-side circle, pcurve_b the cylinder-side generator line.
+        // The (Cylinder, Plane) dispatch arm must SWAP them so that
+        // pcurve_a always belongs to surface_a (the cylinder).
+        let plane = Surface::Plane(Plane::xy());
+        let cyl = Surface::Cylinder(CylinderSurface::new(
+            Point3d::ORIGIN,
+            Direction3d::Z,
+            3.0,
+        ));
+        let tol = ToleranceContext::new();
+
+        let direct = intersect_surfaces(&plane, &cyl, &tol);
+        assert_eq!(direct.len(), 1);
+        assert!(matches!(
+            direct[0].pcurve_a.as_ref().unwrap(),
+            Curve2d::Circle(_)
+        ));
+        assert!(matches!(
+            direct[0].pcurve_b.as_ref().unwrap(),
+            Curve2d::Line(_)
+        ));
+
+        let reversed = intersect_surfaces(&cyl, &plane, &tol);
+        assert_eq!(reversed.len(), 1);
+        assert!(
+            matches!(reversed[0].pcurve_a.as_ref().unwrap(), Curve2d::Line(_)),
+            "cylinder-first: pcurve_a must be the cylinder-side generator line"
+        );
+        assert!(
+            matches!(reversed[0].pcurve_b.as_ref().unwrap(), Curve2d::Circle(_)),
+            "cylinder-first: pcurve_b must be the plane-side circle"
+        );
+    }
+
+    #[test]
+    fn test_boolean_subtract_nurbs_face_shared_edge() {
+        // End-to-end: box with the top face surface replaced by an exactly
+        // equivalent bilinear NURBS patch. The top-face ∩ cylinder pair has
+        // no analytic arm → general path → the shared edge is born as an
+        // exact B-spline (§2.1) with the knot-domain param range, and the
+        // hole coedge carries the Newton-inverted PCURVE (§2.2).
+        let mut box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let top_nurbs = Surface::Nurbs(draper_geometry::NurbsSurface::from_v_rows(
+            1,
+            1,
+            vec![
+                vec![
+                    Point3d::new(-5.0, -5.0, 5.0),
+                    Point3d::new(5.0, -5.0, 5.0),
+                ],
+                vec![
+                    Point3d::new(-5.0, 5.0, 5.0),
+                    Point3d::new(5.0, 5.0, 5.0),
+                ],
+            ],
+            vec![vec![1.0; 2]; 2],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            false,
+            false,
+        ));
+        if let Some(shell) = box_solid.outer_shell.as_mut() {
+            shell.faces[1].surface = Some(top_nurbs);
+        }
+        let cyl_solid = ShapeBuilder::make_cylinder_at(0.0, 0.0, -6.0, 2.0, 12.0);
+
+        let result = boolean_subtract(&box_solid, &cyl_solid, &make_tol_ctx());
+        let solid = result.expect("boolean subtract with a NURBS top face must succeed");
+
+        let shell = solid.outer_shell.as_ref().expect("result shell");
+        assert!(
+            shell.faces.len() >= 6,
+            "expected at least 6 faces (hole-in-top instead of split), got {}",
+            shell.faces.len()
+        );
+
+        // At least one edge in the result carries the exact B-spline of
+        // the (Nurbs × Cylinder) intersection, with the knot-domain
+        // param range (not the legacy (0, 1) blanket).
+        let mut found_nurbs = false;
+        for face in &shell.faces {
+            for eid in &face.edge_ids {
+                if let Some(edge) = solid.resolve_edge(*eid) {
+                    if let Some(Curve3d::Nurbs(nc)) = &edge.curve {
+                        let n = nc.knots.len();
+                        let p = nc.degree;
+                        let (t_min, t_max) = edge.param_range;
+                        assert!(
+                            (t_min - nc.knots[p]).abs() < 1e-12,
+                            "param_range.0 must be the first valid knot"
+                        );
+                        assert!(
+                            (t_max - nc.knots[n - p - 1]).abs() < 1e-12,
+                            "param_range.1 must be the last valid knot"
+                        );
+                        // The intersection circle: radius 2 around (0,0).
+                        let mid =
+                            Curve3d::Nurbs(nc.clone()).point_at(0.5 * (t_min + t_max));
+                        let radial =
+                            ((mid.x * mid.x) + (mid.y * mid.y)).sqrt();
+                        assert!(
+                            (radial - 2.0).abs() < 0.2,
+                            "B-spline midpoint on the r=2 circle, radial={}",
+                            radial
+                        );
+                        found_nurbs = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            found_nurbs,
+            "the result must contain at least one exact B-spline shared edge (general-path SSI)"
+        );
+    }
     // ── Torus SSI wrappers (T-series, 2026-09-02) ─────────────────────
 
     #[test]
@@ -5779,3 +5664,4 @@ mod tests {
             }
         }
     }
+}

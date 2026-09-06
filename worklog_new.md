@@ -3899,3 +3899,89 @@ endpoint-интерполирующий LSQ варит шов: P0 == P_last, C0-
 - Cylinder×Torus parallel-offset аналитика (квартка) — без изменений
 - Legacy eprintln в converter.rs — без изменений
 - C2-периодичность шва (периодические узлы) — будущий пункт
+
+# Worklog — Vision 2036 §2.1/§2.2 consumer: boolean exact SSI (B-spline + PCURVE) (2026-09-06, тринадцатая сессия)
+
+**Baseline:** commit `1372373` (§2.1 follow-up — замыкание шва).
+**Задача:** пункт «Осталось» из §2.1/§2.2 — первый потребитель точного
+SSI: boolean.rs (собственный SSI-конвейер).
+
+## Что сделано
+
+1. **geometry — consumer-контракт выравнивания веток**: новое поле
+   `SurfaceSurfaceIntersection::b_spline_branch_indices: Vec<usize>` —
+   индекс полилинии для каждого фитированного B-spline (позиционное
+   соответствие `polylines` ↔ `b_spline_curves` ↔ `pcurves_a`/`pcurves_b`;
+   фитированное множество — подпоследовательность полилиний из-за
+   per-branch fallback). Фиттинг переработан в приватный
+   `fit_branches_with_indices`; публичные сигнатуры
+   (`try_fit_b_splines_on_surfaces` и др.) не изменены.
+
+2. **topology boolean.rs — general-путь через точный конвейер**:
+   `intersect_surfaces_general` вызывает
+   `draper_geometry::intersection::intersect_surfaces` (marching SSI:
+   two-sided seeding + curve continuation + 4D Newton + relaxed-gate
+   LSQ) вместо собственного 40×40 grid-sampling + proximity chaining.
+   Адаптер per-branch: `points` = marching-полилиния (bit-stable),
+   `curve` = `Curve3d::Nurbs` (§2.1 точный B-spline; unfitted-ветка —
+   polyline fallback, контракт сохранён), `pcurve_a`/`pcurve_b` = §2.2
+   PCURVEs, привязанные через `b_spline_branch_indices` (детерминированный
+   linear-scan, без HashMap). Удалён dead-code (~440 строк):
+   `sample_surface_intersection`, `refine_intersection_point`,
+   `mat4_multiply_mat4_transpose`, `solve_4x4`,
+   `chain_points_into_curves`, `order_chain`, `resample_curve_points`.
+
+3. **boolean_operation: Nurbs param_range** — shared edge с B-spline
+   получает собственный knot-домен (`analytic.param_range()`), а не
+   blanket (0, 1): дискретизация и downstream-вычисления работают в
+   собственной параметризации кривой.
+
+4. **Latent bug fix: pcurve swap для обратного порядка** — arm
+   (Cylinder, Plane) разворачивал только `points`, но не PCURVEs:
+   `intersect_plane_cylinder` plane-first ставит pcurve_a на сторону
+   плоскости, а face A в этом arm'е — цилиндр → цилиндровый сплит
+   получал plane-side UV-кривую. Теперь PCURVEs свапаются
+   (`std::mem::swap`), контракт pcurve_a ↔ surface_a восстановлен.
+
+5. **Грабли сессии (устранены в ней же)**: 12 торусных T-series тестов
+   в HEAD жили ВНЕ `mod tests` — сироты верхнего уровня ПОСЛЕ
+   закрывающей `}` модуля (историческая структура T-series коммитов;
+   компилировались как `boolean::test_*` без модульного префикса).
+   Скрипт вставки новых тестов «перед последней column-0 `}`» затёр
+   их. Восстановлены из HEAD и водворены ВНУТРЬ `mod tests`
+   (структурная нормализация; счётчик 225 → 229 lib-тестов сходится).
+
+## Тесты (+4 в boolean.rs, tests-модуль)
+
+- `test_general_ssi_exact_bspline_pcurves`: Nurbs-патч × цилиндр через
+  topology-dispatch → curve = Nurbs с knot-доменом param_range, обе
+  PCURVEs, composed-точки обеих сторон на окружности пересечения
+  (< 1e-2), marching-точки на окружности (< 5e-2).
+- `test_general_ssi_disjoint_surfaces_empty`: разнесённые патчи →
+  пустой результат (marching-семена не находятся).
+- `test_plane_cylinder_pcurve_order_swap`: (Plane, Cyl) →
+  pcurve_a = Circle2d; (Cyl, Plane) → pcurve_a = Line2d (свап).
+- `test_boolean_subtract_nurbs_face_shared_edge`: end-to-end — box с
+  Nurbs-верхом минус цилиндр: результат содержит точный B-spline
+  shared edge с knot-доменом, midpoint на окружности r=2.
+
+## Верификация
+
+- draper-geometry: **232 lib + 173 integration = 405 зелёные**
+- draper-topology: **229 lib (225 базовых + 4 новых) + 31 integration
+  = 260 зелёные**
+- draper-mesh: **268 lib + 62 integration = 330 зелёные**
+- draper-core: **75 lib зелёные**
+- `cargo check --workspace --lib`: 0 ошибок;
+  `cargo check -p draper-step --tests`: 0 ошибок
+- Среда: sandbox-сброс уничтожил Rust toolchain — переустановлен
+  rustup 1.98.0 minimal + clippy, PATH закреплён в ~/.bashrc; диск
+  5.1G free; CARGO_INCREMENTAL=0 соблюдён
+
+## Осталось (обновление)
+
+- Потребители PCURVE: STEP-экспорт BREP PCURVE, viewer — отдельные
+  задачи (boolean закрыт)
+- Cylinder×Torus parallel-offset аналитика (квартка) — без изменений
+- Legacy eprintln в converter.rs — без изменений
+- C2-периодичность шва (периодические узлы) — будущий пункт
