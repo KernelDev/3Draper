@@ -106,7 +106,9 @@ impl SurfaceSurfaceIntersection {
                 }
             };
             // §2.1 step 3: Newton-Raphson refinement on both surfaces.
-            let n_samples = branch.len().clamp(16, 64);
+            // Sample density matches the branch so that the refinement
+            // re-fit retains the control-point escalation budget.
+            let n_samples = branch.len().clamp(16, 256);
             let final_curve = match newton_refine_curve(&fitted, s1, s2, n_samples) {
                 Some(refined) if refined.len() >= 4 => {
                     match lsq_fit_branch(&refined, tolerance) {
@@ -134,10 +136,10 @@ impl SurfaceSurfaceIntersection {
     pub fn fit_b_spline(&mut self, tolerance: f64) {
         match self.try_fit_b_spline(tolerance) {
             Ok(curve) => {
-                self.b_spline_curve = Some(curve);
                 if self.b_spline_curves.is_empty() {
-                    self.b_spline_curves.push(curve);
+                    self.b_spline_curves.push(curve.clone());
                 }
+                self.b_spline_curve = Some(curve);
             }
             Err(e) => {
                 log::debug!("SSI: B-spline fitting failed: {} — using polyline fallback", e);
@@ -230,10 +232,14 @@ fn lsq_knot_span(knots: &[f64], degree: usize, n_cp: usize, t: f64) -> usize {
     span
 }
 
-/// Build a clamped knot vector with interior knots placed by parameter
-/// averaging (Piegl & Tiller §9.2.1) — the standard technique for
-/// least-squares fitting: knot positions reflect the actual data spacing.
+/// Build a clamped knot vector for least-squares approximation via
+/// fractional-position interpolation between data parameters
+/// (Piegl & Tiller Eq 9.68–9.69): the parameter range is divided into
+/// `n_cp − degree` spans and interior knots are placed at the data-parameter
+/// positions that fall at fractional index `j·d`, keeping knot density
+/// proportional to data density.
 fn averaged_clamped_knots(params: &[f64], n_cp: usize, degree: usize) -> Vec<f64> {
+    let m = params.len();
     let n_knots = n_cp + degree + 1;
     let mut knots = vec![0.0_f64; n_knots];
     // Clamped ends.
@@ -243,13 +249,22 @@ fn averaged_clamped_knots(params: &[f64], n_cp: usize, degree: usize) -> Vec<f64
     for k in knots.iter_mut().rev().take(degree + 1) {
         *k = 1.0;
     }
-    // Interior knots: u_{j+degree} = (1/degree) * sum(params[j .. j+degree]).
-    for j in 1..(n_cp - degree) {
-        let mut sum = 0.0_f64;
-        for i in j..(j + degree) {
-            sum += params[i];
+    // Interior knots: d = (m-1)/(n-p) data points per knot span; interior
+    // knot j sits at parameter value interpolated at index j·d.
+    let spans = n_cp as isize - degree as isize;
+    if spans >= 1 && m > 1 {
+        let d = (m as f64 - 1.0) / spans as f64;
+        for j in 1..spans {
+            let pos = j as f64 * d;
+            let i = pos.floor() as usize;
+            let alpha = pos - i as f64;
+            let i0 = i.min(m - 1);
+            let i1 = (i0 + 1).min(m - 1);
+            let v = (1.0 - alpha) * params[i0] + alpha * params[i1];
+            // Keep strictly inside (0, 1) so the clamped multiplicity is
+            // never increased by rounding.
+            knots[(j + degree as isize) as usize] = v.clamp(1e-12, 1.0 - 1e-12);
         }
-        knots[j + degree] = sum / degree as f64;
     }
     knots
 }
@@ -314,8 +329,9 @@ fn solve_dense_system(a: &mut [Vec<f64>], b: &mut [f64]) -> Option<Vec<f64>> {
 /// which anchors the curve to the marching data.
 ///
 /// `tolerance` gates the maximum curve-to-data deviation. The control-point
-/// count is capped below the data count so the fit remains a genuine
-/// approximation (never an interpolant that hides marching noise).
+/// count starts at the curvature-adaptive estimate and doubles on
+/// `DeviationTooHigh` until the gate is met or the count reaches the data
+/// count (a genuine interpolant is never exceeded).
 fn lsq_fit_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, FittingError> {
     if pts.len() < 4 {
         return Err(FittingError::TooFewPoints { got: pts.len(), min: 4 });
@@ -328,15 +344,50 @@ fn lsq_fit_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, Fitting
     let m = pts.len();
     let degree = 3usize;
 
-    // Step 2: adaptive control-point count (curvature-scaled, capped below
-    // the data count so the solve stays over-determined).
-    let n_cp = adaptive_cp_count(pts)
+    // Step 2: adaptive control-point count (curvature-scaled), with
+    // escalation capacity up to the data count.
+    let n_cp_cap = m.saturating_sub(1).max(degree + 1);
+    let mut n_cp = adaptive_cp_count(pts)
         .max(degree + 1)
-        .min(m.saturating_sub(1))
-        .max(degree + 1);
+        .min(n_cp_cap);
+
+    loop {
+        match lsq_attempt(pts, &params, n_cp, degree) {
+            Ok((curve, max_dev)) => {
+                if max_dev < tolerance {
+                    log::debug!(
+                        "SSI §2.1: LSQ fit ({} data pts → {} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
+                        m, n_cp, degree, max_dev, tolerance
+                    );
+                    return Ok(curve);
+                }
+                if n_cp >= n_cp_cap {
+                    return Err(FittingError::DeviationTooHigh { max_dev, tolerance });
+                }
+                // Escalate: double the control-point budget until the gate is met.
+                n_cp = (n_cp * 2).min(n_cp_cap);
+            }
+            // Singular/ill-conditioned normal equations (only at control-point
+            // budgets close to the data count) — further escalation cannot
+            // help; report the best deviation observed so far.
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Single least-squares attempt with a fixed control-point count.
+/// Returns the fitted curve together with its max deviation over ALL data
+/// points; the deviation gate itself is applied by the caller.
+fn lsq_attempt(
+    pts: &[Point3d],
+    params: &[f64],
+    n_cp: usize,
+    degree: usize,
+) -> Result<(NurbsCurve, f64), FittingError> {
+    let m = pts.len();
 
     // Step 3: knot vector + basis matrix per data point.
-    let knots = averaged_clamped_knots(&params, n_cp, degree);
+    let knots = averaged_clamped_knots(params, n_cp, degree);
 
     // Unknowns: control points 1..=n_cp-2 (P0 and P_{n-1} are fixed to the
     // branch endpoints by interpolation constraints). Normal equations:
@@ -408,7 +459,7 @@ fn lsq_fit_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, Fitting
     let weights = vec![1.0_f64; n_cp];
     let curve = NurbsCurve { degree, control_points, weights, knots };
 
-    // Step 4: verify max deviation over ALL data points.
+    // Step 4: max deviation over ALL data points.
     let mut max_dev = 0.0_f64;
     let eval_curve = Curve3d::Nurbs(curve.clone());
     for (i, &p) in pts.iter().enumerate() {
@@ -418,16 +469,7 @@ fn lsq_fit_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, Fitting
             max_dev = dev;
         }
     }
-
-    if max_dev < tolerance {
-        log::debug!(
-            "SSI §2.1: LSQ fit ({} data pts → {} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
-            m, n_cp, degree, max_dev, tolerance
-        );
-        Ok(curve)
-    } else {
-        Err(FittingError::DeviationTooHigh { max_dev, tolerance })
-    }
+    Ok((curve, max_dev))
 }
 
 /// Newton-Raphson refinement of a fitted intersection curve on both surfaces
@@ -457,7 +499,10 @@ fn newton_refine_curve(
         let p = eval_curve.point_at(t);
         let (u1, v1) = s1.project_point(&p);
         let (u2, v2) = s2.project_point(&p);
-        match newton_surface_surface(s1, s2, u1, v1, u2, v2, 1e-10, 16) {
+        // Convergence tolerance 1e-6: the solver uses forward-difference
+        // derivatives (eps = 1e-7), so its achievable residual floor is
+        // ~1e-7·|S| — tighter gates would never report convergence.
+        match newton_surface_surface(s1, s2, u1, v1, u2, v2, 1e-6, 24) {
             Some((ip, _, _, _, _)) => {
                 refined.push(ip);
                 converged += 1;
@@ -3938,8 +3983,29 @@ pub fn newton_surface_surface(
             -d2v.x * f.x - d2v.y * f.y - d2v.z * f.z,
         ];
 
-        // Solve (J^T J) Δ = J^T F using Gaussian elimination for 4×4
-        let delta = match solve_4x4(&jtj, &jtf) {
+        // Solve (J^T J + λI) Δ = J^T F — Levenberg–Marquardt regularization.
+        //
+        // The 3×4 Jacobian makes plain J^T J singular BY CONSTRUCTION (four
+        // columns in ℝ³ ⇒ rank ≤ 3): for exactly dependent columns (e.g.
+        // plane ∩ cylinder, where the cylinder tangent lies in the plane)
+        // Gaussian elimination hits an exact zero pivot and the historical
+        // unregularized solve returned None forever. The LM term makes the
+        // system nonsingular and yields the minimum-norm step — the correct
+        // pseudo-inverse behavior the audit 6.2 docstring describes. The
+        // damping is scale-relative (1e-10 of the largest diagonal), so it
+        // vanishes for well-conditioned directions and only regularizes the
+        // rank-deficient null space, where J^T F has no component anyway.
+        let max_diag = jtj[0][0]
+            .max(jtj[1][1])
+            .max(jtj[2][2])
+            .max(jtj[3][3])
+            .max(1e-30);
+        let lambda = max_diag * 1e-10;
+        let mut jtj_reg = jtj;
+        for i in 0..4 {
+            jtj_reg[i][i] += lambda;
+        }
+        let delta = match solve_4x4(&jtj_reg, &jtf) {
             Some(d) => d,
             None => {
                 // Singular Jacobian — perturb and retry
