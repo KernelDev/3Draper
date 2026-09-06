@@ -569,16 +569,19 @@ pub struct TriangulationParams {
     pub bbox_surface_area: Option<f64>,
     /// Override for the per-BREP wall-clock time limit.
     ///
-    /// Defaults to `None` (use platform-specific defaults: 30s WASM, 600s native).
+    /// Defaults to `None` (use platform-specific defaults: 30s WASM,
+    /// **unlimited** native — load-dependent face skipping made output
+    /// non-reproducible, so native defaults to no wall-clock budget).
     /// When `Some(duration)`, the BREP session uses this value instead of the
     /// default, allowing tests to simulate timeout scenarios with very short
     /// limits (e.g. 1s).
     pub brep_time_limit_override: Option<std::time::Duration>,
     /// Override for the per-face wall-clock time limit.
     ///
-    /// Defaults to `None` (use platform-specific defaults: 3s WASM, 120s native).
-    /// When `Some(duration)`, each face gets this time budget instead of the
-    /// default, allowing tests to force face-level timeouts.
+    /// Defaults to `None` (use platform-specific defaults: 3s WASM,
+    /// **unlimited** native). When `Some(duration)`, each face gets this time
+    /// budget instead of the default, allowing tests to force face-level
+    /// timeouts.
     pub face_time_limit_override: Option<std::time::Duration>,
 }
 

@@ -3985,3 +3985,67 @@ SSI: boolean.rs (собственный SSI-конвейер).
 - Cylinder×Torus parallel-offset аналитика (квартка) — без изменений
 - Legacy eprintln в converter.rs — без изменений
 - C2-периодичность шва (периодические узлы) — будущий пункт
+
+---
+
+# Worklog — Детерминизм: time-гвард конвертера + хвост HashMap-порядков (2026-09-07, четырнадцатая сессия)
+
+**Baseline:** commit `6389ea7` (после 13-й сессии — Vision 2036 §2.1/§2.2
+boolean exact SSI).
+**Контекст:** параллельно с девятой сессией (13 фикс-сайтов HashMap-порядка,
+дайджест-зонд) эта сессия независимо нашла те же сайты СТУПЕНЧАТО — плюс
+корень, который зонд НЕ ловил: **wall-clock time-гвард**. Комбинированный
+результат: оба набора фиксов в main, полная эмпирическая верификация на
+промышленном наборе.
+
+## Мой вклад (не пересекается с 9-й сессией)
+
+1. **Time-гвард конвертера** (корень «load-флейка», MIGRATION_GUIDE §6
+   п.9): native-дефолты `brep_time_limit=600s`/`face_time_limit=120s` при
+   `elapsed + face_limit > brep_limit` молча skip'али ВСЕ оставшиеся грани
+   BREP после 480s — под параллельной нагрузкой (cargo test threads) порог
+   пересекался по-разному от прогона к прогону (3.05.078: 0.0% ↔ 12.9%
+   boundary; подтверждено в worklog C5 7.6b «load-флейк BREP time-limit
+   face-skip»). Зонд 9-й сессии не под нагрузкой — не ловил это.
+   Фикс: native → `Duration::MAX` (меш определяется геометрией, а не
+   загрузкой машины; WASM сохраняет 30s/3s — UX-контракт антифриза
+   браузера); предикат `face_budget_exhausted` — overflow-safe
+   (`saturating_sub` + ОБЯЗАТЕЛЬНЫЙ MAX-shortcut: `MAX.saturating_sub(e)
+   < MAX` = true → ложный skip всех граней; поймано юнит-тестом первого
+   драфта); оба пути (sequential `triangulate_brep_detailed` + chunked
+   `BrepSession`) мигрированы. +4 юнит-теста `time_guard_tests`.
+2. **converter Phase 1/2 alias-группы** (×6 сайтов): сортировка —
+   порядок логов/итераций стабилен (контент был per-group независим).
+3. **`validate_edge_consistency`**: `boundary_edges` из HashMap — выбор
+   «worst-10» diagnostic SET'а был случайным (не только порядок);
+   сортировка.
+4. **T-junction `edge_tris.keys`**: сортировка (9-я сессия закрыла
+   `splits.keys` + `&tri_splits`; эта — третий цикл).
+5. **`curve_types` печать** (×2): HashSet `{:?}` → sorted Vec.
+6. Документация: TriangulationParams doc-обновление, MIGRATION_GUIDE
+   §6 п.9 закрыт (полная ретроспектива 7 источников).
+
+## Верификация (комбинированное состояние после rebase)
+
+- industrial_files_test (23 промышленных файла, полный STEP→mesh
+  конвейер с конвертером): ×5 прогона — таблица ПОБАЙТОВО идентична;
+  полные RUST_LOG=info логи идентичны (остаточный diff — только cargo
+  build-cache шум)
+- draper-mesh 330✅ (268 lib + 62 integration, debug; release тоже)
+- draper-topology 250✅ (219 lib + 31 integration)
+- draper-step lib release 131✅ (127 + 4 новых time_guard_tests)
+- 0 новых warnings (сверено git-stash baseline)
+- Переопределения brep/face_time_limit_override сохранены
+  (timeout_partial.rs сценарии)
+
+## Среда
+
+Sandbox перезагружался в начале сессии: Rust 1.98.0 переустановлен
+(rustup minimal, 578M), PATH в ~/.bashrc. Репозиторий и история уцелели.
+
+## Осталось
+
+- Legacy eprintln-ы в converter.rs (MERGE/POST_*/WELD_SKIP) — шум в
+  stderr (из «Осталось» 9-й сессии, подтверждаю)
+- Прогон determinism_probe на комбинированном состоянии (зонд 9-й
+  сессии) как CI-гейт

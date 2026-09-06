@@ -384,11 +384,16 @@ pub fn validate_edge_consistency(mesh: &TriangleMesh, tolerance: f64) -> EdgeCon
     // (|mid_i − mid_j| ≤ (√d_a + √d_b)/2 ≤ √(d_a + d_b) < threshold), so
     // the 27-cell neighborhood at cell size = threshold finds every
     // qualifying pair.
-    let boundary_edges: Vec<((u32, u32), usize)> = edge_map
+    let mut boundary_edges: Vec<((u32, u32), usize)> = edge_map
         .iter()
         .filter(|(_, entries)| entries.len() == 1)
         .map(|(k, v)| (*k, v[0].0))
         .collect();
+    // DETERMINISM: sort by canonical edge key — HashMap iteration order is
+    // per-process random, and the "first 10" worst_inconsistencies below are
+    // selected in scan order, so the reported diagnostic SET (not just its
+    // order) varied from run to run.
+    boundary_edges.sort_by_key(|(k, _)| *k);
 
     if !boundary_edges.is_empty() {
         // Face id of the (single) triangle owning each boundary edge (O(B)).
@@ -2128,9 +2133,15 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
         }
 
         // Collect all split operations needed in this iteration.
+        // DETERMINISM: iterate edges in sorted key order — HashMap iteration
+        // order is per-process random, and the collection order here decides
+        // the order new split vertices are pushed into `mesh.vertices`, making
+        // the output mesh layout vary from run to run otherwise.
         let mut splits: HashMap<(u32, u32), Vec<(f64, u32)>> = HashMap::new();
 
-        for &(a, b) in edge_tris.keys() {
+        let mut edge_keys: Vec<(u32, u32)> = edge_tris.keys().copied().collect();
+        edge_keys.sort_unstable();
+        for (a, b) in edge_keys {
             if splits.contains_key(&(a, b)) {
                 continue;
             }

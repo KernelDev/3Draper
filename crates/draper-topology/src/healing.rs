@@ -1346,15 +1346,16 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
     let mut new_faces: Vec<(Face, Vec<Edge>)> = Vec::new();
     let mut merge_count = 0u32;
 
-    for (fi, fj) in &adjacent_pairs {
-        if faces_to_remove.contains(fi) || faces_to_remove.contains(fj) {
+    // (`adjacent_pairs` is already sorted — see DETERMINISM FIX above.)
+    for (fi, fj) in adjacent_pairs {
+        if faces_to_remove.contains(&fi) || faces_to_remove.contains(&fj) {
             continue;
         }
 
-        let face_a = staged.face(*fi);
-        let face_b = staged.face(*fj);
-        let edges_a = staged.face_edges(*fi);
-        let edges_b = staged.face_edges(*fj);
+        let face_a = staged.face(fi);
+        let face_b = staged.face(fj);
+        let edges_a = staged.face_edges(fi);
+        let edges_b = staged.face_edges(fj);
 
         // Check surface compatibility
         if !are_surfaces_compatible(&face_a.surface, &face_b.surface, tol, angular_tol) {
@@ -1377,8 +1378,8 @@ fn merge_one_pass(staged: &mut StagedShell, tol: f64, angular_tol: f64) -> u32 {
         if let Some((merged_face, merged_edges)) =
             merge_two_faces(face_a, edges_a, face_b, edges_b, &shared, tol)
         {
-            faces_to_remove.insert(*fi);
-            faces_to_remove.insert(*fj);
+            faces_to_remove.insert(fi);
+            faces_to_remove.insert(fj);
             new_faces.push((merged_face, merged_edges));
             merge_count += 1;
         }
@@ -2771,6 +2772,14 @@ fn find_boundary_loops(
 ) -> Vec<Vec<TopoId>> {
     let tol_sq = tolerance * tolerance;
 
+    // DETERMINISM: the caller passes the boundary ids pre-sorted
+    // (`boundary_edge_ids_sorted`, see fill_holes); sorting here as well
+    // keeps this function safe for any future unsorted caller — bucket
+    // contents are pushed in ascending order and loops always start from
+    // the lowest edge id, so loop assembly is a pure function of the input.
+    let mut sorted_boundary: Vec<TopoId> = boundary_edge_ids.iter().copied().collect();
+    sorted_boundary.sort_unstable();
+
     // Build adjacency: end point → list of (edge_id, start point)
     // An edge goes from start to end. The next edge in a loop starts
     // where the previous one ends.
@@ -2787,7 +2796,7 @@ fn find_boundary_loops(
         )
     };
 
-    for &edge_id in boundary_edge_ids {
+    for &edge_id in &sorted_boundary {
         if let Some(&(_start, end)) = edge_points.get(&edge_id) {
             let key = snap(&end);
             end_to_edges.entry(key).or_default().push(edge_id);
@@ -2797,7 +2806,7 @@ fn find_boundary_loops(
     let mut visited: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
     let mut loops: Vec<Vec<TopoId>> = Vec::new();
 
-    for &start_edge_id in boundary_edge_ids {
+    for &start_edge_id in &sorted_boundary {
         if visited.contains(&start_edge_id) {
             continue;
         }

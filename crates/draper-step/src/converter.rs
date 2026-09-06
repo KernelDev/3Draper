@@ -702,6 +702,119 @@ pub struct BrepSession {
     bbox: Option<(Point3d, Point3d)>,
 }
 
+/// Default per-BREP wall-clock triangulation budget.
+///
+/// **WASM** keeps a hard 30s limit — browser freeze protection is a UX
+/// contract there.
+///
+/// **Native** has NO default wall-clock limit (`Duration::MAX`). The old
+/// 600s default caused load-dependent output: under heavy parallel test
+/// load the same STEP file silently skipped different faces from run to
+/// run (3.05.078: boundary 0.0% ↔ 12.9%), making regression comparisons
+/// non-reproducible — a correctness bug for a CAD kernel, where the mesh
+/// must be determined by geometry, not by machine load. Native callers
+/// that genuinely need a budget pass `brep_time_limit_override`
+/// explicitly (e.g. `timeout_partial` tests).
+#[cfg(target_arch = "wasm32")]
+fn default_brep_time_limit() -> std::time::Duration {
+    std::time::Duration::from_secs(30)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn default_brep_time_limit() -> std::time::Duration {
+    std::time::Duration::MAX
+}
+
+/// Default per-FACE wall-clock triangulation budget (see
+/// [`default_brep_time_limit`] for the determinism rationale: 3s WASM,
+/// unlimited native).
+#[cfg(target_arch = "wasm32")]
+fn default_face_time_limit() -> std::time::Duration {
+    std::time::Duration::from_secs(3)
+}
+#[cfg(not(target_arch = "wasm32"))]
+fn default_face_time_limit() -> std::time::Duration {
+    std::time::Duration::MAX
+}
+
+/// Overflow-safe "can one more face still fit into the BREP budget?" check.
+///
+/// Equivalent to `elapsed + face_limit > brep_limit` for finite limits — but
+/// the direct sum PANICS on addition overflow in debug builds when either
+/// limit is `Duration::MAX` (the native default), and an unlimited BREP
+/// budget is never exhausted (see the shortcut inside).
+fn face_budget_exhausted(
+    brep_limit: std::time::Duration,
+    elapsed: std::time::Duration,
+    face_limit: std::time::Duration,
+) -> bool {
+    // Unlimited BREP budget (the native default): never exhausted, no matter
+    // the elapsed time. NOTE: this shortcut is REQUIRED, not an optimization:
+    // `MAX.saturating_sub(elapsed)` is `MAX - elapsed`, which is still `< MAX`
+    // and would falsely report exhaustion when the face limit is also MAX.
+    if brep_limit == std::time::Duration::MAX {
+        return false;
+    }
+    brep_limit.saturating_sub(elapsed) < face_limit
+}
+
+#[cfg(test)]
+mod time_guard_tests {
+    use super::*;
+
+    const SEC: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Native defaults must be unlimited: the mesh output of a CAD kernel is
+    /// determined by geometry, never by machine load. (WASM keeps finite
+    /// limits for browser-freeze protection — cfg'd out here.)
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn native_defaults_are_unlimited() {
+        assert_eq!(default_brep_time_limit(), std::time::Duration::MAX);
+        assert_eq!(default_face_time_limit(), std::time::Duration::MAX);
+    }
+
+    /// Unlimited limits never exhaust the budget — no face is ever skipped,
+    /// regardless of elapsed wall-clock time.
+    #[test]
+    fn unlimited_budget_never_exhausts() {
+        let big = std::time::Duration::from_secs(100_000);
+        assert!(!face_budget_exhausted(
+            std::time::Duration::MAX,
+            big,
+            std::time::Duration::MAX
+        ));
+        // Face limit finite, BREP limit unlimited: still never skip.
+        assert!(!face_budget_exhausted(std::time::Duration::MAX, big, SEC));
+    }
+
+    /// Finite semantics preserved: equivalent to `elapsed + face > brep`.
+    #[test]
+    fn finite_budget_semantics() {
+        // 500s elapsed, 120s face, 600s brep → 620 > 600 → exhausted.
+        assert!(face_budget_exhausted(SEC * 600, SEC * 500, SEC * 120));
+        // 400s elapsed → 520 ≤ 600 → not exhausted.
+        assert!(!face_budget_exhausted(SEC * 600, SEC * 400, SEC * 120));
+        // Exactly at the boundary: 480 + 120 == 600 → NOT exhausted
+        // (matches the old strict `>` comparison).
+        assert!(!face_budget_exhausted(SEC * 600, SEC * 480, SEC * 120));
+    }
+
+    /// Mixed limits (small BREP budget, unlimited face limit) must not panic
+    /// — the OLD formulation (`elapsed + face_limit`) overflowed with
+    /// `Duration::MAX` in debug builds. With saturating_sub the answer is
+    /// "a face can never fit" → exhausted, cleanly.
+    #[test]
+    fn mixed_limits_no_overflow() {
+        assert!(face_budget_exhausted(
+            SEC * 30,
+            SEC,
+            std::time::Duration::MAX
+        ));
+        // Elapsed past the BREP limit → saturating_sub clamps to zero.
+        assert!(face_budget_exhausted(SEC * 30, SEC * 60, SEC * 3));
+    }
+}
+
 /// Build the assembly tree and collect BREP instance descriptors — **without**
 /// triangulating any geometry.
 ///
@@ -1604,8 +1717,9 @@ impl OwnedStepConversionContext {
                         true
                     } else {
                         // Check per-face time budget before starting an expensive face.
+                        // Overflow-safe: limits may be `Duration::MAX` (native default).
                         let elapsed = session.brep_start.elapsed();
-                        if elapsed + session.face_time_limit > session.brep_time_limit {
+                        if face_budget_exhausted(session.brep_time_limit, elapsed, session.face_time_limit) {
                             let remaining = session.face_data_list.len() - session.next_face_idx;
                             session.skipped_faces += remaining;
                             log::warn!(
@@ -4408,7 +4522,13 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (vp, step_ids) in &vertex_pair_to_step_ids {
+            // DETERMINISM: sorted group order — per-group aliasing is
+            // independent, but a stable iteration order keeps regression
+            // log diffs meaningful (HashMap order is per-process random).
+            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
+                vertex_pair_to_step_ids.iter().collect();
+            phase1_sorted.sort_by_key(|(k, _)| **k);
+            for (vp, step_ids) in phase1_sorted {
                 if step_ids.len() < 2 { continue; }
                 alias_stats.phase1_groups += 1;
 
@@ -4471,7 +4591,11 @@ impl<'a> StepConverter<'a> {
                         }
                         log::info!(
                             "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
-                            brep_id, all_sids.len(), vp, curve_types
+                            brep_id, all_sids.len(), vp, {
+                                let mut ts: Vec<&str> = curve_types.iter().copied().collect();
+                                ts.sort_unstable();
+                                ts
+                            }
                         );
                         continue; // Skip normal aliasing — already done
                     }
@@ -4558,7 +4682,11 @@ impl<'a> StepConverter<'a> {
             }
             let mut coord_alias_count = 0usize;
             let mut coord_skipped_different_curves = 0usize;
-            for (_key, step_ids) in &coord_pair_to_step_ids {
+            // DETERMINISM: sorted group order (see Phase 1 note above).
+            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
+                coord_pair_to_step_ids.iter().collect();
+            phase2_sorted.sort_by_key(|(k, _)| **k);
+            for (_key, step_ids) in phase2_sorted {
                 if step_ids.len() < 2 { continue; }
                 alias_stats.phase2_groups += 1;
 
@@ -5130,7 +5258,11 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (vp, step_ids) in &vertex_pair_to_step_ids {
+            // DETERMINISM: sorted group order (see Phase 1 note above).
+            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
+                vertex_pair_to_step_ids.iter().collect();
+            phase1_sorted.sort_by_key(|(k, _)| **k);
+            for (vp, step_ids) in phase1_sorted {
                 if step_ids.len() < 2 { continue; }
 
                 // P2: Group by curve SHAPE using 5-point sampling.
@@ -5165,7 +5297,11 @@ impl<'a> StepConverter<'a> {
                         }
                         log::info!(
                             "BREP #{}: aliased {} step_ids with different curve types at VP {:?} (types: {:?})",
-                            brep_id, all_sids.len(), vp, curve_types
+                            brep_id, all_sids.len(), vp, {
+                                let mut ts: Vec<String> = curve_types.iter().cloned().collect();
+                                ts.sort_unstable();
+                                ts
+                            }
                         );
                         continue;
                     }
@@ -5283,7 +5419,11 @@ impl<'a> StepConverter<'a> {
             let mut coord_alias_count = 0usize;
             let mut coord_groups_with_multiple = 0usize;
             let mut coord_skipped_different_curves = 0usize;
-            for (_key, step_ids) in &coord_pair_to_step_ids {
+            // DETERMINISM: sorted group order (see Phase 1 note above).
+            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
+                coord_pair_to_step_ids.iter().collect();
+            phase2_sorted.sort_by_key(|(k, _)| **k);
+            for (_key, step_ids) in phase2_sorted {
                 if step_ids.len() < 2 { continue; }
                 coord_groups_with_multiple += 1;
 
@@ -5331,23 +5471,20 @@ impl<'a> StepConverter<'a> {
         }
 
         // Time guard: limit per-BREP triangulation time.
-        // WASM uses a moderate limit to avoid browser freezes;
-        // native uses a generous limit for complex assemblies.
+        // WASM uses a moderate limit to avoid browser freezes; native has
+        // NO default limit (load-dependent face skipping made output
+        // non-reproducible — see `default_brep_time_limit`).
         // Use override from TriangulationParams if provided.
-        #[cfg(target_arch = "wasm32")]
-        let default_brep_time_limit = std::time::Duration::from_secs(30);
-        #[cfg(not(target_arch = "wasm32"))]
-        let default_brep_time_limit = std::time::Duration::from_secs(600);
-        let brep_time_limit = params.brep_time_limit_override.unwrap_or(default_brep_time_limit);
+        let brep_time_limit = params
+            .brep_time_limit_override
+            .unwrap_or_else(default_brep_time_limit);
 
         // Per-FACE time limit: if a single face takes longer than this,
         // we skip it (returning an empty mesh for that face) rather than blocking.
         // Use override from TriangulationParams if provided.
-        #[cfg(target_arch = "wasm32")]
-        let default_face_time_limit = std::time::Duration::from_secs(3);
-        #[cfg(not(target_arch = "wasm32"))]
-        let default_face_time_limit = std::time::Duration::from_secs(120);
-        let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
+        let face_time_limit = params
+            .face_time_limit_override
+            .unwrap_or_else(default_face_time_limit);
 
         let brep_start = StdInstant::now();
 
@@ -5412,8 +5549,9 @@ impl<'a> StepConverter<'a> {
 
             // Check per-FACE time budget before starting an expensive face.
             // If we've already used most of the BREP time budget, skip remaining faces.
+            // Overflow-safe: limits may be `Duration::MAX` (native default).
             let elapsed = brep_start.elapsed();
-            if elapsed + face_time_limit > brep_time_limit {
+            if face_budget_exhausted(brep_time_limit, elapsed, face_time_limit) {
                 skipped_faces += face_data_list.len() - fi;
                 log::warn!(
                     "BREP #{}: insufficient time budget for face {} (elapsed {:?}), skipping {} remaining",
@@ -6155,7 +6293,11 @@ impl<'a> StepConverter<'a> {
             }
             let mut alias_count = 0usize;
             let mut skipped_different_curves = 0usize;
-            for (_vp, step_ids) in &vertex_pair_to_step_ids {
+            // DETERMINISM: sorted group order (see the detailed-path Phase 1).
+            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
+                vertex_pair_to_step_ids.iter().collect();
+            phase1_sorted.sort_by_key(|(k, _)| **k);
+            for (_vp, step_ids) in phase1_sorted {
                 if step_ids.len() < 2 { continue; }
                 let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
                 let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
@@ -6221,7 +6363,11 @@ impl<'a> StepConverter<'a> {
             let mut coord_alias_count = 0usize;
             let mut coord_groups_with_multiple = 0usize;
             let mut coord_skipped_different_curves = 0usize;
-            for (_key, step_ids) in &coord_pair_to_step_ids {
+            // DETERMINISM: sorted group order (see Phase 1 note above).
+            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
+                coord_pair_to_step_ids.iter().collect();
+            phase2_sorted.sort_by_key(|(k, _)| **k);
+            for (_key, step_ids) in phase2_sorted {
                 if step_ids.len() < 2 { continue; }
                 coord_groups_with_multiple += 1;
                 let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
@@ -6250,18 +6396,15 @@ impl<'a> StepConverter<'a> {
 
         // Time guard: limit per-BREP triangulation time.
         // Use override from TriangulationParams if provided, otherwise use
-        // platform-specific defaults (30s WASM / 600s native).
-        #[cfg(target_arch = "wasm32")]
-        let default_brep_time_limit = std::time::Duration::from_secs(30);
-        #[cfg(not(target_arch = "wasm32"))]
-        let default_brep_time_limit = std::time::Duration::from_secs(600);
-        let brep_time_limit = params.brep_time_limit_override.unwrap_or(default_brep_time_limit);
+        // platform-specific defaults (30s WASM / unlimited native —
+        // see `default_brep_time_limit` for the determinism rationale).
+        let brep_time_limit = params
+            .brep_time_limit_override
+            .unwrap_or_else(default_brep_time_limit);
 
-        #[cfg(target_arch = "wasm32")]
-        let default_face_time_limit = std::time::Duration::from_secs(3);
-        #[cfg(not(target_arch = "wasm32"))]
-        let default_face_time_limit = std::time::Duration::from_secs(120);
-        let face_time_limit = params.face_time_limit_override.unwrap_or(default_face_time_limit);
+        let face_time_limit = params
+            .face_time_limit_override
+            .unwrap_or_else(default_face_time_limit);
 
         // Tolerance-based dedup — uses MAX of vertex_merge_tolerance() and sewing_tol.
         let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
