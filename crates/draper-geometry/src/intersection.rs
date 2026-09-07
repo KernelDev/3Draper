@@ -210,20 +210,22 @@ impl SurfaceSurfaceIntersection {
     ) -> Vec<(usize, NurbsCurve)> {
         let mut out = Vec::with_capacity(self.polylines.len());
         for (branch_idx, branch) in self.polylines.iter().enumerate() {
-            // §2.1 seam closure: near-closed branches (full loops sampled
-            // [0, 2π) without the wrap point — analytic intersectors and
-            // marching loops stopped within a step of closing) carry a
-            // one-step gap; the fitted B-spline inherits it as a visible
-            // seam. Appending the first point closes the loop so the
-            // endpoint-interpolating fit welds the seam (P0 == P_last).
+            // §2.1 seam topology (Vision 2036 «C2-периодичность шва»):
+            // closed loops — exactly closed polylines (a sampler emitting
+            // both domain ends) and near-closed ones (full loops sampled
+            // [0, 2π) without the wrap point; marching continuation
+            // stopping within ~1.3 steps of closing) — are fitted with a
+            // PERIODIC uniform knot vector: C^{degree−1} = C2 continuity
+            // across the seam. The periodic fitter parameterizes the
+            // ORIGINAL cyclic polyline (the wrap gap becomes the natural
+            // last segment), so no weld point is appended; open branches
+            // keep the clamped endpoint-interpolating path.
             // `polylines` themselves stay untouched (bit-stability).
-            let closed_storage;
-            let branch: &[Point3d] = match close_near_closed_branch(branch) {
-                Some(closed) => {
-                    closed_storage = closed;
-                    &closed_storage
-                }
-                None => branch,
+            let closed_loop = branch_is_closed_loop(branch);
+            let fit: fn(&[Point3d], f64) -> Result<NurbsCurve, FittingError> = if closed_loop {
+                lsq_fit_periodic_branch
+            } else {
+                lsq_fit_branch
             };
             // §2.1 step 1–2: marching points + chord-length least-squares fit.
             //
@@ -235,13 +237,13 @@ impl SurfaceSurfaceIntersection {
             // scaled to the branch extent: the resulting curve is only a
             // sampling vehicle for the refinement; the branch is certified
             // (or rejected) by the gate on the REFINED re-fit below.
-            let strict_fit = lsq_fit_branch(branch, tolerance);
+            let strict_fit = fit(branch, tolerance);
             let strict_ok = strict_fit.is_ok();
             let fitted = match strict_fit {
                 Ok(c) => c,
                 Err(strict_err) => {
                     let relaxed = relaxed_initial_gate(branch, tolerance);
-                    match lsq_fit_branch(branch, relaxed) {
+                    match fit(branch, relaxed) {
                         Ok(c) => c,
                         Err(relaxed_err) => {
                             log::debug!(
@@ -261,7 +263,10 @@ impl SurfaceSurfaceIntersection {
             let n_samples = branch.len().clamp(16, 256);
             let final_curve = match newton_refine_curve(&fitted, s1, s2, n_samples) {
                 Some(refined) if refined.len() >= 4 => {
-                    match lsq_fit_branch(&refined, tolerance) {
+                    // Closed loops re-fit periodically: the refinement
+                    // sampler emits both domain ends (first == last point)
+                    // and the periodic fitter drops the wrap duplicate.
+                    match fit(&refined, tolerance) {
                         Ok(refit) => refit,
                         // Refined re-fit failed: the original curve may be
                         // kept only if it already passed the strict gate.
@@ -703,6 +708,193 @@ fn lsq_attempt(
         }
     }
     Ok((curve, max_dev))
+}
+
+/// Vision 2036 «C2-периодичность шва»: periodic uniform-knot LSQ fit for
+/// CLOSED intersection branches.
+///
+/// The clamped endpoint-interpolating fit (`lsq_fit_branch`) welds a closed
+/// loop by duplicating the branch endpoints as the first/last control
+/// points — the position matches (C0), but the tangent and curvature jump
+/// across the seam stays visible in downstream tessellation. A uniform
+/// PERIODIC knot vector removes the seam entirely:
+///
+/// * `n` distinct control points `P_0..P_{n-1}` — all free (a loop has no
+///   endpoints to interpolate),
+/// * storage `C_i = P_{i mod n}` for `i ∈ 0..n+p` (`n + p` points, the
+///   first `p` wrapped to the tail),
+/// * knots `u_i = (i − p)/n` for `i ∈ 0..=n+2p` (uniform, domain
+///   `[u_p, u_{n+p}] = [0, 1]` — matches the curve evaluator's
+///   param_range convention),
+/// * the last domain span evaluates the SAME storage indices/basis as the
+///   first span shifted by one period, so `C(0) = C(1)` exactly with
+///   `C^{p−1} = C2` continuity across the seam (cubic).
+///
+/// Parameterization is cyclic chord-length over the wrap segment: the
+/// near-closed branch gap (analytic `[0, 2π)` sampling without the wrap
+/// point; marching continuation stopping ~1.3 steps short) becomes the
+/// natural last segment. A trailing duplicate of the first point (the
+/// curve sampler emits both domain ends) is dropped.
+fn lsq_fit_periodic_branch(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, FittingError> {
+    let degree = 3usize;
+    // Drop a trailing wrap duplicate (sampler emits t=0 and t=1 of the
+    // closed domain — the same point twice).
+    let diag = {
+        let (mn, mx) = bounding_extent(pts);
+        ((mx.0 - mn.0).powi(2) + (mx.1 - mn.1).powi(2) + (mx.2 - mn.2).powi(2)).sqrt()
+    };
+    let mut data: &[Point3d] = pts;
+    if data.len() >= 2 && data[0].distance_to(&data[data.len() - 1]) <= 1e-12 * diag.max(1.0) {
+        data = &data[..data.len() - 1];
+    }
+    let n = data.len();
+    if n < 8 {
+        return Err(FittingError::TooFewPoints { got: n, min: 8 });
+    }
+    // Cyclic chord-length parameters over the wrap segment.
+    let mut segs = Vec::with_capacity(n);
+    let mut total = 0.0_f64;
+    for i in 0..n {
+        let a = &data[i];
+        let b = &data[(i + 1) % n];
+        let d = a.distance_to(b);
+        if !d.is_finite() || d <= 0.0 {
+            return Err(FittingError::DegenerateGeometry);
+        }
+        segs.push(d);
+        total += d;
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return Err(FittingError::DegenerateGeometry);
+    }
+    let mut params = Vec::with_capacity(n);
+    let mut acc = 0.0_f64;
+    for i in 0..n {
+        // Strictly positive: the shared basis helper has a clamped-domain
+        // shortcut at t <= 0 (N = e_0) that is wrong for uniform knots.
+        // t_0 = 0 becomes a 1e-9 offset — the curve there differs from the
+        // exact knot value by O(1e-9 · |C'|), far below any fit gate.
+        params.push((acc / total).max(1e-9));
+        acc += segs[i];
+    }
+
+    let n_cp_cap = n;
+    let mut n_cp = adaptive_cp_count(data).max(degree + 1).min(n_cp_cap);
+
+    loop {
+        match lsq_periodic_attempt(data, &params, n_cp, degree) {
+            Ok((curve, max_dev)) => {
+                if max_dev < tolerance {
+                    log::debug!(
+                        "SSI §2.1 periodic fit ({} data pts → {} control points, degree={}, max_dev={:.2e}, tol={:.2e})",
+                        n, n_cp, degree, max_dev, tolerance
+                    );
+                    return Ok(curve);
+                }
+                if n_cp >= n_cp_cap {
+                    return Err(FittingError::DeviationTooHigh { max_dev, tolerance });
+                }
+                n_cp = (n_cp * 2).min(n_cp_cap);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Single periodic least-squares attempt with `n_cp` DISTINCT control
+/// points (storage: `n_cp + degree`, knots uniform, domain [0, 1]).
+/// Returns the fitted closed curve and its max deviation over ALL data
+/// points; the deviation gate is applied by the caller.
+fn lsq_periodic_attempt(
+    pts: &[Point3d],
+    params: &[f64],
+    n_cp: usize,
+    degree: usize,
+) -> Result<(NurbsCurve, f64), FittingError> {
+    let m = pts.len();
+    let n_store = n_cp + degree;
+    // knots_i = (i − p)/n_cp for i ∈ 0..=(n_store + p)
+    let knots: Vec<f64> = (0..=(n_store + degree))
+        .map(|i| (i as f64 - degree as f64) / n_cp as f64)
+        .collect();
+
+    // All n_cp unknowns are free — no endpoint constraints. Normal
+    // equations over the cyclic control-point index (storage index mod n).
+    let mut ata = vec![vec![0.0_f64; n_cp]; n_cp];
+    let mut atb = vec![vec![0.0_f64; 3]; n_cp];
+
+    for k in 0..m {
+        let t = params[k].clamp(0.0, 1.0 - 1e-12);
+        let span = lsq_knot_span(&knots, degree, n_store, t);
+        let basis = bspline_basis_values(&knots, degree, span, t);
+        let base = span as isize - degree as isize;
+        for (i, &bi) in basis.iter().enumerate() {
+            if bi.abs() < 1e-14 {
+                continue;
+            }
+            let col_i = ((base + i as isize) as usize) % n_cp;
+            atb[col_i][0] += bi * pts[k].x;
+            atb[col_i][1] += bi * pts[k].y;
+            atb[col_i][2] += bi * pts[k].z;
+            for (j, &bj) in basis.iter().enumerate() {
+                if bj.abs() < 1e-14 {
+                    continue;
+                }
+                let col_j = ((base + j as isize) as usize) % n_cp;
+                ata[col_i][col_j] += bi * bj;
+            }
+        }
+    }
+
+    // Solve the three normal-equation systems (same matrix, three RHS).
+    let mut sol = vec![Vec::new(); 3];
+    for d in 0..3 {
+        let mut a_d = ata.clone();
+        let mut b_d: Vec<f64> = atb.iter().map(|r| r[d]).collect();
+        match solve_dense_system(&mut a_d, &mut b_d) {
+            Some(x) => sol[d] = x,
+            None => return Err(FittingError::DegenerateGeometry),
+        }
+    }
+
+    // Assemble storage control points (first p wrapped to the tail).
+    let distinct: Vec<Point3d> = (0..n_cp)
+        .map(|i| Point3d::new(sol[0][i], sol[1][i], sol[2][i]))
+        .collect();
+    let control_points: Vec<Point3d> = (0..n_store)
+        .map(|i| distinct[i % n_cp])
+        .collect();
+    let weights = vec![1.0_f64; n_store];
+    let curve = NurbsCurve { degree, control_points, weights, knots };
+
+    // Max deviation over ALL data points (de Boor evaluation — the real
+    // curve, knots and all).
+    let mut max_dev = 0.0_f64;
+    let eval_curve = Curve3d::Nurbs(curve.clone());
+    for (i, &p) in pts.iter().enumerate() {
+        let eval = eval_curve.point_at(params[i]);
+        let dev = ((p.x - eval.x).powi(2) + (p.y - eval.y).powi(2) + (p.z - eval.z).powi(2)).sqrt();
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+    Ok((curve, max_dev))
+}
+
+/// Branch loop topology for the §2.1 fit: `true` when the polyline is a
+/// closed loop — exactly closed (endpoints coincide, e.g. a sampler that
+/// emits both domain ends) or near-closed per [`close_near_closed_branch`]
+/// criteria (analytic `[0, 2π)` sampling without the wrap point; marching
+/// continuation stopping within ~1.3 steps of closing).
+fn branch_is_closed_loop(branch: &[Point3d]) -> bool {
+    let n = branch.len();
+    if n < 8 {
+        return false;
+    }
+    if branch[0].distance_to(&branch[n - 1]) < 1e-12 {
+        return true;
+    }
+    close_near_closed_branch(branch).is_some()
 }
 
 /// Newton-Raphson refinement of a fitted intersection curve on both surfaces

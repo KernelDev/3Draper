@@ -339,3 +339,181 @@ fn test_open_branch_not_falsely_closed() {
         );
     }
 }
+
+// ---------------------------------------------------------------
+// 5. C2 seam periodicity (Vision 2036 «C2-периодичность шва»)
+// ---------------------------------------------------------------
+
+/// Tangent magnitude+direction mismatch between the two sides of the seam:
+/// |C'(0) − C'(1)| — for a periodic uniform-knot curve this is ~machine
+/// epsilon; the clamped weld (C0 only) leaves an O(1) jump.
+fn seam_tangent_jump(curve: &NurbsCurve) -> f64 {
+    let eval = Curve3d::Nurbs(curve.clone());
+    let d0 = eval.derivative_at(0.0);
+    let d1 = eval.derivative_at(1.0);
+    ((d0.x - d1.x).powi(2) + (d0.y - d1.y).powi(2) + (d0.z - d1.z).powi(2)).sqrt()
+}
+
+/// Curvature jump across the seam: one-sided second-order estimates of
+/// C'' AT the seam from both parameter sides,
+///   C''(0⁺) ≈ (−3·C'(0) + 4·C'(h) − C'(2h)) / (2h)
+///   C''(1⁻) ≈ ( 3·C'(1) − 4·C'(1−h) + C'(1−2h)) / (2h)
+/// For a C2 seam both limits are the same C''(seam) — the estimates agree
+/// to O(h²); a C0/C1 weld (clamped fit with duplicated endpoints) leaves
+/// an O(|C'(1)−C'(0)|/h) jump.
+fn seam_curvature_jump(curve: &NurbsCurve, h: f64) -> f64 {
+    let eval = Curve3d::Nurbs(curve.clone());
+    let d0 = eval.derivative_at(0.0);
+    let d1 = eval.derivative_at(h);
+    let d2 = eval.derivative_at(2.0 * h);
+    let dp = eval.derivative_at(1.0);
+    let dm = eval.derivative_at(1.0 - h);
+    let dm2 = eval.derivative_at(1.0 - 2.0 * h);
+    let dd0 = (
+        (-3.0 * d0.x + 4.0 * d1.x - d2.x) / (2.0 * h),
+        (-3.0 * d0.y + 4.0 * d1.y - d2.y) / (2.0 * h),
+        (-3.0 * d0.z + 4.0 * d1.z - d2.z) / (2.0 * h),
+    );
+    let dd1 = (
+        (3.0 * dp.x - 4.0 * dm.x + dm2.x) / (2.0 * h),
+        (3.0 * dp.y - 4.0 * dm.y + dm2.y) / (2.0 * h),
+        (3.0 * dp.z - 4.0 * dm.z + dm2.z) / (2.0 * h),
+    );
+    ((dd0.0 - dd1.0).powi(2)
+        + (dd0.1 - dd1.1).powi(2)
+        + (dd0.2 - dd1.2).powi(2))
+        .sqrt()
+}
+
+#[test]
+fn test_closed_branch_seam_c2_analytic_circle() {
+    // Plane z = 0 ∩ cylinder R = 1 → full circle. The periodic fit must
+    // close the seam with C2 continuity: position AND first derivative
+    // AND the curvature trend continue across t=0/1.
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::ORIGIN,
+        Direction3d::Z,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(1.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-4);
+    assert!(!out.b_splines().is_empty());
+    let curve = &out.b_splines()[0];
+    let eval = Curve3d::Nurbs(curve.clone());
+
+    // C0: seam exactly closed.
+    let seam_gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+    assert!(seam_gap < 1e-12, "periodic seam gap = {seam_gap:.3e}");
+
+    // C1: tangents on both sides of the seam agree (machine-level).
+    let t_jump = seam_tangent_jump(curve);
+    assert!(
+        t_jump < 1e-6,
+        "periodic seam must be C1: tangent jump = {t_jump:.3e}"
+    );
+
+    // C2: the curvature estimates from both sides of the seam agree
+    // (finite-difference noise O(h^2 * C4) is about 1e-3; a C0/C1 weld
+    // would leave an O(1) jump).
+    let c_jump = seam_curvature_jump(curve, 1e-3);
+    assert!(
+        c_jump < 0.05,
+        "periodic seam must be C2: curvature jump = {c_jump:.3e}"
+    );
+
+    // Circle quality must hold with the periodic knots.
+    let dev = circle_deviation(curve, 128);
+    assert!(dev < 5e-4, "circle deviation with periodic knots {dev:.3e}");
+}
+
+#[test]
+fn test_closed_branch_seam_c2_marching_torus() {
+    // Torus (R = 10, r = 2) ∩ plane z = 1 → two latitude circles via
+    // marching (near-closed: continuation stops ~1.3 steps short). Both
+    // branches must be periodic — including the wrap gap as the natural
+    // last segment.
+    let torus = Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, 10.0, 2.0));
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(0.0, 0.0, 1.0),
+        Direction3d::Z,
+    ));
+    let out = intersect_surfaces(&torus, &plane, 1e-6);
+    assert_eq!(out.b_splines().len(), 2, "two latitude branches");
+    for curve in out.b_splines() {
+        let eval = Curve3d::Nurbs(curve.clone());
+        let seam_gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+        assert!(seam_gap < 1e-9, "periodic seam gap = {seam_gap:.3e}");
+        let t_jump = seam_tangent_jump(curve);
+        assert!(
+            t_jump < 1e-6,
+            "marching branch periodic seam must be C1: tangent jump = {t_jump:.3e}"
+        );
+        let c_jump = seam_curvature_jump(curve, 1e-3);
+        assert!(
+            c_jump < 0.05,
+            "marching branch periodic seam must be C2: curvature jump = {c_jump:.3e}"
+        );
+    }
+}
+
+#[test]
+fn test_periodic_fit_storage_layout() {
+    // The periodic representation must be self-consistent for a generic
+    // B-spline evaluator: knots count = n_cp + degree + 1, strictly
+    // increasing, param_range = [0, 1], and the tail control points
+    // duplicate the head (the wrap).
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::ORIGIN,
+        Direction3d::Z,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(1.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-4);
+    let curve = &out.b_splines()[0];
+    let n_cp = curve.control_points.len();
+    let p = curve.degree;
+    assert_eq!(curve.knots.len(), n_cp + p + 1, "knot count convention");
+    for i in 1..curve.knots.len() {
+        assert!(curve.knots[i] > curve.knots[i - 1], "strictly increasing knots");
+    }
+    let (t0, t1) = Curve3d::Nurbs(curve.clone()).param_range();
+    assert!(t0.abs() < 1e-12, "param_range starts at 0");
+    assert!((t1 - 1.0).abs() < 1e-12, "param_range ends at 1");
+    // Wrap: the first `degree` storage points repeat at the tail.
+    for i in 0..p {
+        let a = &curve.control_points[i];
+        let b = &curve.control_points[n_cp - p + i];
+        assert!(
+            a.distance_to(b) < 1e-9,
+            "storage tail must repeat the head (wrap), index {i}"
+        );
+    }
+}
+
+#[test]
+fn test_open_branch_keeps_clamped_path() {
+    // Open branches (two generator lines) must keep the clamped
+    // endpoint-interpolating fit: endpoints are INTERPOLATED exactly and
+    // the storage does NOT wrap (first != last control point).
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(2.0, 0.0, 0.0),
+        Direction3d::X,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(5.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-6);
+    assert!(out.b_splines().len() >= 2, "two generator lines");
+    for curve in out.b_splines() {
+        let n_cp = curve.control_points.len();
+        // Clamped storage: first p+1 knots equal the domain start.
+        for k in 0..=curve.degree {
+            assert!(
+                curve.knots[k].abs() < 1e-12,
+                "open branch keeps clamped knots (multiplicity p+1 at 0)"
+            );
+        }
+        // Endpoint interpolation: C(0) == P_0 exactly.
+        let eval = Curve3d::Nurbs(curve.clone());
+        let start = eval.point_at(0.0);
+        let p0 = curve.control_points[0];
+        assert!(start.distance_to(&p0) < 1e-9, "clamped fit interpolates P_0");
+        let _ = n_cp;
+    }
+}

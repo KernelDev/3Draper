@@ -459,35 +459,37 @@ impl NurbsCurve {
         let cz = a_result.2 / w;
 
         // Compute derivative of the weighted numerator A'(t) and weight derivative w'(t)
-        // Using the derivative of the B-spline basis functions
+        // Using the derivative of the B-spline basis functions.
+        //
+        // Derivative control points (Piegl & Tiller, "The NURBS Book",
+        // Algorithm A2.5 / Eq. 3.7):
+        //   Q_j = p · (P_{j+1} − P_j) / (u_{j+p+1} − u_{j+1}),  j = 0..n−1
+        // (degree p−1, knots u_1..u_{n+p}). The previous implementation
+        // divided by (u_{j+p+1} − u_j), which coincides with the correct
+        // denominator only when the interior knots coincide (Bezier span);
+        // for uniform knots it yields exactly p/(p+1) of the true
+        // derivative magnitude — exposed by the periodic uniform-knot SSI
+        // curves (Vision 2036 «C2-периодичность шва»).
         let mut dpts: Vec<(f64, f64, f64, f64)> = Vec::with_capacity(p);
         for i in 0..p {
-            let idx_curr = i;
-            let idx_next = i + 1;
-
-            let k_low = k - p + idx_curr;
-            let k_high = k - p + idx_next;
-
-            let denom1 = if k_low + p + 1 < self.knots.len() && k_low < self.knots.len() {
-                let d = self.knots[k_low + p + 1] - self.knots[k_low];
+            // j = k − p + i: the derivative control point index Q_j; the
+            // span-k de Boor recursion below with the ORIGINAL knot vector
+            // is index-equivalent to the standard degree-(p−1) evaluation
+            // on the shifted knot vector with span k−1.
+            let j = k - p + i;
+            let denom = if j + p + 1 < self.knots.len() && j + 1 < self.knots.len() {
+                let d = self.knots[j + p + 1] - self.knots[j + 1];
                 if d.abs() < 1e-15 { 0.0 } else { p as f64 / d }
             } else {
                 0.0
             };
-
-            let denom2 = if k_high + p + 1 < self.knots.len() && k_high < self.knots.len() {
-                let d = self.knots[k_high + p + 1] - self.knots[k_high];
-                if d.abs() < 1e-15 { 0.0 } else { p as f64 / d }
-            } else {
-                0.0
-            };
-
-            // d[i] = denom1 * pts[i+1] - denom2 * pts[i]
+            let next = pts[i + 1];
+            let curr = pts[i];
             dpts.push((
-                denom1 * pts[idx_next].0 - denom2 * pts[idx_curr].0,
-                denom1 * pts[idx_next].1 - denom2 * pts[idx_curr].1,
-                denom1 * pts[idx_next].2 - denom2 * pts[idx_curr].2,
-                denom1 * pts[idx_next].3 - denom2 * pts[idx_curr].3,
+                denom * (next.0 - curr.0),
+                denom * (next.1 - curr.1),
+                denom * (next.2 - curr.2),
+                denom * (next.3 - curr.3),
             ));
         }
 
