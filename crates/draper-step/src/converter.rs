@@ -2143,8 +2143,10 @@ impl BrepSession {
         {
             let report_before = validate_watertight(&self.mesh, false);
             if report_before.is_watertight() {
-                eprintln!("WELD_SKIP: BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
-                    brep_id, report_before.interior_edge_count);
+                log::info!(
+                    "BREP #{} already watertight ({} interior edges) — skipping weld to preserve triangles",
+                    brep_id, report_before.interior_edge_count
+                );
             } else {
                 // Use the MAX of:
                 // - sewing_tol (auto-computed from VERTEX_POINT distribution)
@@ -4811,8 +4813,8 @@ impl<'a> StepConverter<'a> {
             let added_tris = post_merge_tri_count - pre_merge_tri_count;
             let lost_tris = face_tri_count as isize - added_tris as isize;
             if lost_tris > 3 {
-                eprintln!(
-                    "MERGE_LOSS: BREP #{} STEP #{} ({}): {} of {} triangles lost during merge",
+                log::warn!(
+                    "BREP #{} STEP #{} ({}): {} of {} triangles lost during merge",
                     brep_id, face_data.step_face_id, surface_type, lost_tris, face_tri_count
                 );
             }
@@ -4834,7 +4836,10 @@ impl<'a> StepConverter<'a> {
         let post_filter_tris = mesh.triangle_count();
         let filter_removed = pre_filter_tris - post_filter_tris;
         if filter_removed > 0 {
-            eprintln!("POST_FILTER: BREP #{}: {} degenerate triangles removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
+            log::info!(
+                "BREP #{}: {} degenerate triangles removed ({} → {})",
+                brep_id, filter_removed, pre_filter_tris, post_filter_tris
+            );
         }
 
         // ─── Post-merge: weld boundary edge vertices (FP-drift only) ─────
@@ -5066,7 +5071,7 @@ impl<'a> StepConverter<'a> {
         params: &TriangulationParams,
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
-        eprintln!("ENTER triangulate_brep_detailed: BREP #{}", brep_id);
+        log::debug!("triangulate_brep_detailed: enter BREP #{}", brep_id);
         // P7: Use find_all_shell_refs to support BREP_WITH_VOIDS.
         // The outer shell provides the main solid; each void shell provides
         // an internal cavity (face normals already point into the solid material).
@@ -5605,15 +5610,13 @@ impl<'a> StepConverter<'a> {
             let post_merge_tri_count = mesh.triangle_count();
             let added_tris = post_merge_tri_count - pre_merge_tri_count;
             let lost_tris = face_tri_count as isize - added_tris as isize;
-            eprintln!("MERGE: BREP #{} STEP #{} ({}): face_tris={} added={} lost={}",
-                brep_id, step_face_id, surface_type, face_tri_count, added_tris, lost_tris);
+            log::debug!(
+                "BREP #{} face #{} (STEP #{}, {}): face_tris={} added={} lost={}",
+                brep_id, face_id, step_face_id, surface_type, face_tri_count, added_tris, lost_tris
+            );
             if lost_tris > 0 {
                 log::warn!(
                     "BREP #{} face #{} (STEP #{}, {}): {} of {} triangles lost during merge (degenerate/duplicate)",
-                    brep_id, face_id, step_face_id, surface_type, lost_tris, face_tri_count
-                );
-                eprintln!(
-                    "MERGE_LOSS: BREP #{} face #{} (STEP #{}, {}): {} of {} triangles lost during merge",
                     brep_id, face_id, step_face_id, surface_type, lost_tris, face_tri_count
                 );
             }
@@ -5711,7 +5714,12 @@ impl<'a> StepConverter<'a> {
         filter_degenerate_triangles(&mut mesh, 1e-10);
         let post_filter_tris = mesh.triangle_count();
         let filter_removed = pre_filter_tris - post_filter_tris;
-        eprintln!("POST_FILTER_DETAILED: BREP #{}: {} degenerate removed ({}→{})", brep_id, filter_removed, pre_filter_tris, post_filter_tris);
+        if filter_removed > 0 {
+            log::info!(
+                "BREP #{} detailed: {} degenerate removed ({} → {})",
+                brep_id, filter_removed, pre_filter_tris, post_filter_tris
+            );
+        }
 
         // Close sequential path block
         }
@@ -5762,8 +5770,10 @@ impl<'a> StepConverter<'a> {
             // to avoid creating degenerate triangles.
             let report_before = validate_watertight(&mesh, false);
             if report_before.is_watertight() {
-                eprintln!("WELD_SKIP: BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
-                    brep_id, report_before.interior_edge_count);
+                log::info!(
+                    "BREP #{} detailed already watertight ({} interior edges) — skipping weld to preserve triangles",
+                    brep_id, report_before.interior_edge_count
+                );
             } else {
                 // Use the MAX of sewing_tol and weld_tolerance() (STEP uncertainty-based).
                 let weld_tol = tol_ctx.sewing_tol
@@ -5772,7 +5782,10 @@ impl<'a> StepConverter<'a> {
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();
-                eprintln!("POST_WELD_DETAILED: BREP #{}: tris after weld ({}→{})", brep_id, pre_weld_tris, post_weld_tris);
+                log::debug!(
+                    "BREP #{} detailed: tris after weld ({} → {})",
+                    brep_id, pre_weld_tris, post_weld_tris
+                );
 
                 // ── Second-pass mesh-based weld (OpenCascade Shape Healing) ──
                 // If the VERTEX_POINT-based sewing_tol didn't fully close the
@@ -5797,7 +5810,10 @@ impl<'a> StepConverter<'a> {
                             let pre_weld2_tris = mesh.triangle_count();
                             draper_mesh::weld_boundary_edge_vertices_aggressive(&mut mesh, mesh_weld_tol);
                             let post_weld2_tris = mesh.triangle_count();
-                            eprintln!("POST_WELD2_DETAILED: BREP #{}: tris after mesh-weld ({}→{})", brep_id, pre_weld2_tris, post_weld2_tris);
+                            log::debug!(
+                                "BREP #{} detailed: tris after mesh-weld ({} → {})",
+                                brep_id, pre_weld2_tris, post_weld2_tris
+                            );
                         }
                     }
                 }
@@ -5809,7 +5825,10 @@ impl<'a> StepConverter<'a> {
                 let post_filter2 = mesh.triangle_count();
                 let filter2_removed = pre_filter2 - post_filter2;
                 if filter2_removed > 0 {
-                    eprintln!("POST_WELD_FILTER: BREP #{}: {} degenerate removed after welding ({}→{})", brep_id, filter2_removed, pre_filter2, post_filter2);
+                    log::info!(
+                        "BREP #{} detailed: {} degenerate removed after welding ({} → {})",
+                        brep_id, filter2_removed, pre_filter2, post_filter2
+                    );
                 }
             }
 
@@ -5823,8 +5842,10 @@ impl<'a> StepConverter<'a> {
             let pre_dedup = mesh.triangle_count();
             let dup_removed = mesh.remove_duplicate_triangles();
             if dup_removed > 0 {
-                eprintln!("PRE_TJ_DEDUP: BREP #{} detailed: {} duplicates removed ({}→{})",
-                    brep_id, dup_removed, pre_dedup, mesh.triangle_count());
+                log::info!(
+                    "BREP #{} detailed: {} duplicates removed before T-junction repair ({} → {})",
+                    brep_id, dup_removed, pre_dedup, mesh.triangle_count()
+                );
             }
 
             // CDT-style T-junction repair — only when non-manifold edges
@@ -5844,8 +5865,8 @@ impl<'a> StepConverter<'a> {
                     filter_degenerate_triangles(&mut mesh, 1e-10);
                     let post_tj_filter = mesh.triangle_count();
                     if pre_tj_filter > post_tj_filter {
-                        eprintln!(
-                            "POST_TJ_FILTER: BREP #{}: {} degenerate removed after T-junction repair ({}→{})",
+                        log::info!(
+                            "BREP #{} detailed: {} degenerate removed after T-junction repair ({} → {})",
                             brep_id, pre_tj_filter - post_tj_filter, pre_tj_filter, post_tj_filter,
                         );
                     }
@@ -5882,13 +5903,11 @@ impl<'a> StepConverter<'a> {
         // is represented as multiple NURBS faces covering the same region.
         // Duplicates create non-manifold edges (3+ triangles per edge).
         let dup_removed = mesh.remove_duplicate_triangles();
-        eprintln!("POST_DEDUP_DETAILED: BREP #{}: {} duplicates removed ({}→{})", brep_id, dup_removed, mesh.triangle_count() + dup_removed, mesh.triangle_count());
         if dup_removed > 0 {
             log::info!(
                 "BREP #{} detailed: removed {} duplicate/degenerate triangles ({} → {})",
                 brep_id, dup_removed, mesh.triangle_count() + dup_removed, mesh.triangle_count(),
             );
-            eprintln!("POST_DEDUP_DETAILED: BREP #{}: {} duplicate triangles removed", brep_id, dup_removed);
         }
 
         // ─── Recompute face_infos.triangle_range after remove_duplicate_triangles ───

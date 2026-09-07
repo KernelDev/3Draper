@@ -1833,14 +1833,55 @@ fn order_coedges_into_wire(
         }
 
         if !found {
-            // Can't connect — just add remaining unvisited coedges
-            for i in 0..coedges.len() {
-                if !visited[i] {
-                    ordered.push((coedges[i].0, coedges[i].1));
-                    visited[i] = true;
-                }
+            if ordered.len() == coedges.len() {
+                // All coedges consumed and the successor search came back
+                // to the (already visited) first coedge — the walk closed
+                // the loop. Fall through to the closure verification below.
+                break;
             }
-            break;
+            // Can't connect — the remaining coedges do not chain onto this
+            // walk. REMOVING the historical "dump remaining coedges"
+            // fallback: it fabricated a single wire out of DISCONNECTED
+            // loops. The canonical trigger: merging two half-cylinder
+            // faces that share BOTH seam edges leaves two disjoint
+            // circles (top + bottom), which is not representable as a
+            // single face outer wire without a seam edge (unsupported by
+            // the mesh pipeline). The fake wire produced a merged face
+            // that triangulated to a fraction of its region and leaked
+            // 536 boundary edges (3.05.078 regression, 2026-09-07).
+            // Rejecting here makes `merge_two_faces` return `None`, so
+            // the merge is skipped and both faces stay separate.
+            return None;
+        }
+    }
+
+    // The walk must have consumed ALL coedges — a smaller `ordered` means
+    // the graph has more than one connected component (disconnected loops).
+    if ordered.len() != coedges.len() {
+        return None;
+    }
+
+    // Closure: the chain must loop back — the last coedge's oriented end
+    // must coincide with the first coedge's oriented start. Without this
+    // check a chain that simply ran out of connections would still be
+    // accepted as a "closed" wire by the caller.
+    {
+        let (first_id, first_fwd) = ordered[0];
+        let (last_id, last_fwd) = *ordered.last().expect("ordered is non-empty");
+        let first_edge = edge_map.get(&first_id)?;
+        let last_edge = edge_map.get(&last_id)?;
+        let first_start = if first_fwd {
+            first_edge.start_point()?
+        } else {
+            first_edge.end_point()?
+        };
+        let last_end = if last_fwd {
+            last_edge.end_point()?
+        } else {
+            last_edge.start_point()?
+        };
+        if last_end.distance_sq_to(&first_start) >= tol_sq {
+            return None;
         }
     }
 
