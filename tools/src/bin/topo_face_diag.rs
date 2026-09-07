@@ -4,7 +4,8 @@
 // Run: cargo run --release --bin topo_face_diag -- test/nist_cube.stp
 
 use draper_step::{parse_step_file, extract_solids};
-use draper_mesh::triangulate::{TriangulationParams, triangulate_face};
+use draper_mesh::triangulate::{TriangulationParams, triangulate_solid_face_with_cache};
+use draper_mesh::edge_cache::EdgeDiscretizationCache;
 use draper_geometry::Surface;
 
 fn main() {
@@ -27,23 +28,25 @@ fn main() {
                 Surface::Cylinder(_) => "Cylinder",
                 _ => "Other",
             }).unwrap_or("None");
-            println!("\nFace {} [{}] edges={} forward={}", fi, surf_name, face.edges.len(), face.forward);
+            println!("\nFace {} [{}] edges={} forward={}", fi, surf_name, solid.face_edges(face).len(), face.forward);
             if let Some(ref wire) = face.outer_wire {
                 println!("  outer wire: {} coedges", wire.coedges.len());
                 for (ci, coedge) in wire.coedges.iter().enumerate() {
-                    let e = face.edges.iter().find(|e| e.id == coedge.edge);
+                    let face_edges = solid.face_edges(face);
+                    let e = face_edges.iter().find(|e| e.id == coedge.edge);
                     if let Some(e) = e {
                         println!("    coedge {}: edge={} fwd={} range=({:.4},{:.4}) step_id={:?}",
                             ci, e.id, coedge.forward, e.param_range.0, e.param_range.1,
                             e.step_entity_id);
                     } else {
-                        println!("    coedge {}: edge={} — NOT FOUND in face.edges!", ci, coedge.edge);
+                        println!("    coedge {}: edge={} — NOT FOUND in edge store!", ci, coedge.edge);
                     }
                 }
             }
-            // Triangulate the face standalone
+            // Triangulate the face standalone (store-resolved boundary)
             let params = TriangulationParams::default();
-            let mesh = triangulate_face(face, &params);
+            let mut cache = EdgeDiscretizationCache::new();
+            let mesh = triangulate_solid_face_with_cache(solid, face, &params, &mut cache);
             println!("  standalone triangulation: {} vertices, {} triangles", mesh.vertices.len(), mesh.triangles.len());
             for (ti, t) in mesh.triangles.iter().enumerate() {
                 let p = |i: u32| {

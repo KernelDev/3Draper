@@ -33,7 +33,7 @@ fn main() {
                     _ => "Other",
                 }
             }).unwrap_or("None");
-            println!("\nFace {}: surface={}, edges={}", fi, surf_name, face.edges.len());
+            println!("\nFace {}: surface={}, edges={}", fi, surf_name, solid.face_edges(face).len());
 
             if let Some(Surface::Cone(cone)) = &face.surface {
                 println!("  Cone: origin=({:.4},{:.4},{:.4}) axis=({:.4},{:.4},{:.4})",
@@ -44,7 +44,7 @@ fn main() {
                 println!("  Cone: apex_v={} height={}", cone.apex_v(), cone.height());
 
                 // Print edge details
-                for (ei, edge) in face.edges.iter().enumerate() {
+                for (ei, edge) in solid.face_edges(face).iter().enumerate() {
                     let edge_type = edge.curve.as_ref().map(|c| {
                         match c {
                             draper_geometry::Curve3d::Line(_) => "Line",

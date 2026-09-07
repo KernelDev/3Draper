@@ -3,7 +3,7 @@
 // Run: cargo run --release --bin face_size_diag -- test/8500-02_Vulcan.STEP [max_faces]
 
 use draper_step::{parse_step_file, extract_solids};
-use draper_mesh::triangulate::{TriangulationParams, triangulate_face_with_cache};
+use draper_mesh::triangulate::{TriangulationParams, triangulate_solid_face_with_cache};
 use draper_mesh::edge_cache::EdgeDiscretizationCache;
 use draper_geometry::{Point3d, Surface};
 
@@ -29,7 +29,7 @@ fn main() {
     let mut bmin = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
     let mut bmax = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
     for face in faces.iter() {
-        for e in &face.edges {
+        for e in solid.face_edges(face) {
             for p in [e.start_point(), e.end_point()] {
                 if let Some(p) = p {
                     bmin.x = bmin.x.min(p.x); bmin.y = bmin.y.min(p.y); bmin.z = bmin.z.min(p.z);
@@ -45,7 +45,7 @@ fn main() {
     for (fi, face) in faces.iter().enumerate() {
         if fi >= max_faces { break; }
         let t0 = std::time::Instant::now();
-        let mesh = triangulate_face_with_cache(face, &params, &mut cache);
+        let mesh = triangulate_solid_face_with_cache(solid, face, &params, &mut cache);
         total += mesh.vertices.len();
         let surf = face.surface.as_ref().map(|s| match s {
             Surface::Plane(_) => "Plane",
@@ -57,7 +57,7 @@ fn main() {
             _ => "Other",
         }).unwrap_or("None");
         println!("face {:4} [{}] edges={:3} bnd_edges={:3} -> {:6} verts, {:6} tris ({:?})",
-            fi, surf, face.edges.len(),
+            fi, surf, solid.face_edges(face).len(),
             face.outer_wire.as_ref().map(|w| w.coedges.len()).unwrap_or(0),
             mesh.vertices.len(), mesh.triangles.len(), t0.elapsed());
     }

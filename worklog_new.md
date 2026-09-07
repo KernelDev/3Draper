@@ -4367,3 +4367,31 @@ intersection_curve.rs) теперь получают верные величин
   после reorder_edge_loop — best-effort (см. 16-я сессия)
 - Legacy diag-скрипты в scripts/ частично дублируют друг друга —
   кандидат на чистку
+---
+
+# Worklog — C5 7.6b: миграция tools/draper-diag (билд-фикс Windows)
+
+**Дата:** 2026-09-07
+
+- Пользователь принёс `cargo build --release` лог с GitHub (TestFile/cargo_error.txt):
+  5 бинарей draper-diag падали на `Face.edges` (E0609) — жертвы Stage 7.6b.
+  Cargo после первой пачки ошибок отменил остальные jobs → в логе видны
+  только 5, фактически сломаны 10 tool-бинарей.
+- Паттерн миграции — как у viewer/core/wasm: `solid.face_edges(face)`
+  (Vec<&Edge> из store) вместо `face.edges`.
+- Per-face триангуляция: `triangulate_face_with_cache(face, …)` /
+  `triangulate_face(face, …)` после 7.6b триангулируют ПОЛНУЮ поверхность
+  (wire-less) — диаг-бинари переведены на
+  `triangulate_solid_face_with_cache(solid, face, params, cache)`
+  (гранично-корректный store-first путь).
+- Исправленные файлы (10): annulus_diag, cache_unify_diag, circle_n_diag,
+  cone_diag, cone_lod_diag, cyl_diag, edge_id_diag, face_size_diag,
+  sphere_diag, topo_face_diag.
+- Два косяка при переносе: cyl_diag — `&solid` (owned Solid, не ссылка);
+  topo_face_diag — E0716 (временный Vec привязан к переменной).
+- Среда: sandbox перезагружен начисто (Rust исчез, репозиторий уцелел) —
+  toolchain 1.98.0 переустановлен в персистентные
+  `/home/z/my-project/.rustup` + `.cargo` (env: scripts/rust-env.sh),
+  фон-процессы в sandbox не выживают — cargo гоняется чанками в foreground.
+- Валидация: `cargo check -p draper-diag --bins` — 0 ошибок;
+  `cargo check` (все default-members) — Finished, 0 ошибок.

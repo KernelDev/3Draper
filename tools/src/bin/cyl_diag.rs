@@ -20,8 +20,8 @@ fn main() {
         println!("--- Face #{} (id={:?}) ---", i, face.id);
         println!("  surface: {:?}", face.surface);
         println!("  forward: {}", face.forward);
-        println!("  edges: {}", face.edges.len());
-        for (j, e) in face.edges.iter().enumerate() {
+        println!("  edges: {}", solid.face_edges(face).len());
+        for (j, e) in solid.face_edges(face).iter().enumerate() {
             println!("    edge[{}]: id={:?}, curve={:?}, param_range={:?}", j, e.id, e.curve.as_ref().map(|c| match c {
                 Curve3d::Line(_) => "Line",
                 Curve3d::Circle(_) => "Circle",
@@ -91,7 +91,7 @@ fn main() {
             64,
         );
         cache.set_chord_tolerance_override(Some(params.max_deviation));
-        let face_mesh = draper_mesh::triangulate_face_with_cache(face, &params, &mut cache);
+        let face_mesh = draper_mesh::triangulate_solid_face_with_cache(&solid, face, &params, &mut cache);
         println!("Face #{}: {} vertices, {} triangles", i, face_mesh.vertex_count(), face_mesh.triangle_count());
     }
 }

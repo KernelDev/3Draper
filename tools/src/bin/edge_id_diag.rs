@@ -40,7 +40,7 @@ fn main() {
             // Walk the outer wire: coedge -> edge lookup shows what triangulation sees.
             if let Some(ref wire) = face.outer_wire {
                 for (ci, coedge) in wire.coedges.iter().enumerate() {
-                    if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                    if let Some(edge) = solid.face_edges(face).iter().find(|e| e.id == coedge.edge) {
                         let et = edge.curve.as_ref().map(|c| match c {
                             draper_geometry::Curve3d::Line(_) => "Line",
                             draper_geometry::Curve3d::Circle(_) => "Circle",

@@ -24,7 +24,7 @@ fn main() {
     let mut bmin = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
     let mut bmax = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
     for face in faces.iter() {
-        for e in &face.edges {
+        for e in solid.face_edges(face) {
             for p in [e.start_point(), e.end_point()] {
                 if let Some(p) = p {
                     bmin.x = bmin.x.min(p.x); bmin.y = bmin.y.min(p.y); bmin.z = bmin.z.min(p.z);
@@ -44,7 +44,7 @@ fn main() {
     println!("\nFace {} circle edges:", face_idx);
     let mut total_pts = 0usize;
     let mut n_edges = 0usize;
-    for (i, edge) in face.edges.iter().enumerate() {
+    for (i, edge) in solid.face_edges(face).iter().enumerate() {
         let is_circle = matches!(edge.curve, Some(Curve3d::Circle(_)));
         if let Some(disc) = cache.get(edge.id) {
             let n = disc.points_3d.len();

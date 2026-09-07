@@ -29,7 +29,7 @@ fn main() {
         let mut bmin = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
         let mut bmax = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
         for (fi, face) in solid.faces().iter().enumerate() {
-            for edge in &face.edges {
+            for edge in solid.face_edges(face) {
                 let key = edge.step_entity_id.unwrap_or_else(|| edge.id.to_u64() as i64);
                 groups.entry(key).or_default().push((fi, edge.id));
                 for p in [edge.start_point(), edge.end_point()] {
@@ -51,7 +51,7 @@ fn main() {
             if let Some(ref surface) = face.surface {
                 if let Some(ref wire) = face.outer_wire {
                     for coedge in &wire.coedges {
-                        if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                        if let Some(edge) = solid.face_edges(face).iter().find(|e| e.id == coedge.edge) {
                             if edge.degenerate { continue; }
                             cache.discretize_edge(edge, face.id, surface, 64, coedge.curve_2d.as_ref());
                         }
@@ -59,7 +59,7 @@ fn main() {
                 }
                 for wire in &face.inner_wires {
                     for coedge in &wire.coedges {
-                        if let Some(edge) = face.edges.iter().find(|e| e.id == coedge.edge) {
+                        if let Some(edge) = solid.face_edges(face).iter().find(|e| e.id == coedge.edge) {
                             if edge.degenerate { continue; }
                             cache.discretize_edge(edge, face.id, surface, 64, coedge.curve_2d.as_ref());
                         }

@@ -39,10 +39,10 @@ fn main() {
                     _ => "Other",
                 }
             }).unwrap_or("None");
-            println!("\nFace {}: surface={}, edges={}", fi, surf_name, face.edges.len());
+            println!("\nFace {}: surface={}, edges={}", fi, surf_name, solid.face_edges(face).len());
 
             // Print edge details
-            for (ei, edge) in face.edges.iter().enumerate() {
+            for (ei, edge) in solid.face_edges(face).iter().enumerate() {
                 let edge_type = edge.curve.as_ref().map(|c| {
                     match c {
                         draper_geometry::Curve3d::Line(_) => "Line",

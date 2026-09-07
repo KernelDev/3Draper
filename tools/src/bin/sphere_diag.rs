@@ -35,7 +35,7 @@ fn main() {
                     _ => "Other",
                 }
             }).unwrap_or("None");
-            let n_edges = face.edges.len();
+            let n_edges = solid.face_edges(face).len();
             let n_inner_wires = face.inner_wires.len();
             let has_outer = face.outer_wire.is_some();
             let n_coedges = face.outer_wire.as_ref().map(|w| w.coedges.len()).unwrap_or(0);

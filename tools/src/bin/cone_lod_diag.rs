@@ -14,10 +14,10 @@ fn main() {
         println!(
             "  Face {}: {} edges, surface={}",
             i,
-            face.edges.len(),
+            solid.face_edges(face).len(),
             face.surface.as_ref().map_or("None", |s| s.type_name())
         );
-        for (j, edge) in face.edges.iter().enumerate() {
+        for (j, edge) in solid.face_edges(face).iter().enumerate() {
             let curve_type = match &edge.curve {
                 Some(draper_geometry::Curve3d::Circle(c)) => format!("Circle(R={:.2})", c.radius),
                 Some(c) => format!("{:?}", c).split('(').next().unwrap_or("?").to_string(),
