@@ -1,0 +1,49 @@
+name: Determinism Gate
+
+# Formal CI gate for the mesh determinism probe (Vision 2036 §9).
+# Runs scripts/determinism_gate.sh, which executes the draper-step
+# determinism probe in SEPARATE cargo test processes (fresh HashMap seeds
+# per process) and requires every DIGEST line (mesh, solid, per-face,
+# instance digests) to be byte-identical across runs.
+#
+# Probe source: crates/draper-step/tests/determinism_probe.rs
+# Gate script:  scripts/determinism_gate.sh
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Nightly at 04:00 UTC — one hour after the 03:00 complex-file tests.
+    - cron: '0 4 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  determinism:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-determinism-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-determinism-
+
+      - name: Run determinism gate (2 runs)
+        run: bash scripts/determinism_gate.sh 2

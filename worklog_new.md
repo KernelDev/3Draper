@@ -4317,3 +4317,53 @@ intersection_curve.rs) теперь получают верные величин
 - determinism_probe как формальный CI-гейт (скрипт/CI-джоба)
 - Периодические 2D-PCURVE (Nurbs2d) для замкнутых веток — сейчас 2D
   шов остаётся clamped (§2.2 расширение)
+
+---
+
+# Worklog — determinism_probe как формальный CI-гейт (2026-09-07, восемнадцатая сессия)
+
+**Baseline:** commit `8dc5517` (после 17-й сессии — C2-периодичность).
+**Задача:** последний пункт «Осталось» 14–15-й сессий —
+«determinism_probe как формальный CI-гейт (скрипт/CI-джоба)». Этим
+закрыты все три живых пункта того списка (PCURVE-потребители → 16-я
+сессия; C2-периодичность → 17-я; Cylinder×Torus был уже сделан в
+`c3846d2` — устаревший TODO).
+
+## Реализация
+
+1. **`scripts/determinism_gate.sh`** — гейт-скрипт:
+   - гоняет проб (`cargo test -p draper-step --test determinism_probe
+     -- --nocapture`) N ≥ 2 раз ОТДЕЛЬНЫМИ процессами (каждый — свежий
+     HashMap-seed → утечки hash-порядка в геометрию дают дрейф
+     дайджестов между прогонами);
+   - извлекает только строки `^DIGEST` (667 строк: mesh/solid/per-face/
+     instance дайджесты), stderr-шум сборки отфильтрован;
+   - MESH_ERR/PARSE_ERR в любом прогоне = провал; 0 дайджестов = сетап-
+     проблема (exit 2, подсказка про LFS);
+   - diff между прогонами (unified, первые 40 строк) → exit 1;
+   - `DETERMINISM_PROFILE=release` опционально; временные файлы в
+     mktemp-каталоге с trap-cleanup.
+2. **`.github/workflows/determinism-gate.yml`** — push в main / PR /
+   workflow_dispatch / nightly 04:00 UTC (час после complex-tests
+   03:00); LFS-checkout, cargo-кэш, `bash scripts/determinism_gate.sh 2`,
+   таймаут 20 мин.
+3. **ROADMAP_VISION_2036.md** — строка в Progress Tracking:
+   «Determinism CI gate (probe ×N runs, digest diff)».
+
+## Верификация
+
+- Локальный прогон: **PASSED — 2 прогона × 667 дайджест-строк,
+  побайтово идентичны** (exit 0);
+- путь отказа проверен мок-`cargo` с дрейфом hv в прогоне 2:
+  гейт печатает diff и возвращает exit 1; пустые дайджесты → exit 2;
+- bash -n синтаксис-проверка; существующие сьюты не затронуты (скрипт и
+  workflow — аддитивные файлы).
+
+## Осталось (глобальный список после этой сессии)
+
+- Периодические 2D-PCURVE (Nurbs2d) для замкнутых SSI-веток — 2D шов
+  пока clamped (§2.2 расширение)
+- Шовные рёбра замкнутых поверхностей: PCURVE-назначение по вхождениям
+  после reorder_edge_loop — best-effort (см. 16-я сессия)
+- Legacy diag-скрипты в scripts/ частично дублируют друг друга —
+  кандидат на чистку

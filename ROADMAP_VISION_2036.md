@@ -524,6 +524,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Property-based testing (proptest) | Done | `2d74d8c` |
 | 1 | Fuzz testing setup (quickcheck) | Done | `e7ee121` |
+| 1 | Determinism CI gate (probe ×N runs, digest diff) | Done | `c3d8de9` |
 | 2 | GPU-ready NURBS batch eval (SOA) | Done | `d016ada` |
 | 2 | WebGPU compute shaders | Pending (API ready) | — |
 | 2 | Adaptive LOD at generation | Done | `dea581e` |
