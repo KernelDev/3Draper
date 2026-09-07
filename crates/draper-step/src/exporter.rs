@@ -75,6 +75,18 @@ struct StepWriter {
     surface_cache: HashMap<String, i64>,
     /// Cache for vertex by point id (VERTEX_POINT).
     vertex_cache: HashMap<i64, i64>,
+    /// Analytical PCURVEs collected from `CoEdge.curve_2d` (Vision 2036
+    /// §2.2 consumer), keyed by the same content key as `edge_cache` so a
+    /// shared EDGE_CURVE can carry the PCURVEs of ALL adjacent faces.
+    /// Value: deduped (surface_key, surface, curve_2d) triples in
+    /// deterministic registration order (never iterated as a hash map —
+    /// lookups/removals by key only).
+    edge_pcurves: HashMap<String, Vec<(String, Surface, Curve2d)>>,
+    /// Cache for PCURVE entities, keyed by (surface_key, curve_2d debug).
+    pcurve_cache: HashMap<String, i64>,
+    /// Lazily-allocated PARAMETRIC_REPRESENTATION_CONTEXT entity id
+    /// (shared by all DEFINITIONAL_REPRESENTATIONs in the file).
+    parametric_ctx_id: Option<i64>,
 }
 
 impl StepWriter {
@@ -89,6 +101,9 @@ impl StepWriter {
             curve_cache: HashMap::new(),
             surface_cache: HashMap::new(),
             vertex_cache: HashMap::new(),
+            edge_pcurves: HashMap::new(),
+            pcurve_cache: HashMap::new(),
+            parametric_ctx_id: None,
         }
     }
 
@@ -487,23 +502,17 @@ impl StepWriter {
         };
         let curve_3d_id = self.emit_nurbs_curve(&nurbs);
 
-        // Build the 2D curve geometry
-        let curve_2d_id = self.emit_curve_2d(curve_2d);
+        // Build the 2D curve geometry and the conforming PCURVE pair
+        // (PCURVE → DEFINITIONAL_REPRESENTATION → 2D curve) — the importer's
+        // resolve_pcurve_to_curve2d only accepts the DEFINITIONAL_REPRESENTATION
+        // form, so the old direct PCURVE('',#surface,#curve_2d) form never
+        // round-tripped.
+        let pcurve_geom_id = self.emit_pcurve_pair(surface, curve_2d);
 
-        // Emit the surface (the underlying face surface)
-        let surface_id = self.emit_surface(surface);
-
-        // PCURVE('', #surface, #curve_2d)
-        let pcurve_geom_id = self.alloc_id();
-        self.push_line(&format!(
-            "#{} = PCURVE('',#{},#{});",
-            pcurve_geom_id, surface_id, curve_2d_id
-        ));
-
-        // SURFACE_CURVE('', #curve_3d, (#pcurve_geom), .CURVE_3D.)
+        // SURFACE_CURVE('', #curve_3d, (#pcurve_geom), .PCURVE_S1.)
         let id = self.alloc_id();
         self.push_line(&format!(
-            "#{} = SURFACE_CURVE('',#{},(#{},),.CURVE_3D.);",
+            "#{} = SURFACE_CURVE('',#{},(#{},),.PCURVE_S1.);",
             id, curve_3d_id, pcurve_geom_id
         ));
         id
@@ -513,58 +522,104 @@ impl StepWriter {
     fn emit_curve_2d(&mut self, curve: &Curve2d) -> i64 {
         match curve {
             Curve2d::Line(line) => {
-                // Emit as LINE in 2D using AXIS2_PLACEMENT_2D
+                // LINE in 2D: LINE('', #pt, #vector). The second parameter is
+                // a VECTOR (direction + magnitude), NOT a bare DIRECTION —
+                // the importing reader derives the end point as
+                // start + magnitude * direction, so a bare DIRECTION would
+                // silently clamp every 2D line to unit length (e.g. a
+                // cylinder seam (0,0)→(2π,0) would come back as (0,0)→(1,0)).
                 let pt_id = self.emit_point(&Point3d::new(line.start.u, line.start.v, 0.0));
-                let dir_id = self.emit_direction(&Direction3d::new(
-                    line.end.u - line.start.u,
-                    line.end.v - line.start.v,
+                let du = line.end.u - line.start.u;
+                let dv = line.end.v - line.start.v;
+                let magnitude = (du * du + dv * dv).sqrt();
+                let dir = Direction3d::new(du, dv, 0.0).unwrap_or(Direction3d::X);
+                let dir_id = self.emit_direction(&dir);
+                let vec_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = VECTOR('',#{},{});",
+                    vec_id, dir_id, fmt_f64(magnitude)
+                ));
+                let id = self.alloc_id();
+                self.push_line(&format!("#{} = LINE('',#{},#{});", id, pt_id, vec_id));
+                id
+            }
+            Curve2d::Circle(circle) => {
+                let pt_id = self.emit_point(&Point3d::new(circle.center.u, circle.center.v, 0.0));
+                let ref_dir_id = self.emit_direction(&Direction3d::X);
+                let axis2d_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
+                    axis2d_id, pt_id, ref_dir_id
+                ));
+                let circle_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = CIRCLE('',#{},{});",
+                    circle_id,
+                    axis2d_id,
+                    fmt_f64(circle.radius)
+                ));
+
+                // Full circle → bare CIRCLE; arc → TRIMMED_CURVE with
+                // PARAMETER_VALUE angle trims so the range survives the
+                // round trip (resolve_trimmed_curve_2d reads exactly this).
+                let two_pi = 2.0 * std::f64::consts::PI;
+                let is_full = (circle.end_angle - circle.start_angle) >= two_pi - 1e-9;
+                if is_full {
+                    circle_id
+                } else {
+                    let id = self.alloc_id();
+                    self.push_line(&format!(
+                        "#{} = TRIMMED_CURVE('',#{},(PARAMETER_VALUE({})),(PARAMETER_VALUE({})),.T.,.PARAMETER.);",
+                        id,
+                        circle_id,
+                        fmt_f64(circle.start_angle),
+                        fmt_f64(circle.end_angle)
+                    ));
+                    id
+                }
+            }
+            Curve2d::Ellipse(ellipse) => {
+                let pt_id = self.emit_point(&Point3d::new(ellipse.center.u, ellipse.center.v, 0.0));
+                // ref_direction encodes the major-axis rotation — the
+                // importing reader (resolve_axis2_2d_with_rotation) derives
+                // it as atan2(dir.y, dir.x). Emitting bare X would silently
+                // zero the rotation.
+                let ref_dir_id = self.emit_direction(&Direction3d::new(
+                    ellipse.rotation.cos(),
+                    ellipse.rotation.sin(),
                     0.0,
                 ).unwrap_or(Direction3d::X));
                 let axis2d_id = self.alloc_id();
                 self.push_line(&format!(
                     "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
-                    axis2d_id, pt_id, dir_id
-                ));
-                let id = self.alloc_id();
-                self.push_line(&format!("#{} = LINE('',#{},#{});", id, pt_id, dir_id));
-                id
-            }
-            Curve2d::Circle(circle) => {
-                let pt_id = self.emit_point(&Point3d::new(circle.center.u, circle.center.v, 0.0));
-                let dir_id = self.emit_direction(&Direction3d::Z);
-                let ref_dir_id = self.emit_direction(&Direction3d::X);
-                let axis2d_id = self.alloc_id();
-                self.push_line(&format!(
-                    "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
                     axis2d_id, pt_id, ref_dir_id
                 ));
-                let _ = dir_id; // not used in 2D
-                let id = self.alloc_id();
-                self.push_line(&format!(
-                    "#{} = CIRCLE('',#{},{});",
-                    id,
-                    axis2d_id,
-                    fmt_f64(circle.radius)
-                ));
-                id
-            }
-            Curve2d::Ellipse(ellipse) => {
-                let pt_id = self.emit_point(&Point3d::new(ellipse.center.u, ellipse.center.v, 0.0));
-                let ref_dir_id = self.emit_direction(&Direction3d::X);
-                let axis2d_id = self.alloc_id();
-                self.push_line(&format!(
-                    "#{} = AXIS2_PLACEMENT_2D('',#{},#{});",
-                    axis2d_id, pt_id, ref_dir_id
-                ));
-                let id = self.alloc_id();
+                let ellipse_id = self.alloc_id();
                 self.push_line(&format!(
                     "#{} = ELLIPSE('',#{},{},{});",
-                    id,
+                    ellipse_id,
                     axis2d_id,
                     fmt_f64(ellipse.semi_major),
                     fmt_f64(ellipse.semi_minor)
                 ));
-                id
+
+                // Full ellipse → bare ELLIPSE; arc → TRIMMED_CURVE with
+                // PARAMETER_VALUE angle trims.
+                let two_pi = 2.0 * std::f64::consts::PI;
+                let is_full = (ellipse.end_angle - ellipse.start_angle) >= two_pi - 1e-9;
+                if is_full {
+                    ellipse_id
+                } else {
+                    let id = self.alloc_id();
+                    self.push_line(&format!(
+                        "#{} = TRIMMED_CURVE('',#{},(PARAMETER_VALUE({})),(PARAMETER_VALUE({})),.T.,.PARAMETER.);",
+                        id,
+                        ellipse_id,
+                        fmt_f64(ellipse.start_angle),
+                        fmt_f64(ellipse.end_angle)
+                    ));
+                    id
+                }
             }
             Curve2d::Hyperbola(hyp) => {
                 let pt_id = self.emit_point(&Point3d::new(hyp.center.u, hyp.center.v, 0.0));
@@ -670,16 +725,107 @@ impl StepWriter {
     }
 
     // ── EDGE_CURVE (dedup by content hash) ──
-    fn emit_edge_curve(&mut self, edge: &Edge) -> i64 {
-        // Build a content-based key so shared edges between faces are deduped.
-        let key = if let Some(curve) = &edge.curve {
+
+    /// Content-based key so shared edges between faces are deduped.
+    /// Also used to key `edge_pcurves` so PCURVE registration and
+    /// EDGE_CURVE emission agree on identity.
+    fn edge_content_key(edge: &Edge) -> String {
+        if let Some(curve) = &edge.curve {
             format!("{:?}", curve)
         } else {
             // No curve — use vertex endpoints
             let s = edge.start_point().unwrap_or(Point3d::ORIGIN);
             let e = edge.end_point().unwrap_or(Point3d::ORIGIN);
             format!("no_curve|{:?}|{:?}", s, e)
+        }
+    }
+
+    /// Register the analytical PCURVEs of one face (Vision 2036 §2.2
+    /// consumer): every coedge carrying `curve_2d` contributes a
+    /// (surface, curve_2d) pair to the shared edge's geometry key.
+    ///
+    /// Must run for ALL faces of a shell BEFORE the first EDGE_CURVE is
+    /// emitted, so a shared edge's SURFACE_CURVE lists the PCURVEs of both
+    /// adjacent faces (AP214 allows multiple PCURVEs per SURFACE_CURVE).
+    ///
+    /// Deterministic: entries append in face/wire/coedge order; duplicates
+    /// are rejected by (surface, curve) content. The map is never iterated —
+    /// only looked up and removed by key — so hash order cannot leak.
+    fn register_face_pcurves(&mut self, solid: &Solid, face: &draper_topology::Face) {
+        let Some(surface) = face.surface.as_ref() else { return };
+        let surface_key = format!("{:?}", surface);
+        let face_edges = solid.resolve_face_edges(face);
+        let wires = face.outer_wire.iter().chain(face.inner_wires.iter());
+        for wire in wires {
+            for coedge in &wire.coedges {
+                let Some(curve_2d) = coedge.curve_2d.as_ref() else { continue };
+                let Some(edge) = face_edges.iter().find(|e| e.id == coedge.edge) else {
+                    continue;
+                };
+                let key = Self::edge_content_key(edge);
+                let curve_key = format!("{:?}", curve_2d);
+                let entry = self.edge_pcurves.entry(key).or_default();
+                let already = entry
+                    .iter()
+                    .any(|(sk, _, c)| *sk == surface_key && format!("{:?}", c) == curve_key);
+                if !already {
+                    entry.push((surface_key.clone(), surface.clone(), curve_2d.clone()));
+                }
+            }
+        }
+    }
+
+    /// Emit a PCURVE in the AP214-conforming form the importer resolves
+    /// (PCURVE → DEFINITIONAL_REPRESENTATION → 2D curve):
+    ///
+    /// ```text
+    /// #ctx  = PARAMETRIC_REPRESENTATION_CONTEXT('NONE','PSPACE');   (once)
+    /// #c2d  = <LINE/CIRCLE/.../B_SPLINE_CURVE_WITH_KNOTS>            (2D, UV)
+    /// #def  = DEFINITIONAL_REPRESENTATION('',(#c2d),#ctx);
+    /// #pc   = PCURVE('',#surface,#def);
+    /// ```
+    ///
+    /// Returns the PCURVE entity id (deduped by (surface, curve) content).
+    fn emit_pcurve_pair(&mut self, surface: &Surface, curve_2d: &Curve2d) -> i64 {
+        let cache_key = format!("{:?}|{:?}", surface, curve_2d);
+        if let Some(&id) = self.pcurve_cache.get(&cache_key) {
+            return id;
+        }
+
+        // PARAMETRIC_REPRESENTATION_CONTEXT — one per file, lazily.
+        let ctx_id = match self.parametric_ctx_id {
+            Some(id) => id,
+            None => {
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = PARAMETRIC_REPRESENTATION_CONTEXT('NONE','PSPACE');",
+                    id
+                ));
+                self.parametric_ctx_id = Some(id);
+                id
+            }
         };
+
+        let curve_2d_id = self.emit_curve_2d(curve_2d);
+        let surface_id = self.emit_surface(surface);
+
+        // DEFINITIONAL_REPRESENTATION('', (#curve_2d), #ctx)
+        let def_id = self.alloc_id();
+        self.push_line(&format!(
+            "#{} = DEFINITIONAL_REPRESENTATION('',(#{},),#{});",
+            def_id, curve_2d_id, ctx_id
+        ));
+
+        // PCURVE('', #surface, #def)
+        let id = self.alloc_id();
+        self.push_line(&format!("#{} = PCURVE('',#{},#{});", id, surface_id, def_id));
+
+        self.pcurve_cache.insert(cache_key, id);
+        id
+    }
+
+    fn emit_edge_curve(&mut self, edge: &Edge) -> i64 {
+        let key = Self::edge_content_key(edge);
         if let Some(&id) = self.edge_cache.get(&key) {
             return id;
         }
@@ -702,10 +848,36 @@ impl StepWriter {
             self.emit_line(&Line::new(start_pt, dir))
         };
 
+        // Vision 2036 §2.2 consumer: if analytical PCURVEs were registered
+        // for this edge geometry (from adjacent faces' coedges), wrap the
+        // 3D curve in a SURFACE_CURVE listing them — the importing side
+        // (extract_edge_curves_2d) resolves exactly this chain and the
+        // analytical UV curves survive the round trip.
+        let curve_id = match self.edge_pcurves.remove(&key) {
+            Some(pcurves) if !pcurves.is_empty() => {
+                let mut pcurve_ids = Vec::with_capacity(pcurves.len());
+                for (_, surface, curve_2d) in &pcurves {
+                    pcurve_ids.push(self.emit_pcurve_pair(surface, curve_2d));
+                }
+                let refs = pcurve_ids
+                    .iter()
+                    .map(|id| format!("#{}", id))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sc_id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = SURFACE_CURVE('',#{},({}),.PCURVE_S1.);",
+                    sc_id, curve_id, refs
+                ));
+                sc_id
+            }
+            _ => curve_id,
+        };
+
         let id = self.alloc_id();
         let same_sense = if edge.forward { ".T." } else { ".F." };
         self.push_line(&format!(
-            "#{} = EDGE_CURVE('',#{},#{},{},{});",
+            "#{} = EDGE_CURVE('',#{},#{},#{},{});",
             id, start_vtx_id, end_vtx_id, curve_id, same_sense
         ));
         self.edge_cache.insert(key, id);
@@ -766,7 +938,7 @@ impl StepWriter {
                 };
                 let ec_id = self.alloc_id();
                 self.push_line(&format!(
-                    "#{} = EDGE_CURVE('',#{},#{},{},.T.);",
+                    "#{} = EDGE_CURVE('',#{},#{},#{},.T.);",
                     ec_id, vtx_id, vtx_id, dummy_line_id
                 ));
                 ec_id
@@ -1182,6 +1354,15 @@ pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) ->
 
 /// Emit a CLOSED_SHELL and return its ID.
 fn emit_shell(sw: &mut StepWriter, solid: &Solid, shell: &Shell) -> i64 {
+    // Vision 2036 §2.2 consumer — pre-pass: register the analytical
+    // PCURVEs of ALL faces before any EDGE_CURVE is emitted, so a shared
+    // edge's SURFACE_CURVE carries the PCURVEs of every adjacent face
+    // (registering per-face during emission would miss the second face
+    // of a shared edge — the EDGE_CURVE is deduped on first emission).
+    for face in &shell.faces {
+        sw.register_face_pcurves(solid, face);
+    }
+
     let mut face_ids: Vec<i64> = Vec::with_capacity(shell.faces.len());
 
     for face in &shell.faces {
@@ -1554,5 +1735,255 @@ mod tests {
         let _ = CoEdge::new(TopoId::new(), true);
         let _ = Edge::new_line(Point3d::ORIGIN, Point3d::new(1.0, 0.0, 0.0));
         let _ = Line::new(Point3d::ORIGIN, Direction3d::X);
+    }
+
+    // ── Vision 2036 §2.2 consumer: PCURVE export round-trip ─────────────
+
+    use draper_geometry::{Curve2d, Line2d, Circle2d, Point2d};
+
+    /// Attach an analytical PCURVE to every coedge of a face's outer wire.
+    fn attach_line_pcurve(solid: &mut Solid, face_idx: usize, make: impl Fn(usize) -> Curve2d) {
+        let mut faces = solid.faces_mut();
+        let face = &mut faces[face_idx];
+        let Some(ref mut wire) = face.outer_wire else {
+            panic!("face {face_idx} has no outer wire");
+        };
+        for (i, coedge) in wire.coedges.iter_mut().enumerate() {
+            coedge.curve_2d = Some(make(i));
+        }
+    }
+
+    /// Re-import an exported STEP string back into solids.
+    fn round_trip(step_text: &str) -> Vec<Solid> {
+        let file = crate::parse_step(step_text).expect("re-parse exported STEP");
+        let (solids, _) = crate::extract_solids(&file);
+        assert!(!solids.is_empty(), "round trip produced no solids");
+        solids
+    }
+
+    /// Collect all (curve_2d) values carried by any coedge of any face.
+    fn collect_imported_pcurves(solid: &Solid) -> Vec<Curve2d> {
+        let mut out = Vec::new();
+        for face in solid.faces() {
+            for wire in face.outer_wire.iter().chain(face.inner_wires.iter()) {
+                for coedge in &wire.coedges {
+                    if let Some(c) = coedge.curve_2d.as_ref() {
+                        out.push(c.clone());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_pcurve_export_round_trip() {
+        use draper_topology::ShapeBuilder;
+
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        // Analytical PCURVEs on face 0 — a UV rectangle (the 10×10 box
+        // face boundary in its plane's parameter space).
+        attach_line_pcurve(&mut solid, 0, |i| {
+            let pts = [
+                (Point2d::new(0.0, 0.0), Point2d::new(10.0, 0.0)),
+                (Point2d::new(10.0, 0.0), Point2d::new(10.0, 10.0)),
+                (Point2d::new(10.0, 10.0), Point2d::new(0.0, 10.0)),
+                (Point2d::new(0.0, 10.0), Point2d::new(0.0, 0.0)),
+            ];
+            let (a, b) = pts[i % 4];
+            Curve2d::Line(Line2d::new(a, b))
+        });
+
+        let step = export_step(&solid, "pcurve_rt");
+        // Structural conformance: the conforming PCURVE chain must be present.
+        assert!(
+            step.contains("PARAMETRIC_REPRESENTATION_CONTEXT"),
+            "missing PARAMETRIC_REPRESENTATION_CONTEXT"
+        );
+        assert!(
+            step.contains("DEFINITIONAL_REPRESENTATION"),
+            "missing DEFINITIONAL_REPRESENTATION"
+        );
+        assert!(step.contains("PCURVE("), "missing PCURVE entity");
+        assert!(
+            step.matches("SURFACE_CURVE").count() >= 4,
+            "expected a SURFACE_CURVE per registered edge, got {}",
+            step.matches("SURFACE_CURVE").count()
+        );
+        // The SURFACE_CURVE must be referenced from an EDGE_CURVE (master
+        // representation PCURVE_S1):
+        assert!(step.contains(".PCURVE_S1."), "missing .PCURVE_S1. master flag");
+
+        // Round trip: the analytical UV curves must survive re-import.
+        let solids = round_trip(&step);
+        let imported = collect_imported_pcurves(&solids[0]);
+        assert!(
+            !imported.is_empty(),
+            "no PCURVEs survived the round trip"
+        );
+        // Each exported Line2d must come back with identical endpoints.
+        let mut expected = 0usize;
+        {
+            let face0 = solid.faces()[0];
+            let wire = face0.outer_wire.as_ref().unwrap();
+            expected = wire.coedges.len();
+            for coedge in &wire.coedges {
+                let want = coedge.curve_2d.as_ref().unwrap();
+                let got = imported.iter().find(|c| curves_match(c, want));
+                assert!(
+                    got.is_some(),
+                    "imported pcurves {:?} are missing {:?}",
+                    imported,
+                    want
+                );
+            }
+        }
+        assert_eq!(imported.len(), expected, "unexpected pcurve count");
+    }
+
+    #[test]
+    fn test_pcurve_line_length_survives_round_trip() {
+        use draper_topology::ShapeBuilder;
+
+        // Regression for the VECTOR fix: a bare DIRECTION (magnitude 1.0)
+        // silently clamps every 2D LINE to unit length on re-import —
+        // a cylinder seam (0,0)→(2π,0) would come back as (0,0)→(1,0).
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        attach_line_pcurve(&mut solid, 1, |_| {
+            Curve2d::Line(Line2d::new(
+                Point2d::new(0.0, 0.0),
+                Point2d::new(std::f64::consts::TAU, 0.0),
+            ))
+        });
+
+        let step = export_step(&solid, "pcurve_line_len");
+        assert!(step.contains("VECTOR("), "2D LINE must carry a VECTOR");
+
+        let solids = round_trip(&step);
+        let imported = collect_imported_pcurves(&solids[0]);
+        let seam = imported.iter().find_map(|c| match c {
+            Curve2d::Line(l) => Some(l.clone()),
+            _ => None,
+        });
+        let seam = seam.expect("no 2D line survived the round trip");
+        assert!(
+            (seam.start.u - 0.0).abs() < 1e-9 && (seam.start.v - 0.0).abs() < 1e-9,
+            "seam start drifted: {:?}",
+            seam.start
+        );
+        assert!(
+            (seam.end.u - std::f64::consts::TAU).abs() < 1e-9,
+            "seam end must be 2π, got {} (the unit-length clamp regression)",
+            seam.end.u
+        );
+        assert!((seam.end.v - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_pcurve_circle_arc_round_trip() {
+        use draper_topology::ShapeBuilder;
+
+        // Arc (not full circle) must be exported as TRIMMED_CURVE with
+        // PARAMETER_VALUE trims and re-imported with its angle range.
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        attach_line_pcurve(&mut solid, 2, |_| {
+            Curve2d::Circle(Circle2d::new_arc(
+                Point2d::new(1.0, 2.0),
+                0.5,
+                std::f64::consts::FRAC_PI_6,
+                2.0 * std::f64::consts::FRAC_PI_3,
+            ))
+        });
+
+        let step = export_step(&solid, "pcurve_arc");
+        assert!(step.contains("TRIMMED_CURVE"), "arc must be a TRIMMED_CURVE");
+        assert!(
+            step.contains("PARAMETER_VALUE"),
+            "trims must be PARAMETER_VALUE typed"
+        );
+
+        let solids = round_trip(&step);
+        let imported = collect_imported_pcurves(&solids[0]);
+        let arc = imported.iter().find_map(|c| match c {
+            Curve2d::Circle(circ) => Some(circ.clone()),
+            _ => None,
+        });
+        let arc = arc.expect("no 2D circle survived the round trip");
+        assert!((arc.center.u - 1.0).abs() < 1e-9, "center.u: {:?}", arc.center);
+        assert!((arc.center.v - 2.0).abs() < 1e-9, "center.v: {:?}", arc.center);
+        assert!((arc.radius - 0.5).abs() < 1e-9, "radius: {}", arc.radius);
+        assert!(
+            (arc.start_angle - std::f64::consts::FRAC_PI_6).abs() < 1e-9,
+            "start_angle: {} (expected π/6)",
+            arc.start_angle
+        );
+        assert!(
+            (arc.end_angle - 2.0 * std::f64::consts::FRAC_PI_3).abs() < 1e-9,
+            "end_angle: {} (expected 2π/3)",
+            arc.end_angle
+        );
+    }
+
+    #[test]
+    fn test_pcurve_export_deterministic() {
+        use draper_topology::ShapeBuilder;
+
+        let mut solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        attach_line_pcurve(&mut solid, 3, |i| {
+            let v = i as f64;
+            Curve2d::Line(Line2d::new(
+                Point2d::new(v, 0.0),
+                Point2d::new(v + 1.0, 0.0),
+            ))
+        });
+
+        let a = export_step(&solid, "det");
+        let b = export_step(&solid, "det");
+        let data = |s: &str| s.split_once("DATA;").map(|(_, rest)| rest.to_string());
+        assert_eq!(
+            data(&a),
+            data(&b),
+            "PCURVE-carrying exports must be bit-identical"
+        );
+    }
+
+    #[test]
+    fn test_no_pcurve_output_unchanged() {
+        use draper_topology::ShapeBuilder;
+
+        // A solid WITHOUT analytical PCURVEs must not gain SURFACE_CURVE
+        // wrappers (the plain 3D EDGE_CURVE geometry path is untouched).
+        let solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let step = export_step(&solid, "plain");
+        assert!(
+            !step.contains("SURFACE_CURVE"),
+            "unexpected SURFACE_CURVE in a pcurve-less export"
+        );
+        assert!(
+            !step.contains("PCURVE("),
+            "unexpected PCURVE in a pcurve-less export"
+        );
+    }
+
+    /// Loose structural equality for round-trip comparison (exact float
+    /// round-trips are guaranteed by fmt_f64, but keep the comparison
+    /// robust for derived values).
+    fn curves_match(a: &Curve2d, b: &Curve2d) -> bool {
+        match (a, b) {
+            (Curve2d::Line(x), Curve2d::Line(y)) => {
+                (x.start.u - y.start.u).abs() < 1e-9
+                    && (x.start.v - y.start.v).abs() < 1e-9
+                    && (x.end.u - y.end.u).abs() < 1e-9
+                    && (x.end.v - y.end.v).abs() < 1e-9
+            }
+            (Curve2d::Circle(x), Curve2d::Circle(y)) => {
+                (x.center.u - y.center.u).abs() < 1e-9
+                    && (x.center.v - y.center.v).abs() < 1e-9
+                    && (x.radius - y.radius).abs() < 1e-9
+                    && (x.start_angle - y.start_angle).abs() < 1e-9
+                    && (x.end_angle - y.end_angle).abs() < 1e-9
+            }
+            _ => false,
+        }
     }
 }

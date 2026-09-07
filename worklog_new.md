@@ -4139,3 +4139,102 @@ warnings (сверено git-stash-базлайном: 22 строки до/по
 - Cylinder×Torus parallel-offset аналитика
 - C2-периодичность шва (периодические узлы)
 - determinism_probe как формальный CI-gейт (скрипт/CI-джоба)
+
+---
+
+# Worklog — PCURVE-потребители: STEP-экспорт BREP PCURVE (2026-09-07, шестнадцатая сессия)
+
+**Baseline:** commit `cec110e` (после 15-й сессии — детерминированный
+watertight 3.05.078 + eprintln-миграция).
+**Задача:** первый пункт «Осталось» 14–15-й сессий — «PCURVE-потребители:
+STEP-экспорт BREP PCURVE, viewer». Viewer-потребитель уже обеспечен
+mesh-пайплайном (§2.4: coedge.curve_2d → edge_cache.compute_uvs), так что
+фокус сессии — экспортная сторона и полный раунд-трип.
+
+## Реализация (экспортёр, exporter.rs)
+
+1. **Pre-pass регистрации PCURVE** в `emit_shell`: до эмиссии любых
+   EDGE_CURVE по всем граням оболочки собираются аналитические
+   `coedge.curve_2d` → `edge_pcurves: HashMap<edge_content_key,
+   Vec<(surface, curve_2d)>>` (dedup по контенту; ключ тот же, что у
+   `edge_cache`, — совпадение идентичности гарантировано). Регистрация до
+   эмиссии обязательна: EDGE_CURVE дедупится при первом упоминании, и
+   per-face регистрация «на ходу» пропустила бы вторую грань общего ребра.
+2. **`emit_edge_curve`**: при наличии зарегистрированных PCURVE 3D-кривая
+   оборачивается в `SURFACE_CURVE('',#3d,(#pcurve1,#pcurve2),.PCURVE_S1.)`
+   со списком PCURVE всех смежных граней (AP214-форма). Без PCURVE —
+   прежний путь (байт-идентично старому выводу).
+3. **`emit_pcurve_pair`** — конформная цепочка, которую резолвит
+   импортёр: `PARAMETRIC_REPRESENTATION_CONTEXT` (один на файл) →
+   `DEFINITIONAL_REPRESENTATION('',(#curve_2d),#ctx)` →
+   `PCURVE('',#surface,#def)`. Прежний `PCURVE('',#surface,#curve_2d)`
+   (прямая ссылка) `resolve_pcurve_to_curve2d` не читал вообще —
+   раунд-трип был невозможен. Путь `Curve3d::PCurve` (`emit_pcurve`)
+   переведён на тот же хелпер + `.PCURVE_S1.`.
+4. **2D-LINE в UV**: `LINE('',#pt,#VECTOR)` с magnitude вместо голой
+   DIRECTION-ссылки — реадер строит конец как start + magnitude×dir,
+   голая DIRECTION молча зажимала все 2D-линии в единичную длину (шов
+   цилиндра (0,0)→(2π,0) возвращался как (0,0)→(1,0)).
+5. **Дуги Circle2d/Ellipse2d** → `TRIMMED_CURVE('',#basis,
+   (PARAMETER_VALUE(t1)),(PARAMETER_VALUE(t2)),.T.,.PARAMETER.)`;
+   полные — голые CIRCLE/ELLIPSE. Ротация эллипса теперь кодируется в
+   ref_direction AXIS2_PLACEMENT_2D (раньше всегда X — ротация
+   обнулялась).
+
+## Сопутствующие критичные фиксы
+
+6. **EDGE_CURVE-ссылка** (нашёл probe-тестом): формат-строка писала
+   4-й параметр (кривую) БЕЗ `#` — `EDGE_CURVE('',#v1,#v2,16,.T.)`.
+   Парсер это видел как Integer(16) → и наш импортёр, и любые внешние
+   ридеры не могли резолвить геометрию рёбер экспортированных файлов
+   (молчаливый line-fallback по вершинам). Оба места (основной +
+   degenerate-фолбэк) исправлены на `#16`. Существующие тесты этого не
+   ловили: line-fallback для box-рёбер геометрически идентичен.
+7. **Импорт PCURVE никогда не работал** (`extract_edge_curves_2d`):
+   карта keyed by TopoId от свежего `resolve_edge_curve`, а поиск — по
+   id из более раннего вызова с другим последовательным TopoId
+   (TopoId::new() — счётчик): ключи и поиски НЕ МОГЛИ совпасть — все
+   импортированные PCURVE молча отбрасывались. Переключён на стабильный
+   `step_entity_id` (= STEP EDGE_CURVE entity id) + швы: N-е вхождение
+   ORIENTED_EDGE с тем же ec_id в грани берёт N-ю PCURVE своей
+   поверхности (`extract_pcurve_for_surface` получил параметр skip).
+8. **TRIMMED_CURVE импорт** (3D + 2D): резолверы читали только
+   безымянную форму `TRIMMED_CURVE(#basis,t1,t2,...)` — стандартная
+   `TRIMMED_CURVE('',#basis,(PARAMETER_VALUE(t1)),...)` падала на
+   `params.first()` = имя-строка. Теперь basis ищется как первая
+   ref-ссылка на кривую, trims — через `trim_value()` (Float/Integer/
+   Typed(PARAMETER_VALUE)/List). Добавлена ветка Ellipse-дуги в 2D.
+
+## Тесты (exporter.rs, 5 новых, все green)
+
+- `test_pcurve_export_round_trip` — box + UV-прямоугольник на грани 0:
+  структурные ассерты (SURFACE_CURVE/PCURVE/DEFINITIONAL_REPRESENTATION/
+  PARAMETRIC_REPRESENTATION_CONTEXT/.PCURVE_S1.) + полный раунд-трип
+  (все 4 Line2d возвращаются с идентичными endpoints);
+- `test_pcurve_line_length_survives_round_trip` — регрессия VECTOR
+  (шов 2π);
+- `test_pcurve_circle_arc_round_trip` — дуга π/6→2π/3 через
+  TRIMMED_CURVE+PARAMETER_VALUE;
+- `test_pcurve_export_deterministic` — повторный экспорт
+  побайтово-идентичен;
+- `test_no_pcurve_output_unchanged` — без curve_2d вывод НЕ меняется
+  (нет SURFACE_CURVE/PCURVE).
+
+## Верификация
+
+- draper-step: lib **release 136✅** (131+5), integration_test 7✅,
+  industrial_files 2✅, determinism_probe 1✅ (CI-gейт);
+- draper-topology 260✅ (229+17+11+3); draper-mesh 330✅
+  (268 lib + 62 integration);
+- draper-core 77✅; draper-json 13✅; draper-ffi 10✅; draper-wasm 30✅;
+- 0 новых warnings.
+
+## Осталось
+
+- Cylinder×Torus parallel-offset аналитика
+- C2-периодичность шва (периодические узлы)
+- determinism_probe как формальный CI-гейт (скрипт/CI-джоба)
+- Шовные рёбра замкнутых поверхностей: PCURVE-назначение по вхождениям
+  детерминировано, но после reorder_edge_loop порядок «какая коedge
+  берёт какую из двух шовных PCURVE» — best-effort (см. комментарий в
+  extract_edge_curves_2d)

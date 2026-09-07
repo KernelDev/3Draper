@@ -9691,13 +9691,23 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // For each ORIENTED_EDGE, trace to SURFACE_CURVE and extract PCURVE
-        let mut edge_curve_2d_map: HashMap<draper_topology::TopoId, Curve2d> = HashMap::new();
+        // For each ORIENTED_EDGE, trace to SURFACE_CURVE and extract PCURVE.
+        //
+        // Keyed by the STEP EDGE_CURVE entity id, NOT by TopoId: the edges
+        // in `edges` were resolved by an earlier `resolve_edge_curve` call
+        // whose sequential TopoIds differ from a fresh call here, so a
+        // TopoId-keyed map can never match (the historical bug — imported
+        // analytical PCURVEs silently dropped). `step_entity_id` is stable
+        // across calls. Repeated ec_ids within one face (seam edges on
+        // closed surfaces) consume the surface's PCURVEs in occurrence
+        // order — our exporter registers them in wire order, so the
+        // assignment is deterministic.
+        let mut edge_curve_2d_map: HashMap<i64, Vec<Curve2d>> = HashMap::new();
+        let mut occurrence: HashMap<i64, usize> = HashMap::new();
 
         for oe_id in oriented_edge_ids {
             if let Some(oe_entity) = self.step.find_entity(oe_id) {
                 let mut edge_curve_id: Option<i64> = None;
-                let mut orientation = true;
 
                 for param in &oe_entity.params {
                     if let Some(ref_id) = self.get_ref(param) {
@@ -9707,33 +9717,42 @@ impl<'a> StepConverter<'a> {
                             }
                         }
                     }
-                    if let StepValue::Enum(e) = param {
-                        orientation = e == "T";
-                    }
                 }
 
                 if let Some(ec_id) = edge_curve_id {
                     // Get the SURFACE_CURVE ID from the EDGE_CURVE
                     if let Some(sc_id) = self.find_surface_curve_from_edge_curve(ec_id) {
-                        // Find the PCURVE matching our surface
-                        if let Some(curve_2d) = self.extract_pcurve_for_surface(sc_id, surface_id) {
-                            // Find the edge TopoId that this oriented edge resolves to
-                            if let Some(edge) = self.resolve_edge_curve(ec_id) {
-                                let mut final_edge = edge;
-                                if !orientation {
-                                    final_edge = final_edge.reversed();
-                                }
-                                // Store by edge ID
-                                edge_curve_2d_map.insert(final_edge.id, curve_2d);
-                            }
+                        // Nth occurrence of this edge within the face takes
+                        // the Nth PCURVE matching our surface (seam edges).
+                        let n = occurrence.entry(ec_id).or_insert(0);
+                        if let Some(curve_2d) =
+                            self.extract_pcurve_for_surface(sc_id, surface_id, *n)
+                        {
+                            *n += 1;
+                            edge_curve_2d_map.entry(ec_id).or_default().push(curve_2d);
                         }
                     }
                 }
             }
         }
 
-        // Map edges to their Curve2d
-        edges.iter().map(|e| edge_curve_2d_map.get(&e.id).cloned()).collect()
+        // Map edges to their Curve2d by stable STEP entity id; repeated
+        // occurrences of the same EDGE_CURVE (seam edges) take the pcurves
+        // in order.
+        let mut consumed: HashMap<i64, usize> = HashMap::new();
+        edges
+            .iter()
+            .map(|e| {
+                let ec_id = e.step_entity_id?;
+                let list = edge_curve_2d_map.get(&ec_id)?;
+                let idx = consumed.entry(ec_id).or_insert(0);
+                let curve = list.get(*idx).cloned();
+                if curve.is_some() {
+                    *idx += 1;
+                }
+                curve
+            })
+            .collect()
     }
 
     /// Collect ORIENTED_EDGE entity IDs from an EDGE_LOOP entity.
@@ -9766,9 +9785,16 @@ impl<'a> StepConverter<'a> {
         None
     }
 
-    /// Extract the PCURVE Curve2d from a SURFACE_CURVE that matches a given surface.
+    /// Extract the PCURVE Curve2d from a SURFACE_CURVE that matches a given
+    /// surface. `skip` selects among multiple PCURVEs referencing the SAME
+    /// surface (seam edges on closed surfaces carry one PCURVE per pass).
     /// SURFACE_CURVE('', #3d_curve, (#pcurve1, #pcurve2), .PCURVE_S1.)
-    fn extract_pcurve_for_surface(&self, surface_curve_id: i64, target_surface_id: i64) -> Option<Curve2d> {
+    fn extract_pcurve_for_surface(
+        &self,
+        surface_curve_id: i64,
+        target_surface_id: i64,
+        skip: usize,
+    ) -> Option<Curve2d> {
         let sc_entity = self.step.find_entity(surface_curve_id)?;
         if sc_entity.type_name != "SURFACE_CURVE" {
             return None;
@@ -9776,6 +9802,7 @@ impl<'a> StepConverter<'a> {
 
         // The PCURVE references are in the 3rd parameter (index 2), as a list
         // SURFACE_CURVE('', #curve3d_ref, (#pcurve1, #pcurve2), .PCURVE_S1.)
+        let mut matched = 0usize;
         for param in &sc_entity.params {
             if let StepValue::List(items) = param {
                 for item in items {
@@ -9785,6 +9812,10 @@ impl<'a> StepConverter<'a> {
                                 // PCURVE('', #surface_ref, #definitional_rep)
                                 // Check if this PCURVE references our target surface
                                 if self.pcurve_references_surface(pcurve_entity, target_surface_id) {
+                                    if matched < skip {
+                                        matched += 1;
+                                        continue;
+                                    }
                                     if let Some(curve_2d) = self.resolve_pcurve_to_curve2d(pcurve_entity) {
                                         return Some(curve_2d);
                                     }
@@ -10161,28 +10192,31 @@ impl<'a> StepConverter<'a> {
 
     /// Resolve a 2D TRIMMED_CURVE.
     fn resolve_trimmed_curve_2d(&self, entity: &crate::schema::StepEntity) -> Option<Curve2d> {
-        // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
-        let basis_id = self.get_ref(entity.params.first()?)?;
+        // TRIMMED_CURVE('', #basis, (trim1), (trim2), .T., .PARAMETER.)
+        // Also tolerates the legacy nameless form
+        // TRIMMED_CURVE(#basis_curve, t1, t2, .T., .T., .CARTESIAN., .CARTESIAN.)
+        let basis_id = self.find_trimmed_curve_basis(entity)?;
         let basis = self.resolve_curve_2d(basis_id)?;
 
-        // Extract trim values
+        // Extract trim values: bare floats (legacy form), PARAMETER_VALUE
+        // typed values, or lists containing either (standard form).
         let mut trim1: Option<f64> = None;
         let mut trim2: Option<f64> = None;
 
-        if entity.params.len() >= 3 {
-            if let Some(param) = entity.params.get(1) {
-                trim1 = self.get_float(param);
-                if trim1.is_none() {
-                    if let Some(ref_id) = self.get_ref(param) {
-                        if let Some(pt) = self.resolve_cartesian_point_2d(ref_id) {
-                            // Could use the point, but for now just note we have it
-                            let _ = pt;
-                        }
-                    }
+        let mut seen_basis = false;
+        for param in &entity.params {
+            if !seen_basis {
+                if self.get_ref(param) == Some(basis_id) {
+                    seen_basis = true;
                 }
+                continue;
             }
-            if let Some(param) = entity.params.get(2) {
-                trim2 = self.get_float(param);
+            if let Some(val) = trim_value(param) {
+                if trim1.is_none() {
+                    trim1 = Some(val);
+                } else if trim2.is_none() {
+                    trim2 = Some(val);
+                }
             }
         }
 
@@ -10206,6 +10240,20 @@ impl<'a> StepConverter<'a> {
             if let (Some(t1), Some(t2)) = (trim1, trim2) {
                 return Some(Curve2d::Circle(Circle2d::new_arc(
                     circle.center, circle.radius, t1, t2,
+                )));
+            }
+        }
+
+        // For ELLIPSE in UV, trims define angle range
+        if let Curve2d::Ellipse(ref ellipse) = basis {
+            if let (Some(t1), Some(t2)) = (trim1, trim2) {
+                return Some(Curve2d::Ellipse(Ellipse2d::new_arc(
+                    ellipse.center,
+                    ellipse.semi_major,
+                    ellipse.semi_minor,
+                    ellipse.rotation,
+                    t1,
+                    t2,
                 )));
             }
         }
@@ -11947,38 +11995,75 @@ impl<'a> StepConverter<'a> {
 
     /// Resolve a TRIMMED_CURVE entity by extracting the basis curve and
     /// applying trim parameters to set the correct param_range.
-    fn resolve_trimmed_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
-        // TRIMMED_CURVE(#basis_curve, #trim1, #trim2, .T., .T., .CARTESIAN., .CARTESIAN.)
-        // trim1/trim2 can be either parameter values or point references
-        
-        let basis_id = self.get_ref(entity.params.first()?)?;
-        let curve = self.resolve_curve(basis_id, depth + 1)?;
-        
-        // Try to extract trim parameter values or points
-        // The 2nd and 3rd params are the trim specifications
-        let mut trim1: Option<f64> = None;
-        let mut trim2: Option<f64> = None;
-        let mut _trim_point1: Option<Point3d> = None;
-        let mut _trim_point2: Option<Point3d> = None;
-        
-        if entity.params.len() >= 3 {
-            // Trim 1
-            if let Some(param) = entity.params.get(1) {
-                if let Some(val) = self.get_float(param) {
-                    trim1 = Some(val);
-                } else if let Some(ref_id) = self.get_ref(param) {
-                    _trim_point1 = self.resolve_cartesian_point(ref_id);
-                }
-            }
-            // Trim 2
-            if let Some(param) = entity.params.get(2) {
-                if let Some(val) = self.get_float(param) {
-                    trim2 = Some(val);
-                } else if let Some(ref_id) = self.get_ref(param) {
-                    _trim_point2 = self.resolve_cartesian_point(ref_id);
+    /// Find the basis curve reference of a TRIMMED_CURVE, tolerating BOTH
+    /// the standard form `TRIMMED_CURVE('',#basis,(trim1),(trim2),...)`
+    /// and the legacy nameless form `TRIMMED_CURVE(#basis,t1,t2,...)`.
+    fn find_trimmed_curve_basis(&self, entity: &crate::schema::StepEntity) -> Option<i64> {
+        for param in &entity.params {
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(e) = self.step.find_entity(ref_id) {
+                    if self.is_curve_type(&e.type_name) || e.type_name == "SURFACE_CURVE" {
+                        return Some(ref_id);
+                    }
                 }
             }
         }
+        None
+    }
+
+    /// Collect the first two numeric trim values of a TRIMMED_CURVE that
+    /// appear AFTER the basis parameter. Values may be bare floats
+    /// (legacy form), `PARAMETER_VALUE(x)` typed values, or lists
+    /// containing either (standard form). Point references are recorded
+    /// (cartesian trimming) but do not produce numeric trims.
+    fn collect_trim_values_3d(
+        &self,
+        entity: &crate::schema::StepEntity,
+        basis_id: i64,
+    ) -> (Option<f64>, Option<f64>, Option<Point3d>, Option<Point3d>) {
+        let mut trim1: Option<f64> = None;
+        let mut trim2: Option<f64> = None;
+        let mut trim_point1: Option<Point3d> = None;
+        let mut trim_point2: Option<Point3d> = None;
+        let mut seen_basis = false;
+        for param in &entity.params {
+            if !seen_basis {
+                if self.get_ref(param) == Some(basis_id) {
+                    seen_basis = true;
+                }
+                continue;
+            }
+            if let Some(ref_id) = self.get_ref(param) {
+                if let Some(pt) = self.resolve_cartesian_point(ref_id) {
+                    if trim_point1.is_none() {
+                        trim_point1 = Some(pt);
+                    } else if trim_point2.is_none() {
+                        trim_point2 = Some(pt);
+                    }
+                }
+                continue;
+            }
+            if let Some(val) = trim_value(param) {
+                if trim1.is_none() {
+                    trim1 = Some(val);
+                } else if trim2.is_none() {
+                    trim2 = Some(val);
+                }
+            }
+        }
+        (trim1, trim2, trim_point1, trim_point2)
+    }
+
+    fn resolve_trimmed_curve(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Curve3d> {
+        // TRIMMED_CURVE('', #basis, (trim1), (trim2), .T., .PARAMETER.|.CARTESIAN.)
+        // Also tolerates the legacy nameless form
+        // TRIMMED_CURVE(#basis_curve, t1, t2, .T., .T., .CARTESIAN., .CARTESIAN.)
+
+        let basis_id = self.find_trimmed_curve_basis(entity)?;
+        let curve = self.resolve_curve(basis_id, depth + 1)?;
+
+        let (trim1, trim2, _trim_point1, _trim_point2) =
+            self.collect_trim_values_3d(entity, basis_id);
         
         // If we have parameter values, create a new curve with adjusted param_range
         // For circles/ellipses with angle trims, convert to Arc
@@ -13368,6 +13453,22 @@ fn get_ref_standalone(value: &StepValue) -> Option<i64> {
         _ => None,
     }
 }
+
+/// Extract a numeric trim value from a TRIMMED_CURVE parameter.
+/// Handles bare floats (legacy nameless form), typed values such as
+/// `PARAMETER_VALUE(x)` / `LENGTH_MEASURE(x)`, and lists containing
+/// either (the standard `(#{pt},PARAMETER_VALUE({t}))` trim form).
+/// Point references and enums yield None.
+fn trim_value(value: &StepValue) -> Option<f64> {
+    match value {
+        StepValue::Float(f) => Some(*f),
+        StepValue::Integer(i) => Some(*i as f64),
+        StepValue::Typed { value: inner, .. } => trim_value(inner),
+        StepValue::List(items) => items.iter().find_map(trim_value),
+        _ => None,
+    }
+}
+
 
 /// Standalone version of get_float for StepValue.
 fn get_float_standalone(value: &StepValue) -> Option<f64> {
