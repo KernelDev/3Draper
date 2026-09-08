@@ -4606,3 +4606,75 @@ ToleranceContext и никогда не достигал топологии.
   незакрытый пункт Progress Tracking; требует GPU-стенда.
 - Vision 2036 §1.1 закрыт полностью: пропагация + консистентность +
   round-trip; Phase 1 не имеет открытых пунктов.
+
+## 22-я сессия (2026-09-08): восстановление GitHub Pages деплоя + чистка веток
+
+**Baseline:** commit `0050ed3` (Vision 2036 §1.1 complete). Локальный main
+был отстающим — fast-forward к remote.
+**Задача (user):** «Обнови сайт kerneldev.github.io/3Draper — и зачем нам
+две ветки gh-pages и wip/c5-7.6b-face-edges-removal».
+
+## Диагностика
+
+- Сайт обслуживается workflow'ом `deploy.yml` (Pages `build_type:
+  "workflow"`, artifact-based через actions/deploy-pages), а НЕ веткой
+  gh-pages: live-сайт отвечает `brepcad.html` → 200, `draper-worker.js`
+  → 404 (gh-pages-контент), title без build-бейджа.
+- **Deploy-workflow падал 86 раз подряд с 2026-08-08** (последний успех
+  `d6bf806`, 08-07). Два слоя поломки:
+  1. Phase 5 merge `9572cb7` (08-08) втащил `draper-ai`/`draper-cloud`
+     (tokio full → mio/os-poll) в wasm-граф draper-viewer → 48 ошибок
+     компиляции mio на wasm32.
+  2. `d88f78f` (08-22, VP-ноды) вызывал native-only файловый IO
+     (`parse_step_file`, `write_stl_file`, `draper_mesh::export::*`) без
+     cfg-гейтов.
+- Cargo tree: `mio ← tokio(full) ← draper-cloud ← draper-viewer`.
+
+## Реализация (`590db54`)
+
+- **draper-viewer/Cargo.toml**: `draper-ai`, `draper-cloud`, `tokio`,
+  `rfd`, `env_logger`, `rayon` → `[target.'cfg(not(target_family =
+  "wasm"))'.dependencies]`; web-депы остаются в обычной секции (важно:
+  первый вариант редактирования случайно утащил web-депы в target-секцию
+  — ловится чеком, web-deploy чек зелёный только после перестановки).
+- **cfg-гейтинг кода** (`not(target_family = "wasm")` + wasm-фоллбеки с
+  информативными сообщениями):
+  - `ui/mod.rs` — модули `ai_panel`/`collab_panel` (нативные панели);
+  - `dispatcher.rs` — импорты draper_ai; ветки SimValidate (wasm:
+    watertight-валидация) и AiShapeFromText;
+  - `app.rs` — поля/инициализация/toggle-кнопки/оконный рендер панелей
+    AI/Collab; ToolsAiHealing, AiShapeFromText, AiDesignReview/AiChat/
+    AiCostEstimate/AiAutoFillet; VP-ноды ExportSTEP/ExportSTL/ExportOBJ/
+    ExportGLTF/Export3MF/FileInput/ImportSTL;
+  - `workspace_panels.rs` — AI workspace panel (fn + call site).
+- Паттерн: `#[cfg]` на полях struct-литерала, if-выражениях, match-ветках
+  и блоках-стейтментах — всё stable (проверено мини-тестом rustc).
+
+## Верификация
+
+- `cargo check -p draper-viewer --no-default-features --features
+  web-deploy --target wasm32-unknown-unknown` — **green** (lib + оба bin).
+- `cargo check -p draper-viewer` (native) и `cargo check` (default
+  members) — green.
+- CI на `590db54`: **Build & Deploy to GitHub Pages — success** (первый
+  успех за месяц), Determinism Gate — success.
+- Live-сайт обновлён: index.html + brepcad.html last-modified
+  2026-09-08 12:41 UTC, wasm-ассет 10.2 MB отвечает 200.
+
+## Чистка веток (ответ на вопрос пользователя)
+
+- `wip/c5-7.6b-face-edges-removal` (указывала на `2b131e8`, полностью в
+  истории main) — **удалена** локально и на remote.
+- `gh-pages` (tip `d4e0997`, июльские ручные деплои; НЕ обслуживала live-
+  сайт со времён перехода на workflow-деплой) — **удалена** на remote
+  после подтверждения зелёного CI-деплоя; SHA зафиксирован здесь для
+  восстановления при необходимости.
+- `scripts/deploy_gh_pages.sh` помечен DEPRECATED с указанием на реальный
+  путь деплоя (push в main / workflow_dispatch).
+
+## Осталось
+
+- Vision 2036: следующий пункт по ROADMAP (после §1.1) — читать PLAN.md.
+- draper-viewer wasm: VP-ноды файлового IO возвращают «native-only»
+  сообщения — браузерный IO (File API) как будущая задача (см.
+  UNIVERSAL_STEP_PLAN Phase 8+).

@@ -1,4 +1,13 @@
 #!/usr/bin/env bash
+# [DEPRECATED 2026-09-08] This script is no longer the deployment path.
+# The live site https://kerneldev.github.io/3Draper/ is served by the
+# GitHub Actions workflow .github/workflows/deploy.yml (artifact-based
+# deployment via actions/deploy-pages — Pages build_type: "workflow").
+# The legacy gh-pages branch has been deleted; pushing to it no longer
+# (and never again) updates the site. To deploy, just push to main or
+# trigger the workflow manually (workflow_dispatch).
+# Kept for historical reference only — do not use.
+#
 # Deploy the draper-viewer WASM demo to the gh-pages branch.
 # This is the same build the GitHub Actions workflow produces, but run
 # locally so the user sees the change immediately without waiting for CI.
