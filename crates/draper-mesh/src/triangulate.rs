@@ -5258,7 +5258,7 @@ fn try_strip_triangulation_ruled_nurbs(
 ) -> Option<TriangleMesh> {
     use draper_geometry::{Point3d, Point2d};
 
-    log::warn!(
+    log::debug!(
         "STRIP_ENTER: bnd={} u_deg={} v_deg={} u_range=[{:.3},{:.3}] v_range=[{:.3},{:.3}]",
         boundary_points.len(), nurbs.u_degree, nurbs.v_degree,
         nurbs.u_knots.first().copied().unwrap_or(0.0),
@@ -5268,7 +5268,7 @@ fn try_strip_triangulation_ruled_nurbs(
     );
 
     if boundary_points.is_empty() || boundary_uvs.len() != boundary_points.len() {
-        log::warn!("STRIP_EXIT: empty boundary or length mismatch");
+        log::debug!("STRIP_EXIT: empty boundary or length mismatch");
         return None;
     }
 
@@ -5283,7 +5283,7 @@ fn try_strip_triangulation_ruled_nurbs(
     let orig_to_dedup: Vec<usize> = (0..boundary_points.len()).collect();
     let boundary_points: &[Point3d] = &deduped_points;
     let boundary_uvs: &[Point2d] = &deduped_uvs;
-    log::warn!(
+    log::debug!(
         "STRIP_DEDUP: {} → {} unique points",
         orig_to_dedup.len(), deduped_points.len()
     );
@@ -5305,14 +5305,6 @@ fn try_strip_triangulation_ruled_nurbs(
         return None; // Degenerate surface
     }
 
-    // Classify each boundary point by which edge it's on:
-    // 0 = u_min edge (rail 0 if u_degree=1)
-    // 1 = u_max edge (rail 1 if u_degree=1)
-    // 2 = v_min edge
-    // 3 = v_max edge
-    let u_tol = u_range * 0.01; // 1% of u_range
-    let v_tol = v_range * 0.01;
-
     let is_u_ruled = nurbs.u_degree == 1 && nurbs.v_degree > 1;
     let is_v_ruled = nurbs.v_degree == 1 && nurbs.u_degree > 1;
 
@@ -5320,68 +5312,77 @@ fn try_strip_triangulation_ruled_nurbs(
         return None; // Not a ruled surface
     }
 
-    // Find corners: points where BOTH u and v are at extremes
-    let mut corner_indices: Vec<usize> = Vec::new();
-    for (i, uv) in boundary_uvs.iter().enumerate() {
-        let at_u_min = (uv.u - u_min).abs() < u_tol;
-        let at_u_max = (uv.u - u_max).abs() < u_tol;
-        let at_v_min = (uv.v - v_min).abs() < v_tol;
-        let at_v_max = (uv.v - v_max).abs() < v_tol;
-        if (at_u_min || at_u_max) && (at_v_min || at_v_max) {
-            // Check if this point is too close to ANY existing corner.
-            // Use a FIXED 3D tolerance (1e-6) instead of a parameter-space
-            // tolerance — the parameter-to-3D scaling varies across surfaces,
-            // making parameter-based tolerances unreliable.
-            // Corners that come from the same VERTEX_POINT should be at
-            // EXACTLY the same 3D position (bit-identical from edge cache).
-            let mut is_duplicate = false;
-            let corner_dist_tol = 1e-6; // 1 micron — corners from same vertex are bit-identical
-            for &prev in &corner_indices {
-                let dist = ((boundary_points[i].x - boundary_points[prev].x).powi(2)
-                    + (boundary_points[i].y - boundary_points[prev].y).powi(2)
-                    + (boundary_points[i].z - boundary_points[prev].z).powi(2)).sqrt();
-                if dist < corner_dist_tol {
-                    is_duplicate = true;
-                    break;
-                }
-            }
-            if !is_duplicate {
-                corner_indices.push(i);
+    // Find the 4 corners of the UV rectangle: for each combination of
+    // (u extreme, v extreme), select the boundary point CLOSEST to that
+    // UV corner in normalized parameter distance.
+    //
+    // The previous approach (any point within 1% of both extremes counts as
+    // a corner) over-detected on faces where one parameter range is much
+    // larger than the other. For the as1-oc-214 rod surface (u_range=200,
+    // v_range=30 → u_tol=2.0), every point of the u-extreme edges qualified
+    // as a "corner", 18..107 candidates were found, the == 4 check failed,
+    // and the face fell back to the degenerate earcutr polygon fill.
+    //
+    // Selecting the NEAREST point to each UV rectangle corner is robust to
+    // uneven edge sampling: the true corner vertex is at distance 0 (or FP
+    // noise), while any other boundary point is strictly farther.
+    let mut corner_indices: Vec<usize> = Vec::with_capacity(4);
+    for &(uc, vc) in &[(u_min, v_min), (u_min, v_max), (u_max, v_min), (u_max, v_max)] {
+        let mut best_i = usize::MAX;
+        let mut best_d = f64::MAX;
+        for (i, uv) in boundary_uvs.iter().enumerate() {
+            let d = ((uv.u - uc).abs() / u_range) + ((uv.v - vc).abs() / v_range);
+            if d < best_d {
+                best_d = d;
+                best_i = i;
             }
         }
+        // The selected point must actually be near the UV rectangle corner
+        // (each component within 2% of its parameter range). Otherwise the
+        // face is not an untrimmed quad patch — bail and let the earcutr
+        // path handle it (same failure mode as the old != 4 corners check).
+        let uv = boundary_uvs[best_i];
+        if (uv.u - uc).abs() > 0.02 * u_range || (uv.v - vc).abs() > 0.02 * v_range {
+            log::debug!(
+                "STRIP_FAIL: no boundary point near UV corner ({:.4},{:.4}) — closest is ({:.4},{:.4})",
+                uc, vc, uv.u, uv.v
+            );
+            return None;
+        }
+        corner_indices.push(best_i);
     }
 
+    // The four selections must be distinct boundary points...
+    corner_indices.sort_unstable();
+    corner_indices.dedup();
     if corner_indices.len() != 4 {
-        log::warn!(
-            "STRIP_FAIL: need 4 corners, found {} (u_range={:.3}, v_range={:.3}, u_tol={:.4}, v_tol={:.4}) corners={:?}",
-            corner_indices.len(), u_range, v_range, u_tol, v_tol, corner_indices
-        );
+        log::debug!("STRIP_FAIL: UV-corner selection collapsed to {} distinct points", corner_indices.len());
         return None;
     }
-    log::warn!("STRIP_CORNERS: found 4 corners at {:?}", corner_indices);
-    for (ci, &idx) in corner_indices.iter().enumerate() {
-        let p = &boundary_points[idx];
-        let uv = &boundary_uvs[idx];
-        log::warn!(
-            "  corner {}: idx={} pos=({:.3},{:.3},{:.3}) uv=({:.3},{:.3})",
-            ci, idx, p.x, p.y, p.z, uv.u, uv.v
-        );
-    }
-    // Print y-range of boundary points to detect cross-half contamination
-    let (y_min, y_max) = boundary_points.iter().fold((f64::MAX, f64::MIN), |(mn, mx), p| {
-        (mn.min(p.y), mx.max(p.y))
-    });
-    log::warn!("  boundary y-range: [{:.3}, {:.3}]", y_min, y_max);
-    // Print a few sample points from each rail
-    log::warn!("  rail_a samples (edge 2 = corner2→corner3):");
-    let n = boundary_points.len();
-    for offset in [0, 1, n/4, n/2, 3*n/4] {
-        let idx = corner_indices[2] + offset;
-        if idx < n {
-            let p = &boundary_points[idx];
-            log::warn!("    idx={} pos=({:.3},{:.3},{:.3})", idx, p.x, p.y, p.z);
+    // ...and distinct 3D positions. Corners that come from the same
+    // VERTEX_POINT are bit-identical from the edge cache (1 micron check).
+    {
+        let corner_dist_tol = 1e-6;
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                let pa = boundary_points[corner_indices[i]];
+                let pb = boundary_points[corner_indices[j]];
+                let dist = ((pa.x - pb.x).powi(2)
+                    + (pa.y - pb.y).powi(2)
+                    + (pa.z - pb.z).powi(2)).sqrt();
+                if dist < corner_dist_tol {
+                    log::debug!(
+                        "STRIP_FAIL: corner candidates {} and {} are the same 3D point (dist {:.2e})",
+                        corner_indices[i], corner_indices[j], dist
+                    );
+                    return None;
+                }
+            }
         }
     }
+    // Ascending index order = cyclic boundary order (the boundary is a
+    // closed loop, so the 4 corners in index order walk the perimeter).
+    log::debug!("STRIP_CORNERS: 4 corners at {:?} (UV-corner nearest selection)", corner_indices);
 
     // Split the boundary into 4 edges using the corners
     // The edges are: corner[0]→corner[1], corner[1]→corner[2], corner[2]→corner[3], corner[3]→corner[0]
@@ -5403,24 +5404,38 @@ fn try_strip_triangulation_ruled_nurbs(
     // Identify which edges are the rails
     // For u_ruled: rails are the edges at u_min and u_max (constant u, varying v)
     // For v_ruled: rails are the edges at v_min and v_max (constant v, varying u)
+    //
+    // Classify each edge by the MEAN UV of all its points (robust to uneven
+    // per-edge sampling — a single midpoint index can hit an outlier sample,
+    // and edges with very different point counts make midpoint indices land
+    // at incomparable positions).
     let mut rail_a_idx: Option<usize> = None;
     let mut rail_b_idx: Option<usize> = None;
     let mut side_a_idx: Option<usize> = None;
     let mut side_b_idx: Option<usize> = None;
 
     for (ei, edge) in edges.iter().enumerate() {
-        // Check the midpoint of this edge to classify it
-        let mid_idx = edge[edge.len() / 2];
-        let mid_uv = boundary_uvs[mid_idx];
-        let at_u_min = (mid_uv.u - u_min).abs() < u_tol;
-        let at_u_max = (mid_uv.u - u_max).abs() < u_tol;
-        let at_v_min = (mid_uv.v - v_min).abs() < v_tol;
-        let at_v_max = (mid_uv.v - v_max).abs() < v_tol;
+        if edge.is_empty() {
+            return None;
+        }
+        let mut mean_u = 0.0_f64;
+        let mut mean_v = 0.0_f64;
+        for &idx in edge {
+            mean_u += boundary_uvs[idx].u;
+            mean_v += boundary_uvs[idx].v;
+        }
+        mean_u /= edge.len() as f64;
+        mean_v /= edge.len() as f64;
+
+        let at_u_min = (mean_u - u_min).abs() < 0.02 * u_range;
+        let at_u_max = (mean_u - u_max).abs() < 0.02 * u_range;
+        let at_v_min = (mean_v - v_min).abs() < 0.02 * v_range;
+        let at_v_max = (mean_v - v_max).abs() < 0.02 * v_range;
 
         if is_u_ruled {
-            if at_u_min {
+            if at_u_min && !at_u_max {
                 rail_a_idx = Some(ei);
-            } else if at_u_max {
+            } else if at_u_max && !at_u_min {
                 rail_b_idx = Some(ei);
             } else if at_v_min || at_v_max {
                 if side_a_idx.is_none() {
@@ -5431,9 +5446,9 @@ fn try_strip_triangulation_ruled_nurbs(
             }
         } else {
             // v_ruled
-            if at_v_min {
+            if at_v_min && !at_v_max {
                 rail_a_idx = Some(ei);
-            } else if at_v_max {
+            } else if at_v_max && !at_v_min {
                 rail_b_idx = Some(ei);
             } else if at_u_min || at_u_max {
                 if side_a_idx.is_none() {
@@ -5447,226 +5462,152 @@ fn try_strip_triangulation_ruled_nurbs(
 
     let rail_a_idx = rail_a_idx?;
     let rail_b_idx = rail_b_idx?;
-    let _side_a_idx = side_a_idx?;
-    let _side_b_idx = side_b_idx?;
+    let side_a_idx = side_a_idx?;
+    let side_b_idx = side_b_idx?;
 
     let rail_a = &edges[rail_a_idx];
     let rail_b = &edges[rail_b_idx];
 
-    // ─── RESAMPLE RAILS TO COMMON COUNT ───────────────────────────────
+    // ─── ZIPPER STITCHING OF THE TWO RAILS ────────────────────────────
     //
-    // The edge cache discretizes each EDGE_CURVE independently using chord-error
-    // adaptation. Two rails that trace geometrically equivalent curves (e.g., the
-    // top and bottom edges of a cylinder's half-side) can therefore end up with
-    // DIFFERENT point counts (e.g., 63 vs 61). If we just take min(na, nb) - 1
-    // quads, the extra points on the longer rail become ORPHAN VERTICES that are
-    // added to the mesh but never used in any triangle. Those orphans create
-    // boundary edges (visible holes in the rendered mesh).
+    // Stitch rail_a and rail_b (reversed to run in the same direction as
+    // rail_a) into a triangle strip using ONLY the ORIGINAL boundary
+    // points from the edge cache. Watertightness with adjacent faces
+    // (caps, the opposite half-cylinder, planes) is guaranteed by
+    // construction: every consecutive pair of boundary points becomes a
+    // mesh edge, exactly matching the polylines those faces triangulate.
     //
-    // To eliminate the orphans, we resample BOTH rails by arc length to a common
-    // count = max(na, nb). The resampled rails share endpoints with the originals
-    // (corners are preserved bit-identically), so watertightness with adjacent
-    // faces is maintained. Interior points are interpolated along the rail
-    // polyline; for NURBS surfaces the interpolation is along the surface's
-    // isoparametric curve, which is the geometrically correct thing to do.
-    let na_orig = rail_a.len();
-    let nb_orig = rail_b.len();
+    // The two rails can have DIFFERENT point counts (the edge cache
+    // discretizes each EDGE_CURVE independently with chord-error
+    // adaptation, e.g., 48 vs 47 points for two congruent end arcs).
+    // The zipper walks both rails by arc-length fraction and emits a quad
+    // where the fractions align, or a single triangle where one rail is
+    // ahead — a classic polyline-to-polyline stitch. NO points are
+    // dropped and NO points are interpolated.
+    //
+    // This replaces the previous even-arc-length RESAMPLE of both rails:
+    // resampling discarded most ORIGINAL (chord-adaptive) rail points,
+    // replacing them with evenly-spaced interpolated vertices. The
+    // original points survived as orphan vertices, and the adjacent
+    // faces' meshes (which use the original polylines) no longer shared
+    // edges with the strip → T-junctions → boundary-edge explosions
+    // (2212 boundary edges on the as1-oc-214 bracket).
+    let rail_a_ids: Vec<usize> = rail_a.clone();
+    // Reverse rail_b so that rail_b_ids[k] corresponds to rail_a_ids[k]
+    // (running the same direction along the surface).
+    let rail_b_ids: Vec<usize> = rail_b.iter().rev().copied().collect();
 
-    // Reverse rail_b so that rail_b[i] corresponds to rail_a[i] (going the same
-    // direction along the surface).
-    let rail_b_fwd: Vec<usize> = rail_b.iter().rev().copied().collect();
-
-    // Common count = max of the two rails. We always resample to this count so
-    // that quads are uniform and no vertices are orphaned.
-    let n_common = na_orig.max(nb_orig);
-    if n_common < 2 {
+    let na = rail_a_ids.len();
+    let nb = rail_b_ids.len();
+    if na < 2 || nb < 2 {
         return None;
     }
 
-    // Resample `rail` to match the arc-length positions of `template_rail`.
-    // This preserves ALL original points from `template_rail` and interpolates
-    // `rail` to those same arc-length fractions.
-    // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
-    let _resample_to_positions = |rail: &[usize], template_rail: &[usize], bnd_pts: &[Point3d], bnd_uvs: &[Point2d]|
-        -> Vec<(Point3d, Point2d, Option<usize>)>
-    {
-        if rail.is_empty() || template_rail.is_empty() {
-            return Vec::new();
-        }
-
-        // Compute cumulative arc length for template_rail
-        let mut template_cum: Vec<f64> = Vec::with_capacity(template_rail.len());
-        template_cum.push(0.0);
-        for i in 1..template_rail.len() {
-            let p_prev = bnd_pts[template_rail[i - 1]];
-            let p_curr = bnd_pts[template_rail[i]];
-            let d = ((p_curr.x - p_prev.x).powi(2) + (p_curr.y - p_prev.y).powi(2) + (p_curr.z - p_prev.z).powi(2)).sqrt();
-            template_cum.push(template_cum[i - 1] + d);
-        }
-        let template_total = *template_cum.last().expect("template_cum non-empty after construction");
-
-        // Compute cumulative arc length for rail
-        let mut rail_cum: Vec<f64> = Vec::with_capacity(rail.len());
-        rail_cum.push(0.0);
+    // Cumulative arc-length fractions along each rail (3D distances).
+    let cum_frac = |rail: &[usize]| -> Vec<f64> {
+        let mut cum = vec![0.0_f64];
         for i in 1..rail.len() {
-            let p_prev = bnd_pts[rail[i - 1]];
-            let p_curr = bnd_pts[rail[i]];
-            let d = ((p_curr.x - p_prev.x).powi(2) + (p_curr.y - p_prev.y).powi(2) + (p_curr.z - p_prev.z).powi(2)).sqrt();
-            rail_cum.push(rail_cum[i - 1] + d);
+            let p0 = boundary_points[rail[i - 1]];
+            let p1 = boundary_points[rail[i]];
+            let d = ((p1.x - p0.x).powi(2) + (p1.y - p0.y).powi(2) + (p1.z - p0.z).powi(2)).sqrt();
+            cum.push(cum[i - 1] + d);
         }
-        let rail_total = *rail_cum.last().unwrap_or(&1.0);
-
-        // For each template point, interpolate the rail to the same arc-length fraction
-        let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(template_rail.len());
-        for (k, &_tmpl_idx) in template_rail.iter().enumerate() {
-            // Arc-length fraction for this template point
-            let frac = if template_total > 1e-15 { template_cum[k] / template_total } else { k as f64 / template_rail.len().max(1) as f64 };
-            let target_len = frac * rail_total;
-
-            // Find the position in rail
-            let seg_idx = match rail_cum.binary_search_by(|c| c.partial_cmp(&target_len).unwrap_or(std::cmp::Ordering::Equal)) {
-                Ok(i) => i,
-                Err(i) => i.saturating_sub(1).min(rail.len().saturating_sub(2)),
-            };
-
-            if seg_idx >= rail.len() {
-                let idx = *rail.last().expect("rail non-empty after construction");
-                out.push((bnd_pts[idx], bnd_uvs[idx], Some(idx)));
-                continue;
-            }
-
-            let seg_start = rail_cum[seg_idx];
-            let seg_end = if seg_idx + 1 < rail_cum.len() { rail_cum[seg_idx + 1] } else { rail_total };
-            let seg_len = seg_end - seg_start;
-
-            if seg_len < 1e-15 {
-                let idx = rail[seg_idx];
-                out.push((bnd_pts[idx], bnd_uvs[idx], Some(idx)));
-                continue;
-            }
-
-            let local_t = (target_len - seg_start) / seg_len;
-            let idx_a = rail[seg_idx];
-            let idx_b = rail[(seg_idx + 1).min(rail.len() - 1)];
-            let pa = bnd_pts[idx_a];
-            let pb = bnd_pts[idx_b];
-            let ua = bnd_uvs[idx_a];
-            let ub = bnd_uvs[idx_b];
-            let p = Point3d::new(
-                pa.x + local_t * (pb.x - pa.x),
-                pa.y + local_t * (pb.y - pa.y),
-                pa.z + local_t * (pb.z - pa.z),
-            );
-            let uv = Point2d::new(
-                ua.u + local_t * (ub.u - ua.u),
-                ua.v + local_t * (ub.v - ua.v),
-            );
-            out.push((p, uv, None));
+        let total = *cum.last().unwrap_or(&1.0);
+        if total > 1e-15 {
+            cum.iter().map(|c| c / total).collect()
+        } else {
+            (0..rail.len()).map(|i| i as f64 / (rail.len() - 1) as f64).collect()
         }
-        out
+    };
+    let fa = cum_frac(&rail_a_ids);
+    let fb = cum_frac(&rail_b_ids);
+
+    // ─── SIDE CHAINS ─────────────────────────────────────────────────
+    //
+    // The two remaining boundary edges (the "sides") run along the ruling
+    // direction of the degree-1 parameterization, so they are STRAIGHT
+    // lines in 3D (S(u, v_min) is a ruling from rail_a[0] to rail_b[0]).
+    // The edge cache may still discretize them with intermediate points
+    // (adjacent faces use those polylines). Thread them into the first
+    // and last zipper columns as fans; bail out if a side point is NOT
+    // on the ruling line (the surface is not a clean ruled patch).
+    let side_chain = |side: &Vec<usize>, from: usize, to: usize| -> Option<Vec<usize>> {
+        // Orient the chain from `from` to `to`.
+        let mut chain = side.clone();
+        if chain.first().copied() != Some(from) {
+            chain.reverse();
+        }
+        if chain.first().copied() != Some(from) || chain.last().copied() != Some(to) {
+            return None;
+        }
+        // Collinearity check against the ruling segment (from → to).
+        let p0 = boundary_points[from];
+        let p1 = boundary_points[to];
+        let seg = (p1.x - p0.x, p1.y - p0.y, p1.z - p0.z);
+        let seg_len = (seg.0 * seg.0 + seg.1 * seg.1 + seg.2 * seg.2).sqrt();
+        if seg_len < 1e-12 {
+            return None;
+        }
+        let tol = 1e-6 * seg_len + 1e-12;
+        for &idx in chain.iter().skip(1).take(chain.len().saturating_sub(2)) {
+            let p = boundary_points[idx];
+            // Perpendicular distance from p to the line (p0, p1).
+            let d = (
+                (p.x - p0.x) * seg.1 - (p.y - p0.y) * seg.0,
+                (p.x - p0.x) * seg.2 - (p.z - p0.z) * seg.0,
+                (p.y - p0.y) * seg.2 - (p.z - p0.z) * seg.1,
+            );
+            let dist = (d.0 * d.0 + d.1 * d.1 + d.2 * d.2).sqrt() / seg_len;
+            if dist > tol {
+                log::debug!(
+                    "STRIP_FAIL: side point {} deviates {:.2e} from the ruling (tol {:.2e}) — not a ruled patch",
+                    idx, dist, tol
+                );
+                return None;
+            }
+        }
+        Some(chain)
     };
 
-    // Resample a polyline (Vec of boundary indices) to n target points by arc length.
-    // Returns a Vec of (Point3d, Point2d, original_boundary_index_or_None).
-    // If original_boundary_index is None, the point was interpolated and does not
-    // exist in the original boundary (we add it as a new mesh vertex).
-    let resample = |rail: &[usize], n: usize| -> Vec<(Point3d, Point2d, Option<usize>)> {
-        if rail.is_empty() {
-            return Vec::new();
+    // Which of the two side edges connects rail_a[0]↔rail_b[0] vs
+    // rail_a[na-1]↔rail_b[nb-1]?
+    let start_corner_a = rail_a_ids[0];
+    let start_corner_b = rail_b_ids[0];
+    let end_corner_a = rail_a_ids[na - 1];
+    let end_corner_b = rail_b_ids[nb - 1];
+
+    let mut side_a_chain: Option<Vec<usize>> = None;
+    let mut side_b_chain: Option<Vec<usize>> = None;
+    for &ei in &[side_a_idx, side_b_idx] {
+        let edge = &edges[ei];
+        let endpoints = (edge.first().copied(), edge.last().copied());
+        if endpoints == (Some(start_corner_a), Some(start_corner_b))
+            || endpoints == (Some(start_corner_b), Some(start_corner_a))
+        {
+            side_a_chain = side_chain(edge, start_corner_a, start_corner_b);
+        } else if endpoints == (Some(end_corner_a), Some(end_corner_b))
+            || endpoints == (Some(end_corner_b), Some(end_corner_a))
+        {
+            side_b_chain = side_chain(edge, end_corner_a, end_corner_b);
         }
-        if rail.len() == 1 || n == 1 {
-            let idx = rail[0];
-            return vec![(boundary_points[idx], boundary_uvs[idx], Some(idx))];
-        }
-
-        // Compute cumulative arc length along the rail (in 3D).
-        let mut cum_len = Vec::with_capacity(rail.len());
-        cum_len.push(0.0f64);
-        for i in 1..rail.len() {
-            let p_prev = boundary_points[rail[i - 1]];
-            let p_curr = boundary_points[rail[i]];
-            let dx = p_curr.x - p_prev.x;
-            let dy = p_curr.y - p_prev.y;
-            let dz = p_curr.z - p_prev.z;
-            let seg = (dx * dx + dy * dy + dz * dz).sqrt();
-            cum_len.push(cum_len[i - 1] + seg);
-        }
-        let total_len = *cum_len.last().expect("cum_len non-empty after construction");
-
-        let mut out: Vec<(Point3d, Point2d, Option<usize>)> = Vec::with_capacity(n);
-        for k in 0..n {
-            // Sample at evenly-spaced arc-length fractions.
-            // For k=0 → 0.0, for k=n-1 → 1.0 (exactly hits the endpoints).
-            let t = if n == 1 { 0.0 } else { k as f64 / (n - 1) as f64 };
-            let target_len = t * total_len;
-
-            // Find segment containing target_len.
-            // Use binary search on cum_len for efficiency.
-            let seg_idx = match cum_len.binary_search_by(|c| c.partial_cmp(&target_len).unwrap_or(std::cmp::Ordering::Equal)) {
-                Ok(i) => i, // Exact match — use the point directly
-                Err(i) => {
-                    if i == 0 {
-                        0
-                    } else if i >= rail.len() {
-                        rail.len() - 1
-                    } else {
-                        // target_len is between cum_len[i-1] and cum_len[i]
-                        i - 1
-                    }
-                }
-            };
-
-            // If exact match (within 1e-12), use the original point
-            if (cum_len[seg_idx] - target_len).abs() < 1e-12 {
-                let idx = rail[seg_idx];
-                out.push((boundary_points[idx], boundary_uvs[idx], Some(idx)));
-                continue;
-            }
-
-            // Interpolate within segment seg_idx → seg_idx+1
-            let seg_start_len = cum_len[seg_idx];
-            let seg_end_len = if seg_idx + 1 < cum_len.len() { cum_len[seg_idx + 1] } else { total_len };
-            let seg_len = seg_end_len - seg_start_len;
-            if seg_len < 1e-15 {
-                let idx = rail[seg_idx];
-                out.push((boundary_points[idx], boundary_uvs[idx], Some(idx)));
-                continue;
-            }
-            let local_t = (target_len - seg_start_len) / seg_len;
-            let idx_a = rail[seg_idx];
-            let idx_b = rail[(seg_idx + 1).min(rail.len() - 1)];
-            let pa = boundary_points[idx_a];
-            let pb = boundary_points[idx_b];
-            let ua = boundary_uvs[idx_a];
-            let ub = boundary_uvs[idx_b];
-            let p = Point3d::new(
-                pa.x + local_t * (pb.x - pa.x),
-                pa.y + local_t * (pb.y - pa.y),
-                pa.z + local_t * (pb.z - pa.z),
-            );
-            let uv = Point2d::new(
-                ua.u + local_t * (ub.u - ua.u),
-                ua.v + local_t * (ub.v - ua.v),
-            );
-            out.push((p, uv, None));
-        }
-        out
-    };
-
-    let rail_a_resampled = resample(rail_a, n_common);
-    let rail_b_resampled = resample(&rail_b_fwd, n_common);
-
-    log::warn!(
-        "STRIP_RESAMPLE: rail_a {}→{}, rail_b {}→{} (common={})",
-        na_orig, rail_a_resampled.len(), nb_orig, rail_b_resampled.len(), n_common
-    );
-
-    let n_quads = n_common.saturating_sub(1);
-    if n_quads == 0 {
-        return None;
     }
+    let side_a_chain = side_a_chain?;
+    let side_b_chain = side_b_chain?;
 
     let mut mesh = TriangleMesh::new();
+
+    // Vertex normal from NURBS derivatives, oriented to match the face's
+    // `forward` flag. The geometric surface normal must be NEGATED for
+    // reversed faces (same convention as `uv_triangles_to_3d`), otherwise
+    // half the cylinder sides shade with inward-pointing normals.
+    let oriented_normal = |d: &draper_geometry::SurfaceDerivatives| -> [f64; 3] {
+        let n = d.normal();
+        if forward {
+            [n.x, n.y, n.z]
+        } else {
+            [-n.x, -n.y, -n.z]
+        }
+    };
 
     // Add all ORIGINAL boundary points as vertices (for watertightness with
     // adjacent faces — they share these exact vertices via the edge cache).
@@ -5676,138 +5617,150 @@ fn try_strip_triangulation_ruled_nurbs(
         // Compute normal from NURBS derivatives
         let uv = boundary_uvs[i];
         let derivs = nurbs.derivatives_at(uv.u, uv.v);
-        mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
+        mesh.add_vertex_normal(vi, oriented_normal(&derivs));
         vertex_map.insert(i, vi);
     }
 
-    // Add INTERPOLATED rail points as additional vertices.
-    // We do this so that the resampled rails can be referenced by mesh index.
-    // For NURBS-ruling this is geometrically correct: the interpolated points
-    // lie on the surface's isoparametric curve (since the rail is itself an
-    // isoparametric curve at constant u or v).
-    //
-    // IMPORTANT: For better surface fidelity, we evaluate the NURBS surface at
-    // the interpolated UV instead of just linearly interpolating the 3D point.
-    // This gives us the exact surface point (no chord error).
-    let mut rail_a_mesh_idx: Vec<u32> = Vec::with_capacity(n_common);
-    let mut rail_b_mesh_idx: Vec<u32> = Vec::with_capacity(n_common);
-
-    for k in 0..n_common {
-        // Rail A
-        let (p_a, uv_a, orig_a) = rail_a_resampled[k];
-        let vi_a = if let Some(orig) = orig_a {
-            *vertex_map.get(&orig).unwrap_or(&0)
-        } else {
-            // Use the LINEARLY INTERPOLATED 3D point (p_a) from the resample
-            // function, NOT nurbs.point_at(uv). The interpolated point p_a is
-            // computed by linearly interpolating between two cached boundary
-            // points (which are bit-identical between faces sharing the same
-            // EDGE_CURVE). This ensures watertightness: both faces get the
-            // exact same 3D position for the same interpolated parameter.
-            //
-            // Using nurbs.point_at(uv) here would give DIFFERENT 3D positions
-            // for different NURBS surfaces sharing the same edge, because each
-            // NURBS surface has its own parameterization. This was the root
-            // cause of the remaining boundary edges.
-            let vi = mesh.add_vertex(p_a);
-            let derivs = nurbs.derivatives_at(uv_a.u, uv_a.v);
-            mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
-            vi
-        };
-        rail_a_mesh_idx.push(vi_a);
-
-        // Rail B
-        let (p_b, uv_b, orig_b) = rail_b_resampled[k];
-        let vi_b = if let Some(orig) = orig_b {
-            *vertex_map.get(&orig).unwrap_or(&0)
-        } else {
-            // Same as Rail A: use linearly interpolated 3D point (p_b)
-            // from cached boundary points, NOT nurbs.point_at(uv).
-            let vi = mesh.add_vertex(p_b);
-            let derivs = nurbs.derivatives_at(uv_b.u, uv_b.v);
-            mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
-            vi
-        };
-        rail_b_mesh_idx.push(vi_b);
-    }
-
-    log::warn!(
-        "STRIP_BUILD: n_common={} n_quads={} rail_a_mesh[0..3]={:?} rail_b_mesh[0..3]={:?}",
-        n_common, n_quads, &rail_a_mesh_idx[..3.min(rail_a_mesh_idx.len())], &rail_b_mesh_idx[..3.min(rail_b_mesh_idx.len())]
-    );
-
-    for i in 0..n_quads {
-        let a0 = rail_a_mesh_idx[i];
-        let a1 = rail_a_mesh_idx[i + 1];
-        let b0 = rail_b_mesh_idx[i];
-        let b1 = rail_b_mesh_idx[i + 1];
-
-        // Skip degenerate triangles
-        if a0 == a1 || a0 == b0 || a0 == b1 || a1 == b0 || a1 == b1 || b0 == b1 {
-            continue;
+    // Emit a triangle with winding flipped for reversed faces.
+    let emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
+        if x == y || y == z || x == z {
+            return; // degenerate — skip
         }
-
-        // Print first 2 and middle quad for debugging
-        if i < 2 || i == n_quads / 2 {
-            let p_a0 = mesh.vertices[a0 as usize];
-            let p_b0 = mesh.vertices[b0 as usize];
-            log::warn!(
-                "  quad {}: a0(mesh={})=({:.2},{:.2},{:.2}) b0(mesh={})=({:.2},{:.2},{:.2})",
-                i, a0, p_a0.x, p_a0.y, p_a0.z, b0, p_b0.x, p_b0.y, p_b0.z
-            );
-        }
-
-        // Two triangles per quad:
-        // (a0, a1, b1) and (a0, b1, b0)
-        // The orientation depends on the surface normal direction
         if forward {
-            mesh.add_triangle(a0, a1, b1);
-            mesh.add_triangle(a0, b1, b0);
+            mesh.add_triangle(x, y, z);
         } else {
-            mesh.add_triangle(a0, b1, a1);
-            mesh.add_triangle(a0, b0, b1);
+            mesh.add_triangle(x, z, y);
+        }
+    };
+
+    // Replace triangle (P, apex, R) — whose boundary edge (P→R) carries the
+    // chain c[0]=P … c[last]=R — with a fan (c_k, apex, c_{k+1}).
+    // Preserves the winding of the triangle it replaces.
+    let emit_fan = |mesh: &mut TriangleMesh, chain: &[usize], apex: u32, emit: &dyn Fn(&mut TriangleMesh, u32, u32, u32)| {
+        for w in 0..chain.len().saturating_sub(1) {
+            let ck = vertex_map[&chain[w]];
+            let ck1 = vertex_map[&chain[w + 1]];
+            emit(mesh, ck, apex, ck1);
+        }
+    };
+
+    // Same, but with the OPPOSITE winding: (apex, c_k, c_{k+1}). Used for
+    // the LAST column, where the replaced triangle is (apex, c_0, c_last)
+    // — the chain runs Q→R in the triangle (P, Q, R) there instead of P→R,
+    // so the fan orientation flips.
+    let emit_fan_rev = |mesh: &mut TriangleMesh, chain: &[usize], apex: u32, emit: &dyn Fn(&mut TriangleMesh, u32, u32, u32)| {
+        for w in 0..chain.len().saturating_sub(1) {
+            let ck = vertex_map[&chain[w]];
+            let ck1 = vertex_map[&chain[w + 1]];
+            emit(mesh, apex, ck, ck1);
+        }
+    };
+
+    let a_id = |i: usize| vertex_map[&rail_a_ids[i]];
+    let b_id = |j: usize| vertex_map[&rail_b_ids[j]];
+
+    // ─── ZIPPER WALK ─────────────────────────────────────────────────
+    //
+    // Invariant at the top of each step: column (i, j) is closed on the
+    // left by the edge (a_i, b_j) and must be closed on the right by
+    // either (a_{i+1}, b_j), (a_i, b_{j+1}) or (a_{i+1}, b_{j+1}).
+    // Compare the NEXT arc-length fractions to decide which:
+    //   fa[i+1] ≈ fb[j+1] → quad      (a_i, a_{i+1}, b_{j+1}, b_j)
+    //   fa[i+1] < fb[j+1] → tri-a     (a_i, a_{i+1}, b_j)
+    //   fb[j+1] < fa[i+1] → tri-b     (a_i, b_{j+1}, b_j)
+    // ε scaled to the rail sampling density so near-equal fractions
+    // (congruent arcs sampled 48 vs 47) still zip as quads.
+    let eps = 0.25 / (na.max(nb)) as f64;
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i + 1 < na || j + 1 < nb {
+        let next_a = i + 1 < na;
+        let next_b = j + 1 < nb;
+        let (adv_a, adv_b) = match (next_a, next_b) {
+            (true, true) => {
+                let da = fa[i + 1];
+                let db = fb[j + 1];
+                if (da - db).abs() <= eps {
+                    (true, true)
+                } else if da < db {
+                    (true, false)
+                } else {
+                    (false, true)
+                }
+            }
+            (true, false) => (true, false),
+            (false, true) => (false, true),
+            (false, false) => break,
+        };
+
+        let is_first_column = i == 0 && j == 0;
+        let is_last_column =
+            (i + adv_a as usize + 1 >= na) && (j + adv_b as usize + 1 >= nb);
+
+        if adv_a && adv_b {
+            // Quad (a_i, a_{i+1}, b_{j+1}, b_j) → two triangles.
+            let a0 = a_id(i);
+            let a1 = a_id(i + 1);
+            let b0 = b_id(j);
+            let b1 = b_id(j + 1);
+            // T1 = (a0, a1, b1): boundary edge (a1, b1) — carries the
+            // side_b chain when this is the LAST column. The replaced
+            // triangle is (a0, a1, b1) = (apex, c_0, c_last) → reversed
+            // fan winding.
+            if is_last_column && side_b_chain.len() > 2 {
+                emit_fan_rev(&mut mesh, &side_b_chain, a0, &emit);
+            } else {
+                emit(&mut mesh, a0, a1, b1);
+            }
+            // T2 = (a0, b1, b0): boundary edge (a0, b0) — carries the
+            // side_a chain when this is the FIRST column.
+            if is_first_column && side_a_chain.len() > 2 {
+                emit_fan(&mut mesh, &side_a_chain, b1, &emit);
+            } else {
+                emit(&mut mesh, a0, b1, b0);
+            }
+            i += 1;
+            j += 1;
+        } else if adv_a {
+            // Triangle (a_i, a_{i+1}, b_j): boundary edge (a0, b0) when
+            // first column; boundary edge (a_{i+1}, b_j) when last.
+            let a0 = a_id(i);
+            let a1 = a_id(i + 1);
+            let b0 = b_id(j);
+            if is_first_column && side_a_chain.len() > 2 {
+                emit_fan(&mut mesh, &side_a_chain, a1, &emit);
+            } else if is_last_column && side_b_chain.len() > 2 {
+                emit_fan_rev(&mut mesh, &side_b_chain, a0, &emit);
+            } else {
+                emit(&mut mesh, a0, a1, b0);
+            }
+            i += 1;
+        } else {
+            // Triangle (a_i, b_{j+1}, b_j): boundary edge (a0, b0) when
+            // first column; boundary edge (a_i, b_{j+1}) when last.
+            let a0 = a_id(i);
+            let b0 = b_id(j);
+            let b1 = b_id(j + 1);
+            if is_first_column && side_a_chain.len() > 2 {
+                emit_fan(&mut mesh, &side_a_chain, b1, &emit);
+            } else if is_last_column && side_b_chain.len() > 2 {
+                emit_fan_rev(&mut mesh, &side_b_chain, b0, &emit);
+            } else {
+                emit(&mut mesh, a0, b1, b0);
+            }
+            j += 1;
         }
     }
 
-    // ============================================================
-    // BOUNDARY EDGE ENFORCEMENT (T-junction fix)
+    // ─── BOUNDARY EDGE VERIFICATION ───────────────────────────────────
     //
-    // After strip triangulation, the boundary edges along rail_a and rail_b
-    // should be present in the mesh. But if rail_a was resampled to fewer
-    // points than the original boundary (e.g., rail_a had 32 original points
-    // but was resampled to 33 common points), the ORIGINAL boundary points
-    // that were NOT included in the resample are missing from the mesh.
-    //
-    // This creates T-junctions: the adjacent face (e.g., Plane via earcutr)
-    // has ALL original boundary points, but the NURBS strip face only has
-    // the resampled subset.
-    //
-    // FIX: Add ALL original boundary points as mesh vertices, then create
-    // triangles between consecutive original boundary points along each rail
-    // to ensure every boundary edge is present in the mesh.
-    // ============================================================
+    // The zipper covers every consecutive boundary pair on the rails
+    // (they are quad/triangle edges by construction) and the side chains
+    // are threaded as fans, so the face boundary is fully present. Verify
+    // and BAIL OUT to the earcutr path if anything is missing — the old
+    // "closest-interior-vertex fill" patched gaps with garbage slivers
+    // that produced non-manifold edges and shading artifacts.
     {
-        // Add ALL original boundary points that are not yet in the mesh
-        let mut all_bnd_mesh_idx: Vec<u32> = Vec::with_capacity(boundary_points.len());
-        for (i, p) in boundary_points.iter().enumerate() {
-            let vi = if let Some(&existing) = vertex_map.get(&i) {
-                existing
-            } else {
-                // This boundary point was not included in the strip rails.
-                // Add it as a new mesh vertex.
-                let vi = mesh.add_vertex(*p);
-                let uv = boundary_uvs[i];
-                let derivs = nurbs.derivatives_at(uv.u, uv.v);
-                mesh.add_vertex_normal(vi, [derivs.normal().x, derivs.normal().y, derivs.normal().z]);
-                vertex_map.insert(i, vi);
-                vi
-            };
-            all_bnd_mesh_idx.push(vi);
-        }
-
-        // For each rail (edge of the boundary), ensure consecutive boundary
-        // points are connected by at least one triangle edge. If they're not,
-        // create a fill triangle.
         let n_bnd = boundary_points.len();
         let mut mesh_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
         for tri in &mesh.triangles {
@@ -5817,53 +5770,31 @@ fn try_strip_triangulation_ruled_nurbs(
                 mesh_edges.insert((a.min(b), a.max(b)));
             }
         }
-
-        let mut filled = 0usize;
+        let mut missing = 0usize;
         for i in 0..n_bnd {
-            let va = all_bnd_mesh_idx[i];
-            let vb = all_bnd_mesh_idx[(i + 1) % n_bnd];
-            if va == vb { continue; }
-            let key = (va.min(vb), va.max(vb));
-            if !mesh_edges.contains(&key) {
-                // This boundary edge is missing — find the closest interior
-                // vertex to the midpoint and create a fill triangle.
-                let pa = mesh.vertices[va as usize];
-                let pb = mesh.vertices[vb as usize];
-                let mid = Point3d::new(
-                    (pa.x + pb.x) * 0.5,
-                    (pa.y + pb.y) * 0.5,
-                    (pa.z + pb.z) * 0.5,
-                );
-                let mut best_d = f64::MAX;
-                let mut best_vc: Option<u32> = None;
-                for (vi, v) in mesh.vertices.iter().enumerate() {
-                    if vi == va as usize || vi == vb as usize { continue; }
-                    let d = (v.x - mid.x).powi(2) + (v.y - mid.y).powi(2) + (v.z - mid.z).powi(2);
-                    if d < best_d {
-                        best_d = d;
-                        best_vc = Some(vi as u32);
-                    }
-                }
-                if let Some(vc) = best_vc {
-                    let pc = mesh.vertices[vc as usize];
-                    let ab = (pa.x-pb.x).powi(2)+(pa.y-pb.y).powi(2)+(pa.z-pb.z).powi(2);
-                    let bc = (pb.x-pc.x).powi(2)+(pb.y-pc.y).powi(2)+(pb.z-pc.z).powi(2);
-                    let ac = (pa.x-pc.x).powi(2)+(pa.y-pc.y).powi(2)+(pa.z-pc.z).powi(2);
-                    if ab > 1e-20 && bc > 1e-20 && ac > 1e-20 {
-                        if forward {
-                            mesh.add_triangle(va, vb, vc);
-                        } else {
-                            mesh.add_triangle(va, vc, vb);
-                        }
-                        filled += 1;
-                    }
-                }
+            let va = vertex_map[&i];
+            let vb = vertex_map[&((i + 1) % n_bnd)];
+            if va == vb {
+                continue;
+            }
+            if !mesh_edges.contains(&(va.min(vb), va.max(vb))) {
+                missing += 1;
             }
         }
-        if filled > 0 {
-            log::info!("STRIP_BOUNDARY_FILL: added {} boundary edge fill triangles", filled);
+        if missing > 0 {
+            log::debug!(
+                "STRIP_FAIL: {} of {} boundary edges missing after zipper — falling back to earcutr",
+                missing, n_bnd
+            );
+            return None;
         }
     }
+
+    log::debug!(
+        "STRIP_BUILD: rails {}×{} (zipper), sides {}/{} pts, {} triangles",
+        na, nb, side_a_chain.len(), side_b_chain.len(),
+        mesh.triangle_count()
+    );
 
     // NOTE: The side cap fan triangulation was REMOVED.
     //
@@ -5884,13 +5815,12 @@ fn try_strip_triangulation_ruled_nurbs(
     // and don't affect the surface geometry. They're shared with adjacent
     // faces via the edge cache, ensuring watertightness.
 
-    log::info!(
-        "strip_triangulation: created {} triangles from {} rail points (rails: {} and {} pts, sides: {} and {} pts)",
+    log::debug!(
+        "strip_triangulation: created {} triangles (rails: {} and {} pts, sides: {} and {} pts)",
         mesh.triangle_count(),
-        n_common,
-        na_orig, nb_orig,
-        edges[_side_a_idx].len(),
-        edges[_side_b_idx].len(),
+        na, nb,
+        side_a_chain.len(),
+        side_b_chain.len(),
     );
 
     Some(mesh)

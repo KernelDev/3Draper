@@ -1521,15 +1521,81 @@ impl EdgeDiscretizationCache {
     /// and more accurate than calling surface.project_point() for each point
     /// independently (which does a 32×32 grid search per call).
     pub(crate) fn compute_uvs(points_3d: &[Point3d], params: &[f64], surface: &Surface, curve_2d: Option<&Curve2d>) -> Vec<Point2d> {
+        // ── PCURVE path with validation ──────────────────────────────────
+        //
+        // STEP pcurves are expressed in the parameter space of their basis
+        // surface and share the parent curve's parameterization: the 2D
+        // point at parameter t corresponds to the 3D curve point at t.
+        //
+        // The legacy code evaluated `pcurve(t_min + t·(t_max − t_min))`,
+        // which assumes `params` are normalized [0,1] — but `params` are
+        // the 3D EDGE_CURVE's own parameter values (e.g., B-spline knots
+        // [0,30]). On as1-oc-214 this produced UVs in a foreign/normalized
+        // parameter space for 2 of the 4 boundary edges of each
+        // half-cylinder face (u pinned correctly at u_max, v squeezed into
+        // [0,1] instead of the surface's [0,30]), scrambling the boundary
+        // polygon and degrading the whole NURBS triangulation.
+        //
+        // We now evaluate BOTH candidate mappings and keep the one that
+        // REPRODUCES the 3D points on the surface; if neither validates
+        // (foreign parameter space, wrong basis surface, degenerate
+        // pcurve), fall back to analytic projection below.
         if let Some(c2d) = curve_2d {
-            // Use analytical PCURVE — evaluate the 2D curve at each parameter value
-            let (t_min, t_max) = c2d.param_range();
-            params.iter().map(|&t| {
-                // Map normalized parameter t ∈ [0, 1] to curve's parameter range
-                let curve_t = t_min + t * (t_max - t_min);
-                c2d.point_at(curve_t)
-            }).collect()
-        } else if let Surface::Nurbs(ref nurbs) = surface {
+            if !params.is_empty() && params.len() == points_3d.len() {
+                let (t_min, t_max) = c2d.param_range();
+
+                // Candidate A: identity — pcurve shares the 3D curve's
+                // parameterization (the STEP-correct interpretation).
+                let cand_identity: Vec<Point2d> =
+                    params.iter().map(|&t| c2d.point_at(t)).collect();
+                // Candidate B: legacy normalized remap of [0,1] into the
+                // pcurve's range (kept for files that store pcurves this
+                // way).
+                let cand_remapped: Vec<Point2d> = params
+                    .iter()
+                    .map(|&t| {
+                        let curve_t = t_min + t * (t_max - t_min);
+                        c2d.point_at(curve_t)
+                    })
+                    .collect();
+
+                // Validation tolerance: the boundary points lie on the
+                // surface to ~edge/surface precision; a foreign-parameter
+                // pcurve misses by units. Scale by the polyline length.
+                let mut scale: f64 = 0.0;
+                for w in points_3d.windows(2) {
+                    scale += w[0].distance_to(&w[1]);
+                }
+                let tol = (scale * 1e-6).max(1e-9);
+
+                let sample_step = (cand_identity.len() / 8).max(1);
+                let validates = |cand: &[Point2d]| {
+                    cand.iter()
+                        .enumerate()
+                        .step_by(sample_step)
+                        .all(|(i, uv)| {
+                            surface
+                                .point_at(uv.u, uv.v)
+                                .distance_to(&points_3d[i])
+                                <= tol
+                        })
+                };
+
+                if validates(&cand_identity) {
+                    return cand_identity;
+                }
+                if validates(&cand_remapped) {
+                    return cand_remapped;
+                }
+                log::debug!(
+                    "compute_uvs: PCURVE UVs inconsistent with surface (foreign parameter space?) — {} pts, falling back to projection",
+                    points_3d.len()
+                );
+                // Fall through to the projection path below.
+            }
+        }
+
+        if let Surface::Nurbs(ref nurbs) = surface {
             // NURBS UV projection strategy.
             //
             // DESIGN: Use the analytic project_point() for every point INDEPENDENTLY.
@@ -2402,6 +2468,37 @@ mod tests {
         let surface = Surface::Plane(Plane::xy());
         let face_id = TopoId::new();
 
+        // PCURVE consistent with the 3D line on the XY plane: the 2D line
+        // from (0,0) to (1,0) is exactly where the 3D edge lies.
+        let curve_2d = Curve2d::Line(Line2d::new(
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+        ));
+
+        let disc = cache.discretize_edge(&edge, face_id, &surface, 32, Some(&curve_2d));
+
+        let uvs = disc.uv_per_face.get(&face_id).unwrap();
+        assert!((uvs[0].u - 0.0).abs() < 1e-10, "Expected u=0.0, got {}", uvs[0].u);
+        assert!((uvs[0].v - 0.0).abs() < 1e-10, "Expected v=0.0, got {}", uvs[0].v);
+        assert!((uvs[1].u - 1.0).abs() < 1e-10, "Expected u=1.0, got {}", uvs[1].u);
+        assert!((uvs[1].v - 0.0).abs() < 1e-10, "Expected v=0.0, got {}", uvs[1].v);
+    }
+
+    #[test]
+    fn test_curve2d_inconsistent_pcurve_falls_back_to_projection() {
+        // A PCURVE that does NOT reproduce the 3D edge on the surface
+        // (foreign parameter space — observed on as1-oc-214 where pcurves
+        // carried normalized [0,1] UVs for surfaces with [0,30] ranges)
+        // must be REJECTED; the UVs fall back to surface projection.
+        let mut cache = EdgeDiscretizationCache::new();
+        let p1 = Point3d::new(0.0, 0.0, 0.0);
+        let p2 = Point3d::new(1.0, 0.0, 0.0);
+        let edge = Edge::new_line(p1, p2);
+
+        let surface = Surface::Plane(Plane::xy());
+        let face_id = TopoId::new();
+
+        // Offset 2D line — geometrically inconsistent with the 3D edge.
         let curve_2d = Curve2d::Line(Line2d::new(
             Point2d::new(0.5, 0.5),
             Point2d::new(1.5, 0.5),
@@ -2410,10 +2507,11 @@ mod tests {
         let disc = cache.discretize_edge(&edge, face_id, &surface, 32, Some(&curve_2d));
 
         let uvs = disc.uv_per_face.get(&face_id).unwrap();
-        assert!((uvs[0].u - 0.5).abs() < 1e-10, "Expected u=0.5, got {}", uvs[0].u);
-        assert!((uvs[0].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[0].v);
-        assert!((uvs[1].u - 1.5).abs() < 1e-10, "Expected u=1.5, got {}", uvs[1].u);
-        assert!((uvs[1].v - 0.5).abs() < 1e-10, "Expected v=0.5, got {}", uvs[1].v);
+        // Projection of (0,0,0) and (1,0,0) onto the XY plane.
+        assert!((uvs[0].u - 0.0).abs() < 1e-9, "Expected projected u=0.0, got {}", uvs[0].u);
+        assert!((uvs[0].v - 0.0).abs() < 1e-9, "Expected projected v=0.0, got {}", uvs[0].v);
+        assert!((uvs[1].u - 1.0).abs() < 1e-9, "Expected projected u=1.0, got {}", uvs[1].u);
+        assert!((uvs[1].v - 0.0).abs() < 1e-9, "Expected projected v=0.0, got {}", uvs[1].v);
     }
 
     #[test]

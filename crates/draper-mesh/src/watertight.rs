@@ -3139,22 +3139,28 @@ pub fn smooth_normals(mesh: &mut TriangleMesh, crease_angle: f64) {
         vertex_triangles[tri[2] as usize].push((ti, area));
     }
 
-    // Build edge → face normals map for crease detection
-    let mut edge_face_normals: HashMap<(u32, u32), Vec<[f64; 3]>> = HashMap::new();
-    for (ti, tri) in mesh.triangles.iter().enumerate() {
-        let edges = [
-            (tri[0].min(tri[1]), tri[0].max(tri[1])),
-            (tri[1].min(tri[2]), tri[1].max(tri[2])),
-            (tri[2].min(tri[0]), tri[2].max(tri[0])),
-        ];
-        for &edge in &edges {
-            edge_face_normals.entry(edge).or_default().push(face_normals[ti]);
-        }
-    }
+    // (The old edge → face-normals map for crease detection was dead code —
+    // the per-vertex grouping below uses face normals directly.)
 
-    // For each vertex, compute the smoothed normal by averaging
-    // the face normals of all incident triangles, weighted by area.
-    // Only average across faces where the edge angle is below crease_angle.
+    // For each vertex, compute the smoothed normal by averaging the face
+    // normals of the DOMINANT smooth group of incident triangles, weighted
+    // by area.
+    //
+    // Dominant-group selection (fix for the "first face wins" problem):
+    // the group is seeded with the LARGEST-area incident triangle and then
+    // greedily absorbs every incident face whose normal is within
+    // crease_angle of the group's running area-weighted mean. Vertices on
+    // a smooth surface get the proper averaged normal (all faces join one
+    // group); vertices on a crease (e.g., a cylinder cap rim, where cap
+    // normal and side normal are ~90° apart) follow the LARGER patch —
+    // the side strip on a rod dwarfs the cap fan slivers, so the rim
+    // shades radially instead of axially.
+    //
+    // The previous implementation used the FIRST incident triangle's face
+    // normal as the reference, which tied the result to face merge order:
+    // when a cap plane merged before the cylindrical side, every rim
+    // vertex kept the cap's axial normal and the whole side face shaded
+    // dark/flat.
     let mut smoothed = vec![[0.0_f64; 3]; n_verts];
 
     for vi in 0..n_verts {
@@ -3166,24 +3172,35 @@ pub fn smooth_normals(mesh: &mut TriangleMesh, crease_angle: f64) {
             continue;
         }
 
+        // Deterministic order: area descending, then triangle index
+        // ascending (ties broken by index for bit-stable output).
+        let mut sorted_inc: Vec<(usize, f64)> = incidents.clone();
+        sorted_inc.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.cmp(&b.0))
+        });
+
+        // Greedy growth from the largest-area face. The seed face is always
+        // absorbed (angle to itself is 0).
         let mut sum_nx = 0.0_f64;
         let mut sum_ny = 0.0_f64;
         let mut sum_nz = 0.0_f64;
+        let mut group_mean = face_normals[sorted_inc[0].0];
 
-        // Use the face normal of the first incident triangle as reference
-        let ref_fn = face_normals[incidents[0].0];
-
-        for &(ti, area) in incidents {
+        for &(ti, area) in &sorted_inc {
             let fn_i = face_normals[ti];
-
-            // Check if this face's normal is within crease_angle of the reference
-            let dot = ref_fn[0] * fn_i[0] + ref_fn[1] * fn_i[1] + ref_fn[2] * fn_i[2];
+            let dot = group_mean[0] * fn_i[0] + group_mean[1] * fn_i[1] + group_mean[2] * fn_i[2];
             let angle = dot.clamp(-1.0, 1.0).acos();
 
             if angle <= crease_angle {
                 sum_nx += fn_i[0] * area;
                 sum_ny += fn_i[1] * area;
                 sum_nz += fn_i[2] * area;
+                let len = (sum_nx * sum_nx + sum_ny * sum_ny + sum_nz * sum_nz).sqrt();
+                if len > 1e-15 {
+                    group_mean = [sum_nx / len, sum_ny / len, sum_nz / len];
+                }
             }
         }
 

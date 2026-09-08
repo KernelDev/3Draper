@@ -13183,31 +13183,86 @@ impl<'a> StepConverter<'a> {
         curve_2d: Option<&Curve2d>,
         initial_uv: Option<Point2d>,
     ) -> Vec<Point2d> {
+        // ── PCURVE path with validation ──────────────────────────────────
+        //
+        // STEP pcurves share the parent curve's parameterization: the 2D
+        // point at parameter t corresponds to the 3D curve point at the
+        // SAME t. The legacy code evaluated `pcurve(t_min + t·(t_max −
+        // t_min))`, remapping the params as if they were normalized
+        // [0,1] — but they are the ACTUAL parameter positions from
+        // adaptive discretization (the comment below the old code even
+        // said so). On as1-oc-214 this produced UVs in a foreign
+        // parameter space for 2 of the 4 boundary edges of each
+        // half-cylinder face (e.g., u pinned at u_max but v squeezed
+        // into [0,1] instead of the surface's [0,30]), scrambling the
+        // UV boundary polygon.
+        //
+        // Evaluate BOTH candidate mappings and keep the one that
+        // reproduces the 3D points on the surface; if neither validates,
+        // fall through to the projection path below (which has its own
+        // Newton + brute-force validation).
         if let Some(c2d) = curve_2d {
-            let (c2d_t_min, c2d_t_max) = c2d.param_range();
+            if !params.is_empty() && params.len() == points_3d.len() {
+                let (c2d_t_min, c2d_t_max) = c2d.param_range();
 
-            // Map each normalized parameter [0,1] to the curve_2d parameter range
-            // and evaluate the PCURVE to get UV coordinates.
-            //
-            // IMPORTANT: The params are the ACTUAL parameter positions from
-            // adaptive discretization (not uniform index fractions). Using
-            // uniform fractions after adaptive refinement was the root cause
-            // of incorrect NURBS face triangulation — the midpoints inserted
-            // by adaptive refinement would shift all subsequent point indices,
-            // causing wrong UV coordinates for the entire edge.
-            params.iter().map(|&t_norm| {
-                let curve_t = c2d_t_min + t_norm * (c2d_t_max - c2d_t_min);
-                c2d.point_at(curve_t)
-            }).collect()
-        } else {
-            // No PCURVE — project 3D points to surface.
-            // For NURBS surfaces, we use the same adaptive strategy as
-            // EdgeDiscretizationCache::compute_uvs():
-            // - Small UV ranges (< 10 units): chain Newton-Raphson (fast, reliable)
-            // - Large UV ranges (>= 10 units): independent project_point() per point
-            //   (deterministic — same 3D point → same UV regardless of traversal order)
-            // - Brute-force fallback if projection error is too large
-            if let Surface::Nurbs(ref nurbs) = surface {
+                // Candidate A: identity — pcurve shares the 3D curve's
+                // parameterization (the STEP-correct interpretation).
+                let cand_identity: Vec<Point2d> =
+                    params.iter().map(|&t| c2d.point_at(t)).collect();
+                // Candidate B: legacy normalized remap (kept for pcurves
+                // that are stored with a normalized parameterization).
+                let cand_remapped: Vec<Point2d> = params
+                    .iter()
+                    .map(|&t| {
+                        let curve_t = c2d_t_min + t * (c2d_t_max - c2d_t_min);
+                        c2d.point_at(curve_t)
+                    })
+                    .collect();
+
+                // Validation: surface.point_at(uv) must reproduce the 3D
+                // point. Foreign-parameter pcurves miss by units; correct
+                // ones match to edge/surface precision.
+                let mut scale: f64 = 0.0;
+                for w in points_3d.windows(2) {
+                    scale += w[0].distance_to(&w[1]);
+                }
+                let tol = (scale * 1e-6).max(1e-9);
+
+                let sample_step = (cand_identity.len() / 8).max(1);
+                let validates = |cand: &[Point2d]| {
+                    cand.iter()
+                        .enumerate()
+                        .step_by(sample_step)
+                        .all(|(i, uv)| {
+                            surface
+                                .point_at(uv.u, uv.v)
+                                .distance_to(&points_3d[i])
+                                <= tol
+                        })
+                };
+
+                if validates(&cand_identity) {
+                    return cand_identity;
+                }
+                if validates(&cand_remapped) {
+                    return cand_remapped;
+                }
+                log::debug!(
+                    "PCURVE UVs inconsistent with surface (foreign parameter space?) — {} pts, falling back to projection",
+                    points_3d.len()
+                );
+                // Fall through to the projection path below.
+            }
+        }
+
+        // No valid PCURVE — project 3D points to surface.
+        // For NURBS surfaces, we use the same adaptive strategy as
+        // EdgeDiscretizationCache::compute_uvs():
+        // - Small UV ranges (< 10 units): chain Newton-Raphson (fast, reliable)
+        // - Large UV ranges (>= 10 units): independent project_point() per point
+        //   (deterministic — same 3D point → same UV regardless of traversal order)
+        // - Brute-force fallback if projection error is too large
+        if let Surface::Nurbs(ref nurbs) = surface {
                 let (u_min, u_max) = nurbs.u_range();
                 let (v_min, v_max) = nurbs.v_range();
                 let u_range = u_max - u_min;
@@ -13285,7 +13340,6 @@ impl<'a> StepConverter<'a> {
                     let (u, v) = surface.project_point(p);
                     Point2d::new(u, v)
                 }).collect()
-            }
         }
     }
 
