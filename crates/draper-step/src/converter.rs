@@ -199,7 +199,10 @@ fn compute_face_data_signature(face_data_list: &[FaceData]) -> FaceDataSignature
 /// (one per contiguous group, or all in one inner shell for simplicity).
 /// This ensures that `fix_normal_orientation` in the healing pipeline
 /// processes void shells independently and does not corrupt their normals.
-fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
+fn face_data_list_to_solid(
+    face_data_list: &[FaceData],
+    base_tol: f64,
+) -> (Solid, HashMap<draper_topology::TopoId, usize>) {
     let mut outer_topo_faces = Vec::new();
     let mut void_topo_faces = Vec::new();
     let mut outer_working: Vec<Vec<draper_topology::Edge>> = Vec::new();
@@ -294,6 +297,19 @@ fn face_data_list_to_solid(face_data_list: &[FaceData]) -> (Solid, HashMap<drape
             dedup_report.total_instances,
             dedup_report.unique_edges,
             dedup_report.deduplicated
+        );
+    }
+
+    // Vision 2036 §1.1 — hierarchical tolerance propagation: seed every
+    // Face/Edge with the model-level tolerance (STEP uncertainty when the
+    // file declares one) and rebuild the shell/solid aggregates so the
+    // hierarchy stays consistent (entity values are monotone lower bounds,
+    // never lowered below healing bumps).
+    let n_bumped = solid.apply_model_tolerance(base_tol);
+    if n_bumped > 0 {
+        log::debug!(
+            "face_data_list_to_solid: seeded model tolerance {:.3e} into {} entities (faces + canonical edges)",
+            base_tol, n_bumped
         );
     }
 
@@ -2653,6 +2669,14 @@ impl<'a> StepConverter<'a> {
         let (outer_shell_id, void_shell_ids) = self.find_all_shell_refs_by_brep_id(brep_id);
         let outer_shell_id = outer_shell_id?;
 
+        // Vision 2036 §1.1: entity-tolerance seed — STEP uncertainty when
+        // the file declares one (no bbox here; the cap falls back to
+        // model_scale = 1). Faces/Edges inherit this as a lower bound and
+        // the shell/solid aggregates are rebuilt bottom-up.
+        let mut seed_ctx = ToleranceContext::new();
+        seed_ctx.step_uncertainty = extract_step_tolerance(&self.step);
+        let base_tol = seed_ctx.entity_tolerance();
+
         // Extract outer shell faces
         let outer_face_data = self.extract_shell_faces(outer_shell_id, false)?;
         if outer_face_data.is_empty() {
@@ -2664,7 +2688,7 @@ impl<'a> StepConverter<'a> {
         }
 
         // Convert FaceData list → Solid (outer shell only, no healing applied)
-        let (mut solid, _) = face_data_list_to_solid(&outer_face_data);
+        let (mut solid, _) = face_data_list_to_solid(&outer_face_data, base_tol);
 
         // Extract void shells (if any) and add as inner shells
         for void_shell_id in &void_shell_ids {
@@ -2673,7 +2697,7 @@ impl<'a> StepConverter<'a> {
                     if void_face_data.is_empty() {
                         continue;
                     }
-                    let (void_solid, _) = face_data_list_to_solid(&void_face_data);
+                    let (void_solid, _) = face_data_list_to_solid(&void_face_data, base_tol);
                     if let Some(void_shell) = void_solid.outer_shell {
                         solid.add_void(void_shell);
                     }
@@ -4442,7 +4466,7 @@ impl<'a> StepConverter<'a> {
 
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
-            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list, tol_ctx.entity_tolerance());
             // Use aggressive healing: fix normals, stitch edges, propagate
             // tolerances, merge faces, fix self-intersections, and remove slivers.
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
@@ -5168,7 +5192,7 @@ impl<'a> StepConverter<'a> {
                 pre_heal_sig.bbox_max.x, pre_heal_sig.bbox_max.y, pre_heal_sig.bbox_max.z,
             );
             
-            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list, tol_ctx.entity_tolerance());
             // Use aggressive healing: fix normals, stitch edges, propagate
             // tolerances, merge faces, fix self-intersections, and remove slivers.
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
@@ -6228,7 +6252,7 @@ impl<'a> StepConverter<'a> {
         // ─── Healing pipeline: heal the solid before triangulation ────────
         let face_data_list = if self.config.heal {
             let pre_heal_count = face_data_list.len();
-            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list, tol_ctx.entity_tolerance());
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
@@ -6249,7 +6273,7 @@ impl<'a> StepConverter<'a> {
         // it does NOT block triangulation. Issues are logged for developer
         // awareness and debugging.
         {
-            let (solid, _) = face_data_list_to_solid(&face_data_list);
+            let (solid, _) = face_data_list_to_solid(&face_data_list, tol_ctx.entity_tolerance());
             let report = validate_brep(&solid, &TopologyValidationConfig::critical_only());
             if !report.is_clean() {
                 log::warn!(
@@ -6540,7 +6564,7 @@ impl<'a> StepConverter<'a> {
 
         // ─── Healing pipeline ────────
         let face_data_list = if self.config.heal {
-            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+            let (solid, face_id_map) = face_data_list_to_solid(&face_data_list, tol_ctx.entity_tolerance());
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(shell_id, &report);
@@ -17418,7 +17442,7 @@ END-ISO-10303-21;
         };
 
         let face_data_list = vec![outer_face, void_face];
-        let (solid, face_id_map) = face_data_list_to_solid(&face_data_list);
+        let (solid, face_id_map) = face_data_list_to_solid(&face_data_list, 1e-6);
 
         // Outer shell should have 1 face
         assert!(solid.outer_shell.is_some());

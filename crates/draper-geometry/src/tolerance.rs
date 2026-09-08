@@ -212,6 +212,29 @@ impl ToleranceContext {
         self.vertex_merge_tolerance() * 2.0
     }
 
+    /// Model-level seed for topological entity tolerances
+    /// (Vision 2036 §1.1 — hierarchical tolerance propagation).
+    ///
+    /// This is the value `Solid::apply_model_tolerance` writes into every
+    /// `Face` and canonical `Edge` at import: the STEP model uncertainty
+    /// (`UNCERTAINTY_MEASURE_WITH_UNIT`) when the file declares one — the
+    /// CAD system's stated precision — otherwise the context's coincidence
+    /// tolerance. Capped at `model_scale`: an uncertainty larger than the
+    /// model itself is corrupted metadata, but a coarse-but-real precision
+    /// (e.g. 0.01mm on a 10mm bolt) must survive as-is. This is far more
+    /// permissive than [`ToleranceContext::vertex_merge_tolerance`]'s 0.1%
+    /// cap on purpose: entity tolerances are semantic metadata (healing
+    /// bookkeeping, hierarchy consistency), not mesh-merge radii — the
+    /// merge/weld guards live in their own methods. Floored at 1e-12 so
+    /// the seed stays strictly positive.
+    pub fn entity_tolerance(&self) -> f64 {
+        let base = match self.step_uncertainty {
+            Some(u) if u > 0.0 && u.is_finite() => u,
+            _ => self.coincidence_tolerance(),
+        };
+        base.clamp(1e-12, self.model_scale.max(1e-12))
+    }
+
     /// Weld tolerance for post-merge boundary edge welding.
     ///
     /// Uses STEP uncertainty × 20 (was ×200) when available, or model_scale × 2e-3.
@@ -433,5 +456,44 @@ mod tests {
         assert!(ctx.is_zero(0.0));
         assert!(ctx.is_zero(5e-7));
         assert!(!ctx.is_zero(2e-6));
+    }
+
+    #[test]
+    fn test_entity_tolerance_uncertainty_wins() {
+        // STEP uncertainty is the authoritative seed when present.
+        let mut ctx = ToleranceContext::from_model_scale(40.0); // bolt-scale model
+        ctx.step_uncertainty = Some(0.01);
+        assert!((ctx.entity_tolerance() - 0.01).abs() < 1e-15,
+            "uncertainty 0.01 on scale 40 should seed 0.01, got {}", ctx.entity_tolerance());
+    }
+
+    #[test]
+    fn test_entity_tolerance_fallback_and_cap() {
+        // No uncertainty: coincidence tolerance seeds entities
+        // (1e-6 + 1e-8 * model_scale = 1.01e-6 at unit scale).
+        let ctx = ToleranceContext::from_model_scale(1.0);
+        assert!((ctx.entity_tolerance() - ctx.coincidence_tolerance()).abs() < 1e-15,
+            "fallback should equal the coincidence tolerance, got {} vs {}",
+            ctx.entity_tolerance(), ctx.coincidence_tolerance());
+        assert!(ctx.entity_tolerance() > 1e-6 && ctx.entity_tolerance() < 1.1e-6,
+            "fallback should stay near 1e-6 at unit scale, got {}", ctx.entity_tolerance());
+
+        // Corrupted uncertainty (larger than the model itself) is capped
+        // at model_scale; coarse-but-real precision survives untouched.
+        let mut bad = ToleranceContext::from_model_scale(100.0);
+        bad.step_uncertainty = Some(1e6);
+        assert!((bad.entity_tolerance() - 100.0).abs() < 1e-12,
+            "cap should clamp 1e6 to model_scale 100, got {}", bad.entity_tolerance());
+        let mut coarse = ToleranceContext::from_model_scale(10.0);
+        coarse.step_uncertainty = Some(0.01);
+        assert!((coarse.entity_tolerance() - 0.01).abs() < 1e-15,
+            "coarse-but-real 0.01 on a 10mm bolt must survive, got {}", coarse.entity_tolerance());
+
+        // Negative / NaN uncertainty falls back to the coincidence tolerance.
+        let mut neg = ToleranceContext::from_model_scale(1.0);
+        neg.step_uncertainty = Some(-0.5);
+        assert!((neg.entity_tolerance() - neg.coincidence_tolerance()).abs() < 1e-15);
+        neg.step_uncertainty = Some(f64::NAN);
+        assert!((neg.entity_tolerance() - neg.coincidence_tolerance()).abs() < 1e-15);
     }
 }

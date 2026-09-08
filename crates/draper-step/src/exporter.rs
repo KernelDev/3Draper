@@ -1280,9 +1280,19 @@ pub fn export_step_with_schema(solid: &Solid, name: &str, schema: StepSchema) ->
         "#{} = (NAMED_UNIT(*)SI_UNIT($,.STERADIAN.)SOLID_ANGLE_UNIT());",
         solid_angle_unit_id
     ));
+    // Vision 2036 §1.1: round-trip the model tolerance. The solid's
+    // aggregate tolerance (seeded at import from the source file's
+    // UNCERTAINTY_MEASURE_WITH_UNIT, or the builder default 1e-6) becomes
+    // the exported uncertainty, so tolerance information survives the
+    // STEP round-trip instead of being reset to a hardcoded 1e-6.
+    let uncertainty = if solid.tolerance.is_finite() && solid.tolerance > 0.0 {
+        solid.tolerance
+    } else {
+        1e-6
+    };
     sw.push_line(&format!(
-        "#{} = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0E-6),#{},'distance_accuracy_value','confusion accuracy');",
-        uncertainty_id, length_unit_id
+        "#{} = UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({}),#{},'distance_accuracy_value','confusion accuracy');",
+        uncertainty_id, fmt_f64(uncertainty), length_unit_id
     ));
     sw.push_line(&format!(
         "#{} = (GEOMETRIC_REPRESENTATION_CONTEXT(3) GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{})) GLOBAL_UNIT_ASSIGNED_CONTEXT((#{},#{},#{})) REPRESENTATION_CONTEXT('NONE','WORKSPACE'));",

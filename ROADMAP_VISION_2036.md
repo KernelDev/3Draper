@@ -47,16 +47,25 @@ precision, causing geometry loss or numerical explosions.
 
 **Action Items:**
 
-- [ ] **Remove all global tolerance constants** — replace `const TOLERANCE: f64 = 1e-6`
-      with `entity.tolerance()` or `context.tolerance()`.
-- [ ] **Implement `ContextualTolerance`** — hierarchical tolerance context
-      that propagates from Solid → Shell → Face → Edge → Vertex.
-- [ ] **Add tolerance consistency validation** — ensure child tolerances do
-      not contradict parent tolerances.
-- [ ] **Map 3D tolerance to UV parametric tolerance** using first and second
+- [x] **Remove all global tolerance constants** — replaced with
+      `ToleranceContext` (the legacy `TOLERANCE`/`ANGULAR_TOLERANCE`/
+      `PARAMETRIC_TOLERANCE` constants are `#[deprecated]` back-compat
+      shims; production code reads `context.*` / `entity.tolerance`).
+- [x] **Implement `ContextualTolerance`** — `ToleranceContext` +
+      hierarchical propagation: `Solid::apply_model_tolerance` seeds
+      Face/Edge tolerances from the STEP uncertainty
+      (`entity_tolerance()`), `Solid::recompute_tolerances` rebuilds
+      shell/solid aggregates bottom-up (vertices are implicit — their
+      geometry rides the owning Edge's `start/end_vertex_point`).
+- [x] **Add tolerance consistency validation** — `ToleranceConsistency`
+      check in `validate_topology` (finite/positive = Error; parent must
+      dominate children = Warning); `rebuild_store` auto-recomputes the
+      hierarchy so healing bumps stay consistent.
+- [x] **Map 3D tolerance to UV parametric tolerance** using first and second
       fundamental forms for each surface type.
-- [ ] **Parse `UNCERTAINTY_MEASURE_WITH_UNIT`** from STEP files and use as
-      the model's base tolerance (already partially done — verify completeness).
+- [x] **Parse `UNCERTAINTY_MEASURE_WITH_UNIT`** from STEP files and use as
+      the model's base tolerance; the exporter now round-trips
+      `solid.tolerance` back into the file uncertainty.
 
 **Priority:** P0 (blocking — affects all downstream geometry)
 
@@ -512,7 +521,7 @@ Independent face triangulation with post-facto welding is deprecated.
 |-------|-----------|--------|--------|
 | 1 | Remove global TOLERANCE constants | Done | `065b9e2` |
 | 1 | Parse UNCERTAINTY_MEASURE_WITH_UNIT | Done | `93df2de` |
-| 1 | Contextual hierarchical tolerances | In Progress | `dd99d0a` |
+| 1 | Contextual hierarchical tolerances | Done | `dd99d0a` + propagation/consistency/round-trip |
 | 1 | NURBS healing guards | Done | `eb46eb1` |
 | 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
 | 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |

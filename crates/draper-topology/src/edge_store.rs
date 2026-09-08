@@ -1011,6 +1011,11 @@ impl Solid {
         }
 
         self.edge_store = store;
+        // Vision 2036 §1.1: keep the tolerance hierarchy consistent with
+        // the rebuilt store — reconciled canonical edges may carry bumped
+        // tolerances (healing stitch), and the solid aggregate must
+        // dominate its children.
+        self.recompute_tolerances();
         report
     }
 

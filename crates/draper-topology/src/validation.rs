@@ -342,6 +342,10 @@ pub struct TopologyValidationConfig {
     pub check_geometric_consistency: bool,
     /// Check Euler characteristic for closed shells.
     pub check_euler_characteristic: bool,
+    /// Check the tolerance hierarchy: every entity tolerance is finite and
+    /// positive, and parent aggregates dominate their children
+    /// (face ≤ shell ≤ solid, edge ≤ solid) — Vision 2036 §1.1.
+    pub check_tolerance_consistency: bool,
 }
 
 impl Default for TopologyValidationConfig {
@@ -355,6 +359,7 @@ impl Default for TopologyValidationConfig {
             check_loop_orientation: true,
             check_geometric_consistency: true,
             check_euler_characteristic: true,
+            check_tolerance_consistency: true,
         }
     }
 }
@@ -371,6 +376,7 @@ impl TopologyValidationConfig {
             check_loop_orientation: false,
             check_geometric_consistency: false,
             check_euler_characteristic: false,
+            check_tolerance_consistency: false,
         }
     }
 
@@ -390,6 +396,7 @@ impl TopologyValidationConfig {
             check_loop_orientation: false,
             check_geometric_consistency: false,
             check_euler_characteristic: false,
+            check_tolerance_consistency: false,
         }
     }
 }
@@ -486,7 +493,105 @@ pub fn validate_topology(solid: &Solid, config: &TopologyValidationConfig) -> To
         validate_shell_internal(shell, solid, config, &mut report);
     }
 
+    // Vision 2036 §1.1: tolerance hierarchy is a solid-wide invariant
+    // (edges live in the solid-owned store), checked outside the per-shell pass.
+    if config.check_tolerance_consistency {
+        check_tolerance_consistency(solid, &shells, &mut report);
+    }
+
     report
+}
+
+/// Check the tolerance hierarchy of a solid (Vision 2036 §1.1).
+///
+/// Invariants:
+/// 1. Every entity tolerance is finite and strictly positive — a NaN,
+///    infinite, or zero tolerance poisons every downstream comparison
+///    (Error).
+/// 2. Parent aggregates dominate their children: `face.tolerance ≤
+///    shell.tolerance`, `shell.tolerance ≤ solid.tolerance`, and — because
+///    canonical edges are solid-owned and may cross shell boundaries —
+///    `edge.tolerance ≤ solid.tolerance` (Warning: a violation means the
+///    hierarchy was not rebuilt after a healing bump, not that the geometry
+///    is broken).
+fn check_tolerance_consistency(
+    solid: &Solid,
+    shells: &[&Shell],
+    report: &mut TopologyValidationReport,
+) {
+    // Relative slack for float comparisons of legitimately equal values.
+    let slack = 1.0 + 1e-12;
+
+    if !solid.tolerance.is_finite() || solid.tolerance <= 0.0 {
+        report.add(ValidationIssue::error(
+            "ToleranceConsistency",
+            Some(solid.id),
+            &format!("solid tolerance is not finite/positive: {}", solid.tolerance),
+        ));
+    }
+
+    for shell in shells {
+        if !shell.tolerance.is_finite() || shell.tolerance <= 0.0 {
+            report.add(ValidationIssue::error(
+                "ToleranceConsistency",
+                Some(shell.id),
+                &format!("shell tolerance is not finite/positive: {}", shell.tolerance),
+            ));
+            continue;
+        }
+        if shell.tolerance > solid.tolerance * slack {
+            report.add(ValidationIssue::warning(
+                "ToleranceConsistency",
+                Some(shell.id),
+                &format!(
+                    "shell tolerance {:.3e} exceeds solid tolerance {:.3e} — hierarchy not rebuilt after a child bump?",
+                    shell.tolerance, solid.tolerance
+                ),
+            ));
+        }
+        for face in &shell.faces {
+            if !face.tolerance.is_finite() || face.tolerance <= 0.0 {
+                report.add(ValidationIssue::error(
+                    "ToleranceConsistency",
+                    Some(face.id),
+                    &format!("face tolerance is not finite/positive: {}", face.tolerance),
+                ));
+                continue;
+            }
+            if face.tolerance > shell.tolerance * slack {
+                report.add(ValidationIssue::warning(
+                    "ToleranceConsistency",
+                    Some(face.id),
+                    &format!(
+                        "face tolerance {:.3e} exceeds shell tolerance {:.3e}",
+                        face.tolerance, shell.tolerance
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Canonical edges are solid-owned (they may be shared across shells).
+    for edge in solid.edge_store.iter() {
+        if !edge.tolerance.is_finite() || edge.tolerance <= 0.0 {
+            report.add(ValidationIssue::error(
+                "ToleranceConsistency",
+                Some(edge.id),
+                &format!("edge tolerance is not finite/positive: {}", edge.tolerance),
+            ));
+            continue;
+        }
+        if edge.tolerance > solid.tolerance * slack {
+            report.add(ValidationIssue::warning(
+                "ToleranceConsistency",
+                Some(edge.id),
+                &format!(
+                    "edge tolerance {:.3e} exceeds solid tolerance {:.3e}",
+                    edge.tolerance, solid.tolerance
+                ),
+            ));
+        }
+    }
 }
 
 /// Validate a single shell with the given config.
@@ -2041,5 +2146,119 @@ mod tests {
             !euler_issues.is_empty(),
             "Shell with missing face should have Euler characteristic issue"
         );
+    }
+
+    // ---- Vision 2036 §1.1: hierarchical tolerance propagation + consistency ----
+
+    #[test]
+    fn test_apply_model_tolerance_seeds_hierarchy() {
+        let mut solid = make_proper_box(); // all tolerances 1e-6 by default
+        let changed = solid.apply_model_tolerance(0.01);
+
+        // 6 faces + 12 canonical edges = 18 entities bumped.
+        assert_eq!(changed, 18, "expected 6 faces + 12 edges bumped, got {}", changed);
+        let shell = solid.outer_shell.as_ref().unwrap();
+        for face in &shell.faces {
+            assert!((face.tolerance - 0.01).abs() < 1e-15,
+                "face tolerance should be seeded to 0.01, got {}", face.tolerance);
+        }
+        for edge in solid.edge_store.iter() {
+            assert!((edge.tolerance - 0.01).abs() < 1e-15,
+                "edge tolerance should be seeded to 0.01, got {}", edge.tolerance);
+        }
+        assert!((shell.tolerance - 0.01).abs() < 1e-15,
+            "shell aggregate should be max(faces) = 0.01, got {}", shell.tolerance);
+        assert!((solid.tolerance - 0.01).abs() < 1e-15,
+            "solid aggregate should dominate children = 0.01, got {}", solid.tolerance);
+
+        // Hierarchy is consistent → no ToleranceConsistency issues.
+        let report = validate_topology(&solid, &TopologyValidationConfig {
+            check_tolerance_consistency: true,
+            ..TopologyValidationConfig::none()
+        });
+        assert!(report.issues_for_check("ToleranceConsistency").is_empty(),
+            "seeded solid must pass the consistency check");
+    }
+
+    #[test]
+    fn test_apply_model_tolerance_is_monotone() {
+        let mut solid = make_proper_box();
+        solid.apply_model_tolerance(0.01);
+        let changed_again = solid.apply_model_tolerance(0.001);
+        assert_eq!(changed_again, 0, "a smaller seed must not lower or change any tolerance");
+        assert!((solid.tolerance - 0.01).abs() < 1e-15,
+            "solid tolerance must stay 0.01 (monotone), got {}", solid.tolerance);
+    }
+
+    #[test]
+    fn test_apply_model_tolerance_rejects_garbage() {
+        let mut solid = make_proper_box();
+        assert_eq!(solid.apply_model_tolerance(f64::NAN), 0);
+        assert_eq!(solid.apply_model_tolerance(0.0), 0);
+        assert_eq!(solid.apply_model_tolerance(-1.0), 0);
+        assert_eq!(solid.apply_model_tolerance(f64::INFINITY), 0);
+    }
+
+    #[test]
+    fn test_tolerance_consistency_detects_corruption() {
+        // Case 1: face tolerance above the shell aggregate → warning.
+        let mut solid = make_proper_box();
+        {
+            let shell = solid.outer_shell.as_mut().unwrap();
+            shell.faces[0].tolerance = 10.0; // corrupt: face > shell (1e-6)
+        }
+        let report = validate_topology(&solid, &TopologyValidationConfig {
+            check_tolerance_consistency: true,
+            ..TopologyValidationConfig::none()
+        });
+        let issues = report.issues_for_check("ToleranceConsistency");
+        assert!(!issues.is_empty(), "face tolerance 10.0 over shell 1e-6 must be flagged");
+        assert_eq!(report.error_count, 0, "hierarchy violations are warnings, not errors");
+
+        // Case 2: NaN tolerance → error.
+        let mut nan_solid = make_proper_box();
+        {
+            let shell = nan_solid.outer_shell.as_mut().unwrap();
+            shell.faces[1].tolerance = f64::NAN;
+        }
+        let nan_report = validate_topology(&nan_solid, &TopologyValidationConfig {
+            check_tolerance_consistency: true,
+            ..TopologyValidationConfig::none()
+        });
+        assert!(nan_report.has_errors(), "NaN tolerance must be an Error-level issue");
+
+        // Case 3: edge tolerance above solid aggregate → warning.
+        let mut edge_solid = make_proper_box();
+        {
+            let any_edge = edge_solid.edge_store.iter_ids().next().unwrap();
+            edge_solid.edge_store.get_mut(any_edge).unwrap().tolerance = 5.0;
+        }
+        let edge_report = validate_topology(&edge_solid, &TopologyValidationConfig {
+            check_tolerance_consistency: true,
+            ..TopologyValidationConfig::none()
+        });
+        let edge_issues = edge_report.issues_for_check("ToleranceConsistency");
+        assert!(!edge_issues.is_empty(), "edge tolerance 5.0 over solid 1e-6 must be flagged");
+
+        // Case 4: recompute restores consistency (self-heal of the hierarchy).
+        edge_solid.recompute_tolerances();
+        assert!((edge_solid.tolerance - 5.0).abs() < 1e-15,
+            "recompute must lift the solid aggregate above the bumped edge");
+        let healed_report = validate_topology(&edge_solid, &TopologyValidationConfig {
+            check_tolerance_consistency: true,
+            ..TopologyValidationConfig::none()
+        });
+        assert!(healed_report.issues_for_check("ToleranceConsistency").is_empty(),
+            "after recompute_tolerances the hierarchy must be consistent");
+    }
+
+    #[test]
+    fn test_default_config_includes_tolerance_check() {
+        // Default + all() enable the check; critical_only/none keep it off
+        // (it is a soft invariant — diagnostic, not blocking).
+        assert!(TopologyValidationConfig::default().check_tolerance_consistency);
+        assert!(TopologyValidationConfig::all().check_tolerance_consistency);
+        assert!(!TopologyValidationConfig::critical_only().check_tolerance_consistency);
+        assert!(!TopologyValidationConfig::none().check_tolerance_consistency);
     }
 }

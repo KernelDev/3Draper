@@ -514,13 +514,21 @@ pub fn tolerant_stitch_with_edges(
         );
     }
 
-    // Update shell tolerance (max of all face tolerances)
+    // Update shell tolerance (max of all face tolerances AND the bumped
+    // working-edge tolerances — Vision 2036 §1.1: the stitch raises edge
+    // tolerances above the pre-stitch face values; a shell aggregate that
+    // ignores them breaks the hierarchy invariant)
+    let edge_max = working
+        .iter()
+        .flat_map(|face_working| face_working.iter().map(|e| e.tolerance))
+        .fold(0.0_f64, f64::max);
     shell.tolerance = shell
         .faces
         .iter()
         .map(|f| f.tolerance)
         .fold(0.0_f64, f64::max)
-        .max(shell.tolerance);
+        .max(shell.tolerance)
+        .max(edge_max);
 
     stitched_count
 }

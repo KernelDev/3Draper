@@ -467,6 +467,85 @@ impl Solid {
         self.inner_shells.push(shell);
     }
 
+    /// Recompute the tolerance hierarchy bottom-up so every aggregate
+    /// dominates its children (Vision 2036 §1.1).
+    ///
+    /// - `shell.tolerance` = max(shell.tolerance, max of its faces);
+    /// - `solid.tolerance` = max(solid.tolerance, all shells, all
+    ///   canonical edges in the `EdgeStore`).
+    ///
+    /// Edges are aggregated at the SOLID level, not per shell: canonical
+    /// edges live in the solid-owned store and may be shared across shell
+    /// boundaries, so attributing them to one shell would be ill-defined.
+    /// The operation is monotone — tolerances never shrink (OCC-style
+    /// semantics: healing may bump a child, and the parent must follow).
+    ///
+    /// Called automatically by [`Solid::rebuild_store`] (store rebuilds may
+    /// reconcile instance tolerances upward) and by
+    /// [`Solid::apply_model_tolerance`].
+    pub fn recompute_tolerances(&mut self) {
+        for shell in self.outer_shell.iter_mut().chain(self.inner_shells.iter_mut()) {
+            let face_max = shell
+                .faces
+                .iter()
+                .map(|f| f.tolerance)
+                .fold(0.0_f64, f64::max);
+            shell.tolerance = shell.tolerance.max(face_max);
+        }
+        let mut agg = self.tolerance;
+        if let Some(shell) = &self.outer_shell {
+            agg = agg.max(shell.tolerance);
+        }
+        for shell in &self.inner_shells {
+            agg = agg.max(shell.tolerance);
+        }
+        for edge in self.edge_store.iter() {
+            agg = agg.max(edge.tolerance);
+        }
+        self.tolerance = agg;
+    }
+
+    /// Propagate a model-level tolerance into every topological entity
+    /// (Vision 2036 §1.1 — hierarchical tolerance propagation).
+    ///
+    /// Each `Face` (in every shell) and each canonical `Edge` (in the
+    /// `EdgeStore`) takes `tol` as a LOWER BOUND (`current.max(tol)`):
+    /// healing may have legitimately bumped an entity above the file-level
+    /// value, and tolerance semantics in this kernel are monotone.
+    /// Vertices are implicit in this representation (their geometry rides
+    /// the owning edge's `start_vertex_point`/`end_vertex_point`), so they
+    /// inherit the edge tolerance by construction.
+    ///
+    /// After seeding, [`Solid::recompute_tolerances`] rebuilds the
+    /// hierarchy so shell/solid aggregates dominate their children — the
+    /// invariant checked by the `ToleranceConsistency` topology validation.
+    ///
+    /// Returns the number of entities whose tolerance changed. Non-finite
+    /// or non-positive `tol` is rejected (0 changes) — the caller's
+    /// `ToleranceContext::entity_tolerance()` already guarantees sanity.
+    pub fn apply_model_tolerance(&mut self, tol: f64) -> usize {
+        if !tol.is_finite() || tol <= 0.0 {
+            return 0;
+        }
+        let mut changed = 0usize;
+        for shell in self.outer_shell.iter_mut().chain(self.inner_shells.iter_mut()) {
+            for face in &mut shell.faces {
+                if face.tolerance < tol {
+                    face.tolerance = tol;
+                    changed += 1;
+                }
+            }
+        }
+        for edge in self.edge_store.iter_mut() {
+            if edge.tolerance < tol {
+                edge.tolerance = tol;
+                changed += 1;
+            }
+        }
+        self.recompute_tolerances();
+        changed
+    }
+
     /// Get all faces from all shells.
     pub fn faces(&self) -> Vec<&Face> {
         let mut faces = Vec::new();
