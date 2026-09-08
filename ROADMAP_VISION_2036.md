@@ -521,6 +521,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | BREP validation before triangulation | Done | `9244a7b` |
 | 1 | Seam edge topological gluing | Done | `058805c` |
 | 1 | Analytical PCURVE (derive_pcurve) | Done | `830f782` |
+| 2 | Periodic 2D PCURVEs for closed branches (lattice C2 seam) | Done | `1039889` |
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Property-based testing (proptest) | Done | `2d74d8c` |
 | 1 | Fuzz testing setup (quickcheck) | Done | `e7ee121` |
