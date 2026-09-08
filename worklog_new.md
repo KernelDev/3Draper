@@ -4532,3 +4532,77 @@ diag_weld); run_all_tests.sh с захардкоженным sandbox-путём.
 - Пусто. План Vision 2036 §2.1/§2.2 в части SSI/PCURVE полностью
   закрыт; следующий крупный блок — по ROADMAP/PLAN после C5/Vision2036
   (см. Progress Tracking).
+
+---
+
+# Worklog — Иерархические толерансы сущностей: пропагация + консистентность + STEP round-trip (Vision 2036 §1.1, 2026-09-08, двадцать первая сессия)
+
+**Baseline:** commit `3b2e41d` (после 20-й — периодические 2D-PCURVE +
+чистка legacy-скриптов; tools-фикс `31e6907` в history).
+**Задача:** последний незакрытый пункт Phase 1 «Contextual hierarchical
+tolerances — In Progress (`dd99d0a`)» из Progress Tracking. Поля
+`tolerance` у Face/Edge/Vertex существовали со времён аудита 2.2, но
+имели хардкод 1e-6: uncertainty из STEP останавливался на
+ToleranceContext и никогда не достигал топологии.
+
+## Реализация
+
+- **draper-geometry** — `ToleranceContext::entity_tolerance()`: seed
+  модельного уровня = STEP uncertainty (если заявлен) либо coincidence;
+  cap = model_scale (не 0.1%! — толерансы сущностей это СЕМАНТИКА, а не
+  радиус слияния сетки: честные 0.01мм на болте 10мм обязаны выживать;
+  merge-гарды остаются в своих методах), floor 1e-12.
+- **draper-topology** — `Solid::apply_model_tolerance(tol)`: монотонный
+  lower-bound seed всех Face (всех оболочек) + канонических Edge (store),
+  затем пересборка иерархии снизу вверх; `Solid::recompute_tolerances()`
+  (shell = max(faces), solid = max(shells + edges); рёбра агрегируются на
+  уровне SOLID — store-owned, могут пересекать границы оболочек; никогда
+  не уменьшается, OCC-семантика). `rebuild_store` завершается
+  recompute — стежки healing поднимают edge-толерансы, агрегаты обязаны
+  следовать. `tolerant_stitch`: агрегат оболочки теперь включает
+  поднятые толерансы рабочих рёбер (раньше — только faces).
+- **Валидатор** — новый чек `ToleranceConsistency` в `validate_topology`:
+  NaN/Inf/≤0 = Error (травит все сравнения вниз по стеку); child >
+  parent (face≤shell≤solid, edge≤solid) = Warning (нарушение = иерархию
+  не пересобрали после bump, геометрия цела). Флаг: on в default/all,
+  off в critical_only/none (мягкая инварианта, диагностическая).
+- **draper-step** — `face_data_list_to_solid(face_data_list, base_tol)`:
+  все 6 путей импорта пропагируют `tol_ctx.entity_tolerance()`
+  (extract_solid_from_brep — seed без bbox, model_scale=1; mesh/heal/
+  validation пути — из полного tol_ctx). **Экспортёр**:
+  UNCERTAINTY_MEASURE_WITH_UNIT теперь пишет `solid.tolerance` (было
+  хардкод 1.0E-6) — толерансы переживают STEP round-trip.
+
+## Ключевые решения сессии
+
+- Cap для entity-толерансов сначала сделал 0.1% model_scale (по аналогии
+  с vertex_merge) — интеграционный тест round-trip сразу поймал: путь
+  extract_solid_from_brep не имеет bbox (model_scale=1) → 0.01
+  обрезался бы до 1e-3, round-trip ломался. Анализ потребителей показал:
+  entity-толерансы читают только healing-стежки (bump), boolean-копии,
+  агрегаты и новый валидатор — слияния сеток их НЕ читают → cap
+  ослаблен до model_scale, merge-гарды остались в своих методах.
+- Вершины (Vertex) в этом ядре неявные (геометрия в
+  Edge::start/end_vertex_point) — пропагация вершин = пропагация рёбер
+  по построению; задокументировано в apply_model_tolerance.
+
+## Тесты
+
+- geometry +2 (uncertainty wins; fallback/cap/мусор), topology +5
+  (seed 18 сущностей box; монотонность; мусор; детект коррупции: face >
+  shell = Warning, NaN = Error, edge bump → recompute сам чинит; флаги
+  конфига), step integration +3 (round-trip 0.01 через export→parse→
+  extract_solids; дефолт 1e-6 не изменился; coarse 0.05 import).
+- Полные сьюты: topology 234+31, mesh 268+4, json 13, core 75, ffi 10,
+  step: integration 7 (industrial, вкл. as1-oc-214 с uncertainty 0.01),
+  compacted 3, seam 5, parser_ext 28, exporter 10, voids 5.
+- Среда: sandbox снова перезагружался (rust исчез, репозиторий уцелел) —
+  toolchain 1.98.0 переустановлен из сохранённого scripts/rustup-init.sh
+  в персистентные .rustup/.cargo; env: scripts/rust-env.sh (пересоздан).
+
+## Осталось (глобальный список)
+
+- WebGPU compute shaders (Phase 2, «Pending (API ready)») — единственный
+  незакрытый пункт Progress Tracking; требует GPU-стенда.
+- Vision 2036 §1.1 закрыт полностью: пропагация + консистентность +
+  round-trip; Phase 1 не имеет открытых пунктов.
