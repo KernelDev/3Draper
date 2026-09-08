@@ -16,7 +16,11 @@ pub mod core_engine;
 pub mod sketch;
 pub mod workspaces;
 pub mod dispatcher;
+// AI / Collaboration panels are native-only: they are backed by draper-ai and
+// draper-cloud (tokio + mio), which do not compile on wasm32.
+#[cfg(not(target_family = "wasm"))]
 pub mod ai_panel;
+#[cfg(not(target_family = "wasm"))]
 pub mod collab_panel;
 pub mod animation_panel;
 pub mod scripting_panel;

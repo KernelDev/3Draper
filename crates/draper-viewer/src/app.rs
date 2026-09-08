@@ -778,8 +778,12 @@ pub struct ViewerApp {
     /// Marking menu visibility for BRepCAD UI.
     pub brepcad_marking_menu_visible: bool,
     /// AI panel state (ShapeParser, DesignReviewer, LLM).
+    /// Native-only: backed by draper-ai (tokio) which does not build on wasm32.
+    #[cfg(not(target_family = "wasm"))]
     pub ai_panel: crate::ui::ai_panel::AiPanelState,
     /// Collaboration panel state (WebSocket CRDT sync).
+    /// Native-only: backed by draper-cloud (tokio) which does not build on wasm32.
+    #[cfg(not(target_family = "wasm"))]
     pub collab_panel: crate::ui::collab_panel::CollabPanelState,
     /// Animation timeline state (Phase 6).
     pub animation_panel: crate::ui::animation_panel::AnimationTimelineState,
@@ -1539,7 +1543,9 @@ impl ViewerApp {
             brepcad_dialog: crate::ui::dialogs::DialogType::None,
             brepcad_command_palette: Default::default(),
             brepcad_marking_menu_visible: false,
+            #[cfg(not(target_family = "wasm"))]
             ai_panel: Default::default(),
+            #[cfg(not(target_family = "wasm"))]
             collab_panel: Default::default(),
             animation_panel: Default::default(),
             scripting_console: Default::default(),
@@ -9622,13 +9628,17 @@ impl eframe::App for ViewerApp {
                         }
                         ui.separator();
                         // Fix #3: AI and Collab panel toggle buttons (floating windows)
-                        let ai_btn = if self.brepcad_ai_panel_visible { "AI ✓" } else { "AI" };
-                        if ui.small_button(ai_btn).on_hover_text("Toggle AI Assistant panel").clicked() {
-                            self.brepcad_ai_panel_visible = !self.brepcad_ai_panel_visible;
-                        }
-                        let collab_btn = if self.brepcad_collab_panel_visible { "Colab ✓" } else { "Colab" };
-                        if ui.small_button(collab_btn).on_hover_text("Toggle Collaboration panel").clicked() {
-                            self.brepcad_collab_panel_visible = !self.brepcad_collab_panel_visible;
+                        // Native-only panels (draper-ai / draper-cloud need tokio).
+                        #[cfg(not(target_family = "wasm"))]
+                        {
+                            let ai_btn = if self.brepcad_ai_panel_visible { "AI ✓" } else { "AI" };
+                            if ui.small_button(ai_btn).on_hover_text("Toggle AI Assistant panel").clicked() {
+                                self.brepcad_ai_panel_visible = !self.brepcad_ai_panel_visible;
+                            }
+                            let collab_btn = if self.brepcad_collab_panel_visible { "Colab ✓" } else { "Colab" };
+                            if ui.small_button(collab_btn).on_hover_text("Toggle Collaboration panel").clicked() {
+                                self.brepcad_collab_panel_visible = !self.brepcad_collab_panel_visible;
+                            }
                         }
                     });
                 });
@@ -11229,6 +11239,8 @@ impl eframe::App for ViewerApp {
             // Previously this was a SidePanel::right rendered AFTER CentralPanel,
             // which caused it to overlap the viewport and intercept mouse events.
             // Now it's a floating window that doesn't consume viewport space.
+            // Native-only: the AI panel is backed by draper-ai (tokio/mio).
+            #[cfg(not(target_family = "wasm"))]
             if self.brepcad_ai_panel_visible {
                 let mut ai_actions_pending = None;
                 egui::Window::new("AI Assistant")
@@ -11275,6 +11287,8 @@ impl eframe::App for ViewerApp {
 
             // ═══ Collaboration Panel (Phase 5.1 integration) ═══
             // Fix #1: Render as floating Window instead of SidePanel (same reason as AI panel).
+            // Native-only: the Collab panel is backed by draper-cloud (tokio/mio).
+            #[cfg(not(target_family = "wasm"))]
             if self.brepcad_collab_panel_visible {
                 egui::Window::new("Collaboration")
                     .default_width(260.0)
@@ -16505,6 +16519,8 @@ impl ViewerApp {
                 self.load_mesh(mesh, "Generative Design (SIMP topology opt)");
                 format!("Generative design: {} verts, vol_frac={:.2}, converged={}", vc, result.achieved_volume_fraction, result.converged)
             }
+            // draper-ai healing is native-only (tokio does not build on wasm32).
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::ToolsAiHealing => {
                 use draper_ai::{default_healing_model, heal_with_model, HealingRequest};
                 // Create a simple test: no gaps detected → "healthy" message
@@ -16516,6 +16532,10 @@ impl ViewerApp {
                 let model = default_healing_model();
                 let result = heal_with_model(&request, model.as_ref());
                 format!("AI Healing: {} repaired, {} failed, model={}", result.repaired_count, result.failed_count, model.model_info())
+            }
+            #[cfg(target_family = "wasm")]
+            MenuAction::ToolsAiHealing => {
+                "AI Healing: available in the native build (draper-ai)".to_string()
             }
             MenuAction::ToolsSubdivide => {
                 use draper_subd::{SubdMesh, subdivide, subd_to_triangle_mesh};
@@ -17519,6 +17539,8 @@ impl ViewerApp {
             MenuAction::ScrApiReference => "API Reference: https://github.com/KernelDev/3Draper/blob/main/docs/api.md".to_string(),
 
             // ── AI actions ──
+            // draper-ai ShapeParser is native-only (tokio does not build on wasm32).
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiShapeFromText => {
                 // Use real AiShapeParser to parse a default prompt and generate geometry
                 self.brepcad_push_undo_named("AI Shape from Text");
@@ -17542,6 +17564,10 @@ impl ViewerApp {
                     }
                     Err(e) => format!("AI Shape from Text: parse error: {}", e),
                 }
+            }
+            #[cfg(target_family = "wasm")]
+            MenuAction::AiShapeFromText => {
+                "AI Shape from Text: available in the native build (draper-ai)".to_string()
             }
             MenuAction::AiChat => "AI Assistant: chat interface (coming soon)".to_string(),
             MenuAction::AiDesignReview => {
@@ -17753,10 +17779,13 @@ impl ViewerApp {
             MenuAction::DrwAnnotationSurfaceFinish if false => String::new(),
 
             // ── AI actions (Phase 5.2 UI integration) ──
+            // These arms use the AI panel state (draper-ai) — native-only.
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiShapeFromText => {
                 self.brepcad_status_msg = "AI Shape-from-Text: type a prompt in the AI panel (right side)".to_string();
                 "AI Shape-from-Text: use the AI panel on the right".to_string()
             }
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiDesignReview => {
                 if self.ai_panel.actions.is_empty() {
                     "No actions to review — parse a prompt in the AI panel first".to_string()
@@ -17770,6 +17799,7 @@ impl ViewerApp {
                     }
                 }
             }
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiChat => {
                 self.ai_panel.status = "Chat mode: type a design prompt".to_string();
                 // Fix #1: Toggle the AI panel visibility
@@ -17780,6 +17810,7 @@ impl ViewerApp {
                     "AI Chat panel closed".to_string()
                 }
             }
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiCostEstimate => {
                 if self.ai_panel.actions.is_empty() {
                     "No actions — parse a prompt first".to_string()
@@ -17790,9 +17821,15 @@ impl ViewerApp {
                         vol, report.stats.boolean_operation_count)
                 }
             }
+            #[cfg(not(target_family = "wasm"))]
             MenuAction::AiAutoFillet => {
                 self.ai_panel.actions.push(draper_ai::GeometryAction::FilletAllEdges { radius: 2.0 });
                 "Added FilletAllEdges (R=2mm) to AI actions".to_string()
+            }
+            #[cfg(target_family = "wasm")]
+            MenuAction::AiDesignReview | MenuAction::AiChat | MenuAction::AiCostEstimate
+            | MenuAction::AiAutoFillet => {
+                "AI assistant features are available in the native build (draper-ai)".to_string()
             }
 
             // ── All remaining actions: provide informative messages ──
@@ -21956,6 +21993,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                         }
                         NT::ExportSTEP { path } => {
                             // Export geometry to STEP file.
+                            // File IO is native-only (std::fs functions are cfg-gated
+                            // out of the wasm build of draper-step).
+                            #[cfg(not(target_family = "wasm"))]
                             if let Some(solid) = inputs.get(0).and_then(to_solid) {
                                 let step_content = draper_step::exporter::export_step(&solid, "VP_export");
                                 match draper_step::exporter::write_step_file(&step_content, path) {
@@ -21973,29 +22013,36 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                         NT::ExportSTL { path, binary } => {
                             // Export geometry/mesh to STL file.
                             // Accept either Mesh or Geometry (convert via triangulation).
-                            let mesh_opt = inputs.get(0).and_then(|d| match d {
-                                VpData::Mesh(m) => Some((**m).clone()),
-                                VpData::Geometry(s) => {
-                                    let params = tri_params_for_lod(LodLevel::Medium);
-                                    Some(triangulate_solid(s, &params))
-                                }
-                                _ => None,
-                            });
-                            if let Some(mesh) = mesh_opt {
-                                match draper_mesh::stl::write_stl_file(&mesh, path, *binary) {
-                                    Ok(_) => {
-                                        results.insert(node.id, VpData::String(path.clone()));
-                                        changed = true;
+                            // File IO is native-only (std::fs functions are cfg-gated
+                            // out of the wasm build of draper-mesh).
+                            #[cfg(not(target_family = "wasm"))]
+                            {
+                                let mesh_opt = inputs.get(0).and_then(|d| match d {
+                                    VpData::Mesh(m) => Some((**m).clone()),
+                                    VpData::Geometry(s) => {
+                                        let params = tri_params_for_lod(LodLevel::Medium);
+                                        Some(triangulate_solid(s, &params))
                                     }
-                                    Err(e) => {
-                                        results.insert(node.id, VpData::String(format!("Error: {}", e)));
-                                        changed = true;
+                                    _ => None,
+                                });
+                                if let Some(mesh) = mesh_opt {
+                                    match draper_mesh::stl::write_stl_file(&mesh, path, *binary) {
+                                        Ok(_) => {
+                                            results.insert(node.id, VpData::String(path.clone()));
+                                            changed = true;
+                                        }
+                                        Err(e) => {
+                                            results.insert(node.id, VpData::String(format!("Error: {}", e)));
+                                            changed = true;
+                                        }
                                     }
                                 }
                             }
                         }
                         NT::ExportOBJ { path } => {
                             // Export geometry/mesh to OBJ file.
+                            // File IO is native-only (std::fs functions are cfg-gated
+                            // out of the wasm build of draper-mesh).
                             let mesh_opt = inputs.get(0).and_then(|d| match d {
                                 VpData::Mesh(m) => Some((**m).clone()),
                                 VpData::Geometry(s) => {
@@ -22004,6 +22051,7 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                 }
                                 _ => None,
                             });
+                            #[cfg(not(target_family = "wasm"))]
                             if let Some(mesh) = mesh_opt {
                                 match draper_mesh::stl::write_obj_file(&mesh, path) {
                                     Ok(_) => {
@@ -23304,6 +23352,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                         }
                         NT::FileInput { path } => {
                             // Load STEP file as Solid.
+                            // File IO is native-only (parse_step_file is cfg-gated
+                            // out of the wasm build of draper-step).
+                            #[cfg(not(target_family = "wasm"))]
                             match draper_step::parser::parse_step_file(path) {
                                 Ok(step_file) => {
                                     let (solids, _) = draper_step::converter::extract_solids(&step_file);
@@ -23319,6 +23370,11 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                                     results.insert(node.id, VpData::Empty);
                                     changed = true;
                                 }
+                            }
+                            #[cfg(target_family = "wasm")]
+                            {
+                                results.insert(node.id, VpData::String("File import is native-only".to_string()));
+                                changed = true;
                             }
                         }
                         NT::PathInput { branch, indices } => {
@@ -23384,6 +23440,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                         }
                         NT::ExportGLTF { path } => {
+                            // glTF file export — native-only (draper-mesh export
+                            // module is behind the export-3mf feature / std::fs).
+                            #[cfg(not(target_family = "wasm"))]
                             if let Some(mesh) = inputs.get(0).and_then(to_mesh) {
                                 match draper_mesh::export::export_gltf(&mesh, path) {
                                     Ok(_) => { results.insert(node.id, VpData::String(path.clone())); changed = true; }
@@ -23400,6 +23459,9 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                         }
                         NT::Export3MF { path } => {
+                            // 3MF file export — native-only (export-3mf feature
+                            // pulls zip/bzip2 C dependencies).
+                            #[cfg(not(target_family = "wasm"))]
                             if let Some(mesh) = inputs.get(0).and_then(to_mesh) {
                                 match draper_mesh::export::export_3mf(&mesh, path) {
                                     Ok(_) => { results.insert(node.id, VpData::String(path.clone())); changed = true; }
@@ -23424,9 +23486,17 @@ pub fn vp_evaluate_graph(graph: &crate::ui::workspaces::VpGraph) -> Option<drape
                             }
                         }
                         NT::ImportSTL { path } => {
+                            // STL import — native-only (import_stl_binary is
+                            // cfg-gated out of the wasm build of draper-mesh).
+                            #[cfg(not(target_family = "wasm"))]
                             match draper_mesh::stl::import_stl_binary(path) {
                                 Ok(mesh) => { results.insert(node.id, VpData::Mesh(Box::new(mesh))); changed = true; }
                                 Err(e) => { results.insert(node.id, VpData::String(format!("Error: {}", e))); changed = true; }
+                            }
+                            #[cfg(target_family = "wasm")]
+                            {
+                                results.insert(node.id, VpData::String("File import is native-only".to_string()));
+                                changed = true;
                             }
                         }
                         NT::SketchSolve => {

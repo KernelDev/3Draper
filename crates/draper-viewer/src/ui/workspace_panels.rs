@@ -72,7 +72,21 @@ pub fn show_workspace_panel(
                         inspect_panel(ui, mesh, status_cb);
                     }
                     crate::ui::Workspace::Ai => {
+                        // draper-ai design review is native-only (tokio/mio do not
+                        // build on wasm32); show an informational fallback on web.
+                        #[cfg(not(target_family = "wasm"))]
                         ai_panel(ui, mesh, status_cb);
+                        #[cfg(target_family = "wasm")]
+                        {
+                            ui.label(
+                                egui::RichText::new(
+                                    "AI design review is available in the native build. \
+                                     The web demo does not include draper-ai (tokio).",
+                                )
+                                .small()
+                                .color(egui::Color32::from_rgb(0x9a, 0x9a, 0xb0)),
+                            );
+                        }
                     }
                 }
             });
@@ -886,6 +900,9 @@ fn inspect_panel(ui: &mut egui::Ui, mesh: &TriangleMesh, status_cb: &mut dyn FnM
     }
 }
 
+// AI workspace panel — native-only (draper-ai needs tokio, which does not
+// compile on wasm32-unknown-unknown).
+#[cfg(not(target_family = "wasm"))]
 fn ai_panel(ui: &mut egui::Ui, mesh: &TriangleMesh, status_cb: &mut dyn FnMut(String)) {
     ui.heading("🤖 AI");
     ui.label(

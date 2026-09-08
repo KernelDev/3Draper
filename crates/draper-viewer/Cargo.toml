@@ -32,8 +32,6 @@ draper-step = { workspace = true }
 draper-json = { workspace = true }
 draper-implicit = { workspace = true }
 draper-subd = { workspace = true }
-draper-ai = { workspace = true }
-draper-cloud = { workspace = true }
 draper-sketch = { workspace = true }
 draper-fea = { workspace = true }
 draper-drawing = { workspace = true }
@@ -48,14 +46,8 @@ wgpu = { version = "24", features = ["webgl", "webgpu"] }
 bytemuck = { version = "1", features = ["derive"] }
 log = { workspace = true }
 serde_json = "1"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
 
-# Native-only dependencies
-rfd = { version = "0.15", optional = true }
-env_logger = { version = "0.11", optional = true }
-rayon = { version = "1.10", optional = true }
-
-# Web-only dependencies
+# Web-only optional dependencies (activated by the `web` / `web-deploy` features)
 web-sys = { version = "0.3", optional = true, features = [
     "HtmlInputElement",
     "HtmlElement",
@@ -84,3 +76,15 @@ web-time = { version = "1", optional = true }
 console_error_panic_hook = { version = "0.1", optional = true }
 futures-channel = { version = "0.3", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
+
+# Native-only dependencies
+# draper-ai / draper-cloud pull tokio (mio, os-poll) which does not compile on
+# wasm32-unknown-unknown — they must stay out of the WASM dependency graph
+# (see Trunk.toml note). All code touching them is cfg-gated the same way.
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+draper-ai = { workspace = true }
+draper-cloud = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+rfd = { version = "0.15", optional = true }
+env_logger = { version = "0.11", optional = true }
+rayon = { version = "1.10", optional = true }

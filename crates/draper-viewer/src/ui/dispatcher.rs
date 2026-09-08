@@ -23,9 +23,12 @@ use draper_sheetmetal::{SheetMetalPart, SheetMaterial, Bend};
 // Note: ShapeParser (from shape_parser.rs) is &self method-based;
 // ShapeDescription (from shape_from_text.rs) is the remote enum type.
 // We use our Phase 5 ShapeParser for AI panel integration.
+// draper-ai is native-only (tokio does not build on wasm32).
+#[cfg(not(target_family = "wasm"))]
 use draper_ai::{ShapeParser as AiShapeParser, GeometryAction};
 // Remote DesignReviewer (from design_review.rs) operates on TriangleMesh
 // and is used for mesh validation (SimValidate).
+#[cfg(not(target_family = "wasm"))]
 use draper_ai::{DesignReviewer as MeshDesignReviewer, ReviewConfig as MeshReviewConfig};
 
 /// A snapshot of the document used for undo/redo.
@@ -943,12 +946,24 @@ pub fn dispatch_menu_action(
         }
         MenuAction::SimValidate => {
             // Validate the mesh for FEA (watertightness, quality)
-            let reviewer = MeshDesignReviewer::new(MeshReviewConfig::cnc_milling());
-            let report = reviewer.review(&doc.mesh);
-            if report.passed {
-                format!("Mesh validated: OK ({} checks passed)", report.results.len())
-            } else {
-                format!("Mesh validation: {} errors, {} warnings", report.error_count, report.warning_count)
+            // draper-ai DesignReviewer is native-only (tokio/mio do not build on wasm32).
+            #[cfg(not(target_family = "wasm"))]
+            {
+                let reviewer = MeshDesignReviewer::new(MeshReviewConfig::cnc_milling());
+                let report = reviewer.review(&doc.mesh);
+                if report.passed {
+                    format!("Mesh validated: OK ({} checks passed)", report.results.len())
+                } else {
+                    format!("Mesh validation: {} errors, {} warnings", report.error_count, report.warning_count)
+                }
+            }
+            #[cfg(target_family = "wasm")]
+            {
+                let report = draper_mesh::watertight::validate_watertight(&doc.mesh, false);
+                format!(
+                    "Mesh validation: watertight={}, boundary_edges={}, non_manifold_edges={}",
+                    report.is_watertight(), report.boundary_edge_count, report.non_manifold_edge_count
+                )
             }
         }
         MenuAction::SimStudyModal | MenuAction::SimStudyThermal | MenuAction::SimStudyBuckling
@@ -1123,6 +1138,8 @@ pub fn dispatch_menu_action(
         // ── AI actions ──
         // Phase 5.2 integration: uses AiShapeParser (rule-based) + actions_to_solids
         // For full interactive AI, use the AI panel (right side of BRepCAD UI).
+        // draper-ai ShapeParser is native-only (tokio/mio do not build on wasm32).
+        #[cfg(not(target_family = "wasm"))]
         MenuAction::AiShapeFromText => {
             let parser = AiShapeParser::new();
             match parser.parse("box 50x50x50") {
@@ -1141,6 +1158,10 @@ pub fn dispatch_menu_action(
                 }
                 Err(e) => format!("AI parse error: {}", e),
             }
+        }
+        #[cfg(target_family = "wasm")]
+        MenuAction::AiShapeFromText => {
+            "AI Shape from Text: available in the native build (draper-ai)".to_string()
         }
         MenuAction::AiDesignReview => {
             // Run manufacturability analysis via the AI panel's DesignReviewer
