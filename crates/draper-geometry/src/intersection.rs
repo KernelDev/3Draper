@@ -1005,6 +1005,65 @@ fn unwrap_periodic_seams(surface: &Surface, uvs: &mut [Point2d]) {
     }
 }
 
+/// Closure lattice of a projected UV polyline for a CLOSED 3D branch
+/// (§2.2 periodic extension): the UV image of a closed loop closes modulo
+/// the surface's UV lattice, so `uvs.last() − uvs.first()` must be an
+/// exact lattice vector — an integer multiple of the period in periodic
+/// coordinates and (numerically) zero in aperiodic ones.
+///
+/// Returns the lattice closure vector `Δ` when the closure is valid:
+/// * `(k_u·period_u, k_v·period_v)` — e.g. `(2π, 0)` for a latitude
+///   circle on a cylinder (u wraps once, v constant);
+/// * `(0, 0)` — positionally closed image (e.g. a circle in a plane's UV);
+///
+/// `None` when the endpoints do not close modulo the lattice (projection
+/// drift beyond `uv_tol`, or an aperiodic coordinate with non-zero
+/// closure) — callers then keep the clamped fit path.
+fn pcurve_closure_lattice(
+    surface: &Surface,
+    uvs: &[Point2d],
+    uv_tol: f64,
+) -> Option<Point2d> {
+    if uvs.len() < 8 {
+        return None;
+    }
+    let first = uvs[0];
+    let last = uvs[uvs.len() - 1];
+    let du = last.u - first.u;
+    let dv = last.v - first.v;
+    let lat_u = match surface_u_period(surface) {
+        Some(p) if p > 1e-12 => {
+            let k = (du / p).round();
+            if (du - k * p).abs() > uv_tol {
+                return None;
+            }
+            k * p
+        }
+        _ => {
+            if du.abs() > uv_tol {
+                return None;
+            }
+            0.0
+        }
+    };
+    let lat_v = match surface_v_period(surface) {
+        Some(p) if p > 1e-12 => {
+            let k = (dv / p).round();
+            if (dv - k * p).abs() > uv_tol {
+                return None;
+            }
+            k * p
+        }
+        _ => {
+            if dv.abs() > uv_tol {
+                return None;
+            }
+            0.0
+        }
+    };
+    Some(Point2d::new(lat_u, lat_v))
+}
+
 /// UV-space tolerance gate derived from the 3D tolerance: a UV deviation of
 /// `uv_tol` composes (via the surface's first fundamental form) to a 3D
 /// deviation of at most `uv_tol * metric`, where `metric` = max(|dS/du|,
@@ -1033,11 +1092,20 @@ fn uv_tolerance_for(surface: &Surface, uvs: &[Point2d], tolerance: f64) -> f64 {
 /// Storage per §2.2 step 3:
 /// * `Curve2d::Line` — when the samples are collinear (exact straight UV
 ///   image) and near-linear in the branch parameter;
-/// * `Curve2d::Nurbs` — global least-squares fit with control-point
-///   escalation (mirrors the §2.1 3D fitter) within `uv_tol`;
+/// * `Curve2d::Nurbs` — periodic least-squares fit (uniform knots, tail
+///   wrapped by the lattice closure — C2 across the seam in the quotient
+///   UV space) when `closed_lattice` is `Some` and the periodic gate is
+///   met; otherwise the global clamped least-squares fit with
+///   control-point escalation (mirrors the §2.1 3D fitter) within
+///   `uv_tol`;
 /// * `Curve2d::Composite` — polyline fallback when the LSQ gate cannot be
 ///   met (mirrors §2.1's per-branch polyline fallback).
-fn fit_curve2d_from_samples(ts: &[f64], uvs: &[Point2d], uv_tol: f64) -> Curve2d {
+fn fit_curve2d_from_samples(
+    ts: &[f64],
+    uvs: &[Point2d],
+    uv_tol: f64,
+    closed_lattice: Option<Point2d>,
+) -> Curve2d {
     if uvs.len() < 2 {
         // Degenerate branch (cannot happen for a fitted 3D B-spline, but
         // guard anyway): a zero-length line at the single sample.
@@ -1045,7 +1113,28 @@ fn fit_curve2d_from_samples(ts: &[f64], uvs: &[Point2d], uv_tol: f64) -> Curve2d
         return Curve2d::Line(Line2d::new(p, p));
     }
     if let Some(line) = try_line_from_samples(ts, uvs, uv_tol) {
+        // An exact straight UV image stays a line even for closed branches:
+        // a constant-derivative curve is C∞ across the quotient seam (e.g.
+        // the cylinder-side PCURVE of a plane⊥axis circle, u0 → u0+2π).
         return Curve2d::Line(line);
+    }
+    // Closed branch with a valid lattice closure: periodic fit first (C2
+    // across the seam in the quotient); on failure fall through to the
+    // clamped path (C0 seam, but bounded deviation) — never worse than
+    // the pre-periodic behavior.
+    if let Some(lattice) = closed_lattice {
+        match lsq_fit_periodic_curve2d(uvs, uv_tol, lattice) {
+            Ok(nurbs) => return Curve2d::Nurbs(nurbs),
+            Err(e) => {
+                log::debug!(
+                    "SSI §2.2: periodic PCURVE fit failed ({} samples, lattice=({:.4},{:.4})): {} — clamped fallback",
+                    uvs.len(),
+                    lattice.u,
+                    lattice.v,
+                    e
+                );
+            }
+        }
     }
     match lsq_fit_curve2d(ts, uvs, uv_tol) {
         Ok(nurbs) => Curve2d::Nurbs(nurbs),
@@ -1211,6 +1300,241 @@ fn lsq_attempt_curve2d(
     Ok((curve, max_dev))
 }
 
+/// Periodic least-squares 2D fit for the PCURVE of a CLOSED branch
+/// (§2.2 periodic extension — the 2D mirror of `lsq_fit_periodic_branch`).
+///
+/// The UV image of a closed 3D branch closes modulo the surface's UV
+/// lattice: `uvs.last() == uvs.first() + lattice` with `lattice` the exact
+/// lattice closure vector (see [`pcurve_closure_lattice`]). The fit is
+/// periodic in the QUOTIENT UV space:
+///
+/// * cyclic chord-length parameterization (the wrap gap — through the
+///   lattice closure — is the natural last segment; the trailing closure
+///   duplicate is dropped);
+/// * uniform periodic knot vector `knots_i = (i−p)/n_cp`, domain [0, 1]
+///   = exactly one period (same storage layout as §2.1);
+/// * the tail `degree` control points wrap by `+ lattice`, so
+///   `C(1) = C(0) + lattice` EXACTLY and the last span evaluates the same
+///   shape as the first span translated by the lattice — C2 across the
+///   seam in the quotient (a clamped fit would leave a C0 seam: tangent
+///   and curvature jump at the closure);
+/// * control-point escalation ×2 with the same deviation gate as the
+///   clamped path; on failure the caller falls back to the clamped fit.
+///
+/// `lattice == (0, 0)` (positionally closed image, e.g. a circle in a
+/// plane's UV) reduces to the plain periodic closure of §2.1.
+fn lsq_fit_periodic_curve2d(
+    uvs: &[Point2d],
+    uv_tol: f64,
+    lattice: Point2d,
+) -> Result<Nurbs2d, FittingError> {
+    let degree = 3usize;
+    let m = uvs.len();
+    if m < 9 {
+        return Err(FittingError::TooFewPoints { got: m, min: 9 });
+    }
+    // Quotient data relative to the first sample (q_0 = 0; q_{m-1} ≈ Δ).
+    let origin = uvs[0];
+    let q: Vec<Point2d> = uvs
+        .iter()
+        .map(|p| Point2d::new(p.u - origin.u, p.v - origin.v))
+        .collect();
+    // Drop the trailing closure duplicate (q_{m-1} == lattice in the
+    // quotient — the sampler emits both domain ends of the closed 3D
+    // curve; the projections of coincident 3D points differ by exactly
+    // the lattice multiple).
+    let diag = {
+        let (mut mn, mut mx) = ((0.0_f64, 0.0_f64), (0.0_f64, 0.0_f64));
+        for p in &q {
+            mn.0 = mn.0.min(p.u);
+            mn.1 = mn.1.min(p.v);
+            mx.0 = mx.0.max(p.u);
+            mx.1 = mx.1.max(p.v);
+        }
+        ((mx.0 - mn.0).powi(2) + (mx.1 - mn.1).powi(2)).sqrt()
+    };
+    let mut data: &[Point2d] = &q;
+    let tail = &q[m - 1];
+    if (tail.u - lattice.u).abs() <= 1e-12 * diag.max(1.0)
+        && (tail.v - lattice.v).abs() <= 1e-12 * diag.max(1.0)
+    {
+        data = &q[..m - 1];
+    }
+    let n = data.len();
+    if n < 8 {
+        return Err(FittingError::TooFewPoints { got: n, min: 8 });
+    }
+    // Cyclic chord-length parameters over the wrap segment: the closure
+    // runs from data[n-1] through the lattice back to q_0 (= 0).
+    let mut segs = Vec::with_capacity(n);
+    let mut total = 0.0_f64;
+    for i in 0..n {
+        let a = &data[i];
+        let b = if i + 1 < n { &data[i + 1] } else { &lattice };
+        let du = b.u - a.u;
+        let dv = b.v - a.v;
+        let d = (du * du + dv * dv).sqrt();
+        if !d.is_finite() || d <= 0.0 {
+            return Err(FittingError::DegenerateGeometry);
+        }
+        segs.push(d);
+        total += d;
+    }
+    if !total.is_finite() || total <= 0.0 {
+        return Err(FittingError::DegenerateGeometry);
+    }
+    let mut params = Vec::with_capacity(n);
+    let mut acc = 0.0_f64;
+    for i in 0..n {
+        // Strictly positive: the shared basis helper has a clamped-domain
+        // shortcut at t <= 0 (N = e_0) that is wrong for uniform knots —
+        // same guard as the §2.1 periodic fitter.
+        params.push((acc / total).max(1e-9));
+        acc += segs[i];
+    }
+
+    // Control-point budget: mirror the clamped 2D escalation (adaptive
+    // start, cap at the data count).
+    let lifted: Vec<Point3d> = data.iter().map(|p| Point3d::new(p.u, p.v, 0.0)).collect();
+    let n_cp_cap = n;
+    let mut n_cp = adaptive_cp_count(&lifted).max(degree + 1).min(n_cp_cap);
+
+    loop {
+        match lsq_periodic_attempt_curve2d(uvs, data, &params, origin, lattice, n_cp, degree) {
+            Ok((curve, max_dev)) => {
+                if max_dev < uv_tol {
+                    log::debug!(
+                        "SSI §2.2 periodic PCURVE fit ({} samples → {} control points, degree={}, max_dev={:.2e}, uv_tol={:.2e}, lattice=({:.4},{:.4}))",
+                        m, n_cp, degree, max_dev, uv_tol, lattice.u, lattice.v
+                    );
+                    return Ok(curve);
+                }
+                if n_cp >= n_cp_cap {
+                    return Err(FittingError::DeviationTooHigh { max_dev, tolerance: uv_tol });
+                }
+                n_cp = (n_cp * 2).min(n_cp_cap);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+/// Single periodic 2D least-squares attempt with `n_cp` DISTINCT control
+/// points (mirror of `lsq_periodic_attempt`): uniform periodic knots,
+/// cyclic control-point index, two RHS columns (u, v), tail control
+/// points wrapped by `+ lattice`. Evaluates the deviation in ABSOLUTE UV
+/// coordinates over ALL original samples — including the dropped closure
+/// duplicate, which maps to the wrap parameter t = 1 (where the curve
+/// evaluates C(0) + lattice).
+fn lsq_periodic_attempt_curve2d(
+    uvs: &[Point2d],
+    data: &[Point2d],
+    params: &[f64],
+    origin: Point2d,
+    lattice: Point2d,
+    n_cp: usize,
+    degree: usize,
+) -> Result<(Nurbs2d, f64), FittingError> {
+    let n = data.len();
+    let n_store = n_cp + degree;
+    // knots_i = (i − p)/n_cp for i ∈ 0..=(n_store + p)
+    let knots: Vec<f64> = (0..=(n_store + degree))
+        .map(|i| (i as f64 - degree as f64) / n_cp as f64)
+        .collect();
+
+    // All n_cp unknowns are free — no endpoint constraints. Normal
+    // equations over the cyclic control-point index (storage index mod n).
+    // The tail storage points (index ≥ n_cp) carry `+ lattice` in the
+    // assembled curve; the basis weight on those points at t is the
+    // model's lattice ramp, which must be SUBTRACTED from the data before
+    // the quotient unknowns absorb the remainder (otherwise the solver
+    // distorts the control polygon to reproduce the ramp — the §2.1 3D
+    // fitter needs no adjustment because its lattice is always (0,0)).
+    let mut ata = vec![vec![0.0_f64; n_cp]; n_cp];
+    let mut atb = vec![vec![0.0_f64; 2]; n_cp];
+
+    for k in 0..n {
+        let t = params[k].clamp(0.0, 1.0 - 1e-12);
+        let span = lsq_knot_span(&knots, degree, n_store, t);
+        let basis = bspline_basis_values(&knots, degree, span, t);
+        let base = span as isize - degree as isize;
+        // Lattice ramp mass: Σ N_{i,p}(t) over tail storage indices.
+        let mut tail_mass = 0.0_f64;
+        for (i, &bi) in basis.iter().enumerate() {
+            if bi.abs() < 1e-14 {
+                continue;
+            }
+            if base + i as isize >= n_cp as isize {
+                tail_mass += bi;
+            }
+        }
+        let target_u = data[k].u - lattice.u * tail_mass;
+        let target_v = data[k].v - lattice.v * tail_mass;
+        for (i, &bi) in basis.iter().enumerate() {
+            if bi.abs() < 1e-14 {
+                continue;
+            }
+            let col_i = ((base + i as isize) as usize) % n_cp;
+            atb[col_i][0] += bi * target_u;
+            atb[col_i][1] += bi * target_v;
+            for (j, &bj) in basis.iter().enumerate() {
+                if bj.abs() < 1e-14 {
+                    continue;
+                }
+                let col_j = ((base + j as isize) as usize) % n_cp;
+                ata[col_i][col_j] += bi * bj;
+            }
+        }
+    }
+
+    // Solve the two normal-equation systems (same matrix, two RHS).
+    let mut sol = vec![Vec::new(); 2];
+    for d in 0..2 {
+        let mut a_d = ata.clone();
+        let mut b_d: Vec<f64> = atb.iter().map(|r| r[d]).collect();
+        match solve_dense_system(&mut a_d, &mut b_d) {
+            Some(x) => sol[d] = x,
+            None => return Err(FittingError::DegenerateGeometry),
+        }
+    }
+
+    // Assemble storage control points: distinct points in ABSOLUTE UV
+    // coordinates (re-anchored at the origin sample), with the first p
+    // wrapped to the tail by the lattice closure vector.
+    let distinct: Vec<Point2d> = (0..n_cp)
+        .map(|i| Point2d::new(origin.u + sol[0][i], origin.v + sol[1][i]))
+        .collect();
+    let control_points: Vec<Point2d> = (0..n_store)
+        .map(|i| {
+            let d = i / n_cp;
+            let r = i % n_cp;
+            Point2d::new(
+                distinct[r].u + d as f64 * lattice.u,
+                distinct[r].v + d as f64 * lattice.v,
+            )
+        })
+        .collect();
+    let weights = vec![1.0_f64; n_store];
+    let curve = Nurbs2d { degree, control_points, weights, knots };
+
+    // Max deviation over ALL original samples: the kept data at their
+    // cyclic parameters, plus the dropped closure duplicate at t = 1
+    // (where the curve evaluates C(0) + lattice).
+    let m = uvs.len();
+    let mut max_dev = 0.0_f64;
+    for k in 0..m {
+        let t = if k < params.len() { params[k] } else { 1.0 };
+        let eval = curve.point_at(t);
+        let du = uvs[k].u - eval.u;
+        let dv = uvs[k].v - eval.v;
+        let dev = (du * du + dv * dv).sqrt();
+        if dev > max_dev {
+            max_dev = dev;
+        }
+    }
+    Ok((curve, max_dev))
+}
+
 /// Polyline fallback: a `Curve2d::Composite` of line segments through the
 /// samples with arc-length proportional global parameterization (the §2.2
 /// analogue of §2.1's polyline fallback).
@@ -1253,14 +1577,23 @@ fn project_pcurve_branch(curve: &NurbsCurve, surface: &Surface, tolerance: f64) 
     let n = PCURVE_SAMPLE_COUNT.max(2);
     let ts: Vec<f64> = (0..n).map(|i| i as f64 / (n - 1) as f64).collect();
     let mut uvs: Vec<Point2d> = Vec::with_capacity(n);
+    let mut pts3d: Vec<Point3d> = Vec::with_capacity(n);
     for &t in &ts {
         let p = eval.point_at(t);
         let (u, v) = surface.project_point(&p);
         uvs.push(Point2d::new(u, v));
+        pts3d.push(p);
     }
     unwrap_periodic_seams(surface, &mut uvs);
     let uv_tol = uv_tolerance_for(surface, &uvs, tolerance);
-    fit_curve2d_from_samples(&ts, &uvs, uv_tol)
+    // Closed 3D branch → periodic PCURVE when the UV image closes modulo
+    // the surface's lattice (§2.2 periodic extension).
+    let closed_lattice = if branch_is_closed_loop(&pts3d) {
+        pcurve_closure_lattice(surface, &uvs, uv_tol)
+    } else {
+        None
+    };
+    fit_curve2d_from_samples(&ts, &uvs, uv_tol, closed_lattice)
 }
 
 /// §2.2 step 1 (plane×cylinder analytical path): derive the PCURVEs by
@@ -1320,6 +1653,7 @@ fn analytic_pcurves_plane_cylinder(
         .collect();
     let mut cyl_uv: Vec<Point2d> = Vec::with_capacity(n_samples);
     let mut plane_uv: Vec<Point2d> = Vec::with_capacity(n_samples);
+    let mut pts3d: Vec<Point3d> = Vec::with_capacity(n_samples);
     for &t in &ts {
         let p = eval.point_at(t);
         // Cylinder u: exact angular coordinate of the 3D branch sample.
@@ -1331,6 +1665,7 @@ fn analytic_pcurves_plane_cylinder(
         // Plane UV: orthogonal projection — exact in-plane coordinates.
         let (pu, pv) = plane.project_point(&p);
         plane_uv.push(Point2d::new(pu, pv));
+        pts3d.push(p);
     }
     // Unwrap the cylinder u seam (2π-periodic) for a smooth fit.
     let cyl_surface = if plane_is_a { s2 } else { s1 };
@@ -1342,8 +1677,25 @@ fn analytic_pcurves_plane_cylinder(
     let cyl_uv_tol = (tolerance / cyl_metric).max(1e-9);
     let plane_uv_tol = tolerance.max(1e-9);
 
-    let c_cyl = fit_curve2d_from_samples(&ts, &cyl_uv, cyl_uv_tol);
-    let c_plane = fit_curve2d_from_samples(&ts, &plane_uv, plane_uv_tol);
+    // Closed branch (full ellipse/circle) → periodic PCURVEs when each
+    // side's UV image closes modulo its surface's lattice (§2.2 periodic
+    // extension): the cylinder side wraps u by a full period, the plane
+    // side closes positionally.
+    let closed = branch_is_closed_loop(&pts3d);
+    let cyl_lattice = if closed {
+        pcurve_closure_lattice(cyl_surface, &cyl_uv, cyl_uv_tol)
+    } else {
+        None
+    };
+    let plane_surface = if plane_is_a { s1 } else { s2 };
+    let plane_lattice = if closed {
+        pcurve_closure_lattice(plane_surface, &plane_uv, plane_uv_tol)
+    } else {
+        None
+    };
+
+    let c_cyl = fit_curve2d_from_samples(&ts, &cyl_uv, cyl_uv_tol, cyl_lattice);
+    let c_plane = fit_curve2d_from_samples(&ts, &plane_uv, plane_uv_tol, plane_lattice);
     Some(if plane_is_a { (c_plane, c_cyl) } else { (c_cyl, c_plane) })
 }
 

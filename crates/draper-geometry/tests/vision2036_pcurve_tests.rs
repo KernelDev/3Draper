@@ -414,3 +414,322 @@ impl BoolExt for bool {
         !self
     }
 }
+
+// ---------------------------------------------------------------
+// 4. Periodic PCURVEs for closed branches (§2.2 periodic extension —
+//    the 2D mirror of the §2.1 C2-seam periodicity)
+// ---------------------------------------------------------------
+
+use draper_geometry::Nurbs2d;
+use draper_geometry::Point2d;
+
+/// One-sided derivative estimates AT the seam (4-point one-sided
+/// stencils — exact for cubic polynomials, and each stencil lies within a
+/// single cubic span of the fitted curve, so the estimates are exact up
+/// to roundoff):
+///   C'(0⁺) ≈ (−11·C(0) + 18·C(h) − 9·C(2h) + 2·C(3h)) / (6h)
+///   C'(1⁻) ≈ ( 11·C(1) − 18·C(1−h) + 9·C(1−2h) − 2·C(1−3h)) / (6h)
+/// For the periodic storage the last span is the first span translated
+/// by the lattice, and the uniform knot multiplicity makes the curve C1
+/// across the seam knot — the exact piecewise estimates agree to machine
+/// level. A clamped weld (C0 only) leaves an O(|C'|) jump.
+fn seam_tangent_jump_2d(curve: &Nurbs2d, h: f64) -> f64 {
+    let c0 = curve.point_at(0.0);
+    let ch = curve.point_at(h);
+    let c2h = curve.point_at(2.0 * h);
+    let c3h = curve.point_at(3.0 * h);
+    let c1 = curve.point_at(1.0);
+    let cm = curve.point_at(1.0 - h);
+    let cm2 = curve.point_at(1.0 - 2.0 * h);
+    let cm3 = curve.point_at(1.0 - 3.0 * h);
+    let d0 = (
+        (-11.0 * c0.u + 18.0 * ch.u - 9.0 * c2h.u + 2.0 * c3h.u) / (6.0 * h),
+        (-11.0 * c0.v + 18.0 * ch.v - 9.0 * c2h.v + 2.0 * c3h.v) / (6.0 * h),
+    );
+    let d1 = (
+        (11.0 * c1.u - 18.0 * cm.u + 9.0 * cm2.u - 2.0 * cm3.u) / (6.0 * h),
+        (11.0 * c1.v - 18.0 * cm.v + 9.0 * cm2.v - 2.0 * cm3.v) / (6.0 * h),
+    );
+    ((d0.0 - d1.0).powi(2) + (d0.1 - d1.1).powi(2)).sqrt()
+}
+
+/// One-sided curvature (C'') estimates AT the seam from 4-point one-sided
+/// stencils — exact for cubic polynomials (each stencil lies within a
+/// single cubic span); the lattice offset is a CONSTANT translation over
+/// the tail spans, so it cancels in the differences and both sides
+/// compare directly. For a C2 seam (uniform knots, multiplicity 1) the
+/// exact piecewise estimates agree to roundoff; a C0/C1 weld leaves an
+/// O(|ΔC'|/h) jump.
+fn seam_curvature_jump_2d(curve: &Nurbs2d, h: f64) -> f64 {
+    let c0 = curve.point_at(0.0);
+    let ch = curve.point_at(h);
+    let c2h = curve.point_at(2.0 * h);
+    let c3h = curve.point_at(3.0 * h);
+    let c1 = curve.point_at(1.0);
+    let cm = curve.point_at(1.0 - h);
+    let cm2 = curve.point_at(1.0 - 2.0 * h);
+    let cm3 = curve.point_at(1.0 - 3.0 * h);
+    let dd0 = (
+        (2.0 * c0.u - 5.0 * ch.u + 4.0 * c2h.u - c3h.u) / (h * h),
+        (2.0 * c0.v - 5.0 * ch.v + 4.0 * c2h.v - c3h.v) / (h * h),
+    );
+    let dd1 = (
+        (2.0 * c1.u - 5.0 * cm.u + 4.0 * cm2.u - cm3.u) / (h * h),
+        (2.0 * c1.v - 5.0 * cm.v + 4.0 * cm2.v - cm3.v) / (h * h),
+    );
+    ((dd0.0 - dd1.0).powi(2) + (dd0.1 - dd1.1).powi(2)).sqrt()
+}
+
+/// Lattice closure of a fitted pcurve: C(1) − C(0). For a Line this is
+/// end − start; for a Nurbs, point_at at both domain ends.
+fn pcurve_closure(curve: &Curve2d) -> Point2d {
+    match curve {
+        Curve2d::Line(l) => Point2d::new(l.end.u - l.start.u, l.end.v - l.start.v),
+        Curve2d::Nurbs(n) => {
+            let (t0, t1) = n.param_range();
+            let a = n.point_at(t0);
+            let b = n.point_at(t1);
+            Point2d::new(b.u - a.u, b.v - a.v)
+        }
+        _ => Point2d::ORIGIN,
+    }
+}
+
+#[test]
+fn test_pcurve_closed_periodic_analytic_circle() {
+    // Plane z = 2 ∩ cylinder R = 5 (axis z) → full circle. The analytic
+    // plane×cylinder path must produce:
+    //   cylinder side — exact straight UV image (v ≡ 2, u sweeps ±2π):
+    //     the closure is exactly one lattice period in u;
+    //   plane side — periodic Nurbs (knots[0] < 0, tail = head + lattice):
+    //     C(1) == C(0) exactly and C1/C2 continue across the seam.
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(0.0, 0.0, 2.0),
+        Direction3d::Z,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(5.0));
+
+    let out = intersect_surfaces(&cyl, &plane, 1e-6);
+    assert_eq!(out.b_splines().len(), 1);
+
+    // ── Cylinder side (surface A): straight UV image, lattice closure ──
+    let cyl_pcurve = &out.pcurves_a()[0];
+    let closure = pcurve_closure(cyl_pcurve);
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let k = (closure.u / two_pi).round();
+    assert!(
+        (closure.u - k * two_pi).abs() < 1e-9 && k.abs() >= 1.0,
+        "cylinder-side closure must be a non-trivial u lattice multiple, got ({:.6},{:.6})",
+        closure.u,
+        closure.v
+    );
+    assert!(
+        closure.v.abs() < 1e-9,
+        "cylinder-side v closure must vanish, got {:.3e}",
+        closure.v
+    );
+    // v stays constant over the whole curve (the exact analytic image).
+    let mut max_v_dev = 0.0_f64;
+    for p in sample_curve2d(cyl_pcurve, 64) {
+        max_v_dev = max_v_dev.max((p.v - 2.0).abs());
+    }
+    assert!(max_v_dev < 1e-6, "cylinder-side v dev {max_v_dev:.3e}");
+
+    // ── Plane side (surface B): periodic Nurbs with C2 seam ──
+    let plane_pcurve = &out.pcurves_b()[0];
+    let nurbs = match plane_pcurve {
+        Curve2d::Nurbs(n) => n,
+        other => panic!("plane-side circle must be a Nurbs, got {other:?}"),
+    };
+    // Periodic storage signature: uniform knots start BELOW the domain
+    // (knots[0] = −p/n_cp); a clamped fit has knots[0] == 0.
+    assert!(
+        nurbs.knots[0] < -1e-9,
+        "periodic knots must start below the domain, knots[0] = {:.6}",
+        nurbs.knots[0]
+    );
+    // C0: positionally closed (lattice (0,0)) — exact.
+    let gap = pcurve_closure(plane_pcurve);
+    assert!(
+        gap.u.abs() < 1e-9 && gap.v.abs() < 1e-9,
+        "plane-side periodic closure must be exact, got ({:.3e},{:.3e})",
+        gap.u,
+        gap.v
+    );
+    // C1: tangents continue across the seam.
+    let t_jump = seam_tangent_jump_2d(nurbs, 1e-3);
+    assert!(
+        t_jump < 5e-3,
+        "plane-side seam must be C1: tangent jump = {t_jump:.3e}"
+    );
+    // C2: curvature estimates agree from both sides (a clamped weld would
+    // leave an O(|ΔC'|/h) ≈ O(10³) jump).
+    let c_jump = seam_curvature_jump_2d(nurbs, 1e-3);
+    assert!(
+        c_jump < 0.05,
+        "plane-side seam must be C2: curvature jump = {c_jump:.3e}"
+    );
+    // Composed circle quality is unchanged by the periodic knots.
+    let mut max_r_dev = 0.0_f64;
+    for p in sample_curve2d(plane_pcurve, 64) {
+        let q = plane.point_at(p.u, p.v);
+        let radial = (q.x * q.x + q.y * q.y).sqrt();
+        max_r_dev = max_r_dev.max((radial - 5.0).abs());
+    }
+    assert!(max_r_dev < 1e-4, "plane-side circle radius dev {max_r_dev:.3e}");
+}
+
+#[test]
+fn test_pcurve_closed_periodic_torus_plane_marching() {
+    // Torus (R=10, r=2) ∩ plane z=1 → two latitude circles (marching
+    // path, generic projection). Both sides must close modulo their
+    // surface's lattice with a C2-continuous seam: torus side wraps u by
+    // exactly ±2π (or degenerates to the exact straight image), plane
+    // side closes positionally (periodic Nurbs).
+    let torus = Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, 10.0, 2.0));
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(0.0, 0.0, 1.0),
+        Direction3d::Z,
+    ));
+    let out = intersect_surfaces(&torus, &plane, 1e-6);
+    assert_eq!(out.b_splines().len(), 2, "two latitude branches");
+
+    let two_pi = 2.0 * std::f64::consts::PI;
+    // ── Torus side: lattice closure in u (v may drift only within fit
+    //    noise — v is aperiodic in u-wrapping branches... torus v IS
+    //    periodic, but a latitude circle keeps v constant, so both
+    //    closures must be lattice vectors) ──
+    for pcurve in out.pcurves_a() {
+        let closure = pcurve_closure(pcurve);
+        let ku = (closure.u / two_pi).round();
+        let kv = (closure.v / two_pi).round();
+        assert!(
+            (closure.u - ku * two_pi).abs() < 1e-6 && (closure.v - kv * two_pi).abs() < 1e-6,
+            "torus-side closure must be a UV lattice vector, got ({:.6},{:.6})",
+            closure.u,
+            closure.v
+        );
+        if let Curve2d::Nurbs(n) = pcurve {
+            // C2 seam in the quotient (the lattice is a pure translation:
+            // it cancels in the finite differences).
+            let t_jump = seam_tangent_jump_2d(n, 1e-3);
+            assert!(t_jump < 5e-3, "torus-side seam C1: {t_jump:.3e}");
+            let c_jump = seam_curvature_jump_2d(n, 1e-3);
+            assert!(c_jump < 0.05, "torus-side seam C2: {c_jump:.3e}");
+        }
+        // A Line is the exact straight image (v ≈ const) — equally valid.
+    }
+
+    // ── Plane side: periodic Nurbs, positionally closed ──
+    for pcurve in out.pcurves_b() {
+        let nurbs = match pcurve {
+            Curve2d::Nurbs(n) => n,
+            other => panic!("plane-side latitude circle must be a Nurbs, got {other:?}"),
+        };
+        assert!(
+            nurbs.knots[0] < -1e-9,
+            "periodic knots must start below the domain, knots[0] = {:.6}",
+            nurbs.knots[0]
+        );
+        let gap = pcurve_closure(pcurve);
+        assert!(
+            gap.u.abs() < 1e-9 && gap.v.abs() < 1e-9,
+            "plane-side periodic closure must be exact, got ({:.3e},{:.3e})",
+            gap.u,
+            gap.v
+        );
+        let t_jump = seam_tangent_jump_2d(nurbs, 1e-3);
+        assert!(t_jump < 5e-3, "plane-side seam C1: {t_jump:.3e}");
+        let c_jump = seam_curvature_jump_2d(nurbs, 1e-3);
+        assert!(c_jump < 0.05, "plane-side seam C2: {c_jump:.3e}");
+    }
+}
+
+#[test]
+fn test_pcurve_periodic_storage_layout() {
+    // Self-consistency of the periodic Nurbs2d storage (mirror of the
+    // §2.1 layout test): knots strictly increasing, count = n_cp + p + 1
+    // over the STORED points, domain [0, 1] = one period, tail control
+    // points = head + lattice, C(1) − C(0) = lattice exactly.
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(0.0, 0.0, 2.0),
+        Direction3d::Z,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(5.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-6);
+
+    let nurbs = match &out.pcurves_b()[0] {
+        Curve2d::Nurbs(n) => n,
+        other => panic!("plane-side circle must be a Nurbs, got {other:?}"),
+    };
+    let p = nurbs.degree;
+    let n_store = nurbs.control_points.len();
+    assert!(n_store > p, "stored control points must exceed degree");
+    assert_eq!(
+        nurbs.knots.len(),
+        n_store + p + 1,
+        "knot count = n_store + degree + 1"
+    );
+    for w in nurbs.knots.windows(2) {
+        assert!(w[1] > w[0], "knots strictly increasing");
+    }
+    let (t0, t1) = nurbs.param_range();
+    assert!((t0 - 0.0).abs() < 1e-12, "domain start {t0}");
+    assert!((t1 - 1.0).abs() < 1e-12, "domain end {t1}");
+
+    // Period structure: n_cp = n_store − degree distinct points; tail
+    // degree points duplicate the head (lattice (0,0) here).
+    let n_cp = n_store - p;
+    for i in 0..p {
+        let head = &nurbs.control_points[i];
+        let tail = &nurbs.control_points[n_cp + i];
+        assert!(
+            (head.u - tail.u).abs() < 1e-12 && (head.v - tail.v).abs() < 1e-12,
+            "tail control point {i} must wrap the head (lattice (0,0)): ({:.6},{:.6}) vs ({:.6},{:.6})",
+            tail.u,
+            tail.v,
+            head.u,
+            head.v
+        );
+    }
+    // Exact closure via evaluation.
+    let a = nurbs.point_at(0.0);
+    let b = nurbs.point_at(1.0);
+    assert!(
+        (a.u - b.u).abs() < 1e-12 && (a.v - b.v).abs() < 1e-12,
+        "C(1) == C(0) exactly, got Δ = ({:.3e},{:.3e})",
+        b.u - a.u,
+        b.v - a.v
+    );
+}
+
+#[test]
+fn test_pcurve_open_branch_not_periodic() {
+    // Plane x = 2 ∥ cylinder R=5 axis → two open generator lines. Their
+    // UV images are exact straight segments — Line2d, NOT periodic Nurbs
+    // (the closed-branch machinery must not touch open branches).
+    let plane = Surface::Plane(Plane::from_origin_and_normal(
+        Point3d::new(2.0, 0.0, 0.0),
+        Direction3d::X,
+    ));
+    let cyl = Surface::Cylinder(CylinderSurface::new_z(5.0));
+    let out = intersect_surfaces(&cyl, &plane, 1e-6);
+    assert!(out.b_splines().len() >= 2, "two generator lines");
+    assert_eq!(out.pcurves_a().len(), out.b_splines().len());
+    assert_eq!(out.pcurves_b().len(), out.b_splines().len());
+
+    // The 3D branches stay open (endpoint gap O(span)) — and their
+    // PCURVEs are straight segments in both UV spaces.
+    for (i, branch) in out.b_splines().iter().enumerate() {
+        let eval = Curve3d::Nurbs(branch.clone());
+        let gap = eval.point_at(0.0).distance_to(&eval.point_at(1.0));
+        assert!(gap > 0.5, "branch {i} must stay open, gap = {gap:.3e}");
+        for pcurve in [&out.pcurves_a()[i], &out.pcurves_b()[i]] {
+            assert!(
+                matches!(pcurve, Curve2d::Line(_)),
+                "open branch {i} pcurve must be a straight UV line, got {:?}",
+                std::mem::discriminant(pcurve)
+            );
+        }
+    }
+}
