@@ -4874,3 +4874,45 @@ as1-oc-214 от смешанной дискретизации (2-pt LINE vs N-pt
   кандидат: топологическое закрытие face loops (§3.2 BREP validation).
 - Vision 2036: §3.1 audit (edge bus уже substantially есть),
   затем §3.3 seam topological gluing.
+
+# Сессия 25 (продолжение) — Vision 2036 §3.2: настоящий Euler-чек до триангуляции (2026-09-09)
+
+## Контекст
+
+Аудит §3.2 показал: валидация уже была, но Check 3 (Euler) — заглушка
+(`actual_euler = E − E + F = F`, буквально количество граней), а вызывалась
+она только в chunked-пути (`prepare_brep_session`). Некэшированный путь
+`triangulate_brep_detailed` не валидировал вовсе.
+
+## Реализация
+
+1. **validate_brep → &self**-метод; Check 3 переписан: V = уникальные
+   VERTEX_POINT-сущности (скан параметров EDGE_CURVE), E = уникальные
+   edge step_ids (Check 2), F = грани. Проверки: нечётный χ → ERROR
+   (не-манифольд/дубликаты — невозможно для замкнутой ориентируемой
+   границы); χ > 2 → warning (void shells / потерянные грани);
+   лог «Euler V-E+F = v-e+f = chi=».
+2. **triangulate_brep_detailed** теперь вызывает ту же §3.2-валидацию
+   после извлечения face_data_list (паритет с chunked-путём).
+
+## Верификация (живые файлы)
+
+- as1-oc-214: гайка 12−18+8=χ2 ✓, rod 4−6+4=χ2 ✓, l-bracket 28−42+16=χ2 ✓,
+  пластина 32−48+18=χ2 ✓; **болт #1190: 8−12+7=χ3 → ERROR (нечётный)** —
+  реальная BREP-аномалия до триангуляции (меш в итоге watertight χ=2 —
+  repair-пайплайн нормализует, флаг advisory).
+- drill_top: **SHAFT #1576 χ=15 odd и HOUSING #47598 χ=9 odd пойманы ДО
+  триангуляции** — ровно те BREP, чьи меши дают 761/4911 boundary edges.
+  GEAR χ=2, SHAFT_SLEEVE χ=2 — топологически чисты, их дыры от
+  дискретизации (зона §1.2 gate). 2 из 5 дефектных BREP ловятся
+  топологически — многослойная защита (§3.2 → healing → §1.2 gate →
+  T-junction) подтверждена.
+- Тесты: manifold_gate 2/2, brick 3/3, determinism_probe 1/1 (34.6s),
+  seam_junction_regression 5/5.
+
+## Осталось
+
+- §3.3 audit: `register_seam_aliases` уже существует — проверить покрытие
+  (cylinder/sphere/torus/revolution/closed NURBS) и дополнить при нужде.
+- GEAR/SHAFT_SLEEVE: топологически чисты, дыры от дискретизации —
+  изучить root cause (возможно, seam UV-полировка).

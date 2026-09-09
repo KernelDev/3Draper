@@ -5369,6 +5369,26 @@ impl<'a> StepConverter<'a> {
             );
         }
 
+        // ─── BREP validation before triangulation (ROADMAP_VISION_2036 §3.2) ──
+        // Same gate as the chunked path (prepare_brep_session): loop closure,
+        // edge-face counts, real Euler V-E+F from VERTEX_POINT entities.
+        let brep_validation = self.validate_brep(&face_data_list, brep_id);
+        if brep_validation.error_count > 0 {
+            log::warn!(
+                "BREP #{} validation: {} errors, {} warnings — triangulation may produce non-watertight mesh",
+                brep_id, brep_validation.error_count, brep_validation.warning_count
+            );
+            for err in brep_validation.errors.iter().take(5) {
+                log::warn!("  [error] {}", err);
+            }
+        } else if brep_validation.warning_count > 0 {
+            log::info!(
+                "BREP #{} validation: OK ({} warnings)", brep_id, brep_validation.warning_count
+            );
+        } else {
+            log::info!("BREP #{} validation: OK (no issues)", brep_id);
+        }
+
         // Create tolerance context for this BREP
         let tol_ctx = match bbox {
             Some((bmin, bmax)) => {
@@ -6474,7 +6494,7 @@ impl<'a> StepConverter<'a> {
         }
 
         // ─── BREP validation before triangulation (ROADMAP_VISION_2036 §3.2) ──
-        let brep_validation = Self::validate_brep(&face_data_list, brep_id);
+        let brep_validation = self.validate_brep(&face_data_list, brep_id);
         if brep_validation.error_count > 0 {
             log::warn!(
                 "BREP #{} validation: {} errors, {} warnings — triangulation may produce non-watertight mesh",
@@ -9625,7 +9645,7 @@ impl<'a> StepConverter<'a> {
     /// 3. Euler characteristic — V - E + F = 2(1 - genus) for closed solids
     ///
     /// Returns a BrepValidationReport with error/warning counts.
-    fn validate_brep(face_data_list: &[FaceData], brep_id: i64) -> BrepValidationReport {
+    fn validate_brep(&self, face_data_list: &[FaceData], brep_id: i64) -> BrepValidationReport {
         let mut report = BrepValidationReport::default();
         let n_faces = face_data_list.len();
         if n_faces == 0 {
@@ -9703,20 +9723,67 @@ impl<'a> StepConverter<'a> {
             boundary_edges, non_manifold
         );
 
-        // ── Check 3: Euler characteristic (approximate) ──
-        // For a closed solid: V - E + F = 2(1 - genus)
-        // We approximate V from unique vertex step_ids (if available).
-        // This is a rough check since we don't have explicit vertex entities here.
-        let approx_genus = 0; // Assume genus 0 (sphere-like) for most parts
-        let expected_euler = 2 * (1 - approx_genus);
-        let actual_euler = (total_edges as i64) - (total_edges as i64) + (n_faces as i64);
-        // Note: This is a simplified check without vertex count.
-        // Full Euler check requires vertex enumeration from STEP VERTEX_POINT entities.
-        if actual_euler != expected_euler && n_faces > 4 {
-            log::debug!(
-                "BREP #{} Euler check: simplified F={} (expected ≥4 for closed solid, got {})",
-                brep_id, n_faces, actual_euler
-            );
+        // ── Check 3: Euler characteristic (real, §3.2) ──
+        // V = unique VERTEX_POINT entities referenced by this BREP's
+        // EDGE_CURVEs, E = unique edge step_ids (from Check 2),
+        // F = faces. For a closed orientable boundary each component has
+        // even χ = 2 − 2·genus; BREP_WITH_VOIDS adds 2 per void shell.
+        // Sound checks: odd χ is impossible (non-manifold or duplicated
+        // entities); χ > 2 needs void shells (or signals missing faces /
+        // unmerged vertices when the solid has none).
+        {
+            let mut vertex_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+            let mut edges_without_two_vertices = 0usize;
+            for &edge_id in edge_face_count.keys() {
+                if let Some(ec) = self.step.find_entity(edge_id) {
+                    if ec.type_name == "EDGE_CURVE" {
+                        let mut found = 0usize;
+                        for param in &ec.params {
+                            if let Some(ref_id) = self.get_ref(param) {
+                                if let Some(v) = self.step.find_entity(ref_id) {
+                                    if v.type_name == "VERTEX_POINT" {
+                                        vertex_ids.insert(ref_id);
+                                        found += 1;
+                                    }
+                                }
+                            }
+                        }
+                        if found < 2 {
+                            edges_without_two_vertices += 1;
+                        }
+                    }
+                }
+            }
+            if !vertex_ids.is_empty() {
+                let v = vertex_ids.len() as i64;
+                let e = total_edges as i64;
+                let f = n_faces as i64;
+                let chi = v - e + f;
+                if chi % 2 != 0 {
+                    report.errors.push(format!(
+                        "odd Euler characteristic chi={} (V={}, E={}, F={}) — non-manifold or duplicated entities",
+                        chi, v, e, f
+                    ));
+                    report.error_count += 1;
+                } else if chi > 2 {
+                    report.warnings.push(format!(
+                        "Euler chi={} > 2 (V={}, E={}, F={}) — void shells, or missing faces / unmerged vertices",
+                        chi, v, e, f
+                    ));
+                    report.warning_count += 1;
+                }
+                log::info!(
+                    "BREP #{} validation: Euler V-E+F = {}-{}+{} = chi={} ({} vertex entities, {} edges lacking 2 vertices)",
+                    brep_id, v, e, f, chi, vertex_ids.len(), edges_without_two_vertices
+                );
+            } else if edges_without_two_vertices > 0 {
+                // No vertex entities resolvable — the legacy face-count check
+                // is the only signal available.
+                log::debug!(
+                    "BREP #{} Euler check: no VERTEX_POINT entities resolvable for {} edges — skipping real chi computation",
+                    brep_id, edges_without_two_vertices
+                );
+            }
         }
 
         report
