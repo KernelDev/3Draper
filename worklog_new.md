@@ -5167,3 +5167,70 @@ GEAR/SHAFT_SLEEVE. §1.2 gate + §3.3 швы остаются правильно
   полигональная аппроксимация UV-кривых);
 - Чекбокс «Return exact B-spline intersection curves» — SSI
   (крупнейшая P1-работа).
+
+# Сессия 28 — Mesh watertightness: CDT-аудит HOUSING #47598 (2026-09-09)
+
+## Контекст
+
+После закрытия §1.3 (все 3 чекбокса, сессия 27) следующий фронт —
+HOUSING 4911/6089 boundary edges («Осталось» из worklog). Найден
+незакоммиченный WIP прошлого контекста в curve2d.rs (§1.3
+derivatives+projections) — завершён и запушен первым (cb8c3ca),
+затем §1.3 чекбоксы 1–2 закрыты аудитом (5183773).
+
+## Реализация (коммит cf61e89)
+
+1. **Тест-доказательство**: legacy-путь скармливает earcutr интерьерные
+   Steiner-точки appended в кольцо («spike-chain») — MapBox earcut НЕ
+   поддерживает Steiner нативно; клиpped спайки оставляют интерьерные
+   дыры (57% дыр HOUSING были Steiner-to-Steiner). Регрессия
+   `test_steiner_insertion_no_interior_gaps_vs_legacy_earcutr`.
+2. **custom_cdt подключён** в `triangulate_surface_consistent` за
+   флагом `TriangulationParams::use_cdt_steiner` (**default OFF**):
+   * earcutr-фаза только для boundary+holes (rim-рёбра сохранены);
+   * `repair_unused_ring_vertices` — ре-инсерция коллинеарных rim/hole
+     вершин, дропнутых ear-clipping'ом (winding-preserving split,
+     детерминированно);
+   * Bowyer-Watson инсерция с RING EDGE PROTECTION (Steiner на rim
+     ребре скипается, не расщепляет контракт с соседней гранью);
+   * Lawson-флипы ОТКЛЮЧЕНЫ (нет quad-convexity guard — портили
+     валидную триангуляцию; стресс-тест с дыркой это поймал).
+3. **Always-on фиксы** (default-путь):
+   * consecutive-duplicate boundary dedup (бит-идентичные 3D, включая
+     закрывающий first==last): −1016 rim-rim дегенеративных дропов;
+   * Steiner 3D-position dedup (зеркалит вычисления Step 5):
+     дегенеративные дропы 1369 → 0;
+   * HOUSING: 6089 → **6035** boundary; as1-oc-214 watertight 0.
+   * Удалён eprintln-шум TORUS_PATH/TORUS_UNWRAP (продакшен-stderr).
+4. **Документировано**: строка «Edge cache consistency: 0.00%» в
+   boundary_diag — HARDCODED, никогда не проверяла. Оставшиеся 6035 —
+   кросс-фейс rim-мисматчи из-за провалов edge-aliasing конвертера
+   (skipped step_ids, дубли EDGE_CURVE) → это поле §1.4 «SSI for edge
+   recovery».
+
+## Почему CDT default-off (never-worsen)
+
+Per-face меши с CDT доказуемо чисты (single-рёбра = ровно
+rim+hole-кольца), НО ко-фациальные грани одного NURBS получают те же
+shared Steiner точки (MS-2), а CDT-коннективность между ними у каждой
+грани своя → в merged-меше растут кросс-фейс boundary (HOUSING 6035 →
+14292 при включении). Включение требует канонической триангуляции на
+уровне поверхности (один CDT на общий NURBS, извлечение per-face
+подтриангуляций) — следующий юнит по этой линии.
+
+## Верификация
+
+- draper-mesh **271/271**; draper-topology **234/234**; draper-step
+  fast-subset **134/134** (тяжёлые интеграционные скипнуты — область не
+  тронута); workspace check чисто;
+- as1-oc-214: **watertight YES, 0 boundary**; HOUSING 6035 (базовая
+  6089).
+
+## Осталось
+
+- §1.4: surface extension algorithms; SSI for edge recovery (ключ к
+  оставшимся 6035: восстановление потерянных alias-связей рёбер).
+- Surface-level canonical triangulation для включения CDT
+  (use_cdt_steiner) без кросс-фейс регрессий.
+- Pinched-кольца (225 непоследовательных дублей в HOUSING) —
+  полигон-сплиттинг, не дедуп.
