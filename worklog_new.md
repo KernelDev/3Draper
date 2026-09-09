@@ -4782,3 +4782,47 @@ https://kerneldev.github.io/3Draper модель test/as1-oc-214.stp выгля�
  полу-arc-сущностей STEP (2-pt LINE vs 48-pt цепочка на одной образующей) —
   кандидат на tolerant-snap швов в merge.
 - Vision 2036: продолжить по PLAN.md.
+
+# Сессия 24 — Шовные микро-щели: boundary T-junction gate + финальный пост-winding проход (2026-09-09)
+
+## Контекст
+
+Продолжение Сессии 23: пункт «Осталось» — микро-щели швов на гайке/пластине
+as1-oc-214 от смешанной дискретизации (2-pt LINE vs N-pt цепочка на одной
+геометрической образующей). T-junction-вершины лежат бит-точно на длинном
+ребре, но старый гейт `non_manifold_edge_count > 0` их не ловил: такие
+дефекты проявляются как BOUNDARY-рёбра (count==1), а не non-manifold
+(count>2).
+
+## Реализация
+
+1. **Boundary-гейт T-junction ремонта** во всех трёх путях конвертации
+   (`OwnedStepConversionContext`, `BrepSession` chunked, `StepConverter`):
+   `non_manifold > 0 || boundary > 0`. Толеранс прежний — 1e-9 ×
+   model_scale (расстояния «лежания» ≤1e-13, реальные дыры ≥1e-5).
+2. **Финальный пост-winding проход**: `fix_inconsistent_winding` удаляет
+   same-face перекрывающиеся треугольники (180° dihedral) и МОЖЕТ
+   вскрыть boundary-рёбра ПОСЛЕ основного ремонта. Дополнительный
+   tight-tolerance проход в конце + пересборка `triangle_range` face_infos
+   (сдвиги индексов после удаления дегенератов/дубликатов).
+3. **Новый инструмент** `tools/src/bin/seam_gap_probe.rs`: для каждого
+   длинного boundary-ребра ищет вершины других (коротких) boundary-рёбер,
+   меряет расстояние до сегмента → данные для подбора snap-толеранса;
+   sweep режимов repair_t_junctions.
+
+## Верификация
+
+- Гайка #63: boundary 112 → **0** (вкл. nut_1/nut_2: «0 boundary edges»),
+  watertight ✓ (1008 interior edges, Euler χ=0).
+- repair_t_junctions #63: 1325 junctions за 8 итераций; winding-consistent.
+- `cargo check -p draper-step -p draper-diag` — чисто (2 преждевременных
+  warning в несвязанном dump_step84_span).
+- `cargo test -p draper-mesh` — 331 passed / 0 failed (все suites);
+  `-p draper-step` — drill / surface_diagnostic / brick-серия green.
+- Сессия прервалась до коммита (context overflow) — закоммичено в
+  продолжении.
+
+## Осталось
+
+- Vision 2036: продолжить по PLAN.md (след. раздел).
+- Пластина #3813: проверить остаточные щели после нового прохода.

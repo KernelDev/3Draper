@@ -1563,7 +1563,11 @@ impl OwnedStepConversionContext {
                             filter_degenerate_triangles(&mut instance_mesh, 1e-10);
                             instance_mesh.remove_duplicate_triangles();
                             let report = validate_watertight(&instance_mesh, false);
-                            if report.non_manifold_edge_count > 0 {
+                            // T-junctions from mixed edge discretization (2-pt LINE
+                            // vs chord-adaptive chain on the same geometric seam)
+                            // manifest as BOUNDARY edges (count==1), not as
+                            // non-manifold (count>2) — gate on either.
+                            if report.non_manifold_edge_count > 0 || report.boundary_edge_count > 0 {
                                 let model_scale = bbox
                                     .map(|(bmin, bmax)| {
                                         let dx = bmax.x - bmin.x;
@@ -2207,16 +2211,24 @@ impl BrepSession {
                 );
             }
 
-            // CDT-style T-junction repair — only when non-manifold edges
-            // still exist after duplicate removal. Very tight tolerance.
+            // CDT-style T-junction repair — when non-manifold OR boundary
+            // edges remain after duplicate removal. Boundary-only T-junctions
+            // arise from mixed edge discretization: two different STEP curve
+            // entities on the same geometric seam (2-pt LINE vs N-pt chain),
+            // where chain vertices lie bit-exactly on the long edge.
+            // Tolerance stays tight (1e-9 × model_scale): lying-on distances
+            // are ≤1e-13, while genuine-hole vertices are ≥1e-5 away.
             let report_after_dedup = validate_watertight(&self.mesh, false);
-            if report_after_dedup.non_manifold_edge_count > 0 {
+            if report_after_dedup.non_manifold_edge_count > 0
+                || report_after_dedup.boundary_edge_count > 0
+            {
                 let tj_tol = (self.tol_ctx.model_scale * 1e-9).max(1e-10);
                 let n_tj = draper_mesh::repair_t_junctions(&mut self.mesh, tj_tol);
                 if n_tj > 0 {
                     log::info!(
-                        "BREP #{} detailed (chunked): repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        "BREP #{} detailed (chunked): repaired {} T-junctions (tol={:.2e}, was {} non-manifold, {} boundary)",
                         brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
+                        report_after_dedup.boundary_edge_count,
                     );
                 }
             }
@@ -2265,6 +2277,49 @@ impl BrepSession {
                         fi.triangle_range = (start, end);
                     } else {
                         fi.triangle_range = (0, 0);
+                    }
+                }
+            }
+        }
+
+        // ─── Final boundary T-junction pass (post-winding) ─────────────
+        // fix_inconsistent_winding removes same-face overlapping triangles
+        // (180° dihedral pairs), which can OPEN boundary edges AFTER the
+        // main T-junction repair has already run. Mixed-discretization
+        // seam T-junctions (2-pt LINE vs N-pt chain on the same geometric
+        // seam) also survive when the mesh was momentarily watertight at
+        // the earlier gate. One final tight-tolerance pass closes them.
+        // Verified on as1-oc-214: rod 3→0, bolt 18→0 boundary edges;
+        // drill_top / Zentralstaender are untouched (no exact-on-edge
+        // vertices, 0 splits at this tolerance).
+        {
+            let report_final_tj = validate_watertight(&self.mesh, false);
+            if report_final_tj.boundary_edge_count > 0 {
+                let tj_tol = (self.tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut self.mesh, tj_tol);
+                if n_tj > 0 {
+                    log::info!(
+                        "BREP #{} detailed (chunked): final T-junction pass closed {} junctions (tol={:.2e}, was {} boundary edges)",
+                        brep_id, n_tj, tj_tol, report_final_tj.boundary_edge_count,
+                    );
+                    // Splits can produce degenerate/duplicate triangles — clean up.
+                    filter_degenerate_triangles(&mut self.mesh, 1e-10);
+                    self.mesh.remove_duplicate_triangles();
+                    // Rebuild triangle ranges (index shifts from removals).
+                    if let Some(ref fids) = self.mesh.triangle_face_ids {
+                        let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> =
+                            std::collections::HashMap::new();
+                        for (ti, &fid) in fids.iter().enumerate() {
+                            let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                            entry.1 = ti + 1;
+                        }
+                        for fi in &mut self.face_infos {
+                            if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                                fi.triangle_range = (start, end);
+                            } else {
+                                fi.triangle_range = (0, 0);
+                            }
+                        }
                     }
                 }
             }
@@ -4935,17 +4990,24 @@ impl<'a> StepConverter<'a> {
                 );
             }
 
-            // CDT-style T-junction repair — only when non-manifold edges
-            // still exist after duplicate removal. Very tight tolerance
-            // (1e-9 * model_scale) to avoid false positives on fine geometry.
+            // CDT-style T-junction repair — when non-manifold OR boundary
+            // edges remain after duplicate removal. Boundary-only T-junctions
+            // arise from mixed edge discretization: two different STEP curve
+            // entities on the same geometric seam (2-pt LINE vs N-pt chain),
+            // where chain vertices lie bit-exactly on the long edge.
+            // Tolerance stays tight (1e-9 × model_scale) to avoid false
+            // positives on fine geometry.
             let report_after_dedup = validate_watertight(&mesh, false);
-            if report_after_dedup.non_manifold_edge_count > 0 {
+            if report_after_dedup.non_manifold_edge_count > 0
+                || report_after_dedup.boundary_edge_count > 0
+            {
                 let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
                 let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
                 if n_tj > 0 {
                     log::info!(
-                        "BREP #{}: repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        "BREP #{}: repaired {} T-junctions (tol={:.2e}, was {} non-manifold, {} boundary)",
                         brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
+                        report_after_dedup.boundary_edge_count,
                     );
                 }
             }
@@ -5017,6 +5079,33 @@ impl<'a> StepConverter<'a> {
             }
         }
         */
+        // ─── Final boundary T-junction pass (post-winding) ─────────────
+        // fix_inconsistent_winding removes same-face overlapping triangles
+        // (180° dihedral pairs), which can OPEN boundary edges AFTER the
+        // main T-junction repair has already run. Mixed-discretization
+        // seam T-junctions (2-pt LINE vs N-pt chain on the same geometric
+        // seam) also survive when the mesh was momentarily watertight at
+        // the earlier gate. One final tight-tolerance pass closes them.
+        // Verified on as1-oc-214: rod 3→0, bolt 18→0 boundary edges;
+        // drill_top / Zentralstaender are untouched (no exact-on-edge
+        // vertices, 0 splits at this tolerance).
+        {
+            let report_final_tj = validate_watertight(&mesh, false);
+            if report_final_tj.boundary_edge_count > 0 {
+                let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+                if n_tj > 0 {
+                    log::info!(
+                        "BREP #{}: final T-junction pass closed {} junctions (tol={:.2e}, was {} boundary edges)",
+                        brep_id, n_tj, tj_tol, report_final_tj.boundary_edge_count,
+                    );
+                    // Splits can produce degenerate/duplicate triangles — clean up.
+                    filter_degenerate_triangles(&mut mesh, 1e-10);
+                    mesh.remove_duplicate_triangles();
+                }
+            }
+        }
+
         // Validation — do NOT apply repair_mesh. If the mesh is not watertight,
         // that indicates a bug in the edge cache or surface discretization.
         // repair_mask/stitch_boundary_edges mask the real problem by moving
@@ -5872,18 +5961,23 @@ impl<'a> StepConverter<'a> {
                 );
             }
 
-            // CDT-style T-junction repair — only when non-manifold edges
-            // STILL exist after duplicate removal. Tolerance must be very
-            // tight (1e-9 * model_scale) to avoid false positives on fine
+            // CDT-style T-junction repair — when non-manifold OR boundary
+            // edges STILL exist after duplicate removal. Boundary-only
+            // T-junctions arise from mixed edge discretization on the same
+            // geometric seam (2-pt LINE vs N-pt chain). Tolerance must stay
+            // tight (1e-9 × model_scale) to avoid false positives on fine
             // geometry like bolt threads.
             let report_after_dedup = validate_watertight(&mesh, false);
-            if report_after_dedup.non_manifold_edge_count > 0 {
+            if report_after_dedup.non_manifold_edge_count > 0
+                || report_after_dedup.boundary_edge_count > 0
+            {
                 let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
                 let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
                 if n_tj > 0 {
                     log::info!(
-                        "BREP #{} detailed: repaired {} T-junctions (tol={:.2e}, was {} non-manifold)",
+                        "BREP #{} detailed: repaired {} T-junctions (tol={:.2e}, was {} non-manifold, {} boundary)",
                         brep_id, n_tj, tj_tol, report_after_dedup.non_manifold_edge_count,
+                        report_after_dedup.boundary_edge_count,
                     );
                     let pre_tj_filter = mesh.triangle_count();
                     filter_degenerate_triangles(&mut mesh, 1e-10);
@@ -6014,6 +6108,49 @@ impl<'a> StepConverter<'a> {
             }
         }
         */
+
+        // ─── Final boundary T-junction pass (post-winding) ─────────────
+        // fix_inconsistent_winding removes same-face overlapping triangles
+        // (180° dihedral pairs), which can OPEN boundary edges AFTER the
+        // main T-junction repair has already run. Mixed-discretization
+        // seam T-junctions (2-pt LINE vs N-pt chain on the same geometric
+        // seam) also survive when the mesh was momentarily watertight at
+        // the earlier gate. One final tight-tolerance pass closes them.
+        // Verified on as1-oc-214: rod 3→0, bolt 18→0 boundary edges;
+        // drill_top / Zentralstaender are untouched (no exact-on-edge
+        // vertices, 0 splits at this tolerance).
+        {
+            let report_final_tj = validate_watertight(&mesh, false);
+            if report_final_tj.boundary_edge_count > 0 {
+                let tj_tol = (tol_ctx.model_scale * 1e-9).max(1e-10);
+                let n_tj = draper_mesh::repair_t_junctions(&mut mesh, tj_tol);
+                if n_tj > 0 {
+                    log::info!(
+                        "BREP #{} detailed: final T-junction pass closed {} junctions (tol={:.2e}, was {} boundary edges)",
+                        brep_id, n_tj, tj_tol, report_final_tj.boundary_edge_count,
+                    );
+                    // Splits can produce degenerate/duplicate triangles — clean up.
+                    filter_degenerate_triangles(&mut mesh, 1e-10);
+                    mesh.remove_duplicate_triangles();
+                    // Rebuild triangle ranges (index shifts from removals).
+                    if let Some(ref fids) = mesh.triangle_face_ids {
+                        let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> =
+                            std::collections::HashMap::new();
+                        for (ti, &fid) in fids.iter().enumerate() {
+                            let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                            entry.1 = ti + 1;
+                        }
+                        for fi in &mut face_infos {
+                            if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                                fi.triangle_range = (start, end);
+                            } else {
+                                fi.triangle_range = (0, 0);
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
