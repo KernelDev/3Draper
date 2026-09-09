@@ -103,7 +103,23 @@ approximation of the intersection.
       Polyline should be fallback only when Newton iteration fails.
 - [ ] **Implement analytical `Curve2d` (PCURVE)** — remove polyline
       approximation of UV-space curves.
-- [ ] **Add analytical derivatives and projections** for PCURVE.
+- [x] **Add analytical derivatives and projections** for PCURVE
+      (2026-09-09, draper-geometry/curve2d.rs):
+      **Projections** — exact `project_point(p) -> (t, dist)` on all 7
+      curve types: `Line2d` (clamped dot-product), `Circle2d` (atan2
+      angle + arc-range clamp, exact for full circles), `Ellipse2d` /
+      `Hyperbola2d` / `Parabola2d` / `Nurbs2d` (generic engine
+      `project_parametric_curve`: 48-sample uniform bracketing scan →
+      golden-section shrink → orthogonal-projection polish with step
+      halving and clamping); `Curve2d` enum dispatch `project_point` +
+      `distance_to`. **Derivatives** — `Nurbs2d::derivative_at` now
+      analytical (quotient rule C' = (A' − C·w')/w with Piegl & Tiller
+      derivative control points, 2D de Boor `de_boor_step_2d`; numerical
+      fallback only on non-finite result, §1.5 philosophy). 12 new tests:
+      quarter-circle NURBS derivative vs exact, 3D-twin consistency,
+      uniform-knot magnitude, per-type projections (incl. orthogonality
+      assertions), composite dispatch. draper-geometry lib **246/246
+      passed**, workspace check clean.
 
 **Priority:** P1
 
