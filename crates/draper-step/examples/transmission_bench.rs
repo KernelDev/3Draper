@@ -160,7 +160,7 @@ fn face_bench_run(solid: &draper_topology::Solid, params: &TriangulationParams) 
         let m = triangulate_solid_face_with_cache(solid, face, params, &mut cache);
         rows.push((fi, t.elapsed().as_secs_f64(), m.triangle_count(), stype, nb));
     }
-    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     let total: f64 = rows.iter().map(|r| r.1).sum();
     println!("  face-tris total: {total:.2?}  ({} faces)", rows.len());
     for (fi, dt, tris, stype, nb) in rows.iter().take(20) {

@@ -616,7 +616,7 @@ fn insert_points_on_line_edges(poly: &mut Vec<Vec2d>, o: &Vec2d, d: &Vec2d, ins:
                 .map(|p| (t_of(p), *p))
                 .filter(|(t, _)| *t > lo + eps && *t < hi - eps)
                 .collect();
-            mid.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+            mid.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
             // The edge is traversed a -> b; if t decreases along that
             // traversal, the points must be inserted in decreasing t
             // order, otherwise the polygon self-intersects (butterfly).
@@ -908,7 +908,7 @@ fn apply_cell_edge_splits(
         if mid.is_empty() {
             continue;
         }
-        mid.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        mid.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
         // Dedup near-identical points.
         let mut deduped: Vec<(f64, Point3d)> = Vec::with_capacity(mid.len());
         for m in mid {

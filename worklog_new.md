@@ -5035,3 +5035,45 @@ GEAR/SHAFT_SLEEVE. §1.2 gate + §3.3 швы остаются правильно
   boundary edges (лог «MISSING boundary edge: mesh_idx ...»), т.е.
   триангуляция внутренней границы, не топология.
 - §1.3 SSI (P1): точные B-сплайн кривые пересечения.
+
+# Сессия 26 (продолжение) — Vision 2036 §1.5 Degeneracies: аудит + фикс NaN-паник (2026-09-09)
+
+## Контекст
+
+§1.3 SSI и §1.4 (P1) остаются крупными математическими работами; §1.5 —
+быстрый закрытый юнит. Начат аудит трёх action items.
+
+## Реализация
+
+1. **Degeneracy-фильтрация на этапе топологии** — УЖЕ РЕАЛИЗОВАНА:
+   healing `mark_degenerate_edges` (Curve3d::is_degenerate, юнит-тесты на
+   line/circle/ellipse/arc/NURBS) → триангулятор пропускает
+   `edge.degenerate` (6+ сайтов в triangulate.rs) → дегенеративные
+   треугольники фильтруются в merge/repair. Рендерер НЕ фильтрует.
+2. **NaN/Inf guard'ы в NURBS-путях** — верифицированы как полные:
+   w≠0 fallback'и, non-finite → ORIGIN/numerical, de Boor |denom|<1e-15,
+   clamp параметров, OOB-guard'ы строк/столбцов, knot-span cap.
+3. **unwrap/panic аудит math-модулей** (главная находка): паникующий
+   паттерн `partial_cmp().unwrap()` в sort_by/max_by компараторах —
+   единственный достижимый паник-путь (NaN в данных → panic всей
+   конвертации). Скан всех 35+ production-файлов:
+   * фикс 7 сайтов (10 замен): intersection.rs ×2 (max_by в tangency),
+     parametric_domain.rs ×2 (median_u), mesh_boolean.rs ×2 (mid sort),
+     transmission_bench ×1 — все → `unwrap_or(Ordering::Equal)`;
+   * остальные unwrap'ы доказуемо безопасны: len-guard'ed Vec::last(),
+     константные Direction3d::new, тестовые модули.
+4. Полная миграция на Result<T, GeometryError> признана ненужной —
+   достижимых паник-путей в production math-коде не осталось.
+
+## Верификация
+
+- draper-geometry: **415 passed / 0 failed**; draper-mesh lib: **269/269**;
+  workspace check чисто (19.2s).
+- Повторный скан: 0 паникующих partial_cmp в production.
+
+## Осталось (по плану)
+
+- §1.3 SSI: точные B-сплайн кривые пересечения + аналитические PCURVE
+  (крупная математическая работа, §2.1/2.2).
+- §1.4: парсинг толерансов, surface extension, OffsetSurface/SweptSurface.
+- HOUSING 4911 boundary (mesh-уровень, earcutr missing-boundary).

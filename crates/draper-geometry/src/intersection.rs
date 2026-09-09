@@ -2893,7 +2893,7 @@ pub fn intersect_cylinder_cylinder(
         // D ≤ 0 everywhere: tangency is where D touches zero — i.e. the
         // MAXIMUM of D. Golden-section refinement of the grid argmax.
         let grid_argmax = (0..m_scan)
-            .max_by(|&i, &j| d_vals[i].partial_cmp(&d_vals[j]).unwrap())
+            .max_by(|&i, &j| d_vals[i].partial_cmp(&d_vals[j]).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap();
         let step = 2.0 * std::f64::consts::PI / m_scan as f64;
         let mut lo = theta_of(grid_argmax) - step;
@@ -3408,7 +3408,7 @@ impl<'a> ThetaArcEngine<'a> {
             .map(|i| (self.disc_at)(two_pi * i as f64 / m as f64))
             .collect();
         let argmax = (0..m)
-            .max_by(|&i, &j| grid[i].partial_cmp(&grid[j]).unwrap())
+            .max_by(|&i, &j| grid[i].partial_cmp(&grid[j]).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap();
         let step = two_pi / m as f64;
         let mut lo = two_pi * argmax as f64 / m as f64 - step;

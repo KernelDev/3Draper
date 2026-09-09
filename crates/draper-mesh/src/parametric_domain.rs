@@ -1315,12 +1315,12 @@ fn proactive_split_at_midpoint_u(
     // Use median instead of average to avoid being skewed by outliers near u_mid
     let median_u_walk1 = {
         let mut us: Vec<f64> = walk1_uv.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         if us.is_empty() { u_mid } else { us[us.len() / 2] }
     };
     let median_u_walk2 = {
         let mut us: Vec<f64> = walk2_uv.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         if us.is_empty() { u_mid } else { us[us.len() / 2] }
     };
 
@@ -7031,7 +7031,7 @@ mod tests {
         // Recover unique u and v values.
         let tol = 1e-9;
         let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut u_unique: Vec<f64> = Vec::new();
         for u in us {
             if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {
@@ -7191,7 +7191,7 @@ mod tests {
 
         let tol = 1e-9;
         let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut u_unique: Vec<f64> = Vec::new();
         for u in us {
             if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {
@@ -8391,7 +8391,7 @@ mod tests {
         }
         let tol = 1e-9;
         let mut us: Vec<f64> = pts.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mut u_unique: Vec<f64> = Vec::new();
         for u in us {
             if u_unique.last().map_or(true, |last| (last - u).abs() > tol) {

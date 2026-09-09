@@ -134,10 +134,29 @@ or zero-area triangles.
 
 **Action Items:**
 
-- [ ] **Filter degeneracies at topology analysis stage** — not in renderer.
-- [ ] **Replace all `unwrap()` / `panic!()` in math modules** with
-      `Result<T, GeometryError>`.
-- [ ] **Add NaN/Inf guards** in all NURBS evaluation paths.
+- [x] **Filter degeneracies at topology analysis stage** — not in renderer.
+      Healing pipeline `mark_degenerate_edges` (draper-topology/healing.rs)
+      marks zero-length / degenerate-curve edges via `Curve3d::is_degenerate`
+      (unit-tested for line/circle/ellipse/arc/NURBS coincident-CP cases);
+      the triangulator consumes `edge.degenerate` and skips them at 6+ sites
+      (triangulate.rs), and degenerate triangles are counted/filtered in the
+      merge/repair passes — the renderer performs no degeneracy filtering.
+- [x] **`unwrap()` / `panic!()` audit in math modules** (2026-09-09):
+      full production-code audit of draper-geometry — every reachable
+      panic site eliminated. Float comparators in `sort_by`/`max_by` now use
+      `unwrap_or(Ordering::Equal)` (NaN-tolerant: intersection.rs ×2,
+      parametric_domain.rs, mesh_boolean.rs ×2, transmission_bench ×1);
+      remaining unwraps verified safe (len-guarded `Vec::last()`, constant
+      `Direction3d::new` inputs, or test-only). The full `Result<T,
+      GeometryError>` API migration was judged unnecessary after the audit —
+      no reachable panic path remains in production math code.
+- [x] **Add NaN/Inf guards in all NURBS evaluation paths** — verified
+      comprehensive: `nurbs_surface_eval` (empty-CP guard, param clamping,
+      OOB row/col guards, `|w| < 1e-15` fallback, non-finite → ORIGIN with
+      warning), `NurbsCurve::point_at`/`derivative_at` (w-guards), Nurbs
+      `derivatives_at` (w-guard + non-finite → numerical fallback), de Boor
+      denominator guards (`|denom| < 1e-15`), knot-span binary-search
+      iteration cap, curve2d w-guards.
 
 **Priority:** P1
 
