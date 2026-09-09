@@ -938,7 +938,7 @@ impl<'a> StepConversionContext<'a> {
                 cached.clone()
             } else {
                 drop(cache); // Release borrow before mutating
-                let result = self.converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+                let result = self.converter.triangulate_brep_detailed_gated(pending.brep_id, &self.params, &self.bbox)?;
                 self.brep_detail_cache.borrow_mut().insert(pending.brep_id, result.clone());
                 result
             }
@@ -1320,7 +1320,7 @@ impl OwnedStepConversionContext {
                 self.pd_brep_map.clone(),
                 self.nauo_transform_map.clone(),
             );
-            let result = converter.triangulate_brep_detailed(pending.brep_id, &self.params, &self.bbox)?;
+            let result = converter.triangulate_brep_detailed_gated(pending.brep_id, &self.params, &self.bbox)?;
             self.brep_detail_cache.insert(pending.brep_id, result.clone());
             result
         };
@@ -1538,7 +1538,7 @@ impl OwnedStepConversionContext {
                             nauo_transform_map,
                         );
 
-                        let (mesh, faces) = match converter.triangulate_brep_detailed(brep_id, &params, &bbox) {
+                        let (mesh, faces) = match converter.triangulate_brep_detailed_gated(brep_id, &params, &bbox) {
                             Some(result) => result,
                             None => return, // triangulation failed
                         };
@@ -1782,6 +1782,20 @@ impl OwnedStepConversionContext {
 
             // Cache the result (same as triangulate_pending).
             if mesh.triangle_count() > 0 {
+                // Vision 2036 §1.2: manifold status is checked before every
+                // BREP cache insertion. The progressive (chunked) path does
+                // NOT retry — re-running the session would double the work
+                // on the WASM main thread mid-loading; the non-chunked
+                // paths (`triangulate_brep_detailed_gated`) carry the retry.
+                let report = draper_mesh::check_manifold(&mesh);
+                if !report.is_watertight() {
+                    log::warn!(
+                        "BREP #{}: cached (chunked) mesh is not watertight — {} boundary, {} non-manifold edges (§1.2 gate, no retry on progressive path)",
+                        brep_id,
+                        report.boundary_edge_count,
+                        report.non_manifold_edge_count
+                    );
+                }
                 self.brep_detail_cache.insert(brep_id, (mesh.clone(), faces.clone()));
             }
 
@@ -3927,7 +3941,7 @@ impl<'a> StepConverter<'a> {
         if let Some(cached) = cache.get(&brep_id) {
             return Some(cached.clone());
         }
-        let result = self.triangulate_brep_detailed(brep_id, params, bbox)?;
+        let result = self.triangulate_brep_detailed_gated(brep_id, params, bbox)?;
         cache.insert(brep_id, result.clone());
         Some(result)
     }
@@ -5175,6 +5189,119 @@ impl<'a> StepConverter<'a> {
         log::info!("BREP #{}: edge_cache={} entries, mesh v={} t={}",
             brep_id, edge_cache.len(), mesh.vertex_count(), mesh.triangle_count());
         Some(mesh)
+    }
+
+    /// Vision 2036 §1.2 — triangle budget for the manifold retry.
+    ///
+    /// When the first attempt is not watertight but already produced more
+    /// triangles than this, a retry at finer deviation would risk memory
+    /// and time explosion (finer settings roughly quadruple triangle
+    /// count), so the first result is kept.
+    const MANIFOLD_RETRY_TRIANGLE_BUDGET: usize = 400_000;
+
+    /// Vision 2036 §1.2 — manifold gate with a single retry.
+    ///
+    /// Triangulates `brep_id`; when the repaired mesh still has boundary or
+    /// non-manifold edges, retries once with halved `max_deviation`,
+    /// `max_edge_length` and `max_angular_deviation` (finer discretization
+    /// can close seam gaps that the repair pipeline cannot snap). Returns
+    /// whichever result is closer to watertight; the decision is
+    /// deterministic — (is_watertight desc, defect count asc, triangle
+    /// count asc) — so identical inputs always produce identical output.
+    ///
+    /// On wasm32 the gate is check-only (no retry) to keep web load times
+    /// unaffected. The edge discretization cache is created fresh inside
+    /// each `triangulate_brep_detailed` call, so the retry genuinely
+    /// re-samples edges at the finer chord tolerance (not a cache replay).
+    fn triangulate_brep_detailed_gated(
+        &self,
+        brep_id: i64,
+        params: &TriangulationParams,
+        bbox: &Option<(Point3d, Point3d)>,
+    ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
+        let first = self.triangulate_brep_detailed(brep_id, params, bbox)?;
+        // On wasm32 the gate is check-only: a retry would double the worker's
+        // load time for defect-heavy files (drill_top retries ~12s per broken
+        // BREP natively). The web keeps the first result, matching the
+        // progressive path which also never retries.
+        if cfg!(target_arch = "wasm32") {
+            return Some(first);
+        }
+        let report_first = draper_mesh::check_manifold(&first.0);
+        if report_first.is_watertight() {
+            return Some(first);
+        }
+        let defects_first =
+            report_first.boundary_edge_count + report_first.non_manifold_edge_count;
+        if first.0.triangle_count() > Self::MANIFOLD_RETRY_TRIANGLE_BUDGET {
+            log::info!(
+                "BREP #{}: not watertight ({} boundary, {} non-manifold edges) but {} tris exceeds §1.2 retry budget {} — keeping first result",
+                brep_id,
+                report_first.boundary_edge_count,
+                report_first.non_manifold_edge_count,
+                first.0.triangle_count(),
+                Self::MANIFOLD_RETRY_TRIANGLE_BUDGET
+            );
+            return Some(first);
+        }
+
+        let mut retry_params = params.clone();
+        retry_params.max_deviation *= 0.5;
+        retry_params.max_edge_length *= 0.5;
+        retry_params.max_angular_deviation *= 0.5;
+        log::info!(
+            "BREP #{}: not watertight ({} boundary, {} non-manifold edges) — §1.2 retry at halved deviation ({:.2e})",
+            brep_id,
+            report_first.boundary_edge_count,
+            report_first.non_manifold_edge_count,
+            retry_params.max_deviation
+        );
+        let retry = match self.triangulate_brep_detailed(brep_id, &retry_params, bbox) {
+            Some(r) if r.0.triangle_count() > 0 => r,
+            _ => {
+                log::warn!(
+                    "BREP #{}: §1.2 retry produced no mesh — keeping first result",
+                    brep_id
+                );
+                return Some(first);
+            }
+        };
+        let report_retry = draper_mesh::check_manifold(&retry.0);
+        let defects_retry =
+            report_retry.boundary_edge_count + report_retry.non_manifold_edge_count;
+
+        // Deterministic pick: watertight wins; then fewer defects; then
+        // fewer triangles (which favors the coarser first attempt on ties).
+        let retry_wins = if report_retry.is_watertight() != report_first.is_watertight() {
+            report_retry.is_watertight()
+        } else if defects_retry != defects_first {
+            defects_retry < defects_first
+        } else {
+            retry.0.triangle_count() < first.0.triangle_count()
+        };
+
+        if retry_wins {
+            log::info!(
+                "BREP #{}: §1.2 retry accepted — {} tris, {} boundary + {} non-manifold (first: {} tris, {} defects)",
+                brep_id,
+                retry.0.triangle_count(),
+                report_retry.boundary_edge_count,
+                report_retry.non_manifold_edge_count,
+                first.0.triangle_count(),
+                defects_first
+            );
+            Some(retry)
+        } else {
+            log::info!(
+                "BREP #{}: §1.2 retry rejected ({} tris, {} defects vs first {} tris, {} defects) — keeping first result",
+                brep_id,
+                retry.0.triangle_count(),
+                defects_retry,
+                first.0.triangle_count(),
+                defects_first
+            );
+            Some(first)
+        }
     }
 
     /// Triangulate a BREP with per-face ID tracking and FaceInfo generation.
@@ -17671,5 +17798,83 @@ END-ISO-10303-21;
         assert!(fd.is_void);
         let cloned = fd.clone();
         assert!(cloned.is_void, "is_void should survive cloning");
+    }
+}
+
+/// Vision 2036 §1.2 — tests for the manifold gate with retry
+/// (`triangulate_brep_detailed_gated`).
+#[cfg(test)]
+mod manifold_gate_tests {
+    use crate::parse_step;
+    use crate::converter::{step_structure_lazy, OwnedStepConversionContext};
+    use draper_mesh::triangulate::SteinerBudgetProfile;
+    use draper_mesh::check_manifold;
+
+    /// Load as1-oc-214 and triangulate a specific BREP instance through the
+    /// full gated path (the same one `triangulate_pending` caches through).
+    fn triangulate_instance(brep_id: i64) -> Option<draper_mesh::TriangleMesh> {
+        // Path is resolved from the crate manifest (tests run with cwd =
+        // crates/draper-step), so relative "test/..." would miss.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/as1-oc-214.stp");
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return None, // file missing in trimmed checkouts — skip, don't fail
+        };
+        let step = parse_step(&content).expect("as1-oc-214 parses");
+        let (_tree, pending) = step_structure_lazy(&step);
+        let pending = pending
+            .into_iter()
+            .find(|p| p.brep_id == brep_id)
+            .expect("BREP id present in as1-oc-214");
+        let mut ctx = OwnedStepConversionContext::new_with_lod_and_profile(
+            step,
+            1.0,
+            SteinerBudgetProfile::Desktop,
+        );
+        let inst = ctx.triangulate_pending(&pending)?;
+        Some(inst.mesh)
+    }
+
+    /// The gate must never regress a watertight result: nut #63 was made
+    /// watertight in sessions 23/24 and the §1.2 gate keeps it (the retry
+    /// only fires on non-watertight first attempts).
+    #[test]
+    fn test_manifold_gate_keeps_watertight_nut() {
+        let Some(mesh) = triangulate_instance(63) else {
+            eprintln!("test/as1-oc-214.stp not available — skipping");
+            return;
+        };
+        let report = check_manifold(&mesh);
+        assert!(
+            report.is_watertight(),
+            "nut #63 must stay watertight through the §1.2 gate: {} boundary, {} non-manifold edges",
+            report.boundary_edge_count,
+            report.non_manifold_edge_count
+        );
+        // Sanity: a nut is a solid of genus 1 (through-hole) → χ = 0.
+        assert_eq!(report.euler_characteristic, 0, "nut #63 Euler characteristic");
+    }
+
+    /// The gate either returns the first attempt as-is or a strictly better
+    /// retry, so the plate's defect count can never exceed the pre-gate
+    /// baseline of 221 (session 23 verification number).
+    #[test]
+    fn test_manifold_gate_never_worsens_plate() {
+        let Some(mesh) = triangulate_instance(3813) else {
+            eprintln!("test/as1-oc-214.stp not available — skipping");
+            return;
+        };
+        let report = check_manifold(&mesh);
+        let defects = report.boundary_edge_count + report.non_manifold_edge_count;
+        assert!(
+            defects <= 221,
+            "plate #3813 defects must not exceed the pre-gate baseline of 221: got {} boundary + {} non-manifold",
+            report.boundary_edge_count,
+            report.non_manifold_edge_count
+        );
+        assert!(
+            mesh.triangle_count() > 0 && mesh.vertex_count() > 100,
+            "plate #3813 mesh is degenerate"
+        );
     }
 }

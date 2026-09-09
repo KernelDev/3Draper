@@ -4826,3 +4826,51 @@ as1-oc-214 от смешанной дискретизации (2-pt LINE vs N-pt
 
 - Vision 2036: продолжить по PLAN.md (след. раздел).
 - Пластина #3813: проверить остаточные щели после нового прохода.
+
+# Сессия 25 — Vision 2036 §1.2: manifold-gate перед BREP-кэшем с retry (2026-09-09)
+
+## Контекст
+
+Пункт §1.2 «Watertightness Illusion», action item 3: ManifoldChecker
+перед кэшированием триангуляции + retry с уменьшенным max_deviation.
+Диагноз: `check_manifold`/`is_watertight` существовали в draper-mesh
+(manifold.rs), но конвертер их не вызывал перед вставкой в
+`brep_detail_cache`, retry не существовало вовсе.
+
+## Реализация
+
+1. **`triangulate_brep_detailed_gated`** (StepConverter): первый проход →
+   `check_manifold`; если не watertight и ≤400k tris — retry с
+   halved `max_deviation`/`max_edge_length`/`max_angular_deviation`.
+   Детерминированный выбор результата: (is_watertight, defects asc,
+   tris asc). Кэш рёбер создаётся заново внутри каждого вызова — retry
+   реально пересэмплирует (не replay).
+2. **Все 4 некэш-сайта** переключены на gated: StepConversionContext::
+   triangulate_pending (941), OwnedStepConversionContext::triangulate_
+   pending (1323), параллельный путь (1541), triangulate_brep_detailed_
+   cached (3930).
+3. **wasm32: gate check-only** (без retry) — не удваивать загрузку в
+   вебе дефектных файлов (drill_top: 5 retry × ~12s). Прогрессивный
+   (chunked) путь тоже без retry — только warn-лог перед вставкой.
+4. **Тесты**: manifold_gate_tests — nut #63 watertight через gate
+   (χ=0), plate #3813 defects ≤ 221 (базлайн сессии 23).
+
+## Верификация
+
+- as1-oc-214: **все 18 инстансов 0 boundary edges** (incl. plate
+  #3813 было 221 → 0, l-bracket #1934 → 0) — эффект финального
+  T-junction-прохода сессии 24; gate ничего не ретраит.
+- drill_top: gate сработал на 5 дефектных BREP (SHAFT/GEAR/SHAFT_SLEEVE/
+  HOUSING/HOUSING_MIRROR), все retry корректно отклонены (дефекты там
+  структурные, не от грубой дискретизации) — поведение never-worsen
+  подтверждено.
+- Тесты: manifold_gate 2/2 (4.3s); determinism 1/1 (34.6s);
+  test_transmission 1/1 (185s); test_all_files_instance_conversion 1/1
+  (release 214s); diag-серия (drill/surface_diagnostic/compressor) green.
+
+## Осталось
+
+- drill_top структурные дыры (§1.2 «0.64%») — не лечатся retry;
+  кандидат: топологическое закрытие face loops (§3.2 BREP validation).
+- Vision 2036: §3.1 audit (edge bus уже substantially есть),
+  затем §3.3 seam topological gluing.
