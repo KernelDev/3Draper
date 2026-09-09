@@ -99,10 +99,38 @@ approximation of the intersection.
 
 **Action Items:**
 
-- [ ] **Return exact B-spline intersection curves** from `intersect_surfaces()`.
-      Polyline should be fallback only when Newton iteration fails.
-- [ ] **Implement analytical `Curve2d` (PCURVE)** — remove polyline
-      approximation of UV-space curves.
+- [x] **Return exact B-spline intersection curves** from
+      `intersect_surfaces()` (implemented as §2.1, commits 8fa3643 /
+      1372373 / 6389ea7 / 8dc5517; audited 2026-09-09):
+      `SurfaceSurfaceIntersection.b_spline_curves` — per-branch
+      least-squares fit with Newton-refined marching points;
+      `b_spline_branch_indices` consumer contract maps each fitted
+      branch to its polyline. Polyline stays as **per-branch fallback
+      only** (unfittable branches keep polyline representation, no
+      global failure). Topology consumer `intersect_surfaces_general`
+      (boolean.rs) attaches `Curve3d::Nurbs` + param_range = knot
+      domain to the shared edge; boolean edges preserve the exact
+      curve instead of flattening to polyline. Verified by
+      `test_general_ssi_exact_bspline_pcurves` (fitted branch must
+      exist, knot-domain param range) and
+      `test_cylinder_cylinder_quartic_*` (polyline-only fallback for
+      quartic cylinders — exercised intentionally).
+- [x] **Implement analytical `Curve2d` (PCURVE)** (implemented as §2.2,
+      commits 8fa3643 / 1039889 / 57c6a33; audited 2026-09-09):
+      * SSI side — `pcurves_a`/`pcurves_b`: plane×cylinder pairs use
+        analytical parametric substitution; all other pairs project the
+        3D B-spline branch into UV via Newton inversion; stored as
+        `Curve2d::Nurbs` (least-squares) or `Curve2d::Line` (exact);
+        closed branches get periodic 2D PCURVEs (C2 seam continuity).
+      * STEP parser side — `resolve_curve_2d` resolves all native 2D
+        curve types analytically (LINE/CIRCLE/ELLIPSE/HYPERBOLA/
+        PARABOLA/B_SPLINE/BEZIER/TRIMMED_CURVE/OFFSET_CURVE_2D);
+        POLYLINE only when the file itself stores one.
+      * Exporter round-trips SURFACE_CURVE + PCURVE (57c6a33).
+        Verified: `test_general_ssi_exact_bspline_pcurves` (composed
+        PCURVE deviation < 1e-2 on both surfaces),
+        `test_plane_cylinder_pcurve_order_swap`,
+        `test_curve2d_inconsistent_pcurve_falls_back_to_projection`.
 - [x] **Add analytical derivatives and projections** for PCURVE
       (2026-09-09, draper-geometry/curve2d.rs):
       **Projections** — exact `project_point(p) -> (t, dist)` on all 7
