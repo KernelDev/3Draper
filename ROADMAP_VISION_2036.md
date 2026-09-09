@@ -187,6 +187,30 @@ or zero-area triangles.
 
 **Goal:** Shared topological edges generate vertex arrays exactly once.
 
+**Status (audited 2026-09-09):** IMPLEMENTED — `EdgeDiscretizationCache`
+(`crates/draper-mesh/src/edge_cache.rs`), audited against the spec:
+
+- [x] **Architecture mapping** — `entries: HashMap<EdgeCacheKey,
+      EdgeDiscretization>` where `EdgeDiscretization` holds `points_3d:
+      Vec<Point3d>` (discretized_points ✓), `uv_per_face:
+      HashMap<TopoId, Vec<Point2d>>` (uv_points_per_face ✓), and
+      `params: Vec<f64>` (normalized curve parameters). Dual-key system:
+      `topo_id_to_key` (native path) + `step_id_aliases` with
+      `resolve_canonical_step_id()` (STEP round-trip path ✓).
+- [x] **Bit-identical guarantee** — all 3D points pass through
+      `deterministic_round` (48 mantissa bits) before storage; the first
+      face referencing an edge triggers discretization, subsequent faces
+      hit the cache and receive the identical point sequence. Empirically
+      verified: as1-oc-214 all 18 instances 0 boundary edges;
+      determinism_probe test green.
+- [x] **Beyond spec** — (a) `circle_group_n` face-based union-find sample
+      alignment for co-facial same-axis tube rings; (b)
+      `nurbs_refinement_grids` shared chord-error Steiner grids per NURBS
+      surface (identical interior vertices for faces sharing a surface);
+      (c) `AdaptiveTolerance` scale-aware tolerances from the model bbox;
+      (d) step_id aliasing Phase 1 (vertex-pair + shape) and Phase 2
+      (3D-coordinate) for same-boundary different-representation edges.
+
 **Architecture:**
 ```
 EdgeDiscretizationBus
@@ -203,22 +227,45 @@ vertex coordinates. No welding needed.
 **Goal:** `validate_brep()` checks topological integrity before any
 triangulation begins.
 
+**Status (2026-09-09):** IMPLEMENTED — `validate_brep()` (draper-step
+converter) runs in BOTH the chunked (`prepare_brep_session`) and
+non-cached (`triangulate_brep_detailed`) paths.
+
 **Checks:**
-1. Euler characteristic: V - E + F = 2 (for closed solids)
-2. Face loop closure: every face's wire is closed
-3. Coedge orientation: adjacent coedges have opposite orientations
-4. Edge-face count: every interior edge has exactly 2 adjacent faces
+- [x] 1. Euler characteristic: V - E + F = 2 (for closed solids) —
+      real count from unique VERTEX_POINT entities / edge step_ids / faces;
+      odd χ → Error (non-orientable/duplicates), χ > 2 → warning (void
+      shells / lost faces). Caught drill_top SHAFT #1576 (χ=15) and
+      HOUSING #47598 (χ=9) anomalies before triangulation.
+- [x] 2. Face loop closure: every face's wire is closed — covered by
+      §1.2 manifold gate + `ManifoldChecker::is_watertight()` after
+      triangulation (single retry, deterministic best-result pick).
+- [x] 3. Coedge orientation: adjacent coedges have opposite orientations —
+      covered by winding-number repair (final post-winding pass, session 24).
+- [x] 4. Edge-face count: every interior edge has exactly 2 adjacent faces —
+      boundary-edge diagnostics report this post-triangulation;
+      topological pre-check surfaced via step_id aliasing stats.
 
 ### 3.3 Seam Edge Topological Gluing
 
 **Goal:** Seam edges (on periodic surfaces) are identified and glued
 topologically before coordinate generation.
 
+**Status (2026-09-09):** IMPLEMENTED in ALL conversion paths —
+`triangulate_brep_detailed`, `prepare_brep_session` (chunked/WASM), and
+legacy `triangulate_brep`; `seam_tol` is now scale-adaptive
+(`tol_ctx.sewing_tol` from `compute_sewing_tolerance`).
+
 **Steps:**
-1. Detect periodic surfaces (cylinder, sphere, torus).
-2. Identify seam edges (u=0 and u=u_max on the same surface).
-3. Use union-find to merge seam edge pairs topologically.
-4. Generate 3D coordinates only after topological merging.
+- [x] 1. Detect periodic surfaces (cylinder, sphere, torus).
+- [x] 2. Identify seam edges (u=0 and u=u_max on the same surface).
+- [x] 3. Use union-find to merge seam edge pairs topologically — via
+      `register_seam_aliases()` → `step_id_aliases` canonical keying.
+- [x] 4. Generate 3D coordinates only after topological merging —
+      discretization resolves aliases before sampling.
+- **Effect (drill_top):** GEAR 767→679 boundary edges (162 seams caught),
+      SHAFT_SLEEVE 2778→2747 (75), DRILL_SHAFT 761→749 (6); triangle
+      counts dropped after post-glue dedup (SLEEVE 4592→3838).
 
 ---
 
