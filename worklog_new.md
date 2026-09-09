@@ -5122,3 +5122,48 @@ GEAR/SHAFT_SLEEVE. §1.2 gate + §3.3 швы остаются правильно
 - SSI for edge recovery (восстановление потерянных рёбер).
 - §1.3 SSI (точные B-сплайн кривые пересечения) — крупнейшая
   оставшаяся P1-работа по Critical Technical Debt.
+
+# Сессия 27 — Vision 2036 §1.3: аналитические производные и проекции Curve2d (2026-09-09)
+
+## Контекст
+
+Сессия началась после сброса контекста; sandbox НЕ откатился — обнаружен
+незакоммиченный WIP прошлого контекста (+765 строк в curve2d.rs, юнит
+прерван на середине). Код компилировался, но не был оформлен.
+
+## Реализация (завершение WIP)
+
+1. **project_point на всех 7 типах Curve2d** (exact closest-point):
+   * Line2d — clamped dot-product projection (замкнутая форма);
+   * Circle2d — atan2-угол + clamp в диапазон дуги (для полной
+     окружности — точный глобальный минимум);
+   * Ellipse2d / Hyperbola2d / Parabola2d / Nurbs2d — generic-движок
+     `project_parametric_curve`: 48-сэмпловый равномерный скан
+     (брекетинг глобального минимума, иммунен к немономодальному
+     профилю расстояния) → golden-section shrink (~60 оценок) →
+     orthogonal-projection polish (t += ((p−C)·C')/|C'|² с halving и
+     clamp, 8 шагов, доводка до машинной точности);
+   * Curve2d enum: dispatch project_point + distance_to.
+2. **Nurbs2d::derivative_at — аналитический** (был численный):
+   quotient rule C' = (A' − C·w')/w + derivative control points
+   Piegl & Tiller (A2.5/Eq. 3.7), новый `de_boor_step_2d` (2D-близнец
+   de_boor_step_curve); численный fallback только при non-finite
+   (malformed knots/weights — философия §1.5).
+3. 12 новых тестов: NURBS-производная четверть-окружности vs точное
+   значение, консистентность с 3D-близнецом, magnitude на uniform
+   knots, проекции всех типов (включая orthogonality-assertions),
+   composite dispatch.
+
+## Верификация
+
+- draper-geometry lib: **246/246 passed** (0.51s);
+- `cargo check --workspace --exclude draper-testing`: чисто (44s);
+- commit `cb8c3ca`, pushed → main (0b8bbf4..cb8c3ca).
+
+## Осталось (§1.3)
+
+- Чекбокс «Implement analytical Curve2d (PCURVE)» — завязать
+  аналитические проекции в PCURVE-пайплайн draper-step (сейчас
+  полигональная аппроксимация UV-кривых);
+- Чекбокс «Return exact B-spline intersection curves» — SSI
+  (крупнейшая P1-работа).
