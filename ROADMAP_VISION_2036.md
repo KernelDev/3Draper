@@ -78,14 +78,16 @@ assemblies (e.g., `drill_top.stp`) retain up to 0.64% boundary edges.
 
 **Action Items:**
 
-- [ ] **Implement Edge Discretization Bus** — each topological edge is
+- [x] **Implement Edge Discretization Bus** — each topological edge is
       discretized exactly once in a global cache. Adjacent faces receive
       bit-identical vertex arrays. No post-facto geometric welding.
-- [ ] **Rewrite seam edge handling** — use topological gluing (union-find)
-      before generating 3D coordinates, not geometric `weld` after.
-- [ ] **Add `ManifoldChecker::is_watertight()`** — called before caching
-      triangulation. If mesh is not manifold, retry with reduced
-      `max_deviation`.
+      (`EdgeDiscretizationCache` + step_id aliasing, incl. seam aliases)
+- [x] **Rewrite seam edge handling** — topological gluing (alias
+      registration) before 3D coordinate generation, in ALL conversion
+      paths, with scale-adaptive seam tolerance (2026-09-09).
+- [x] **Add `ManifoldChecker::is_watertight()`** — called before caching
+      triangulation; single retry at halved `max_deviation` with a
+      deterministic best-result pick; wasm32 check-only (2026-09-09).
 
 **Priority:** P0
 
