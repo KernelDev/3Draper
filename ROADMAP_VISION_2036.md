@@ -114,16 +114,34 @@ approximation of the intersection.
 
 **Action Items:**
 
-- [ ] **Extract tolerances from `UNCERTAINTY_MEASURE_WITH_UNIT`** and
-      `LENGTH_MEASURE_WITH_UNIT` (verify existing extraction is complete).
+- [x] **Extract tolerances from `UNCERTAINTY_MEASURE_WITH_UNIT`** and
+      `LENGTH_MEASURE_WITH_UNIT` (verify existing extraction is complete) —
+      audited 2026-09-09 with `tol_extract_check`: all 7 canonical test files
+      extract correctly (as1 5e-6, drill 3.99e-4, Zentralstaender 2e-5,
+      compressor 3.36e-3, SampleCube 1e-6, Spit-Fire/Vulcan 1e-5 via 311/2167
+      per-context repetitions). `LENGTH_MEASURE_WITH_UNIT` audited: those
+      entities carry unit-conversion factors (0.0254 = inch→metre) and
+      property measures — NOT tolerances; correctly not used as tolerance
+      source. The Typed `LENGTH_MEASURE` wrapper inside UNCERTAINTY is
+      handled by `extract_float_from_step_value`.
 - [ ] **Implement surface extension algorithms** — extend surfaces to close
       micro-gaps instead of removing faces.
 - [ ] **Implement surface-surface intersection for edge recovery** —
       reconstruct lost edges by intersecting adjacent surfaces.
-- [ ] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
-      stop force-approximating them as NURBS.
-- [ ] **Audit healing NURBS guards** — verify all healing steps protect
-      NURBS faces from removal (done in commit `eb46eb1`, verify coverage).
+- [x] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
+      `SweptSurface` was already analytical (SURFACE_OF_REVOLUTION /
+      SURFACE_OF_LINEAR_EXTRUSION → `Revolution`/`Extrusion` surfaces);
+      `OFFSET_SURFACE` now extracts NATIVELY as `Surface::Offset`
+      (2026-09-09: exact evaluation S = base + d·n, Gauss-map-preserved
+      normals, inherited periodicity for §3.3 seam handling, exporter emits
+      OFFSET_SURFACE for round-trip — the 16×16 NURBS approximation moved
+      to tests). Dedicated meshing refinements tracked under §2.3.
+- [x] **Audit healing NURBS guards** — verified 2026-09-09: all 4 face
+      removal paths protect NURBS (merge requires Nurbs×Nurbs compatible —
+      mixed surface types never merge; small-face removal retains NURBS;
+      self-intersection removal skips NURBS; normal-repair removal skips
+      NURBS). The STEP converter delegates all removal to the guarded
+      healing pipeline (`apply_healing_to_face_data`).
 
 **Priority:** P1
 

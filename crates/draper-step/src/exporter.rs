@@ -1053,11 +1053,25 @@ impl StepWriter {
                 id
             }
             Surface::Nurbs(nurbs) => self.emit_nurbs_surface(nurbs),
-            Surface::Offset(_) | Surface::Ruled(_) => {
-                // Audit item 4.3 (2026-07-19): Offset/Ruled surfaces
-                // are not yet supported in STEP export. Fall back to NURBS
-                // conversion (TODO: implement direct export).
-                log::warn!("Offset/Ruled surface export not yet implemented, skipping");
+            Surface::Offset(o) => {
+                // OFFSET_SURFACE('', #basis_surface, distance, .T.)
+                // §1.4/§2.3: native offset round-trip — emit the basis
+                // surface recursively and reference it. (Was: "not yet
+                // implemented, skipping" with a dummy id — native offsets
+                // now arrive from extract_offset_surface, so the export
+                // path must round-trip them.)
+                let basis_id = self.emit_surface(&o.base);
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = OFFSET_SURFACE('',#{},{},.T.);",
+                    id, basis_id, fmt_f64(o.distance)
+                ));
+                id
+            }
+            Surface::Ruled(_) => {
+                // Audit item 4.3 (2026-07-19): Ruled surfaces are not yet
+                // supported in STEP export.
+                log::warn!("Ruled surface export not yet implemented, skipping");
                 self.alloc_id() // Return a dummy ID
             }
         };

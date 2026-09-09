@@ -5077,3 +5077,48 @@ GEAR/SHAFT_SLEEVE. §1.2 gate + §3.3 швы остаются правильно
   (крупная математическая работа, §2.1/2.2).
 - §1.4: парсинг толерансов, surface extension, OffsetSurface/SweptSurface.
 - HOUSING 4911 boundary (mesh-уровень, earcutr missing-boundary).
+
+# Сессия 26 (продолжение 2) — Vision 2036 §1.4: OFFSET_SURFACE нативно + аудиты (2026-09-09)
+
+## Реализация
+
+1. **Толеранс-экстракция — аудит завершён** (новый инструмент
+   `tools/src/bin/tol_extract_check.rs`): все 7 канонических файлов
+   извлекают uncertainty корректно (as1 5e-6, drill 3.99e-4, Zentral 2e-5,
+   compressor 3.36e-3, SampleCube 1e-6, Spit-Fire/Vulcan 1e-5 — по
+   311/2167 повторам на контекст). LENGTH_MEASURE_WITH_UNIT — факторы
+   конверсии единиц (0.0254 = inch→metre), НЕ толерансы: корректно не
+   используются. Typed LENGTH_MEASURE внутри UNCERTAINTY обёртки — handled.
+2. **OFFSET_SURFACE — нативный Surface::Offset** (главный юнит):
+   * converter: extract_offset_surface возвращает Surface::Offset
+     (точная оценка S = base + d·n; 16×16 NURBS-аппроксимация →
+     #[cfg(test)]);
+   * exporter: эмит OFFSET_SURFACE('', #basis, d, .T.) — рекурсивно по
+     базе (было: «not yet implemented, skipping» с dummy id); найден и
+     исправлен собственный баг форматирования ({}.T. без запятой →
+     расстояние парсилось как 0);
+   * geometry: is_u/v_periodic делегируют базе (Offset-of-Cylinder
+     периодичен — §3.3 seam-глюинг);
+   * тест test_offset_surface_native_extraction_and_round_trip:
+     синтетический OFFSET_SURFACE над плоскостью → extraction →
+     точная оценка (z=2.5) → periodicity-делегация (цилиндр+offset:
+     u-periodic, радиус 11) → экспорт box с offset-гранью → re-parse →
+     Offset снова (d=0.5, z=0.5).
+3. **Healing NURBS guard'ы — аудит завершён**: все 4 пути удаления граней
+   защищают NURBS (merge только Nurbs×Nurbs; small-face retain; self-int
+   skip; normal-repair skip); конвертер делегирует удаление только
+   healing-пайплайну.
+
+## Верификация
+
+- draper-step --lib **140/140** (237s; +1 новый offset-тест);
+  tolerance_hierarchy 7/7; integration 3/3; workspace check чисто.
+- В репозитории нет файлов с OFFSET_SURFACE → регрессий на живых файлах
+  быть не может; риск закрыт синтетическим round-trip-тестом.
+
+## Осталось (§1.4)
+
+- Surface extension algorithms (закрытие микро-щелей).
+- SSI for edge recovery (восстановление потерянных рёбер).
+- §1.3 SSI (точные B-сплайн кривые пересечения) — крупнейшая
+  оставшаяся P1-работа по Critical Technical Debt.

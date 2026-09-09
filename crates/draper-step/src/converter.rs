@@ -26,7 +26,7 @@
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
-    ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
+    ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface, OffsetSurface,
     NurbsSurface, Curve3d, Curve2d, Line, Circle,  Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Hyperbola2d, Parabola2d, Nurbs2d,
 };
@@ -11841,20 +11841,22 @@ impl<'a> StepConverter<'a> {
         None
     }
 
-    /// Extract an OFFSET_SURFACE with NURBS approximation.
+    /// Extract an OFFSET_SURFACE — NATIVE `Surface::Offset` (§1.4/§2.3:
+    /// stop force-approximating as NURBS).
     /// OFFSET_SURFACE('', #basis_surface, offset_distance, .T./.F.)
     ///
-    /// Approximation approach:
-    /// 1. Sample the basis surface on a grid
-    /// 2. At each grid point, compute the surface normal
-    /// 3. Offset each point along the normal by the given distance
-    /// 4. Create a NURBS surface from the offset grid
+    /// The native offset evaluates exactly: S(u,v) = base(u,v) + d·n(u,v)
+    /// (see `Surface::point_at`/`normal_at`/`project_point` Offset arms —
+    /// normal is exact via the Gauss-map preservation argument). The
+    /// former 16×16 NURBS sampling approximation is kept in tests only.
+    /// Self-intersection (|d|·κ ≥ 1) yields degenerate triangles which the
+    /// existing degenerate-triangle filters handle (§1.5).
     fn extract_offset_surface(&self, entity: &crate::schema::StepEntity, depth: usize) -> Option<Surface> {
         // Find the basis surface reference (2nd param, index 1)
         let basis_id = self.find_param_ref(entity, 1)?;
         let surface = self.extract_surface(basis_id, depth)?;
 
-        // Extract offset distance
+        // Extract offset distance (first float param)
         let offset_dist = self.find_float_param(entity, 0).unwrap_or(0.0);
 
         if offset_dist.abs() < 1e-10 {
@@ -11862,9 +11864,11 @@ impl<'a> StepConverter<'a> {
             return Some(surface);
         }
 
-        // Approximate the offset surface using NURBS
-        info!("OFFSET_SURFACE #{}: approximating offset={} as NURBS surface", entity.id, offset_dist);
-        Some(approximate_offset_surface(&surface, offset_dist))
+        info!(
+            "OFFSET_SURFACE #{}: native Surface::Offset (distance={}) over {}",
+            entity.id, offset_dist, surface.type_name()
+        );
+        Some(Surface::Offset(OffsetSurface::new(surface, offset_dist)))
     }
 
     /// Find a curve reference from an entity's parameters.
@@ -15614,6 +15618,7 @@ fn solve_linear_system_gauss(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 /// Given a basis surface and an offset distance, this samples the basis surface
 /// on a grid, offsets each grid point along the surface normal, and creates
 /// a NURBS surface from the offset grid.
+#[cfg(test)]
 fn approximate_offset_surface(basis_surface: &Surface, distance: f64) -> Surface {
     let n_u = 16;
     let n_v = 16;
@@ -17272,6 +17277,98 @@ mod step_parser_extension_tests {
             assert!((p_mid.z - 1.0).abs() < 0.1, "Offset plane z should be ~1.0, got {}", p_mid.z);
         } else {
             panic!("Expected NURBS surface for offset plane");
+        }
+    }
+
+    /// §1.4/§2.3: OFFSET_SURFACE must extract NATIVELY as Surface::Offset
+    /// (exact evaluation, inherited periodicity) and round-trip through the
+    /// exporter as an OFFSET_SURFACE entity.
+    #[test]
+    fn test_offset_surface_native_extraction_and_round_trip() {
+        // ── 1. Extraction: synthetic OFFSET_SURFACE over a plane ──
+        let step_text = make_step(
+            "#11 = CARTESIAN_POINT('',(0.,0.,0.));
+\
+             #12 = DIRECTION('',(0.,0.,1.));
+\
+             #13 = DIRECTION('',(1.,0.,0.));
+\
+             #14 = AXIS2_PLACEMENT_3D('',#11,#12,#13);
+\
+             #15 = PLANE('',#14);
+\
+             #16 = OFFSET_SURFACE('',#15,2.5,.T.);"
+        );
+        let step = parse_step(&step_text).expect("synthetic offset STEP parses");
+        let conv = StepConverter::new(&step);
+        let surf = conv.extract_surface(16, 0).expect("OFFSET_SURFACE extracts");
+        match &surf {
+            Surface::Offset(o) => {
+                assert!((o.distance - 2.5).abs() < 1e-12, "distance must be 2.5, got {}", o.distance);
+                assert!(matches!(*o.base, Surface::Plane(_)), "base must be the plane");
+                // Exact evaluation: plane z=0 offset by +2.5 → z = 2.5 exactly.
+                let p = surf.point_at(0.3, 0.7);
+                assert!((p.z - 2.5).abs() < 1e-9, "z must be exactly 2.5, got {}", p.z);
+                assert_eq!(p.x, 0.3);
+                assert_eq!(p.y, 0.7);
+                // Normal preserved by the offset construction (Gauss map).
+                let n = surf.normal_at(0.3, 0.7);
+                assert!(n.z > 0.999, "offset normal must match base normal, got {:?}", n);
+                // Periodicity delegation: plane is not periodic.
+                assert!(!surf.is_u_periodic());
+            }
+            other => panic!("expected Surface::Offset, got {}", other.type_name()),
+        }
+
+        // ── 2. Periodicity delegation: offset of a cylinder IS u-periodic ──
+        // (§3.3 seam handling depends on this for offset-of-periodic faces.)
+        let cyl = Surface::Cylinder(CylinderSurface::new(
+            Point3d::ORIGIN, Direction3d::Z, 10.0,
+        ));
+        let off_cyl = Surface::Offset(OffsetSurface::new(cyl, 1.0));
+        assert!(off_cyl.is_u_periodic(), "offset of cylinder must be u-periodic");
+        let p_cyl = off_cyl.point_at(0.0, 0.0);
+        assert!(
+            ((p_cyl.x - 11.0).abs() < 1e-9) && (p_cyl.z.abs() < 1e-9),
+            "offset cylinder radius must be 11 at u=0, got {:?}",
+            p_cyl
+        );
+
+        // ── 3. Export round-trip ──
+        use crate::exporter::export_step;
+        use draper_topology::ShapeBuilder;
+        let mut solid = ShapeBuilder::make_box(2.0, 2.0, 2.0);
+        if let Some(face) = solid.faces_mut().first_mut() {
+            face.surface = Some(Surface::Offset(OffsetSurface::new(
+                Surface::Plane(Plane::xy()),
+                0.5,
+            )));
+        }
+        let text = export_step(&solid, "OFFBOX");
+        assert!(
+            text.contains("OFFSET_SURFACE('',"),
+            "export must emit OFFSET_SURFACE entity, got: {}",
+            text.lines().find(|l| l.contains("OFFSET_SURFACE")).unwrap_or("<none>")
+        );
+        let re_step = parse_step(&text).expect("round-tripped STEP re-parses");
+        let re_conv = StepConverter::new(&re_step);
+        // Find the OFFSET_SURFACE entity in the re-parsed file and extract it.
+        let offset_entity = re_step
+            .entities
+            .iter()
+            .find(|e| e.type_name == "OFFSET_SURFACE")
+            .expect("re-parsed file must contain OFFSET_SURFACE");
+        let re_surf = re_conv
+            .extract_surface(offset_entity.id, 0)
+            .expect("re-imported OFFSET_SURFACE extracts");
+        match &re_surf {
+            Surface::Offset(o) => {
+                assert!((o.distance - 0.5).abs() < 1e-12, "round-trip distance, got {}", o.distance);
+                assert!(matches!(*o.base, Surface::Plane(_)), "round-trip base must be plane");
+                let p = re_surf.point_at(0.1, 0.2);
+                assert!((p.z - 0.5).abs() < 1e-9, "round-trip z must be 0.5, got {}", p.z);
+            }
+            other => panic!("round-trip must give Surface::Offset, got {}", other.type_name()),
         }
     }
 

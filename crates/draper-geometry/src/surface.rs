@@ -2063,6 +2063,9 @@ impl Surface {
         match self {
             Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_) | Surface::Revolution(_) => true,
             Surface::Nurbs(n) => n.u_closed,
+            // §3.3 seam handling: an offset of a periodic base is periodic
+            // with the same parameterization (u/v domains are inherited).
+            Surface::Offset(o) => o.base.is_u_periodic(),
             _ => false,
         }
     }
@@ -2072,6 +2075,7 @@ impl Surface {
         match self {
             Surface::Sphere(_) | Surface::Torus(_) => true,
             Surface::Nurbs(n) => n.v_closed,
+            Surface::Offset(o) => o.base.is_v_periodic(),
             _ => false,
         }
     }
