@@ -34,14 +34,14 @@ jobs:
             ${{ runner.os }}-cargo-test-
 
       - name: Build draper-testing
-        run: cargo build -p draper-testing --tests --exclude draper-diag
+        run: cargo build -p draper-testing --tests
 
       - name: Run complex file tests (ignored)
         run: cargo test -p draper-testing --test complex_files -- --ignored --nocapture
         timeout-minutes: 20
 
       - name: Run standard tests
-        run: cargo test -p draper-testing --test complex_files --exclude draper-diag
+        run: cargo test -p draper-testing --test complex_files
 
       - name: Upload test results
         if: always()
