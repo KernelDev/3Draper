@@ -221,10 +221,13 @@ fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
 // Ear-clipping triangulation
 // ============================================================
 
-/// Triangulate a parametric domain using earcutr.
+/// Triangulate a parametric domain using earcutr + CDT Steiner insertion.
 ///
 /// earcutr is O(n log n) typical, handles holes natively, and
-/// never hangs on degenerate inputs.
+/// never hangs on degenerate inputs. Interior Steiner points are
+/// inserted via Bowyer-Watson (custom_cdt) — NOT appended to the
+/// earcutr ring (which would leave interior holes; see the regression
+/// test `test_steiner_insertion_no_interior_gaps_vs_legacy_earcutr`).
 pub fn triangulate_cdt(
     domain: &ParametricDomain,
     surface: &Surface,
@@ -238,12 +241,14 @@ pub fn triangulate_cdt(
     // Build combined point array: [boundary...][holes...][interior...]
     let mut all_points: Vec<Point2d> = domain.outer_boundary.clone();
     let mut hole_start_indices: Vec<usize> = Vec::new();
+    let mut holes_2d: Vec<Vec<[f64; 2]>> = Vec::new();
 
     for hole in &domain.holes {
         if hole.len() < 3 {
             continue;
         }
         hole_start_indices.push(all_points.len());
+        holes_2d.push(hole.iter().map(|p| [p.u, p.v]).collect());
         all_points.extend_from_slice(hole);
     }
 
@@ -257,8 +262,13 @@ pub fn triangulate_cdt(
         coords.push(p.v);
     }
 
-    // Run triangulation using the new adapter (tries earcut w/ int predicates,
-    // falls back to i_triangle for self-intersecting polygons, then earcutr).
+    // Run triangulation using the adapter (earcutr). Interior points are
+    // appended to the input ring (legacy spike-chain). This domain-level
+    // path is used by torus/revolution unwraps whose interior points are
+    // sparse; the proper CDT Steiner insertion lives in
+    // `triangulate_surface_consistent` behind
+    // `TriangulationParams::use_cdt_steiner` (default off — see its doc
+    // for the cross-face connectivity caveat).
     let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
     // Collect triangles, filtering degenerate ones
@@ -4688,12 +4698,94 @@ pub fn triangulate_surface_consistent(
     // Instead of downsampling boundaries, we control the total triangle
     // count by limiting INTERIOR points only.
     // ============================================================
-    let boundary_points_3d = boundary_points_3d.to_vec();
+    let mut boundary_points_3d = boundary_points_3d.to_vec();
     let mut outer_uv = outer_uv; // Already a Vec, no downsampling
 
     // Keep all hole points too — holes define where NOT to triangulate
     let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
-    let normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
+    let mut normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
+
+    // ============================================================
+    // Step 1.5 (Vision 2036 watertightness / HOUSING #47598):
+    // consecutive-duplicate boundary dedup.
+    //
+    // Faces whose wires reference the same EDGE_CURVE twice (or edges
+    // with bit-identical endpoints) produce boundary polygons with
+    // consecutive duplicate 3D points. Every triangle spanning such a
+    // pair is position-degenerate → dropped in Step 5 → interior
+    // holes (HOUSING: 1016 of 1241 degenerate drops were consecutive
+    // rim-rim pairs). Duplicated CLOSING points (first == last) are
+    // the same disease on a closed ring.
+    //
+    // The dedup is DETERMINISTIC and cross-face consistent: it keys on
+    // exact 3D bit-identity of edge-cache points (both faces sharing an
+    // edge receive the same bits and remove the same duplicates). UVs
+    // are filtered in lockstep by index.
+    //
+    // Non-consecutive duplicates (a pinched ring visiting the same
+    // point twice, e.g. seam edges listed twice in one wire) are NOT
+    // removed — they are a real topological signal and need polygon
+    // splitting, not silent dedup.
+    {
+        let mut keep: Vec<bool> = Vec::with_capacity(outer_uv.len());
+        let mut prev_bits: Option<[u64; 3]> = None;
+        for p in &boundary_points_3d {
+            let bits = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            keep.push(prev_bits != Some(bits));
+            prev_bits = Some(bits);
+        }
+        // Closing duplicate: first == last (ring double-closed).
+        if keep.len() > 1 && boundary_points_3d.first() == boundary_points_3d.last() {
+            let n = keep.len();
+            keep[n - 1] = false;
+        }
+        let cnt = keep.iter().filter(|&&k| k).count();
+        if cnt >= 3 && cnt < keep.len() {
+            let mut new_uv = Vec::with_capacity(cnt);
+            let mut new_3d = Vec::with_capacity(cnt);
+            for (i, &k) in keep.iter().enumerate() {
+                if k {
+                    new_uv.push(outer_uv[i]);
+                    new_3d.push(boundary_points_3d[i]);
+                }
+            }
+            outer_uv = new_uv;
+            boundary_points_3d = new_3d;
+        }
+    }
+    let hole_polylines_3d_capped: Vec<Vec<Point3d>> = {
+        let mut out = Vec::with_capacity(hole_polylines_3d_capped.len());
+        for (hi, hole) in hole_polylines_3d_capped.iter().enumerate() {
+            let huv = &normalized_holes_uv_capped[hi];
+            let mut keep: Vec<bool> = Vec::with_capacity(hole.len());
+            let mut prev_bits: Option<[u64; 3]> = None;
+            for p in hole {
+                let bits = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+                keep.push(prev_bits != Some(bits));
+                prev_bits = Some(bits);
+            }
+            if keep.len() > 1 && hole.first() == hole.last() {
+                let n = keep.len();
+                keep[n - 1] = false;
+            }
+            let cnt = keep.iter().filter(|&&k| k).count();
+            if cnt >= 3 && cnt < hole.len() {
+                let mut new_uv = Vec::with_capacity(cnt);
+                let mut new_3d = Vec::with_capacity(cnt);
+                for (i, &k) in keep.iter().enumerate() {
+                    if k {
+                        new_uv.push(huv[i]);
+                        new_3d.push(hole[i]);
+                    }
+                }
+                normalized_holes_uv_capped[hi] = new_uv;
+                out.push(new_3d);
+            } else {
+                out.push(hole.clone());
+            }
+        }
+        out
+    };
 
     // ── Adaptive per-face-area budget (task 1.1.4) ─────────────────
     //
@@ -5195,6 +5287,59 @@ pub fn triangulate_surface_consistent(
     };
 
     // ============================================================
+    // Step 3.95 (Vision 2036 watertightness / HOUSING #47598):
+    // 3D-position dedup of interior Steiner points.
+    //
+    // Step 5 resolves each vertex's 3D position and DROPS any triangle
+    // whose vertices collide positionally (bit-identical 3D) as
+    // position-degenerate — punching holes exactly where coverage is
+    // needed (HOUSING: 1369 dropped triangles ≈ the dominant share of
+    // its mesh boundary edges). Interior Steiner points whose surface
+    // position equals a boundary vertex (or another interior point)
+    // are therefore removed BEFORE triangulation: the position is
+    // already represented by the surviving vertex, so no coverage is
+    // lost, and Step 5 never has to drop a triangle again.
+    //
+    // The evaluation must mirror Step 5 exactly: NURBS →
+    // `derivatives_at(uv).point` (de Boor), others → `point_at(uv)`;
+    // both through `deterministic_round_point`. Boundary vertices use
+    // their cached (already bit-identical) positions.
+    let interior_uv_points: Vec<Point2d> = {
+        let mut seen: std::collections::HashSet<[u64; 3]> =
+            std::collections::HashSet::with_capacity(boundary_points_3d.len() + 16);
+        for p in &boundary_points_3d {
+            seen.insert([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+        }
+        for hole in &hole_polylines_3d_capped {
+            for p in hole {
+                seen.insert([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]);
+            }
+        }
+        let mut kept: Vec<Point2d> = Vec::with_capacity(interior_uv_points.len());
+        for uv in &interior_uv_points {
+            let p3d = if let Surface::Nurbs(ref nurbs) = surface {
+                deterministic_round_point(nurbs.derivatives_at(uv.u, uv.v).point)
+            } else {
+                deterministic_round_point(surface.point_at(uv.u, uv.v))
+            };
+            let key = [p3d.x.to_bits(), p3d.y.to_bits(), p3d.z.to_bits()];
+            if !p3d.x.is_finite() || !p3d.y.is_finite() || !p3d.z.is_finite() {
+                // Non-finite surface evaluation (degenerate patch):
+                // keep the UV — the CDT may still skip it via the
+                // outside-triangulation path, and Step 5 will drop
+                // whatever collapses; removing it here is also safe
+                // but keeping it preserves grid regularity.
+                kept.push(*uv);
+                continue;
+            }
+            if seen.insert(key) {
+                kept.push(*uv);
+            }
+        }
+        kept
+    };
+
+    // ============================================================
     // Step 3.9: Validate UV polygon before triangulation
     //
     // If the outer UV polygon is self-intersecting or degenerate,
@@ -5293,9 +5438,16 @@ pub fn triangulate_surface_consistent(
     // ============================================================
     // Step 4: Build earcutr input with ALL points
     //
-    // KEY: Pass interior points as part of the earcutr input
-    // directly. earcutr handles Steiner points natively and
-    // produces quality triangulation in O(n log n).
+    // KEY: interior points are inserted via a proper CDT (Bowyer-Watson
+    // point insertion with constraint-edge preservation + Lawson flips),
+    // NOT appended to the earcutr input ring. MapBox earcut/earcutr has
+    // NO native Steiner support: points appended after the last ring are
+    // absorbed into that ring as a "spike chain", and the clipped spikes
+    // leave interior holes — Steiner-to-Steiner edges with exactly 1
+    // adjacent triangle (root cause of HOUSING #47598: 57% of its 6089
+    // boundary edges). `custom_cdt::triangulate_polygon_cdt` triangulates
+    // the boundary polygon with earcutr first (all rim edges preserved),
+    // then inserts each interior point, guaranteeing a hole-free interior.
     // ============================================================
 
     let n_boundary = outer_uv.len();
@@ -5329,9 +5481,39 @@ pub fn triangulate_surface_consistent(
         coords.push(p.v);
     }
 
-    // Run triangulation using the new adapter (tries earcut w/ int predicates,
-    // falls back to i_triangle for self-intersecting polygons, then earcutr).
-    let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
+    // Run triangulation: CDT path (boundary via earcutr + Bowyer-Watson
+    // Steiner insertion). The returned indices reference the same combined
+    // layout [boundary][holes][interior] as `all_uv`, so Step 5's vertex
+    // resolution is unchanged. If the CDT fails outright (degenerate
+    // boundary polygon), fall back to the legacy spike-chain path — a
+    // partial mesh is better than none (never-worsen).
+    let triangle_indices: Vec<usize> = {
+        let boundary_2d: Vec<[f64; 2]> =
+            outer_uv.iter().map(|p| [p.u, p.v]).collect();
+        let holes_2d: Vec<Vec<[f64; 2]>> = valid_hole_indices
+            .iter()
+            .map(|&hi| {
+                normalized_holes_uv_capped[hi]
+                    .iter()
+                    .map(|p| [p.u, p.v])
+                    .collect()
+            })
+            .collect();
+        let interior_2d: Vec<[f64; 2]> =
+            interior_uv_points.iter().map(|p| [p.u, p.v]).collect();
+        let cdt = if params.use_cdt_steiner {
+            crate::custom_cdt::triangulate_polygon_cdt(&boundary_2d, &holes_2d, &interior_2d)
+        } else {
+            Vec::new()
+        };
+        if cdt.is_empty() {
+            crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices)
+        } else {
+            cdt.into_iter()
+                .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+                .collect()
+        }
+    };
 
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);

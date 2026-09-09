@@ -504,6 +504,20 @@ pub struct TriangulationParams {
     /// Defaults to `Desktop`. The WASM viewer sets this to `Mobile` or
     /// `Tablet` based on screen width to keep mobile devices responsive.
     pub steiner_profile: SteinerBudgetProfile,
+    /// Whether curved faces insert interior Steiner points through the
+    /// proper CDT (earcutr boundary + Bowyer-Watson insertion,
+    /// `custom_cdt::triangulate_polygon_cdt`) instead of appending them
+    /// to the earcutr ring (spike-chain).
+    ///
+    /// The CDT path produces provably hole-free PER-FACE triangulations
+    /// (regression: `test_steiner_insertion_no_interior_gaps_vs_legacy_earcutr`),
+    /// but is **default-off**: faces sharing one NURBS surface receive the
+    /// same shared Steiner points yet build DIFFERENT CDT connectivity per
+    /// face, so the merged mesh gains cross-face boundary edges on dirty
+    /// files (HOUSING #47598: 6035 → 14292). Turning this on requires the
+    /// surface-level canonical triangulation (triangulate the shared grid
+    /// once per NURBS surface, then extract per-face sub-triangulations).
+    pub use_cdt_steiner: bool,
     /// Target fraction of triangles to KEEP after post-triangulation decimation.
     /// `1.0` = no decimation (keep all triangles).
     /// `0.1` = keep only 10% of triangles (very coarse, ~90% reduction).
@@ -623,6 +637,7 @@ impl Default for TriangulationParams {
             progress_callback: None,
             max_face_triangles: 8000,
             steiner_profile: SteinerBudgetProfile::default(),
+            use_cdt_steiner: false,
             keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
@@ -717,6 +732,7 @@ impl TriangulationParams {
             progress_callback: None,
             max_face_triangles,
             steiner_profile: SteinerBudgetProfile::default(),
+            use_cdt_steiner: false,
             keep_ratio,
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
@@ -747,6 +763,7 @@ impl TriangulationParams {
         self.max_angular_deviation.to_bits().hash(&mut hasher);
         self.adaptive.hash(&mut hasher);
         self.adaptive_lod_enabled.hash(&mut hasher);
+        self.use_cdt_steiner.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -4854,10 +4871,6 @@ fn unwrap_periodic_torus_boundary(
         "TORUS_UNWRAP_CHECK: n_bnd={}, u=[{:.4},{:.4}] (range={:.4}), v=[{:.4},{:.4}] (range={:.4}), wrap_u={}, wrap_v={}",
         boundary_uvs.len(), u_min, u_max, u_range, v_min, v_max, v_range, wrap_u, wrap_v,
     );
-    eprintln!(
-        "TORUS_UNWRAP_CHECK_EPRINT: n_bnd={}, u=[{:.4},{:.4}] (range={:.4}), v=[{:.4},{:.4}] (range={:.4}), wrap_u={}, wrap_v={}",
-        boundary_uvs.len(), u_min, u_max, u_range, v_min, v_max, v_range, wrap_u, wrap_v,
-    );
 
     if !wrap_u && !wrap_v {
         // No wrap — return inputs unchanged
@@ -6273,7 +6286,6 @@ pub fn triangulate_face_with_boundary_and_holes(
             // produce a continuous range, allowing earcutr to triangulate
             // correctly.
             if let Surface::Torus(_) = surface {
-                eprintln!("TORUS_PATH: triangulate_face_with_boundary_and_holes (non-UV) _ branch, n_bnd={}", boundary_points.len());
                 let (b3d, buvs, hps, huvs) = unwrap_periodic_torus_boundary(
                     boundary_points, &boundary_uvs, hole_polylines, &hole_uvs,
                 );
@@ -6283,22 +6295,6 @@ pub fn triangulate_face_with_boundary_and_holes(
                 // b3d and hps are unchanged (3D points not affected by UV unwrap)
                 let _ = b3d;
                 let _ = hps;
-
-                // Diagnostic: print unwrapped UV range
-                let u_min = boundary_uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
-                let u_max = boundary_uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
-                let v_min = boundary_uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
-                let v_max = boundary_uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
-                eprintln!(
-                    "TORUS_UNWRAPPED UVs: n={}, u=[{:.4},{:.4}], v=[{:.4},{:.4}]",
-                    boundary_uvs.len(), u_min, u_max, v_min, v_max,
-                );
-                // Print first 10 and last 10 UVs
-                for (i, uv) in boundary_uvs.iter().enumerate() {
-                    if i < 10 || i >= boundary_uvs.len() - 10 {
-                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, uv.u, uv.v);
-                    }
-                }
             }
 
             crate::parametric_domain::triangulate_surface_consistent(
@@ -6603,28 +6599,9 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             // the seam multiple times (e.g., half-torus with full V wrap).
             let (boundary_points_eff, boundary_uvs_eff, hole_polylines_eff, hole_uvs_eff) =
                 if let Surface::Torus(_) = surface {
-                    eprintln!("TORUS_PATH: triangulate_face_with_boundary_and_holes_uv (UV) _ branch, n_bnd={}", boundary_points.len());
-                    let result = unwrap_periodic_torus_boundary(
+                    unwrap_periodic_torus_boundary(
                         boundary_points, boundary_uvs, hole_polylines, hole_uvs,
-                    );
-                    // Print unwrapped UV range
-                    let u_min = result.1.iter().map(|p| p.u).fold(f64::MAX, f64::min);
-                    let u_max = result.1.iter().map(|p| p.u).fold(f64::MIN, f64::max);
-                    let v_min = result.1.iter().map(|p| p.v).fold(f64::MAX, f64::min);
-                    let v_max = result.1.iter().map(|p| p.v).fold(f64::MIN, f64::max);
-                    eprintln!(
-                        "TORUS_UNWRAPPED_RESULT: n={}, u=[{:.4},{:.4}], v=[{:.4},{:.4}]",
-                        result.1.len(), u_min, u_max, v_min, v_max,
-                    );
-                    // Print first 5 UVs
-                    for (i, uv) in result.1.iter().enumerate().take(5) {
-                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, uv.u, uv.v);
-                    }
-                    // Print UVs around index 80-90 (where the wrap might occur)
-                    for i in 80..result.1.len().min(95) {
-                        eprintln!("  uv[{}]: ({:.4}, {:.4})", i, result.1[i].u, result.1[i].v);
-                    }
-                    result
+                    )
                 } else {
                     (
                         boundary_points.to_vec(),

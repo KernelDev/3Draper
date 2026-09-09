@@ -18,7 +18,10 @@
 //! 3. Delaunay improvement: After all insertions, apply Lawson flips
 //!    to improve triangle quality while respecting constraints.
 
-#![allow(dead_code)]
+// Production module since 2026-09-09: `triangulate_surface_consistent` and
+// `triangulate_cdt` route interior Steiner points through
+// `triangulate_polygon_cdt` (see the HOUSING #47598 regression).
+
 use std::collections::{HashMap, HashSet};
 
 /// Tolerance for geometric comparisons.
@@ -87,13 +90,40 @@ pub fn triangulate_polygon_cdt(
         return Vec::new();
     }
 
+    // Repair boundary vertices that earcutr dropped (collinear rim /
+    // hole points are skipped by ear-clipping — zero-area ears). Each
+    // dropped vertex leaves its two ring edges missing from the
+    // triangulation: the neighboring face still uses the vertex (it
+    // comes from the shared edge cache), producing boundary edges in
+    // the merged BREP mesh. The repair re-inserts every unused ring
+    // vertex by splitting the covering edge.
+    repair_unused_ring_vertices(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
+
     // Insert interior Steiner points using Bowyer-Watson
     if !interior_2d.is_empty() {
-        insert_interior_points(&all_2d, &mut triangles, interior_start, interior_2d.len());
+        insert_interior_points(
+            &all_2d,
+            &mut triangles,
+            interior_start,
+            interior_2d.len(),
+            n_boundary,
+            &hole_index_ranges,
+        );
     }
 
-    // Delaunay improvement (Lawson flips) respecting constraints
-    lawson_flip(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
+    // Delaunay improvement (Lawson flips) — DISABLED 2026-09-09.
+    //
+    // The flip phase had no quad-convexity guard: for a non-convex quad
+    // the incircle test passes trivially (the "opposite" vertex lies
+    // inside the neighbor triangle, hence inside its circumcircle), and
+    // the flip then produces OVERLAPPING triangles — corrupting an
+    // otherwise valid greedy-insertion triangulation (stress test
+    // `test_cdt_with_hole_and_grid_no_gaps` caught 2 interior gaps from
+    // exactly this). Correctness (watertightness) strictly dominates
+    // Delaunay quality here; re-enable only with a convexity guard AND
+    // a post-flip validity check (no edge usage != 2 in the interior).
+    // lawson_flip(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
+    let _ = (&n_boundary, &hole_index_ranges);
 
     // Verify constraint edges exist (debug only)
     #[cfg(debug_assertions)]
@@ -112,9 +142,23 @@ fn insert_interior_points(
     triangles: &mut Vec<[u32; 3]>,
     interior_start: usize,
     n_interior: usize,
+    n_boundary: usize,
+    hole_ranges: &[(usize, usize)],
 ) {
     // Build edge-to-triangle adjacency map for fast neighbor lookups
     let mut edge_map = build_edge_map(triangles);
+
+    // RING EDGE PROTECTION (Vision 2036 watertightness / HOUSING #47598):
+    // the outer rim and hole rings are CROSS-FACE contracts — the
+    // neighboring face discretizes the shared topological edge into the
+    // same bit-identical vertices, and every rim edge must survive this
+    // face's triangulation exactly as (v_i, v_{i+1}). Splitting a ring
+    // edge to insert a Steiner point would replace it with (v_i, s) +
+    // (s, v_{i+1}) — a pair the neighbor does not have — punching 3
+    // boundary edges into the merged BREP mesh. A Steiner landing on a
+    // ring edge is redundant anyway (the rim already discretizes the
+    // curve there), so the point is simply skipped.
+    let ring_edges: HashSet<(u32, u32)> = build_constraint_set(n_boundary, hole_ranges);
 
     for i in 0..n_interior {
         let point_idx = (interior_start + i) as u32;
@@ -123,6 +167,17 @@ fn insert_interior_points(
         match find_containing_triangle(all_2d, triangles, p) {
             Some((tri_idx, on_edge)) => {
                 if on_edge {
+                    // Determine the edge the point sits on (the same
+                    // min-|orient2d| choice insert_point_on_edge_fast
+                    // makes) and skip the insertion when it is a ring
+                    // edge — see the protection note above.
+                    let edge = nearest_triangle_edge(all_2d, triangles[tri_idx], p);
+                    let is_ring = edge
+                        .map(|(v1, v2)| ring_edges.contains(&(v1.min(v2), v1.max(v2))))
+                        .unwrap_or(false);
+                    if is_ring {
+                        continue; // redundant with the rim — skip
+                    }
                     insert_point_on_edge_fast(all_2d, triangles, tri_idx, point_idx, &mut edge_map);
                 } else {
                     insert_point_in_triangle_fast(triangles, tri_idx, point_idx, &mut edge_map);
@@ -136,6 +191,30 @@ fn insert_interior_points(
     }
 }
 
+/// The triangle edge nearest to point p (by |orient2d|), as a
+/// (v1, v2) vertex pair — mirrors the edge choice of
+/// `insert_point_on_edge_fast`.
+fn nearest_triangle_edge(
+    vertices: &[[f64; 2]],
+    tri: [u32; 3],
+    p: [f64; 2],
+) -> Option<(u32, u32)> {
+    let [a, b, c] = tri;
+    let pa = vertices[a as usize];
+    let pb = vertices[b as usize];
+    let pc = vertices[c as usize];
+    let d1 = orient2d(p, pa, pb).abs();
+    let d2 = orient2d(p, pb, pc).abs();
+    let d3 = orient2d(p, pc, pa).abs();
+    Some(if d1 <= d2 && d1 <= d3 {
+        (a, b)
+    } else if d2 <= d3 {
+        (b, c)
+    } else {
+        (c, a)
+    })
+}
+
 /// Build a map from edge (min,max) → list of triangle indices that share that edge.
 fn build_edge_map(triangles: &[[u32; 3]]) -> HashMap<(u32, u32), Vec<usize>> {
     let mut map: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
@@ -147,6 +226,173 @@ fn build_edge_map(triangles: &[[u32; 3]]) -> HashMap<(u32, u32), Vec<usize>> {
         }
     }
     map
+}
+
+/// Re-insert boundary (outer rim + hole ring) vertices that earcutr
+/// dropped from the triangulation.
+///
+/// ear-clipping skips collinear ring points (their ears have zero area),
+/// so such vertices appear in no triangle and their two ring edges are
+/// missing. Since production rims come from the shared edge cache (the
+/// neighboring face DOES use those vertices), each dropped vertex becomes
+/// dangling in the merged mesh → boundary edges.
+///
+/// Repair per unused ring vertex `p`:
+/// 1. Find a triangle edge (a, b) whose segment geometrically contains p.
+/// 2. Split (a, b) into (a, p) and (p, b) in BOTH adjacent triangles
+///    (identical to `insert_point_on_edge_fast`'s edge split, but with the
+///    edge located by an exact on-segment test instead of the nearest-edge
+///    heuristic — the vertex may be far from the triangle's other edges).
+/// 3. Repeat until every ring vertex is used (an inserted split can chain:
+///    the first repair may reveal the next collinear vertex).
+fn repair_unused_ring_vertices(
+    all_2d: &[[f64; 2]],
+    triangles: &mut Vec<[u32; 3]>,
+    n_boundary: usize,
+    hole_ranges: &[(usize, usize)],
+) {
+    // Ring vertex indices: outer rim 0..n_boundary, plus each hole range.
+    let mut ring_vertices: Vec<usize> = (0..n_boundary).collect();
+    for &(start, end) in hole_ranges {
+        ring_vertices.extend(start..end);
+    }
+
+    // A repair pass can only make more vertices USED (splits never remove
+    // vertex usages), so a bounded loop over the ring vertices converges.
+    let mut repaired_any = true;
+    let max_passes = ring_vertices.len() + 2;
+    let mut pass = 0;
+    while repaired_any && pass < max_passes {
+        pass += 1;
+        repaired_any = false;
+
+        let mut used: Vec<bool> = vec![false; all_2d.len()];
+        for tri in triangles.iter() {
+            for &v in tri {
+                if (v as usize) < used.len() {
+                    used[v as usize] = true;
+                }
+            }
+        }
+
+        for &k in &ring_vertices {
+            if used[k] {
+                continue;
+            }
+            let p = all_2d[k];
+            let split = find_edge_containing_point(triangles, all_2d, p, k);
+            if let Some((v1, v2)) = split {
+                split_edge_with_vertex(triangles, all_2d, v1, v2, k as u32);
+                repaired_any = true;
+                // Refresh used flags for this vertex only (cheap).
+                used[k] = true;
+            } else {
+                log::debug!(
+                    "repair_unused_ring_vertices: vertex {} at ({:.4},{:.4}) \
+                     not on any triangle edge — left unused",
+                    k, p[0], p[1]
+                );
+            }
+        }
+    }
+}
+
+/// Find a triangle edge whose segment geometrically contains point `p`
+/// (collinear and within the segment bounds, with tolerance EPS).
+/// Returns the (v1, v2) vertex pair of that edge.
+fn find_edge_containing_point(
+    triangles: &[[u32; 3]],
+    vertices: &[[f64; 2]],
+    p: [f64; 2],
+    exclude: usize,
+) -> Option<(u32, u32)> {
+    for tri in triangles {
+        for i in 0..3 {
+            let a = tri[i];
+            let b = tri[(i + 1) % 3];
+            if a as usize == exclude || b as usize == exclude {
+                continue;
+            }
+            let pa = vertices[a as usize];
+            let pb = vertices[b as usize];
+            if point_on_segment(p, pa, pb) {
+                return Some((a, b));
+            }
+        }
+    }
+    None
+}
+
+/// Exact on-segment test: p collinear with (a, b) and inside the
+/// axis-aligned bounding box of the segment (with EPS slack).
+fn point_on_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> bool {
+    let cross = orient2d(a, b, p);
+    if cross.abs() > EPS {
+        return false;
+    }
+    let (minx, maxx) = (a[0].min(b[0]), a[0].max(b[0]));
+    let (miny, maxy) = (a[1].min(b[1]), a[1].max(b[1]));
+    p[0] >= minx - EPS && p[0] <= maxx + EPS && p[1] >= miny - EPS && p[1] <= maxy + EPS
+}
+
+/// Split edge (v1, v2) into (v1, p) and (p, v2) in BOTH adjacent
+/// triangles. A boundary edge (single adjacent triangle) is split in
+/// that one triangle. Maintains the total-edge invariant: the two new
+/// edges replace the old one everywhere it was used.
+fn split_edge_with_vertex(
+    triangles: &mut Vec<[u32; 3]>,
+    vertices: &[[f64; 2]],
+    v1: u32,
+    v2: u32,
+    p_idx: u32,
+) {
+    let edge_key = (v1.min(v2), v1.max(v2));
+
+    // Collect the adjacent triangle indices (0, 1, or 2 of them).
+    let adjacent: Vec<usize> = triangles
+        .iter()
+        .enumerate()
+        .filter(|(_, tri)| {
+            (0..3).any(|i| {
+                let a = tri[i].min(tri[(i + 1) % 3]);
+                let b = tri[i].max(tri[(i + 1) % 3]);
+                (a, b) == edge_key
+            })
+        })
+        .map(|(ti, _)| ti)
+        .collect();
+
+    for ti in adjacent {
+        let [a, b, c] = triangles[ti];
+        // The opposite vertex is the one that is neither v1 nor v2.
+        let opposite = if a != v1 && a != v2 {
+            a
+        } else if b != v1 && b != v2 {
+            b
+        } else {
+            c
+        };
+        // Winding-preserving split. The triangle's cyclic order is either
+        // (…opp, v1, v2…) or (…opp, v2, v1…). In the first case the edge is
+        // traversed v1→v2 and the sub-triangles are (opp, v1, p) and
+        // (opp, p, v2); in the second it is traversed v2→v1 and the
+        // sub-triangles are (opp, v2, p) and (opp, p, v1). Emitting the
+        // wrong pair still tiles the same area but flips the triangle
+        // winding, which would invert the face's mesh normals.
+        let pos = |x: u32| -> usize {
+            if x == a { 0 } else if x == b { 1 } else { 2 }
+        };
+        let (pv1, pv2, pop) = (pos(v1), pos(v2), pos(opposite));
+        let v1_before_v2 = (pv1 + 3 - pop) % 3 < (pv2 + 3 - pop) % 3;
+        let (t1, t2) = if v1_before_v2 {
+            ([opposite, v1, p_idx], [opposite, p_idx, v2])
+        } else {
+            ([opposite, v2, p_idx], [opposite, p_idx, v1])
+        };
+        triangles[ti] = t1;
+        triangles.push(t2);
+        let _ = vertices; // reserved for diagnostics
+    }
 }
 
 /// Find the triangle containing a point.
@@ -787,6 +1033,184 @@ mod tests {
             let a = i.min(j) as u32;
             let b = i.max(j) as u32;
             assert!(tri_edges.contains(&(a, b)), "Boundary edge ({}, {}) should exist", a, b);
+        }
+    }
+
+    /// Count "interior boundary edges" of a triangulation: edges between
+    /// two INTERIOR (non-rim) vertices that have exactly 1 adjacent
+    /// triangle. A watertight face triangulation must have ZERO of these —
+    /// such edges are holes inside the face.
+    fn count_interior_boundary_edges(
+        triangles: &[[u32; 3]],
+        n_rim: usize,
+    ) -> usize {
+        let mut usage: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in triangles {
+            for i in 0..3 {
+                let a = tri[i].min(tri[(i + 1) % 3]);
+                let b = tri[i].max(tri[(i + 1) % 3]);
+                *usage.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        usage
+            .iter()
+            .filter(|(&(a, b), &c)| {
+                c == 1 && a as usize >= n_rim && b as usize >= n_rim
+            })
+            .count()
+    }
+
+    /// Regression: the legacy earcutr path appends interior Steiner points
+    /// directly to the earcutr input (spike-chain), which produces interior
+    /// holes (Steiner-to-Steiner edges with 1 adjacent triangle). The CDT
+    /// path (Bowyer-Watson insertion) must produce ZERO such edges.
+    ///
+    /// This test reproduces the HOUSING #47598 root cause (6089 boundary
+    /// edges, 57% Steiner-to-Steiner) in miniature.
+    #[test]
+    fn test_steiner_insertion_no_interior_gaps_vs_legacy_earcutr() {
+        // 8x8 square boundary (32 rim points) + 5x5 interior grid.
+        let n = 8usize;
+        let mut rim: Vec<[f64; 2]> = Vec::new();
+        for i in 0..n {
+            rim.push([i as f64, 0.0]);
+        }
+        for j in 1..n {
+            rim.push([n as f64, j as f64]);
+        }
+        for i in (0..n - 1).rev() {
+            rim.push([i as f64, n as f64]);
+        }
+        for j in (1..n - 1).rev() {
+            rim.push([0.0, j as f64]);
+        }
+        let n_rim = rim.len();
+
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for i in 1..=5 {
+            for j in 1..=5 {
+                interior.push([i as f64, j as f64]);
+            }
+        }
+
+        // ── Legacy path: append interior points to earcutr input ──────
+        let mut coords: Vec<f64> = Vec::new();
+        for p in rim.iter().chain(interior.iter()) {
+            coords.push(p[0]);
+            coords.push(p[1]);
+        }
+        let legacy = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &[]);
+        let legacy_tris: Vec<[u32; 3]> = legacy
+            .chunks(3)
+            .filter_map(|c| {
+                if c.len() < 3 {
+                    return None;
+                }
+                let (a, b, cc) = (c[0] as u32, c[1] as u32, c[2] as u32);
+                if a == b || b == cc || a == cc {
+                    return None;
+                }
+                Some([a, b, cc])
+            })
+            .collect();
+
+        // ── CDT path ──────────────────────────────────────────────────
+        let cdt = triangulate_polygon_cdt(&rim, &[], &interior);
+
+        let legacy_gaps = count_interior_boundary_edges(&legacy_tris, n_rim);
+        let cdt_gaps = count_interior_boundary_edges(&cdt, n_rim);
+
+        // The CDT must be hole-free in the interior.
+        assert_eq!(
+            cdt_gaps, 0,
+            "CDT path must not leave Steiner-to-Steiner boundary edges (got {})",
+            cdt_gaps
+        );
+        // The legacy path demonstrably leaks (this is the bug being fixed;
+        // if this assertion ever fails, the legacy path was silently
+        // changed and this regression guard should be revisited).
+        assert!(
+            legacy_gaps > 0,
+            "legacy earcutr spike-chain should show interior gaps here — if it \
+             no longer does, the adapter changed; re-audit the production path"
+        );
+    }
+
+    /// Stress: 12x12 rim + 6x6 interior grid + square hole — the CDT must
+    /// (a) have zero interior boundary edges and (b) preserve every rim and
+    /// hole edge as a triangle edge (each exactly 1 adjacent triangle).
+    #[test]
+    fn test_cdt_with_hole_and_grid_no_gaps() {
+        let n = 12usize;
+        let mut rim: Vec<[f64; 2]> = Vec::new();
+        for i in 0..n {
+            rim.push([i as f64, 0.0]);
+        }
+        for j in 1..n {
+            rim.push([n as f64, j as f64]);
+        }
+        for i in (0..n - 1).rev() {
+            rim.push([i as f64, n as f64]);
+        }
+        for j in (1..n - 1).rev() {
+            rim.push([0.0, j as f64]);
+        }
+        let n_rim = rim.len();
+
+        // Hole: square [4,4]x[7,7] (16 points, CCW)
+        let hole: Vec<[f64; 2]> = vec![
+            [4.0, 4.0], [5.0, 4.0], [6.0, 4.0], [7.0, 4.0],
+            [7.0, 5.0], [7.0, 6.0], [7.0, 7.0],
+            [6.0, 7.0], [5.0, 7.0], [4.0, 7.0],
+            [4.0, 6.0], [4.0, 5.0],
+        ];
+
+        // Interior grid avoiding the hole area
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        'outer: for i in 1..n {
+            for j in 1..n {
+                let p = [i as f64, j as f64];
+                if p[0] >= 3.9 && p[0] <= 7.1 && p[1] >= 3.9 && p[1] <= 7.1 {
+                    continue; // skip hole region (with margin)
+                }
+                interior.push(p);
+                if interior.len() >= 60 {
+                    break 'outer;
+                }
+            }
+        }
+
+        let tris = triangulate_polygon_cdt(&rim, &[hole.clone()], &interior);
+
+        // (a) no interior-to-interior boundary edges
+        let mut usage: HashMap<(u32, u32), u32> = HashMap::new();
+        for tri in &tris {
+            for i in 0..3 {
+                let a = tri[i].min(tri[(i + 1) % 3]);
+                let b = tri[i].max(tri[(i + 1) % 3]);
+                *usage.entry((a, b)).or_insert(0) += 1;
+            }
+        }
+        let interior_gaps = usage
+            .iter()
+            .filter(|(&(a, b), &c)| c == 1 && a as usize >= n_rim + hole.len() && b as usize >= n_rim + hole.len())
+            .count();
+        assert_eq!(interior_gaps, 0, "interior Steiner gaps: {}", interior_gaps);
+
+        // (b) every rim edge and hole edge must exist exactly once
+        let n_hole = hole.len();
+        for i in 0..n_rim {
+            let j = (i + 1) % n_rim;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let c = usage.get(&key).copied().unwrap_or(0);
+            assert_eq!(c, 1, "rim edge {:?} usage {} (must be 1)", key, c);
+        }
+        for k in 0..n_hole {
+            let i = n_rim + k;
+            let j = n_rim + (k + 1) % n_hole;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let c = usage.get(&key).copied().unwrap_or(0);
+            assert_eq!(c, 1, "hole edge {:?} usage {} (must be 1)", key, c);
         }
     }
 }

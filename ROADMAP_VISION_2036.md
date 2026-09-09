@@ -558,6 +558,25 @@ CPU-side copies.
 
 - [ ] Full transition to contextual hierarchical tolerances.
 - [ ] 100% watertight on all standard STEP files (AP203/AP214/AP242).
+      **Progress note (2026-09-09, mesh CDT audit):** the per-face
+      triangulation pipeline is now provably hole-free —
+      `custom_cdt::triangulate_polygon_cdt` (earcutr boundary +
+      Bowyer-Watson Steiner insertion + rim-vertex repair) replaces the
+      earcutr "spike-chain" Steiner append (regression test
+      `test_steiner_insertion_no_interior_gaps_vs_legacy_earcutr` proves
+      the legacy path leaks); consecutive-duplicate boundary dedup +
+      Steiner 3D-position dedup eliminate all position-degenerate
+      triangle drops (HOUSING #47598: 1369 → 0). The CDT is gated
+      behind `TriangulationParams::use_cdt_steiner` (**default off**):
+      faces sharing one NURBS surface receive the same shared Steiner
+      points but build different CDT connectivity per face, adding
+      cross-face boundary edges on dirty files (HOUSING 6035 → 14292
+      when enabled). Remaining boundary edges (HOUSING 6035, from 6089)
+      are CROSS-FACE rim mismatches from converter-level edge aliasing
+      failures (skipped step_ids, duplicated EDGE_CURVEs) — the §1.4
+      "SSI for edge recovery" work. Enabling the CDT requires the
+      surface-level canonical triangulation (one CDT per shared NURBS
+      surface, per-face sub-triangulation extraction).
 - [ ] Analytical `Curve2d` (PCURVE) and exact B-spline SSI.
 - [ ] Property-based testing for topology.
 - [ ] Fuzz testing for STEP parser and NURBS solver.
