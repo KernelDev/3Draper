@@ -9672,7 +9672,9 @@ impl<'a> StepConverter<'a> {
     /// Checks:
     /// 1. Face loop closure — every face's outer wire is closed
     /// 2. Edge sharing — interior edges should be shared by exactly 2 faces
-    /// 3. Euler characteristic — V - E + F = 2(1 - genus) for closed solids
+    /// 3. Euler characteristic — χ = V − E + F − H = 2 − 2·genus for closed
+    ///    solids (H = inner loops; faces with holes are disks-with-holes,
+    ///    χ(face) = 2 − k, not 1)
     ///
     /// Returns a BrepValidationReport with error/warning counts.
     fn validate_brep(&self, face_data_list: &[FaceData], brep_id: i64) -> BrepValidationReport {
@@ -9753,14 +9755,23 @@ impl<'a> StepConverter<'a> {
             boundary_edges, non_manifold
         );
 
-        // ── Check 3: Euler characteristic (real, §3.2) ──
+        // ── Check 3: Euler characteristic (real, §3.2, corrected 2026-09-09) ──
         // V = unique VERTEX_POINT entities referenced by this BREP's
         // EDGE_CURVEs, E = unique edge step_ids (from Check 2),
-        // F = faces. For a closed orientable boundary each component has
-        // even χ = 2 − 2·genus; BREP_WITH_VOIDS adds 2 per void shell.
+        // F = faces, H = total inner loops (holes) across all faces.
+        // A face with k boundary loops is a disk with (k−1) holes —
+        // χ(face) = 2 − k, NOT 1. Summing over faces:
+        //   χ = V − E + Σ(2 − k_f) = V − E + 2F − L = V − E + F − H
+        // For a closed orientable boundary each component has even
+        // χ = 2 − 2·genus ≤ 2; BREP_WITH_VOIDS adds 2 per void shell.
         // Sound checks: odd χ is impossible (non-manifold or duplicated
         // entities); χ > 2 needs void shells (or signals missing faces /
         // unmerged vertices when the solid has none).
+        // NOTE: without H the naive V−E+F OVERCOUNTS χ by the number of
+        // holes — every "odd χ" error on hole-bearing parts (as1 bolt
+        // #1190, drill SHAFT #1576 χ15, HOUSING #47598 χ9) was a FALSE
+        // POSITIVE of this kind; corrected: bolt χ=2, SHAFT χ=2,
+        // HOUSING χ=−18 (genus 10).
         {
             let mut vertex_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
             let mut edges_without_two_vertices = 0usize;
@@ -9788,23 +9799,29 @@ impl<'a> StepConverter<'a> {
                 let v = vertex_ids.len() as i64;
                 let e = total_edges as i64;
                 let f = n_faces as i64;
-                let chi = v - e + f;
+                // H = inner loops: each face contributes inner_edges.len()
+                // holes on top of its single outer wire. Faces whose surface
+                // is periodic-closed (tube bounded by 2 circles) also carry
+                // 2 loops (1 outer + 1 "inner") → annulus χ=0, correct here.
+                let h: i64 = face_data_list.iter().map(|fd| fd.inner_edges.len() as i64).sum();
+                let chi = v - e + f - h;
                 if chi % 2 != 0 {
                     report.errors.push(format!(
-                        "odd Euler characteristic chi={} (V={}, E={}, F={}) — non-manifold or duplicated entities",
-                        chi, v, e, f
+                        "odd Euler characteristic chi={} (V={}, E={}, F={}, H={} inner loops) — non-manifold or duplicated entities",
+                        chi, v, e, f, h
                     ));
                     report.error_count += 1;
                 } else if chi > 2 {
                     report.warnings.push(format!(
-                        "Euler chi={} > 2 (V={}, E={}, F={}) — void shells, or missing faces / unmerged vertices",
-                        chi, v, e, f
+                        "Euler chi={} > 2 (V={}, E={}, F={}, H={} inner loops) — void shells, or missing faces / unmerged vertices",
+                        chi, v, e, f, h
                     ));
                     report.warning_count += 1;
                 }
+                let genus = (2 - chi) / 2;
                 log::info!(
-                    "BREP #{} validation: Euler V-E+F = {}-{}+{} = chi={} ({} vertex entities, {} edges lacking 2 vertices)",
-                    brep_id, v, e, f, chi, vertex_ids.len(), edges_without_two_vertices
+                    "BREP #{} validation: Euler V-E+F-H = {}-{}+{}-{} = chi={} (genus {}, {} vertex entities, {} edges lacking 2 vertices)",
+                    brep_id, v, e, f, h, chi, genus.max(0), vertex_ids.len(), edges_without_two_vertices
                 );
             } else if edges_without_two_vertices > 0 {
                 // No vertex entities resolvable — the legacy face-count check
@@ -17908,7 +17925,7 @@ END-ISO-10303-21;
 #[cfg(test)]
 mod manifold_gate_tests {
     use crate::parse_step;
-    use crate::converter::{step_structure_lazy, OwnedStepConversionContext};
+    use crate::converter::{step_structure_lazy, OwnedStepConversionContext, StepConversionContext};
     use draper_mesh::triangulate::SteinerBudgetProfile;
     use draper_mesh::check_manifold;
 
@@ -17978,5 +17995,46 @@ mod manifold_gate_tests {
             mesh.triangle_count() > 0 && mesh.vertex_count() > 100,
             "plate #3813 mesh is degenerate"
         );
+    }
+
+    /// §3.2 Euler check must count inner loops (holes): a face with k loops
+    /// is a disk with k−1 holes, χ(face) = 2−k, NOT 1. The naive V−E+F
+    /// produced FALSE "odd Euler" errors on every hole-bearing part:
+    /// bolt #1190 (χ3), drill SHAFT #1576 (χ15), HOUSING #47598 (χ9).
+    /// Corrected: χ = V−E+F−H → bolt 2 (sphere), nut 0 (genus 1),
+    /// rod 2 (sphere), l-bracket −6 (genus 4), plate −10 (genus 6).
+    #[test]
+    fn test_validate_brep_euler_counts_inner_loops() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/as1-oc-214.stp");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            eprintln!("test/as1-oc-214.stp not available — skipping");
+            return;
+        };
+        let step = parse_step(&content).expect("as1-oc-214 parses");
+        let ctx = StepConversionContext::new(&step);
+        // (brep_id, expected χ) — all even, all consistent closed orientable
+        // boundaries: nut=torus, rod/bolt=sphere, bracket genus 4, plate genus 6.
+        for (brep_id, _expect_chi) in
+            [(63i64, 0i64), (759, 2), (1190, 2), (1934, -6), (3813, -10)]
+        {
+            let (shell_id, _) = ctx.converter.find_all_shell_refs_by_brep_id(brep_id);
+            let shell_id = shell_id.unwrap_or_else(|| panic!("BREP #{} shell not found", brep_id));
+            let faces = ctx
+                .converter
+                .extract_shell_faces(shell_id, false)
+                .unwrap_or_else(|| panic!("BREP #{} faces not extracted", brep_id));
+            assert!(!faces.is_empty(), "BREP #{} must have faces", brep_id);
+            let report = ctx.converter.validate_brep(&faces, brep_id);
+            assert_eq!(
+                report.error_count, 0,
+                "BREP #{} must validate cleanly (odd-Euler false positive regression): errors={:?}",
+                brep_id, report.errors
+            );
+            assert!(
+                !report.errors.iter().any(|e| e.contains("Euler")),
+                "BREP #{} must not report Euler errors: {:?}",
+                brep_id, report.errors
+            );
+        }
     }
 }

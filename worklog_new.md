@@ -4955,3 +4955,83 @@ under-merge на метровых).
   EDGE_CURVE-сущностях).
 - Vision 2036: §3.1 формальный audit + ROADMAP_VISION_2036 чекбоксы
   обновить (1.2/3.2/3.3).
+
+# Сессия 26 — Vision 2036 §3.1 audit + §3.2 Euler: формула χ=V−E+F−H (ложные «odd χ» устранены) (2026-09-09)
+
+## Контекст
+
+Сессия 25 закрыла §1.2/§3.2/§3.3, но оставила: (a) §3.1 формальный audit,
+(b) «HOUSING #47598 χ=9 odd — топологическая аномалия». План: аудит →
+разбор HOUSING → §1.5. Синхронизация: remote был на 6 коммитов вперед
+(сессия 25 уже в remote — 344d402); fast-forward, 936 коммитов.
+
+## 1. Проверка здоровья (после отката песочницы)
+
+- Инструментарий: rustup/.cargo/.rustup WIPES при откате — переустановлен
+  (stable 1.98.1, ~9 мин), `scripts/rust-env.sh` воссоздан.
+- `cargo check --workspace --exclude draper-testing` — чисто (2m17s).
+- Тесты: manifold_gate 2/2, seam_junction_regression 5/5, as1-oc-214
+  nut #63 watertight 0 boundary edges (boundary_diag).
+
+## 2. §3.1 формальный audit → ROADMAP (commit ff7d523)
+
+EdgeDiscretizationCache сверен со спекой: все 3 маппинга есть
+(points_3d; uv_per_face: HashMap<TopoId, Vec<Point2d>>; step_id_aliases
++ resolve_canonical_step_id), гарантия bit-identical через
+deterministic_round (48 бит мантиссы). Сверх спеки: circle_group_n
+(union-faith по co-facial same-axis группам), nurbs_refinement_grids
+(общие Steiner-сетки на NURBS-поверхность), AdaptiveTolerance,
+Phase1/Phase2 aliasing. Чекбоксы 3.1/3.2/3.3 проставлены с evidence.
+
+## 3. HOUSING #47598 «аномалия» → РАЗГАДКА: баг ФОРМУЛЫ Эйлера (не топология!)
+
+Новый инструмент `tools/src/bin/euler_probe.rs` (чистый entity-graph walk,
+без триангуляции) + `brep_dump.rs`. Пошаговая дедукция на drill_top:
+
+- Локально всё идеально: все 686 рёбер — ровно 2 грани с противоположными
+  ориентациями; 0 boundary/0 non-manifold/0 bowtie; 430 вершин — все
+  позиции уникальны; 0 zero-length; 0 разрывов контуров; 1 компонент
+  связности; link-анализ всех вершин — по 1 компоненте (нет pinch).
+- НО χ_naive = 9 (нечётный — математически невозможен). Ручной разбор
+  as1 bolt #1190 (F=7, E=12, V=8, χ=3): болт = head cyl (2 полybrep NURBS)
+  + top annulus (r5..7.5, **2 LOOP'а**) + shaft + диски. Аннулюс ≠ диск!
+- **Формула**: грань с k контурами — диск с (k−1) дырками, χ(face) = 2−k.
+  Суммируя: **χ = V − E + 2F − L = V − E + F − H**, H = L − F.
+- Верификация (10 BREP из 2 файлов, всё сходится):
+  * as1: nut 12-18+8-2=**0** (тор, g=1 ✓ сквозное отверстие!), rod **2**,
+    bolt 8-12+7-1=**2** (сфера — «аномалия» была ложной!), l-bracket
+    28-42+16-8=**−6** (g=4), plate 32-48+18-12=**−10** (g=6);
+  * drill: SHAFT #1576 71-114+58-13=**2**; #16033 **−4** (g=3);
+    #32629 **0** (g=1); HOUSING #47598 430-686+265-27=**−18** (g=10);
+    MIRROR #62542 −18. ВСЕ чётные ✓.
+- Попутно найден и починен баг в самих пробах: `contains("BOUND")` матчил
+  BOUNDED_SURFACE (NURBS) → фантомные loop'ы (у HOUSING L было 349 вместо
+  292). Производственный парсер-face-bound типизирован точно — не затронут.
+
+## 4. Продакшн-фикс + тест
+
+- `validate_brep` Check 3 (converter.rs): H = Σ fd.inner_edges.len();
+  χ = V − E + F − H; сообщения/log с H и genus; док-комментарий обновлён
+  (формула + история ложных срабатываний).
+- Новый тест `test_validate_brep_euler_counts_inner_loops`: 5 BREP as1
+  (nut/rod/bolt/bracket/plate) — error_count=0, никаких Euler-ошибок
+  (раньше bolt давал ERROR).
+- Прогоны: draper-step --lib **139/139** (236s); integration 3/3;
+  compacted_solids 7/7; determinism 1/1; seam 5/5; workspace check чисто.
+
+## Значение
+
+HOUSING 4911 boundary edges в меше — НЕ топологическая поломка BREP
+(граница «чистая», genus 10 корректен): это дефект дискретизации, как у
+GEAR/SHAFT_SLEEVE. §1.2 gate + §3.3 швы остаются правильной защитой.
+Все «odd χ» сигналы §3.2 до сих пор были ложными тревогами — теперь
+ошибка odd χ означает РЕАЛЬную проблему.
+
+## Осталось
+
+- §1.5 Degeneracies (P1): фильтры дегенераций на этапе анализа топологии,
+  замена unwrap/panic в math-модулях на Result, NaN/Inf guard'ы.
+- HOUSING 4911 boundary (mesh-уровень): кандидат — earcutr missing
+  boundary edges (лог «MISSING boundary edge: mesh_idx ...»), т.е.
+  триангуляция внутренней границы, не топология.
+- §1.3 SSI (P1): точные B-сплайн кривые пересечения.

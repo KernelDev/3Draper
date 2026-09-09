@@ -233,10 +233,12 @@ non-cached (`triangulate_brep_detailed`) paths.
 
 **Checks:**
 - [x] 1. Euler characteristic: V - E + F = 2 (for closed solids) —
-      real count from unique VERTEX_POINT entities / edge step_ids / faces;
-      odd χ → Error (non-orientable/duplicates), χ > 2 → warning (void
-      shells / lost faces). Caught drill_top SHAFT #1576 (χ=15) and
-      HOUSING #47598 (χ=9) anomalies before triangulation.
+      **χ = V − E + F − H** (H = inner loops; faces with holes are
+      disks-with-holes, χ(face) = 2 − k, NOT 1 — corrected 2026-09-09:
+      the naive V−E+F produced false "odd χ" errors on every hole-bearing
+      part: as1 bolt #1190 χ3→2, drill SHAFT #1576 χ15→2, HOUSING #47598
+      χ9→−18 = genus 10). odd χ → Error (non-orientable/duplicates),
+      χ > 2 → warning (void shells / lost faces).
 - [x] 2. Face loop closure: every face's wire is closed — covered by
       §1.2 manifold gate + `ManifoldChecker::is_watertight()` after
       triangulation (single retry, deterministic best-result pick).
