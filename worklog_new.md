@@ -4916,3 +4916,42 @@ as1-oc-214 от смешанной дискретизации (2-pt LINE vs N-pt
   (cylinder/sphere/torus/revolution/closed NURBS) и дополнить при нужде.
 - GEAR/SHAFT_SLEEVE: топологически чисты, дыры от дискретизации —
   изучить root cause (возможно, seam UV-полировка).
+
+# Сессия 25 (продолжение 2) — Vision 2036 §3.3: seam gluing во ВСЕ пути + адаптивный толеранс (2026-09-09)
+
+## Контекст
+
+Аудит §3.3: `register_seam_aliases` существовал, но вызывался ТОЛЬКО в
+`triangulate_brep_detailed`. Chunked-путь (WASM-прогрессивный!) и legacy
+`triangulate_brep` не регистрировали швы вовсе; толеранс матчинга был
+hardcoded 0.01 (не масштабо-зависимый: over-merge на моделях <10мм,
+under-merge на метровых).
+
+## Реализация
+
+1. `register_seam_aliases` принимает `seam_tol: f64`; вызовы передают
+   `tol_ctx.sewing_tol` (масштабо-адаптивный, посчитанный
+   `compute_sewing_tolerance` из фактических vertex-gap'ов BREP).
+2. Вызовы добавлены в `prepare_brep_session` (chunked/WASM — раньше
+   швы вообще не склеивались → boundary edges прямо в вебе) и в
+   `triangulate_brep` (legacy-путь, паритет с detailed).
+
+## Верификация
+
+- as1-oc-214: все 18 инстансов остаются 0 boundary edges.
+- drill_top (эффект адаптивного толеранса vs 0.01):
+  GEAR 767→**679** (162 шва поймано), SHAFT_SLEEVE 2778→**2747** (75),
+  DRILL_SHAFT 761→**749** (6); HOUSING 4911→4911 (2 шва, без эффекта).
+  Треугольники: GEAR 2077→1923, SLEEVE 4592→3838 (дедуп после склейки).
+- Тесты: manifold_gate 2/2, determinism_probe 1/1 (33.2s),
+  seam_junction_regression 5/5, test_drill release 1/1 (32.1s — быстрее:
+  меньше T-junction-ремонта), brick 3/3, zentralstaender-группа 6/6,
+  compressor 1/1.
+
+## Осталось
+
+- HOUSING #47598 (4911 boundary, χ=9 odd): топологическая аномалия —
+  кандидат на изучение структуры face loops (возможно, дубли вершин в
+  EDGE_CURVE-сущностях).
+- Vision 2036: §3.1 формальный audit + ROADMAP_VISION_2036 чекбоксы
+  обновить (1.2/3.2/3.3).

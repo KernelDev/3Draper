@@ -4555,6 +4555,21 @@ impl<'a> StepConverter<'a> {
         // no effect on edge discretization.
         edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
 
+        // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
+        // Legacy non-detailed path: register seam aliases BEFORE
+        // discretization so periodic-surface seams yield bit-identical
+        // vertices (parity with triangulate_brep_detailed).
+        {
+            let seam_count =
+                self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
+            if seam_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
+                    brep_id, seam_count
+                );
+            }
+        }
+
         // Pre-compute per-axis-group n for circles — ensures all circles
         // on the same axis (e.g., bottom+top rings of a cone tube face)
         // get the SAME n. Critical for watertightness of multi-radius
@@ -5725,7 +5740,7 @@ impl<'a> StepConverter<'a> {
             // edges at u=0 and u=u_max represent the same geometric boundary (seam).
             // We detect these and register them as aliases BEFORE triangulation,
             // so the edge cache produces bit-identical 3D points for both sides.
-            let seam_count = self.register_seam_aliases(&face_data_list, &mut edge_cache);
+            let seam_count = self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
             if seam_count > 0 {
                 log::info!(
                     "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
@@ -6588,6 +6603,21 @@ impl<'a> StepConverter<'a> {
         // Apply LOD-aware chord tolerance so the Quality slider changes
         // circle/edge sampling density.
         edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+
+        // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
+        // Chunked/progressive path previously MISSED seam aliasing: periodic
+        // surfaces (cylinders, spheres, tori) could get non-identical vertices
+        // on the two sides of a seam, producing boundary edges on the web.
+        {
+            let seam_count =
+                self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
+            if seam_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} seam edge aliases (chunked path, topological gluing before triangulation)",
+                    brep_id, seam_count
+                );
+            }
+        }
 
         // Pre-compute per-axis-group n for circles (watertightness for
         // multi-radius tube faces).
@@ -9807,6 +9837,7 @@ impl<'a> StepConverter<'a> {
         &self,
         face_data_list: &[FaceData],
         edge_cache: &mut EdgeDiscretizationCache,
+        seam_tol: f64,
     ) -> usize {
         let mut seam_count = 0;
 
@@ -9858,11 +9889,15 @@ impl<'a> StepConverter<'a> {
                         continue;
                     }
 
-                    // Check if vertex pairs match (within tolerance)
+                    // Check if vertex pairs match (within the scale-adaptive
+                    // seam tolerance — derived from the BREP's own vertex-gap
+                    // distribution via compute_sewing_tolerance; replaces the
+                    // old hardcoded 0.01 which over-merged on models < 10mm
+                    // and under-merged on meter-scale models).
                     let dist_a = ((ai.x - aj.x).powi(2) + (ai.y - aj.y).powi(2) + (ai.z - aj.z).powi(2)).sqrt();
                     let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
 
-                    if dist_a < 0.01 && dist_b < 0.01 {
+                    if dist_a < seam_tol && dist_b < seam_tol {
                         // These are likely seam edges — register alias
                         edge_cache.register_step_id_alias(*sid_j, *sid_i);
                         seam_count += 1;
