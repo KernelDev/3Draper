@@ -2216,11 +2216,20 @@ fn remove_inconsistent_normal_faces(staged: &mut StagedShell, _params: &HealingP
             continue;
         }
 
-        // Get this face's normal at center
+        // §1.4 fix (2026-09-10): evaluate the normal at a point that
+        // represents the face's TRIMMED patch — the boundary centroid
+        // projected onto the face's own surface — instead of the
+        // parameterization origin (0,0). For sphere/torus patches (and
+        // any trim far from the UV origin) `normal_at(0,0)` describes
+        // geometry the face doesn't cover, and the anti-parallel test
+        // below compares meaningless directions. (The NURBS guard above
+        // exists for exactly this reason — analytical surfaces have the
+        // same failure mode.)
+        let (u_c, v_c) = representative_face_uv(surface, staged.face_edges(fi));
         let this_normal = if staged.face(fi).forward {
-            surface.normal_at(0.0, 0.0)
+            surface.normal_at(u_c, v_c)
         } else {
-            surface.normal_at(0.0, 0.0).neg()
+            surface.normal_at(u_c, v_c).neg()
         };
 
         // Collect adjacent face normals (C5 Stage 7.4b: edge ids from
@@ -2235,10 +2244,13 @@ fn remove_inconsistent_normal_faces(staged: &mut StagedShell, _params: &HealingP
             if !shares_edge { continue; }
 
             if let Some(ref other_surface) = staged.face(fj).surface {
+                // Same §1.4 fix: neighbor normal at ITS representative
+                // patch point, not the parameterization origin.
+                let (oj, ov) = representative_face_uv(other_surface, staged.face_edges(fj));
                 let other_normal = if staged.face(fj).forward {
-                    other_surface.normal_at(0.0, 0.0)
+                    other_surface.normal_at(oj, ov)
                 } else {
-                    other_surface.normal_at(0.0, 0.0).neg()
+                    other_surface.normal_at(oj, ov).neg()
                 };
                 adjacent_normals.push(Vec3d::new(other_normal.x, other_normal.y, other_normal.z));
             }
@@ -2749,6 +2761,34 @@ fn wrap_coord(value: f64, min: f64, max: f64, period: f64) -> f64 {
         v += period;
     }
     v
+}
+
+/// Representative UV of a face's trimmed patch: the 3D centroid of its
+/// boundary edges' midpoints, projected onto the face's own surface.
+/// Used where a face-local sample is required (e.g. inconsistent-normal
+/// detection) — the parameterization origin (0,0) can lie outside the
+/// trimmed patch entirely (§1.4 fix, 2026-09-10).
+fn representative_face_uv(surface: &Surface, edges: &[Edge]) -> (f64, f64) {
+    let mut cx = 0.0f64;
+    let mut cy = 0.0f64;
+    let mut cz = 0.0f64;
+    let mut n = 0usize;
+    for edge in edges {
+        if edge.degenerate {
+            continue;
+        }
+        if let Some(p) = edge.point_at(0.5) {
+            cx += p.x;
+            cy += p.y;
+            cz += p.z;
+            n += 1;
+        }
+    }
+    if n == 0 {
+        return (0.0, 0.0);
+    }
+    let centroid = Point3d::new(cx / n as f64, cy / n as f64, cz / n as f64);
+    surface.project_point(&centroid)
 }
 
 /// Even-odd ray-casting point-in-polygon test.
@@ -4296,6 +4336,37 @@ mod tests {
             "never-worsen: aggressive healing must not remove faces"
         );
         assert_eq!(report.small_faces_removed, 0);
+    }
+
+    /// §1.4: representative_face_uv must return a point that represents
+    /// the face's TRIMMED patch, not the parameterization origin — a
+    /// cylinder band at z in [3,5] yields v ~ 4 (band middle), never the
+    /// surface origin v = 0.
+    #[test]
+    fn test_representative_face_uv_trim_centroid() {
+        use draper_geometry::{Circle, CylinderSurface};
+
+        let mk_band_edges = |radius: f64, z0: f64, z1: f64| -> Vec<Edge> {
+            let mk_ring = |z: f64| {
+                let circle = Circle::new_xy(Point3d::new(0.0, 0.0, z), radius);
+                Edge::new(Curve3d::Circle(circle), (0.0, 2.0 * std::f64::consts::PI))
+            };
+            vec![mk_ring(z0), mk_ring(z1)]
+        };
+
+        let surface = Surface::Cylinder(CylinderSurface::new_z(1.0));
+        let edges = mk_band_edges(1.0, 3.0, 5.0);
+        let (u, v) = representative_face_uv(&surface, &edges);
+        assert!(
+            (v - 4.0).abs() < 0.1,
+            "band centroid should project to v ~ 4.0, got {}",
+            v
+        );
+        assert!(u.is_finite());
+
+        // Degenerate input: no usable edges -> parameterization origin.
+        let (u0, v0) = representative_face_uv(&surface, &[]);
+        assert_eq!((u0, v0), (0.0, 0.0));
     }
 
     /// C5 Stage 7.5 — `validate_and_fix` on a mirror-free (store-only)
