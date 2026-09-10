@@ -53,12 +53,14 @@ fn main() {
     // instead convert the pending instance directly through ctx and grab
     // the solid from its faces (triangulate_pending returns mesh only).
     // Fallback: use the solid whose step face ids overlap the target.
+    // (C5 7.6b: Face no longer carries step_entity_id — the STEP ids ride
+    // the owning edges, resolved through the Solid's edge store.)
     let _ = ctx;
     let solid = solids
         .iter()
         .find(|s| {
             s.faces().iter().any(|f| {
-                f.step_entity_id.is_some()
+                s.face_edges(f).iter().any(|e| e.step_entity_id.is_some())
             })
         })
         .cloned()
