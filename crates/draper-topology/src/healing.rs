@@ -95,6 +95,22 @@ pub struct HealingParams {
     /// or removed. This is an expensive operation (O(n²) in face count).
     pub fix_self_intersections: bool,
 
+    /// Whether to REMOVE faces involved in self-intersections (§1.4
+    /// never-worsen). Default **false**: detection is report-only.
+    ///
+    /// Rationale (HOUSING #47598, 2026-09-10): the legacy removal
+    /// ("remove the face with fewer edges") deleted 27 valid faces from
+    /// a closed shell on the strength of 2579 detection hits that were
+    /// overwhelmingly false positives — boundary points projecting onto
+    /// the UNTRIMMED extension of a neighbor's surface. Removing any face
+    /// from a closed shell orphans the shared edges of its neighbors and
+    /// opens mesh holes (5730 orphan boundary edges in HOUSING).
+    /// The detection itself now verifies that the projected point falls
+    /// inside the neighbor's trimmed UV domain; removal additionally
+    /// requires this opt-in flag for callers that explicitly want the
+    /// destructive behavior.
+    pub remove_self_intersecting_faces: bool,
+
     /// Whether to remove faces with inconsistent normals that can't be
     /// fixed by simple flipping. This catches faces whose normals disagree
     /// with adjacent faces even after the orientation repair step.
@@ -121,6 +137,7 @@ impl Default for HealingParams {
             merge_faces: true,
             propagate_tolerances: true,
             fix_self_intersections: false,
+            remove_self_intersecting_faces: false,
             remove_inconsistent_normals: false,
             tolerance_context: None,
             tolerance: 1e-6,
@@ -162,6 +179,7 @@ impl HealingParams {
             merge_faces: false,        // Conservative: don't remove faces
             propagate_tolerances: true, // Safe: ensures consistency
             fix_self_intersections: false, // Expensive, may remove geometry
+            remove_self_intersecting_faces: false, // §1.4 never-worsen
             remove_inconsistent_normals: false, // May remove geometry
             tolerance_context: None,
             tolerance: 1e-6,
@@ -183,7 +201,9 @@ impl HealingParams {
     /// This is the recommended preset for visualization workflows where
     /// geometry correctness matters more than preserving every tiny feature.
     /// Compared to `default()`:
-    /// - Enables `fix_self_intersections` (removes intersecting faces)
+    /// - Enables `fix_self_intersections` (DETECTS and REPORTS intersecting
+    ///   faces; removal additionally requires
+    ///   `remove_self_intersecting_faces` — default false, §1.4 never-worsen)
     /// - Enables `remove_inconsistent_normals` (removes faces with bad normals)
     /// - Sets `min_face_area` to 1e-10 (removes sub-micron faces)
     /// - Sets `max_aspect_ratio` to 500 (removes extreme slivers)
@@ -202,6 +222,10 @@ impl HealingParams {
             merge_faces: true,
             propagate_tolerances: true,
             fix_self_intersections: true,
+            // §1.4 never-worsen: closed-shell face removal opens mesh
+            // holes (HOUSING #47598: 27 faces / 5730 orphan boundary
+            // edges). Detection is report-only unless explicitly opted in.
+            remove_self_intersecting_faces: false,
             remove_inconsistent_normals: true,
             tolerance_context: None,
             tolerance: 1e-6,
@@ -2089,6 +2113,23 @@ fn fix_self_intersections_heal(staged: &mut StagedShell, params: &HealingParams,
 
     report.self_intersections = intersections.len() as u32;
 
+    // §1.4 never-worsen: closed-shell face removal orphans the shared
+    // edges of the removed face's neighbors and opens mesh holes
+    // (HOUSING #47598: 27 faces removed → 5730 orphan boundary edges).
+    // Detection is report-only unless the caller explicitly opts in.
+    if !params.remove_self_intersecting_faces {
+        report.add_msg(format!(
+            "Detected {} self-intersection hits across {} face pairs (report-only; removal disabled — §1.4 never-worsen)",
+            intersections.len(),
+            intersections.iter().map(|si| (si.face_a, si.face_b)).collect::<std::collections::HashSet<_>>().len()
+        ));
+        log::warn!(
+            "healing: {} self-intersection hits detected — report-only (remove_self_intersecting_faces=false)",
+            intersections.len()
+        );
+        return;
+    }
+
     // Collect the set of face indices to remove: for each intersection,
     // remove the face with fewer edges (it's likely the "intruder").
     // NEVER remove NURBS faces — they represent complex geometry (fillets,
@@ -2311,8 +2352,21 @@ fn detect_self_intersections_impl(
 ) -> Vec<SelfIntersection> {
     let mut intersections = Vec::new();
 
-    // Build a set of shared edge pairs to skip
     let n_faces = faces.len();
+
+    // §1.4 fix (2026-09-10): precompute a per-face probe — 3D boundary
+    // samples + the face's own trimmed UV domain (seam-unwrapped). The
+    // domain is what the legacy detector was missing: a boundary point of
+    // face A projecting onto face B's UNTRIMMED surface extension was
+    // counted as an "intersection" even though face B's actual patch lies
+    // elsewhere (HOUSING #47598: 2579 phantom hits → 27 valid faces
+    // removed → 5730 orphan boundary edges).
+    let probes: Vec<FaceProbe> = (0..n_faces)
+        .map(|fi| {
+            let surface = faces[fi].surface.as_ref();
+            build_face_probe(&faces[fi], &working[fi], surface, 8)
+        })
+        .collect();
 
     for i in 0..n_faces {
         for j in (i + 1)..n_faces {
@@ -2321,6 +2375,12 @@ fn detect_self_intersections_impl(
 
             // Skip if faces share an edge — they're supposed to meet there
             if faces_share_edge(face_a, &working[i], face_b, &working[j]) {
+                continue;
+            }
+
+            // Faces without a surface can't participate in a surface
+            // intersection test.
+            if face_a.surface.is_none() || face_b.surface.is_none() {
                 continue;
             }
 
@@ -2337,7 +2397,8 @@ fn detect_self_intersections_impl(
 
             // Sample boundary points of face A and check distance to face B's surface
             check_face_pair_intersection(
-                i, j, face_a, &working[i], face_b, &working[j], tolerance, &mut intersections,
+                i, j, &probes[i], face_a.surface.as_ref(),
+                &probes[j], face_b.surface.as_ref(), tolerance, &mut intersections,
             );
         }
     }
@@ -2383,76 +2444,428 @@ fn face_bounding_box(_face: &Face, edges: &[Edge]) -> (Point3d, Point3d) {
     }
 }
 
-/// Check for intersections between boundary curves of two faces.
-/// C5 Stage 7.4b: edge geometry arrives as explicit lists.
-fn check_face_pair_intersection(
-    face_a_idx: usize,
-    face_b_idx: usize,
-    face_a: &Face,
-    edges_a: &[Edge],
-    face_b: &Face,
-    edges_b: &[Edge],
-    tolerance: f64,
-    intersections: &mut Vec<SelfIntersection>,
-) {
-    let tol_sq = tolerance * tolerance;
+/// Per-face precomputed data for self-intersection detection (§1.4 fix).
+///
+/// Holds the face's boundary samples in 3D (for surface projection tests
+/// and boundary-contact distance tests) and the face's own **trimmed UV
+/// domain** — the boundary projected into the surface's parameter space,
+/// seam-unwrapped for periodic surfaces. The domain is what turns "the
+/// point lies on the (infinite) surface" into "the point lies on the
+/// face's actual patch".
+struct FaceProbe {
+    /// Boundary sample points in 3D (wire order, all wires).
+    boundary_pts: Vec<Point3d>,
+    /// Boundary polyline segments in 3D (consecutive samples within each
+    /// edge's run) — for the boundary-contact distance test.
+    boundary_segs: Vec<(Point3d, Point3d)>,
+    /// Trimmed UV domain: outer loop (seam-unwrapped).
+    uv_outer: Vec<[f64; 2]>,
+    /// Trimmed UV domain: hole loops (aligned to the outer loop's window).
+    uv_holes: Vec<Vec<[f64; 2]>>,
+    /// UV window of the unwrapped outer loop: (u_min, u_max, v_min, v_max).
+    uv_window: [f64; 4],
+    /// u wrap period (None = not periodic in u).
+    u_period: Option<f64>,
+    /// v wrap period (None = not periodic in v).
+    v_period: Option<f64>,
+    /// Whether a usable UV domain could be built (>=3 outer points).
+    has_domain: bool,
+}
 
-    // Collect edge sample points from both faces
-    let pts_a = sample_face_boundary(edges_a, 8);
-    let pts_b = sample_face_boundary(edges_b, 8);
-
-    // Check face A boundary points against face B's surface
-    if let Some(ref surface_b) = face_b.surface {
-        for p in &pts_a {
-            let (u, v) = surface_b.project_point(p);
-            let proj = surface_b.point_at(u, v);
-            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
-            if dist_sq < tol_sq && dist_sq > 1e-20 {
-                // Point from face A lies on face B's surface — potential intersection
-                // But we need to check if it's within face B's boundary
-                intersections.push(SelfIntersection {
-                    face_a: face_a_idx,
-                    face_b: face_b_idx,
-                    point: *p,
-                    distance: dist_sq.sqrt(),
-                });
+impl FaceProbe {
+    /// Whether a UV coordinate lies inside the face's trimmed domain
+    /// (inside the outer loop, outside every hole loop). Periodic
+    /// coordinates are wrapped into the unwrapped outer-loop window.
+    fn contains_uv(&self, u: f64, v: f64) -> bool {
+        if !self.has_domain {
+            // Cannot verify — treat as OUTSIDE (never-worsen: a missed
+            // true intersection is preferable to a phantom one).
+            return false;
+        }
+        let u_t = match self.u_period {
+            Some(p) => wrap_coord(u, self.uv_window[0], self.uv_window[1], p),
+            None => u,
+        };
+        let v_t = match self.v_period {
+            Some(p) => wrap_coord(v, self.uv_window[2], self.uv_window[3], p),
+            None => v,
+        };
+        if !point_in_polygon([u_t, v_t], &self.uv_outer) {
+            return false;
+        }
+        for hole in &self.uv_holes {
+            if point_in_polygon([u_t, v_t], hole) {
+                return false;
             }
         }
+        true
     }
 
-    // Check face B boundary points against face A's surface
-    if let Some(ref surface_a) = face_a.surface {
-        for p in &pts_b {
-            let (u, v) = surface_a.project_point(p);
-            let proj = surface_a.point_at(u, v);
-            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
-            if dist_sq < tol_sq && dist_sq > 1e-20 {
-                intersections.push(SelfIntersection {
-                    face_a: face_a_idx,
-                    face_b: face_b_idx,
-                    point: *p,
-                    distance: dist_sq.sqrt(),
-                });
+    /// Squared 3D distance from a point to the face's boundary polyline.
+    fn boundary_distance_sq(&self, p: &Point3d) -> f64 {
+        let mut best = f64::MAX;
+        for (a, b) in &self.boundary_segs {
+            best = best.min(point_segment_dist_sq(p, a, b));
+            if best < 1e-24 {
+                break;
+            }
+        }
+        best
+    }
+}
+
+/// u-direction wrap period of a surface (None = not periodic in u).
+fn surface_u_period(surface: &Surface) -> Option<f64> {
+    match surface {
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_)
+        | Surface::Torus(_) | Surface::Revolution(_) => {
+            let (u0, u1, _, _) = surface.natural_uv_domain();
+            Some(u1 - u0)
+        }
+        Surface::Nurbs(n) if n.u_closed => {
+            let (u0, u1, _, _) = surface.natural_uv_domain();
+            Some(u1 - u0)
+        }
+        Surface::Offset(o) if o.base.is_u_periodic() => {
+            let (u0, u1, _, _) = o.base.natural_uv_domain();
+            Some(u1 - u0)
+        }
+        _ => None,
+    }
+}
+
+/// v-direction wrap period of a surface (None = not periodic in v).
+/// v is genuinely periodic only for the torus and v-closed NURBS — the
+/// sphere's v in [0, pi] is pole-clamped, not a wrap.
+fn surface_v_period(surface: &Surface) -> Option<f64> {
+    match surface {
+        Surface::Torus(_) => {
+            let (_, _, v0, v1) = surface.natural_uv_domain();
+            Some(v1 - v0)
+        }
+        Surface::Nurbs(n) if n.v_closed => {
+            let (_, _, v0, v1) = surface.natural_uv_domain();
+            Some(v1 - v0)
+        }
+        Surface::Offset(o) if o.base.is_v_periodic() => {
+            let (_, _, v0, v1) = o.base.natural_uv_domain();
+            Some(v1 - v0)
+        }
+        _ => None,
+    }
+}
+
+/// Sample one wire's edges in loop order: 3D points + segments + UV image
+/// on the face's own surface. Coedge orientation is honored (reversed
+/// coedges sample their edge backwards) so the UV polygon forms a proper
+/// ring.
+fn sample_wire_uv(
+    wire: &Wire,
+    by_id: &std::collections::HashMap<TopoId, &Edge>,
+    surface: Option<&Surface>,
+    n_samples: usize,
+    pts_3d: &mut Vec<Point3d>,
+    segs_3d: &mut Vec<(Point3d, Point3d)>,
+    uv_out: &mut Vec<[f64; 2]>,
+) {
+    for coedge in &wire.coedges {
+        let edge = match by_id.get(&coedge.edge) {
+            Some(e) => *e,
+            None => continue,
+        };
+        if edge.degenerate {
+            continue;
+        }
+        let curve = match &edge.curve {
+            Some(c) => c,
+            None => continue,
+        };
+        let (tmin, tmax) = edge.param_range;
+        let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
+        let mut prev: Option<Point3d> = None;
+        for i in 0..n_samples {
+            // Reversed coedge: sample the param range backwards so the
+            // wire's loop order is preserved in the polygon ring.
+            let frac = if coedge.forward {
+                i as f64 / n_samples as f64
+            } else {
+                (n_samples - 1 - i) as f64 / n_samples as f64
+            };
+            let t = pmin + frac * (pmax - pmin);
+            let p3 = curve.point_at(t);
+            pts_3d.push(p3);
+            if let Some(q) = prev {
+                segs_3d.push((q, p3));
+            }
+            prev = Some(p3);
+            if let Some(s) = surface {
+                let (u, v) = s.project_point(&p3);
+                uv_out.push([u, v]);
             }
         }
     }
 }
 
-/// Sample points along a face's boundary edges.
-fn sample_face_boundary(edges: &[Edge], n_samples: usize) -> Vec<Point3d> {
-    let mut points = Vec::new();
-    for edge in edges {
-        if edge.degenerate { continue; }
-        if let Some(ref curve) = edge.curve {
-            let (tmin, tmax) = edge.param_range;
-            let (pmin, pmax) = if tmin <= tmax { (tmin, tmax) } else { (tmax, tmin) };
-            for i in 0..n_samples {
-                let t = pmin + (i as f64 / n_samples as f64) * (pmax - pmin);
-                points.push(curve.point_at(t));
+/// Build the per-face probe: boundary samples + trimmed UV domain.
+fn build_face_probe(
+    face: &Face,
+    edges: &[Edge],
+    surface: Option<&Surface>,
+    n_samples: usize,
+) -> FaceProbe {
+    let mut boundary_pts: Vec<Point3d> = Vec::new();
+    let mut boundary_segs: Vec<(Point3d, Point3d)> = Vec::new();
+    let mut uv_outer: Vec<[f64; 2]> = Vec::new();
+    let mut uv_holes: Vec<Vec<[f64; 2]>> = Vec::new();
+
+    let by_id: std::collections::HashMap<TopoId, &Edge> =
+        edges.iter().map(|e| (e.id, e)).collect();
+
+    let u_period = surface.and_then(surface_u_period);
+    let v_period = surface.and_then(surface_v_period);
+
+    if let Some(wire) = &face.outer_wire {
+        sample_wire_uv(
+            wire, &by_id, surface, n_samples,
+            &mut boundary_pts, &mut boundary_segs, &mut uv_outer,
+        );
+        for hw in &face.inner_wires {
+            let mut hole_uv = Vec::new();
+            let mut hole_pts = Vec::new();
+            let mut hole_segs = Vec::new();
+            sample_wire_uv(
+                hw, &by_id, surface, n_samples,
+                &mut hole_pts, &mut hole_segs, &mut hole_uv,
+            );
+            boundary_pts.extend(hole_pts);
+            boundary_segs.extend(hole_segs);
+            uv_holes.push(hole_uv);
+        }
+    } else if !edges.is_empty() && surface.is_some() {
+        // Wire-less face: treat the flat edge list as a single (outer)
+        // loop — the best available approximation of the trim.
+        let mut wire = Wire::new(Vec::new());
+        for e in edges {
+            let coedge = CoEdge::new(e.id, true);
+            wire.coedges.push(coedge);
+        }
+        sample_wire_uv(
+            &wire, &by_id, surface, n_samples,
+            &mut boundary_pts, &mut boundary_segs, &mut uv_outer,
+        );
+    }
+
+    // Seam-unwrap the outer loop, then align hole loops to its window.
+    unwrap_uv_loop(&mut uv_outer, u_period, v_period);
+    for hole in uv_holes.iter_mut() {
+        unwrap_uv_loop(hole, u_period, v_period);
+        if let Some(p) = u_period {
+            align_uv_axis(hole, 0, p);
+        }
+        if let Some(p) = v_period {
+            align_uv_axis(hole, 1, p);
+        }
+    }
+
+    let mut uv_window = [0.0f64; 4];
+    let has_domain = uv_outer.len() >= 3;
+    if has_domain {
+        let (mut u_min, mut u_max) = (f64::MAX, f64::MIN);
+        let (mut v_min, mut v_max) = (f64::MAX, f64::MIN);
+        for pt in &uv_outer {
+            u_min = u_min.min(pt[0]);
+            u_max = u_max.max(pt[0]);
+            v_min = v_min.min(pt[1]);
+            v_max = v_max.max(pt[1]);
+        }
+        uv_window = [u_min, u_max, v_min, v_max];
+    }
+
+    FaceProbe {
+        boundary_pts,
+        boundary_segs,
+        uv_outer,
+        uv_holes,
+        uv_window,
+        u_period,
+        v_period,
+        has_domain,
+    }
+}
+
+/// Unwrap a UV loop across seams: consecutive deltas larger than half the
+/// period are shifted by +/- period, producing a contiguous loop.
+fn unwrap_uv_loop(pts: &mut [[f64; 2]], u_period: Option<f64>, v_period: Option<f64>) {
+    if let Some(p) = u_period {
+        for i in 1..pts.len() {
+            let d = pts[i][0] - pts[i - 1][0];
+            if d > 0.5 * p {
+                pts[i][0] -= p;
+            } else if d < -0.5 * p {
+                pts[i][0] += p;
             }
         }
     }
-    points
+    if let Some(p) = v_period {
+        for i in 1..pts.len() {
+            let d = pts[i][1] - pts[i - 1][1];
+            if d > 0.5 * p {
+                pts[i][1] -= p;
+            } else if d < -0.5 * p {
+                pts[i][1] += p;
+            }
+        }
+    }
+}
+
+/// Shift a loop's `axis` coordinate (0 = u, 1 = v) by +/- period until its
+/// range overlaps [0, period] — normalizing hole loops (unwrapped from
+/// their own start point) onto the outer loop's coordinate window.
+fn align_uv_axis(pts: &mut [[f64; 2]], axis: usize, period: f64) {
+    let min = pts.iter().map(|p| p[axis]).fold(f64::MAX, f64::min);
+    let max = pts.iter().map(|p| p[axis]).fold(f64::MIN, f64::max);
+    let mut shift = 0.0f64;
+    while max + shift > period * 1.5 {
+        shift -= period;
+    }
+    while min + shift < -period * 0.5 {
+        shift += period;
+    }
+    if shift != 0.0 {
+        for p in pts.iter_mut() {
+            p[axis] += shift;
+        }
+    }
+}
+
+/// Wrap a coordinate into the window [min - p/2, max + p/2] by +/- period
+/// shifts (for testing a periodic projection against an unwrapped loop).
+fn wrap_coord(value: f64, min: f64, max: f64, period: f64) -> f64 {
+    let mut v = value;
+    while v >= max + 0.5 * period {
+        v -= period;
+    }
+    while v < min - 0.5 * period {
+        v += period;
+    }
+    v
+}
+
+/// Even-odd ray-casting point-in-polygon test.
+fn point_in_polygon(pt: [f64; 2], poly: &[[f64; 2]]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi) = (poly[i][0], poly[i][1]);
+        let (xj, yj) = (poly[j][0], poly[j][1]);
+        if (yi > pt[1]) != (yj > pt[1]) {
+            let x_cross = (xj - xi) * (pt[1] - yi) / (yj - yi) + xi;
+            if pt[0] < x_cross {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Squared distance from a 3D point to a segment.
+fn point_segment_dist_sq(p: &Point3d, a: &Point3d, b: &Point3d) -> f64 {
+    let abx = b.x - a.x;
+    let aby = b.y - a.y;
+    let abz = b.z - a.z;
+    let len2 = abx * abx + aby * aby + abz * abz;
+    if len2 < 1e-24 {
+        let dx = p.x - a.x;
+        let dy = p.y - a.y;
+        let dz = p.z - a.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+    let apx = p.x - a.x;
+    let apy = p.y - a.y;
+    let apz = p.z - a.z;
+    let t = ((apx * abx + apy * aby + apz * abz) / len2).clamp(0.0, 1.0);
+    let dx = apx - t * abx;
+    let dy = apy - t * aby;
+    let dz = apz - t * abz;
+    dx * dx + dy * dy + dz * dz
+}
+
+/// Check for intersections between boundary curves of two faces.
+///
+/// §1.4 fix (2026-09-10): a boundary point of face A that projects onto
+/// face B's surface within tolerance is only counted when it lands inside
+/// face B's **trimmed UV domain** (projections onto the untrimmed surface
+/// extension are phantom hits), and when it is not merely in boundary
+/// CONTACT with face B (faces meeting at a shared vertex / touching rims
+/// project onto each other's surfaces by construction — that is normal
+/// B-Rep adjacency, not a self-intersection).
+#[allow(clippy::too_many_arguments)]
+fn check_face_pair_intersection(
+    face_a_idx: usize,
+    face_b_idx: usize,
+    probe_a: &FaceProbe,
+    surface_a: Option<&Surface>,
+    probe_b: &FaceProbe,
+    surface_b: Option<&Surface>,
+    tolerance: f64,
+    intersections: &mut Vec<SelfIntersection>,
+) {
+    let tol_sq = tolerance * tolerance;
+
+    // Check face A boundary points against face B's surface + trim
+    if let Some(surface_b) = surface_b {
+        for p in &probe_a.boundary_pts {
+            let (u, v) = surface_b.project_point(p);
+            let proj = surface_b.point_at(u, v);
+            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
+            if dist_sq < tol_sq {
+                // §1.4: the projection must land on face B's actual patch,
+                // not its untrimmed extension.
+                if !probe_b.contains_uv(u, v) {
+                    continue;
+                }
+                // §1.4: boundary contact (shared vertex, touching rims) is
+                // normal adjacency — not an intersection.
+                if probe_b.boundary_distance_sq(p) < tol_sq {
+                    continue;
+                }
+                intersections.push(SelfIntersection {
+                    face_a: face_a_idx,
+                    face_b: face_b_idx,
+                    point: *p,
+                    distance: dist_sq.sqrt(),
+                });
+            }
+        }
+    }
+
+    // Check face B boundary points against face A's surface + trim
+    if let Some(surface_a) = surface_a {
+        for p in &probe_b.boundary_pts {
+            let (u, v) = surface_a.project_point(p);
+            let proj = surface_a.point_at(u, v);
+            let dist_sq = (p.x - proj.x).powi(2) + (p.y - proj.y).powi(2) + (p.z - proj.z).powi(2);
+            if dist_sq < tol_sq {
+                if !probe_a.contains_uv(u, v) {
+                    continue;
+                }
+                if probe_a.boundary_distance_sq(p) < tol_sq {
+                    continue;
+                }
+                intersections.push(SelfIntersection {
+                    face_a: face_a_idx,
+                    face_b: face_b_idx,
+                    point: *p,
+                    distance: dist_sq.sqrt(),
+                });
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -3727,6 +4140,162 @@ mod tests {
         let explicit_cross =
             detect_self_intersections_with_edges(&crossing, &working_cross, crossing_tol);
         assert!(!explicit_cross.is_empty(), "crossing pair must be detected");
+    }
+
+    /// §1.4 (2026-09-10): boundary points projecting onto a neighbor's
+    /// UNTRIMMED surface extension must NOT be counted as self-
+    /// intersections. Two coaxial cylinder bands at different heights
+    /// (radii within tolerance) — face A's rings lie on face B's infinite
+    /// cylinder surface, but outside B's trimmed v-range. The legacy
+    /// detector flagged these (HOUSING #47598: 2579 phantom hits → 27
+    /// valid faces removed → 5730 orphan boundary edges).
+    #[test]
+    fn test_self_intersection_untrimmed_projection_not_flagged() {
+        use draper_geometry::{Circle, CylinderSurface};
+
+        let build_band = |radius: f64, z0: f64, z1: f64| -> (Face, Vec<Edge>) {
+            let surface = Surface::Cylinder(CylinderSurface::new_z(radius));
+            let mk_ring = |z: f64| {
+                let circle = Circle::new_xy(Point3d::new(0.0, 0.0, z), radius);
+                Edge::new(Curve3d::Circle(circle), (0.0, 2.0 * std::f64::consts::PI))
+            };
+            let bottom = mk_ring(z0);
+            let top = mk_ring(z1);
+            let coedges = vec![
+                CoEdge::new(bottom.id, true),
+                CoEdge::new(top.id, false),
+            ];
+            let wire = Wire::new(coedges);
+            let face = Face::new(surface, wire);
+            (face, vec![bottom, top])
+        };
+
+        // Band A: z in [0, 2]; Band B: z in [3, 5], radius +0.0002 —
+        // every ring of A is within tol of B's surface, but outside B's
+        // trimmed band (and vice versa).
+        let (face_a, edges_a) = build_band(1.0, 0.0, 2.0);
+        let (face_b, edges_b) = build_band(1.0002, 3.0, 5.0);
+
+        let shell = Shell::new(vec![face_a, face_b]);
+        let working = vec![edges_a, edges_b];
+        let hits = detect_self_intersections_with_edges(&shell, &working, 0.01);
+        assert!(
+            hits.is_empty(),
+            "untrimmed-extension projections must not be flagged, got {} hits: {:?}",
+            hits.len(),
+            hits.iter().map(|h| h.point).collect::<Vec<_>>()
+        );
+    }
+
+    /// §1.4: faces meeting at a shared VERTEX (no shared topological
+    /// edge) project onto each other's surfaces by construction — normal
+    /// B-Rep adjacency, not a self-intersection. A's edge lies IN B's
+    /// plane; its samples must be rejected by the trimmed-domain test.
+    #[test]
+    fn test_self_intersection_vertex_contact_not_flagged() {
+        // A: triangle in the z=0 plane (x, y >= 0).
+        // B: triangle in the y=0 plane (x <= 0) — shares ONLY the vertex
+        // (0,0,0) with A. A's edge (0,0,0)->(5,0,0) lies in B's plane, so
+        // every sample projects onto B's surface at distance ~0 — but
+        // lands OUTSIDE B's trimmed triangle.
+        let (face_a, edges_a) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(5.0, 0.0, 0.0),
+            Point3d::new(0.0, 5.0, 0.0),
+        ])
+            .expect("face A");
+        let (face_b, edges_b) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(-5.0, 0.0, 0.0),
+            Point3d::new(0.0, 0.0, 5.0),
+        ])
+            .expect("face B");
+
+        let shell = Shell::new(vec![face_a, face_b]);
+        let working = vec![edges_a, edges_b];
+        let hits = detect_self_intersections_with_edges(&shell, &working, 0.5);
+        assert!(
+            hits.is_empty(),
+            "vertex-adjacent faces must not be flagged, got {} hits: {:?}",
+            hits.len(),
+            hits.iter().map(|h| h.point).collect::<Vec<_>>()
+        );
+    }
+
+    /// §1.4: two faces whose boundary edges are GEOMETRICALLY COINCIDENT
+    /// but topologically DISTINCT (the "duplicate EDGE_CURVE" case —
+    /// no shared TopoId). The coincident samples project inside the
+    /// neighbor's domain but sit ON its boundary polyline — the
+    /// boundary-contact guard must skip them (they are stitching
+    /// candidates, not self-intersections).
+    #[test]
+    fn test_self_intersection_duplicate_boundary_contact_not_flagged() {
+        // A: triangle in the z=0 plane; its edge (0,0,0)->(5,0,0).
+        // B: quad in the y=0 plane reaching BELOW z=0, carrying its own
+        // (geometrically identical) edge (0,0,0)->(5,0,0).
+        let (face_a, edges_a) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(5.0, 0.0, 0.0),
+            Point3d::new(0.0, 5.0, 0.0),
+        ])
+            .expect("face A");
+        let (face_b, edges_b) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(5.0, 0.0, 0.0),
+            Point3d::new(5.0, 0.0, -10.0),
+            Point3d::new(0.0, 0.0, -10.0),
+        ])
+            .expect("face B");
+
+        let shell = Shell::new(vec![face_a, face_b]);
+        let working = vec![edges_a, edges_b];
+        let hits = detect_self_intersections_with_edges(&shell, &working, 0.5);
+        assert!(
+            hits.is_empty(),
+            "coincident-boundary contact (duplicate edges) must not be flagged, got {} hits: {:?}",
+            hits.len(),
+            hits.iter().map(|h| h.point).collect::<Vec<_>>()
+        );
+    }
+
+    /// §1.4 never-worsen: aggressive healing DETECTS and REPORTS the
+    /// crossing pair but must NOT remove faces from it (removal now
+    /// requires `remove_self_intersecting_faces`).
+    #[test]
+    fn test_aggressive_healing_report_only_self_intersections() {
+        // Genuinely crossing pair (see the equivalence test above): a
+        // vertical wall whose bottom edge cuts through the bottom face's
+        // interior.
+        let (bottom, bottom_w) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(-5.0, -5.0, 0.0),
+            Point3d::new(5.0, -5.0, 0.0),
+            Point3d::new(5.0, 5.0, 0.0),
+            Point3d::new(-5.0, 5.0, 0.0),
+        ])
+            .expect("bottom face");
+        let (wall, wall_w) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, -5.0, 0.0),
+            Point3d::new(0.0, 5.0, 0.0),
+            Point3d::new(0.0, 5.0, 8.0),
+            Point3d::new(0.0, -5.0, 8.0),
+        ])
+            .expect("wall face");
+
+        let shell = Shell::new(vec![bottom, wall]);
+        let working = vec![bottom_w, wall_w];
+        let solid = Solid::from_edges_only(shell, working);
+
+        let params = HealingParams::aggressive();
+        assert!(!params.remove_self_intersecting_faces);
+        let (healed, report) = heal_solid(&solid, &params);
+
+        // Both faces survive — detection is report-only.
+        assert_eq!(
+            healed.faces().len(),
+            2,
+            "never-worsen: aggressive healing must not remove faces"
+        );
+        assert_eq!(report.small_faces_removed, 0);
     }
 
     /// C5 Stage 7.5 — `validate_and_fix` on a mirror-free (store-only)

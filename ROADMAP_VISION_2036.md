@@ -172,6 +172,28 @@ approximation of the intersection.
       micro-gaps instead of removing faces.
 - [ ] **Implement surface-surface intersection for edge recovery** —
       reconstruct lost edges by intersecting adjacent surfaces.
+- [x] **Root-cause audit + never-worsen healing gate for "lost edges"**
+      (2026-09-10): the HOUSING #47598 "lost edges" were not parser losses —
+      healing itself deleted 27 valid faces (265→238) on the strength of
+      2579 self-intersection detection hits, ~95% phantom: boundary points
+      projecting onto a neighbor's UNTRIMMED surface extension (the
+      trimmed-domain check existed as a comment but never as code).
+      Detection now (a) builds each face's trimmed UV domain
+      (wire-resolved, coedge-orientation-aware, seam-unwrapped for
+      periodic surfaces, hole-aware even-odd containment), (b) rejects
+      projections outside the trimmed domain, (c) rejects boundary
+      CONTACT (shared vertices / coincident duplicate EDGE_CURVEs —
+      normal B-Rep adjacency, not intersection); the legacy
+      `dist > 1e-20` exact-coincidence guard was removed (domain +
+      contact tests own that filtering now). Removal is opt-in via
+      `HealingParams::remove_self_intersecting_faces` — default false in
+      every preset (aggressive included): detection is report-only.
+      HOUSING: 252/265 faces triangulated (was 226), +3411 triangles
+      restored; as1-oc-214 remains 18/18 watertight, 0 boundary edges.
+      The remaining ~6400 HOUSING boundary edges are dominated by
+      per-face interior Steiner holes (CDT default-off, §2.3 line) +
+      ~305 rim-aliasing twins (converter shape-group skips) — the
+      surface-extension / SSI-recovery items above stay open for those.
 - [x] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
       `SweptSurface` was already analytical (SURFACE_OF_REVOLUTION /
       SURFACE_OF_LINEAR_EXTRUSION → `Revolution`/`Extrusion` surfaces);

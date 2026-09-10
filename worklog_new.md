@@ -5234,3 +5234,106 @@ shared Steiner точки (MS-2), а CDT-коннективность между
   (use_cdt_steiner) без кросс-фейс регрессий.
 - Pinched-кольца (225 непоследовательных дублей в HOUSING) —
   полигон-сплиттинг, не дедуп.
+
+# Сессия 29 — §1.4 healing: ложные self-intersections → удаление 27 граней (2026-09-10)
+
+## Контекст
+
+Sandbox после перезагрузки: локал отставал от remote на 15 коммитов
+(3a242a6, 945) → `git reset --hard origin/main`; Rust toolchain
+отсутствовал → переустановлен 1.98.0. Попутно зафиксирован E0609 в
+`tools/uv_polygon_audit.rs` (Face потерял `step_entity_id` в C5 7.6b,
+коммит cf61e89 ушёл без финального workspace check) — b770f09.
+Дальше по плану: §1.4 «SSI for edge recovery» для оставшихся 6035
+boundary HOUSING.
+
+## Диагностика (новые инструменты)
+
+1. `boundary_twin_probe` (tools): классификация boundary-рёбер по
+   наличию геометрического двойника на другой грани — **305 TWINED**
+   (stitching-провал, геометрия с обеих сторон) против **5730 ORPHAN**
+   (двойника нет: дыра или сосед отсутствует). Рабочая гипотеза
+   «кросс-фейс rim-мисматчи из-за aliasing» опровергнута — доминируют
+   orphan.
+2. `housing_topo_probe` (python): в STEP-файле shell #46176 = **265
+   ADVANCED_FACE**, все рёбра топологически shared — а триангулируется
+   только 226. Потеря 39 граней происходит В конвертере.
+3. Логи конвертера: `healing changed face count: 265 → 238` +
+   `Removed 27 faces involved in 2579 self-intersections` —
+   **деструктивный healing** с массовым false-positive детекцией.
+
+## Корневой дефект
+
+`check_face_pair_intersection` (draper-topology/healing.rs): точка
+границы грани A проецировалась на НЕОБРЕЗАННУЮ поверхность грани B;
+расстояние < tol → «self-intersection». Проверка «нужно проверить,
+внутри ли границы B» существовала КАК КОММЕНТАРИЙ, но не как код.
+Смежные грани (общая вершина, ко-фациальные патчи, совпадающие
+duplicate-EDGE_CURVE) проецируются друг на друга ПОСТРОЕНИЕМ → 2579
+фантомных попаданий → эвристика «удали грань с меньшим числом рёбер»
+вырезала 27 валидных граней из замкнутого shell → 5730 осиротевших
+boundary-рёбер у соседей.
+
+## Реализация
+
+1. **FaceProbe** (healing.rs): per-face препроцессинг — 3D-сэмплы
+   границы (по wire, с учётом coedge.forward), полилиния сегментов,
+   обрезанный UV-домен (внешний контур + дыры, seam-unwrapping для
+   периодических поверхностей через ±период, выравнивание дыр к окну
+   внешнего контура, even-odd point-in-polygon, wrap тестовой точки в
+   окно развёртки). Без wire — fallback на плоский список рёбер.
+2. **Детекция**: попадание засчитывается только если проекция ЛЕЖИТ
+   в обрезанном домене соседа И точка не в boundary-CONTACT
+   (расстояние до полилинии границы соседа ≥ tol — общий вершинный
+   контакт/дубликаты рёбер нормальны для BREP). Легаси-гард
+   `dist_sq > 1e-20` удалён (домен+контакт теперь фильтруют лучше;
+   ровно-на-поверхности точки — сигнал реального пересечения).
+3. **Never-worsen gate**: `HealingParams::remove_self_intersecting_faces`
+   (default false ВО ВСЕХ пресетах, включая aggressive) — детекция
+   report-only; удаление только по явному opt-in.
+4. Тесты (4 новых): untrimmed-projection не флагуется (коаксиальные
+   цилиндрические бэнды), vertex-contact не флагуется,
+   duplicate-boundary-contact не флагуется, aggressive не удаляет
+   грани пересекающейся пары. Позитивный контроль (crossing pair)
+   остаётся зелёным.
+
+## Замеры (drill_top, before → after)
+
+| BREP | boundary | non-manifold | verts | tris | faces* |
+|---|---|---|---|---|---|
+| DRILL_SHAFT | 987 → 990 | 654 → 720 | 1868→1938 | 4241→4458 | |
+| GEAR | 679 → 685 | 106 → 180 | 1365→1122 | 1923→2092 | |
+| SHAFT_SLEEVE | 2967 → 3102 | 937 → 1052 | 2332→2644 | 4218→5123 | |
+| HOUSING | 6035 → 6405 | 962 → 1005 | 12296→13972 | 21186→24597 | 226→252 |
+| HOUSING_MIRROR | 6039 → 6358 | 926 → 948 | 12325→13809 | 20976→23878 | |
+
+*HOUSING faces triangulated. Boundary +2..6% — выжившие грани вносят
+собственные interior-дыры (CDT default-off) и genuine-оверлапы
+(non-manifold +43); НО +3411 треугольников геометрии восстановлено,
+shell ближе к STEP-истине (252/265 против 226/265). as1-oc-214 —
+**18/18 watertight, 0 boundary** (эталон не тронут).
+
+Переосмысление остатка: ~6400 boundary HOUSING — это НЕ «потерянные
+рёбра для SSI-восстановления», а (а) interior Steiner-дыры per-face
+(линия CDT/surface-level canonical triangulation из сессии 28) +
+(б) 305 rim-aliasing twins (shape-group skips конвертера). §1.4
+surface-extension/SSI-recovery остаются открытыми для микроф-гэпов.
+
+## Верификация
+
+- draper-topology **238+17+11+3** (43 healing-теста, вкл. 4 новых);
+- draper-mesh **271/271**; draper-geometry **246/246**; draper-step
+  fast-subset **136/136** (4 тяжёлых интеграционных скипнуты);
+- workspace check чисто; as1 18/18 watertight.
+
+## Осталось
+
+- Surface-level canonical triangulation (один CDT на общий NURBS) —
+  ключ к interior-дырам, след. юнит по линии сессии 28.
+- Rim-aliasing twins (305): shape-group skips при отклонении > 0.008 —
+  кандидат на геометрическую ре-ассоциацию через SSI-проекцию.
+- `remove_inconsistent_normal_faces` использует `normal_at(0,0)` —
+  угол параметризации, а не точка грани: тот же паттерн false-positive
+  риска (в HOUSING удалений не было, но паттерн подозрителен).
+- Non-determinism между chunked/non-cached путями конвертера
+  (6405 vs 6757 в одном прогоне) — отдельный аудит.
