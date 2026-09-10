@@ -518,6 +518,24 @@ pub struct TriangulationParams {
     /// surface-level canonical triangulation (triangulate the shared grid
     /// once per NURBS surface, then extract per-face sub-triangulations).
     pub use_cdt_steiner: bool,
+    /// Whether NURBS faces sharing one surface are triangulated through a
+    /// SURFACE-LEVEL CANONICAL CDT (one `CanonicalSurfaceCdt` per shared
+    /// NURBS, per-face sub-triangulation extraction) instead of per-face
+    /// CDT/earcutr runs.
+    ///
+    /// This is the safe way to enable interior Steiner coverage: all
+    /// faces' rim loops become constraint edges of ONE triangulation, so
+    /// Steiner-to-rim connectivity is shared by construction and cannot
+    /// add cross-face boundary edges (the failure mode that keeps
+    /// `use_cdt_steiner` default-off — HOUSING 6035 → 14292). Interior
+    /// holes the legacy earcutr spike-chain leaks get filled by the
+    /// canonical Steiner grid instead.
+    ///
+    /// Requires the converter pre-pass
+    /// (`StepConverter::pre_compute_canonical_surface_cdts`) — without it
+    /// the flag is inert and every face takes the legacy path (default
+    /// off; never-worsen fallbacks at every stage).
+    pub use_surface_canonical_cdt: bool,
     /// Target fraction of triangles to KEEP after post-triangulation decimation.
     /// `1.0` = no decimation (keep all triangles).
     /// `0.1` = keep only 10% of triangles (very coarse, ~90% reduction).
@@ -638,6 +656,7 @@ impl Default for TriangulationParams {
             max_face_triangles: 8000,
             steiner_profile: SteinerBudgetProfile::default(),
             use_cdt_steiner: false,
+            use_surface_canonical_cdt: false,
             keep_ratio: 1.0, // No decimation by default — preserve backward compatibility
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
@@ -733,6 +752,7 @@ impl TriangulationParams {
             max_face_triangles,
             steiner_profile: SteinerBudgetProfile::default(),
             use_cdt_steiner: false,
+            use_surface_canonical_cdt: false,
             keep_ratio,
             target_triangles_per_face: None,
             adaptive_lod_enabled: false,
@@ -764,6 +784,7 @@ impl TriangulationParams {
         self.adaptive.hash(&mut hasher);
         self.adaptive_lod_enabled.hash(&mut hasher);
         self.use_cdt_steiner.hash(&mut hasher);
+        self.use_surface_canonical_cdt.hash(&mut hasher);
         hasher.finish()
     }
 

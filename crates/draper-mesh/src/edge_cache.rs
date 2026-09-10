@@ -455,6 +455,13 @@ pub struct EdgeDiscretizationCache {
     /// different interior edges), and these mismatched vertices appear as
     /// BREP boundary edges.
     nurbs_refinement_grids: HashMap<u64, Vec<Point2d>>,
+    /// Surface-level canonical CDTs (Vision 2036 Phase 1 — session-30
+    /// line): one constrained triangulation per shared NURBS surface,
+    /// keyed by `nurbs_surface_hash`. Built by the converter pre-pass
+    /// (`pre_compute_canonical_surface_cdts`) when
+    /// `TriangulationParams::use_surface_canonical_cdt` is on; consumed
+    /// by `CanonicalSurfaceCdt::extract_face_mesh` per face.
+    canonical_surface_cdts: HashMap<u64, crate::surface_canonical::CanonicalSurfaceCdt>,
     /// ── Instrumentation counters ──
     /// Number of cache hits (edge already discretized).
     cache_hits: usize,
@@ -550,6 +557,7 @@ impl EdgeDiscretizationCache {
             circle_axis_n: HashMap::new(),
             circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
+            canonical_surface_cdts: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -569,6 +577,7 @@ impl EdgeDiscretizationCache {
             circle_axis_n: HashMap::new(),
             circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
+            canonical_surface_cdts: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -588,6 +597,7 @@ impl EdgeDiscretizationCache {
             circle_axis_n: HashMap::new(),
             circle_group_n: HashMap::new(),
             nurbs_refinement_grids: HashMap::new(),
+            canonical_surface_cdts: HashMap::new(),
             cache_hits: 0,
             cache_misses: 0,
             shared_edges: 0,
@@ -1292,6 +1302,26 @@ impl EdgeDiscretizationCache {
     pub fn get_nurbs_refinement_grid(&self, nurbs: &draper_geometry::NurbsSurface) -> Option<&Vec<Point2d>> {
         let hash = nurbs_surface_hash(nurbs);
         self.nurbs_refinement_grids.get(&hash)
+    }
+
+    /// Store a surface-level canonical CDT (converter pre-pass).
+    pub fn set_canonical_surface_cdt(
+        &mut self,
+        nurbs: &draper_geometry::NurbsSurface,
+        cdt: crate::surface_canonical::CanonicalSurfaceCdt,
+    ) {
+        let hash = nurbs_surface_hash(nurbs);
+        self.canonical_surface_cdts.insert(hash, cdt);
+    }
+
+    /// Get the surface-level canonical CDT for the given NURBS surface
+    /// (`None` when the pre-pass did not build one — legacy path).
+    pub fn get_canonical_surface_cdt(
+        &self,
+        nurbs: &draper_geometry::NurbsSurface,
+    ) -> Option<&crate::surface_canonical::CanonicalSurfaceCdt> {
+        let hash = nurbs_surface_hash(nurbs);
+        self.canonical_surface_cdts.get(&hash)
     }
 
     /// Adaptively discretize an edge based on curve curvature.

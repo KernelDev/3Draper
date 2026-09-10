@@ -122,6 +122,20 @@ pub struct FaceData {
     is_void: bool,
 }
 
+/// Boundary loops (3D + UV polylines) for one face, collected from the
+/// shared edge cache. Produced by
+/// `StepConverter::collect_face_boundary_loops_cached`; shared between
+/// `surface_to_mesh_cached` and the canonical-surface pre-pass so both
+/// see bit-identical loops (session-30 canonical CDT matching).
+struct FaceBoundaryLoops {
+    boundary_3d: Vec<Point3d>,
+    boundary_uvs: Vec<Point2d>,
+    holes_3d: Vec<Vec<Point3d>>,
+    holes_uvs: Vec<Vec<Point2d>>,
+    edge_debug_info: Vec<String>,
+    edges_without_step_id: usize,
+}
+
 /// Validation report for BREP topology (ROADMAP_VISION_2036 §3.2).
 /// Produced by `validate_brep()` before triangulation begins.
 #[derive(Clone, Debug, Default)]
@@ -4593,6 +4607,12 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
+        // session-30): one constrained triangulation per shared NURBS
+        // surface — the safe way to enable interior Steiner coverage.
+        // No-op unless `params.use_surface_canonical_cdt`.
+        self.pre_compute_canonical_surface_cdts(&face_data_list, params, &mut edge_cache);
+
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // In STEP B-Rep, two faces sharing a geometric boundary may use
         // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
@@ -5524,6 +5544,10 @@ impl<'a> StepConverter<'a> {
                 edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
             }
         }
+
+        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
+        // session-30) — no-op unless `params.use_surface_canonical_cdt`.
+        self.pre_compute_canonical_surface_cdts(&face_data_list, &params, &mut edge_cache);
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         {
@@ -6635,6 +6659,10 @@ impl<'a> StepConverter<'a> {
                 edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
             }
         }
+
+        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
+        // session-30) — no-op unless `params.use_surface_canonical_cdt`.
+        self.pre_compute_canonical_surface_cdts(&face_data_list, params, &mut edge_cache);
 
         // ─── Build vertex-pair → canonical step_id aliases ──────────────
         // (Same logic as triangulate_brep_detailed — see comments there.)
@@ -12721,6 +12749,254 @@ impl<'a> StepConverter<'a> {
         Some(approximate_offset_curve(&basis_curve, offset_dist, ref_dir.as_ref()))
     }
 
+    /// Per-face boundary loops collected from the shared edge cache
+    /// (3D polylines + UV polylines). Extracted from
+    /// `surface_to_mesh_cached` (session-30) so the canonical-surface
+    /// pre-pass collects BIT-IDENTICAL loops — the canonical CDT is
+    /// matched against the per-face collection by 3D position bits.
+    fn collect_face_boundary_loops_cached(
+        &self,
+        face_data: &FaceData,
+        params: &TriangulationParams,
+        edge_cache: &mut EdgeDiscretizationCache,
+    ) -> FaceBoundaryLoops {
+        // Collect 3D boundary points from edge curves using the cache.
+        // When an edge is already in the cache (shared with another face),
+        // we reuse the identical 3D points to guarantee watertightness.
+        let mut boundary_points = Vec::new();
+        let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
+
+        // Collect UV coordinates for boundary points, computed from PCURVE
+        // (if available) or surface.project_point() (as fallback).
+        let mut boundary_uvs: Vec<Point2d> = Vec::new();
+        let mut inner_boundary_uvs: Vec<Vec<Point2d>> = Vec::new();
+
+        // Track the last UV from the previous edge to use as initial guess for
+        // NURBS chain projection. This ensures UV continuity across edges —
+        // without it, project_point() can return different UVs for the same
+        // 3D point (e.g., u=0 vs u=2π on periodic surfaces), causing the UV
+        // polygon to jump and self-intersect.
+        let mut prev_edge_last_uv: Option<Point2d> = None;
+        let mut edges_without_step_id = 0usize;
+        let mut edge_debug_info: Vec<String> = Vec::new();
+        for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
+            let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
+            let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
+            let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
+
+            if step_id != 0 {
+                let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
+                // Compute UV for each boundary point using actual parameter values
+                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, prev_edge_last_uv);
+                // Track last UV for next edge's initial guess
+                if let Some(last_uv) = uvs.last() {
+                    prev_edge_last_uv = Some(*last_uv);
+                }
+                // Diagnostic: log per-edge UV range for NURBS faces
+                if matches!(&face_data.surface, Surface::Nurbs(_)) && !uvs.is_empty() {
+                    let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                    let eu_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                    let ev_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                    let ev_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                    let has_c2d = curve_2d.is_some();
+                    let p0 = pts.first();
+                    let p_n = pts.last();
+                    log::info!(
+                        "EDGE_UV_DIAG: edge_idx={} step_id={} n_pts={} pcurve={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] 3d_first=({:.2},{:.2},{:.2}) 3d_last=({:.2},{:.2},{:.2})",
+                        edge_idx, step_id, uvs.len(), has_c2d, eu_min, eu_max, ev_min, ev_max,
+                        p0.map(|p| p.x).unwrap_or(0.0), p0.map(|p| p.y).unwrap_or(0.0), p0.map(|p| p.z).unwrap_or(0.0),
+                        p_n.map(|p| p.x).unwrap_or(0.0), p_n.map(|p| p.y).unwrap_or(0.0), p_n.map(|p| p.z).unwrap_or(0.0)
+                    );
+                }
+                edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
+                boundary_points.extend(pts);
+                boundary_uvs.extend(uvs);
+            } else {
+                log::warn!("BREP face: edge has step_id=0 (no cache), surface={:?}, edge_id={}",
+                    std::mem::discriminant(&face_data.surface), edge.id);
+                // No STEP ID (e.g., synthetic edge) — sample independently
+                let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                boundary_points.extend(pts_3d);
+                boundary_uvs.extend(pts_uv);
+                edges_without_step_id += 1;
+            }
+        }
+
+        // For curved surfaces, also sample inner edges (holes) using the cache
+        match &face_data.surface {
+            Surface::Plane(_) => {}, // Planes use the dedicated hole-aware path
+            _ => {
+                for (loop_idx, inner_edges) in face_data.inner_edges.iter().enumerate() {
+                    let mut hole_pts = Vec::new();
+                    let mut hole_uvs = Vec::new();
+                    let step_ids = face_data.inner_edge_step_ids.get(loop_idx);
+                    for (edge_idx, edge) in inner_edges.iter().enumerate() {
+                        let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
+                        let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
+                        // Try to find the curve_2d for this inner edge
+                        let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
+
+                        if step_id != 0 {
+                            let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
+                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
+                            hole_pts.extend(pts);
+                            hole_uvs.extend(uvs);
+                        } else {
+                            log::warn!("BREP face: inner edge has step_id=0 (no cache), surface={:?}, edge_id={}",
+                                std::mem::discriminant(&face_data.surface), edge.id);
+                            let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                            hole_pts.extend(pts_3d);
+                            hole_uvs.extend(pts_uv);
+                            edges_without_step_id += 1;
+                        }
+                    }
+                    if !hole_pts.is_empty() {
+                        inner_boundary_points.push(hole_pts);
+                        inner_boundary_uvs.push(hole_uvs);
+                    }
+                }
+            }
+        }
+
+        // If outer boundary is empty, try all edges with cache
+        if boundary_points.is_empty() {
+            for (edge_idx, edge) in face_data.edges.iter().enumerate() {
+                let step_id = face_data.edge_step_ids.get(edge_idx).copied().unwrap_or(0);
+                let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
+                let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
+
+                if step_id != 0 {
+                    let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
+                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
+                    boundary_points.extend(pts);
+                    boundary_uvs.extend(uvs);
+                } else {
+                    log::warn!("BREP face: fallback edge has step_id=0 (no cache), surface={:?}, edge_id={}",
+                        std::mem::discriminant(&face_data.surface), edge.id);
+                    let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
+                    boundary_points.extend(pts_3d);
+                    boundary_uvs.extend(pts_uv);
+                    edges_without_step_id += 1;
+                }
+            }
+        }
+
+        FaceBoundaryLoops {
+            boundary_3d: boundary_points,
+            boundary_uvs,
+            holes_3d: inner_boundary_points,
+            holes_uvs: inner_boundary_uvs,
+            edge_debug_info,
+            edges_without_step_id,
+        }
+    }
+
+    /// Pre-compute surface-level canonical CDTs for every NURBS surface
+    /// referenced by `face_data_list` (Vision 2036 Phase 1, session-30).
+    ///
+    /// Groups faces by `nurbs_surface_hash`, collects each group's rim
+    /// loops through the SAME cache-aware collection as
+    /// `surface_to_mesh_cached` (bit-identical), builds ONE constrained
+    /// triangulation per surface (`build_canonical_surface_cdt`) and
+    /// stores it in the edge cache. `surface_to_mesh_cached` then
+    /// extracts per-face sub-triangulations — Steiner coverage without
+    /// cross-face boundary regressions.
+    ///
+    /// No-op unless `params.use_surface_canonical_cdt`. Never-worsen: a
+    /// surface whose canonical build fails is simply not stored — its
+    /// faces take the legacy path.
+    fn pre_compute_canonical_surface_cdts(
+        &self,
+        face_data_list: &[FaceData],
+        params: &TriangulationParams,
+        edge_cache: &mut EdgeDiscretizationCache,
+    ) {
+        use draper_mesh::edge_cache::nurbs_surface_hash;
+        use draper_mesh::surface_canonical::{build_canonical_surface_cdt, CanonicalFaceLoops};
+
+        if !params.use_surface_canonical_cdt {
+            return;
+        }
+
+        // Group NURBS faces by surface identity (content hash).
+        let mut groups: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut nurbs_of: HashMap<u64, NurbsSurface> = HashMap::new();
+        for (i, fd) in face_data_list.iter().enumerate() {
+            if let Surface::Nurbs(nurbs) = &fd.surface {
+                let h = nurbs_surface_hash(nurbs);
+                groups.entry(h).or_default().push(i);
+                nurbs_of.insert(h, nurbs.clone());
+            }
+        }
+
+        // Deterministic group order (HashMap iteration is randomized).
+        let mut keys: Vec<u64> = groups.keys().copied().collect();
+        keys.sort_unstable();
+
+        let mut built = 0usize;
+        let mut dropped = 0usize;
+        for h in keys {
+            let face_idxs = &groups[&h];
+            let nurbs = &nurbs_of[&h];
+            let steiner: Vec<Point2d> = edge_cache
+                .get_nurbs_refinement_grid(nurbs)
+                .cloned()
+                .unwrap_or_default();
+
+            let mut loops: Vec<CanonicalFaceLoops> = Vec::with_capacity(face_idxs.len());
+            for &fi in face_idxs {
+                let fd = &face_data_list[fi];
+                let l = self.collect_face_boundary_loops_cached(fd, params, edge_cache);
+                if l.boundary_3d.len() < 3 || l.boundary_3d.len() != l.boundary_uvs.len() {
+                    // Face without usable loops (e.g. edges=EMPTY): it will
+                    // not match any canonical entry and takes the legacy
+                    // path — keep building the rest of the group.
+                    continue;
+                }
+                loops.push(CanonicalFaceLoops {
+                    step_face_id: fd.step_face_id,
+                    forward: fd.forward,
+                    outer_3d: l.boundary_3d,
+                    outer_uv: l.boundary_uvs,
+                    holes_3d: l.holes_3d,
+                    holes_uv: l.holes_uvs,
+                });
+            }
+            if loops.is_empty() {
+                continue;
+            }
+
+            match build_canonical_surface_cdt(nurbs, loops, &steiner) {
+                Some(cdt) => {
+                    log::info!(
+                        "canonical CDT: surface hash {:x} — {} faces, {} canonical triangles",
+                        h,
+                        cdt.face_count(),
+                        cdt.canonical_triangle_count()
+                    );
+                    edge_cache.set_canonical_surface_cdt(nurbs, cdt);
+                    built += 1;
+                }
+                None => {
+                    log::warn!(
+                        "canonical CDT: surface hash {:x} ({} faces) failed validation — legacy path",
+                        h,
+                        face_idxs.len()
+                    );
+                    dropped += 1;
+                }
+            }
+        }
+        if built > 0 || dropped > 0 {
+            log::info!(
+                "canonical CDT pre-pass: {} built, {} dropped (legacy), {} NURBS groups",
+                built,
+                dropped,
+                groups.len()
+            );
+        }
+    }
+
     /// Convert a FaceData (surface + boundary edges) to a mesh by creating a Face
     /// with proper wire/edges and triangulating.
     /// Triangulate a face using the STEP edge discretization cache.
@@ -12800,135 +13076,49 @@ impl<'a> StepConverter<'a> {
             );
         }
 
-        // Collect 3D boundary points from edge curves using the cache.
-        // When an edge is already in the cache (shared with another face),
-        // we reuse the identical 3D points to guarantee watertightness.
-        let mut boundary_points = Vec::new();
-        let mut inner_boundary_points: Vec<Vec<Point3d>> = Vec::new();
-
-        // Collect UV coordinates for boundary points, computed from PCURVE
-        // (if available) or surface.project_point() (as fallback).
-        let mut boundary_uvs: Vec<Point2d> = Vec::new();
-        let mut inner_boundary_uvs: Vec<Vec<Point2d>> = Vec::new();
-
-        // Whether we have any analytical PCURVE data for this face
-        let _has_pcurves = face_data.edge_curves_2d.iter().any(|c| c.is_some());
-
-        // Sample outer edges using the cache
-        let mut edges_without_step_id = 0usize;
-        let mut edge_debug_info: Vec<String> = Vec::new();
-        // Track the last UV from the previous edge to use as initial guess for
-        // NURBS chain projection. This ensures UV continuity across edges —
-        // without it, project_point() can return different UVs for the same
-        // 3D point (e.g., u=0 vs u=2π on periodic surfaces), causing the UV
-        // polygon to jump and self-intersect.
-        let mut prev_edge_last_uv: Option<Point2d> = None;
-        for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
-            let step_id = face_data.outer_edge_step_ids.get(edge_idx).copied().unwrap_or(0);
-            let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
-            let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
-
-            if step_id != 0 {
-                let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                // Compute UV for each boundary point using actual parameter values
-                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, prev_edge_last_uv);
-                // Track last UV for next edge's initial guess
-                if let Some(last_uv) = uvs.last() {
-                    prev_edge_last_uv = Some(*last_uv);
-                }
-                // Diagnostic: log per-edge UV range for NURBS faces
-                if matches!(&face_data.surface, Surface::Nurbs(_)) && !uvs.is_empty() {
-                    let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
-                    let eu_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
-                    let ev_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
-                    let ev_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
-                    let has_c2d = curve_2d.is_some();
-                    let p0 = pts.first();
-                    let p_n = pts.last();
-                    log::info!(
-                        "EDGE_UV_DIAG: edge_idx={} step_id={} n_pts={} pcurve={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] 3d_first=({:.2},{:.2},{:.2}) 3d_last=({:.2},{:.2},{:.2})",
-                        edge_idx, step_id, uvs.len(), has_c2d, eu_min, eu_max, ev_min, ev_max,
-                        p0.map(|p| p.x).unwrap_or(0.0), p0.map(|p| p.y).unwrap_or(0.0), p0.map(|p| p.z).unwrap_or(0.0),
-                        p_n.map(|p| p.x).unwrap_or(0.0), p_n.map(|p| p.y).unwrap_or(0.0), p_n.map(|p| p.z).unwrap_or(0.0)
-                    );
-                }
-                edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
-                boundary_points.extend(pts);
-                boundary_uvs.extend(uvs);
-            } else {
-                log::warn!("BREP face: edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
-                    std::mem::discriminant(&face_data.surface), edge.id);
-                // No STEP ID (e.g., synthetic edge) — sample independently
-                let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
-                boundary_points.extend(pts_3d);
-                boundary_uvs.extend(pts_uv);
-                edges_without_step_id += 1;
-            }
+        // Collect boundary loops (3D + UV) from the shared edge cache.
+        // The collection lives in `collect_face_boundary_loops_cached` so
+        // the canonical-surface pre-pass sees BIT-IDENTICAL loops
+        // (session-30): the canonical CDT face matching is by 3D bits.
+        let loops = self.collect_face_boundary_loops_cached(face_data, params, edge_cache);
+        let boundary_points = loops.boundary_3d;
+        let boundary_uvs = loops.boundary_uvs;
+        let inner_boundary_points = loops.holes_3d;
+        let inner_boundary_uvs = loops.holes_uvs;
+        let edge_debug_info = loops.edge_debug_info;
+        if loops.edges_without_step_id > 0 {
+            log::warn!("surface_to_mesh_cached: {} edges without step_id (bypassing edge cache)", loops.edges_without_step_id);
         }
 
-        // For curved surfaces, also sample inner edges (holes) using the cache
-        match &face_data.surface {
-            Surface::Plane(_) => {}, // Planes use the dedicated hole-aware path above
-            _ => {
-                for (loop_idx, inner_edges) in face_data.inner_edges.iter().enumerate() {
-                    let mut hole_pts = Vec::new();
-                    let mut hole_uvs = Vec::new();
-                    let step_ids = face_data.inner_edge_step_ids.get(loop_idx);
-                    for (edge_idx, edge) in inner_edges.iter().enumerate() {
-                        let step_id = step_ids.and_then(|ids| ids.get(edge_idx).copied()).unwrap_or(0);
-                        let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
-                        // Try to find the curve_2d for this inner edge
-                        let curve_2d = self.find_curve_2d_for_edge(edge, face_data);
-
-                        if step_id != 0 {
-                            let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
-                            hole_pts.extend(pts);
-                            hole_uvs.extend(uvs);
-                        } else {
-                            log::warn!("BREP face: inner edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
-                                std::mem::discriminant(&face_data.surface), edge.id);
-                            let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
-                            hole_pts.extend(pts_3d);
-                            hole_uvs.extend(pts_uv);
-                            edges_without_step_id += 1;
+        // ── Surface-level canonical CDT (Vision 2036 Phase 1, session-30) ──
+        // One constrained triangulation per shared NURBS surface, built by
+        // the converter pre-pass; this face extracts its sub-triangulation.
+        // Connectivity is shared across faces by construction → interior
+        // Steiner coverage WITHOUT cross-face boundary regressions.
+        // `extract_face_mesh` returns None on loop mismatch → legacy path
+        // (never-worsen, face by face).
+        if params.use_surface_canonical_cdt {
+            if let Surface::Nurbs(nurbs) = &face_data.surface {
+                if let Some(cdt) = edge_cache.get_canonical_surface_cdt(nurbs) {
+                    if let Some(mesh) = cdt.extract_face_mesh(
+                        nurbs,
+                        &boundary_points,
+                        &boundary_uvs,
+                        &inner_boundary_points,
+                        &inner_boundary_uvs,
+                        face_data.forward,
+                    ) {
+                        if !mesh.triangles.is_empty() {
+                            log::info!(
+                                "FACE_DIAG: surface=Nurbs canonical CDT → {} verts, {} tris",
+                                mesh.vertices.len(),
+                                mesh.triangles.len()
+                            );
+                            return mesh;
                         }
                     }
-                    if !hole_pts.is_empty() {
-                        // DISABLED dedup — same reason as outer boundary: removes
-                        // different points from different faces, creating T-junctions.
-                        inner_boundary_points.push(hole_pts);
-                        inner_boundary_uvs.push(hole_uvs);
-                    }
                 }
             }
-        }
-
-        // If outer boundary is empty, try all edges with cache
-        if boundary_points.is_empty() {
-            for (edge_idx, edge) in face_data.edges.iter().enumerate() {
-                let step_id = face_data.edge_step_ids.get(edge_idx).copied().unwrap_or(0);
-                let n_samples = self.edge_sample_count_lod(edge, params.detail_level);
-                let curve_2d = face_data.edge_curves_2d.get(edge_idx).and_then(|c| c.as_ref());
-
-                if step_id != 0 {
-                    let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
-                    boundary_points.extend(pts);
-                    boundary_uvs.extend(uvs);
-                } else {
-                    log::warn!("BREP face: fallback edge has step_id=0 (no cache), surface={:?}, edge_id={}", 
-                        std::mem::discriminant(&face_data.surface), edge.id);
-                    let (pts_3d, pts_uv) = self.sample_edge_points_with_uv(edge, &face_data.surface, curve_2d);
-                    boundary_points.extend(pts_3d);
-                    boundary_uvs.extend(pts_uv);
-                    edges_without_step_id += 1;
-                }
-            }
-        }
-
-        if edges_without_step_id > 0 {
-            log::warn!("surface_to_mesh_cached: {} edges without step_id (bypassing edge cache)", edges_without_step_id);
         }
 
         // Deduplicate boundary points and their corresponding UVs together

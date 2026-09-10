@@ -23,6 +23,7 @@ pub mod certification;
 pub mod text3d;
 pub mod watertight;
 pub mod custom_cdt;
+pub mod surface_canonical;
 pub mod earcut_adapter;
 pub mod pmi_display;
 pub mod wasm_api;

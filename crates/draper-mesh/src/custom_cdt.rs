@@ -812,7 +812,7 @@ fn build_constraint_set(
 
 /// Robust 2D orientation test.
 /// Returns positive if a, b, c are counter-clockwise, negative if clockwise.
-fn orient2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+pub(crate) fn orient2d(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
     (a[0] - c[0]) * (b[1] - c[1]) - (a[1] - c[1]) * (b[0] - c[0])
 }
 
