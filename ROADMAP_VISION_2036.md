@@ -596,9 +596,20 @@ CPU-side copies.
       when enabled). Remaining boundary edges (HOUSING 6035, from 6089)
       are CROSS-FACE rim mismatches from converter-level edge aliasing
       failures (skipped step_ids, duplicated EDGE_CURVEs) — the §1.4
-      "SSI for edge recovery" work. Enabling the CDT requires the
-      surface-level canonical triangulation (one CDT per shared NURBS
-      surface, per-face sub-triangulation extraction).
+      "SSI for edge recovery" work.
+      **Progress note (2026-09-11, session 30):** the surface-level
+      canonical triangulation is IMPLEMENTED (`surface_canonical.rs`:
+      one constrained CDT per shared NURBS — hull-fan seed, flip-only
+      constraint enforcement, protected Steiner insertion, per-face
+      centroid extraction, rim-contract validation) behind
+      `TriangulationParams::use_surface_canonical_cdt` (default off,
+      converter pre-pass on all three BREP paths). Verified
+      never-worsen: as1-oc-214 0 boundary in both modes;
+      SHAFT_SLEEVE 3102 → 3065 boundary with canonical on. The
+      blocking defects for default-on: pinched rims (57/97 HOUSING
+      NURBS groups fail the >2-adjacency validation — needs loop
+      splitting at the pinch vertex) and sliver-UV extraction
+      fallbacks (233 faces, legacy via rim-contract guard).
 - [ ] Analytical `Curve2d` (PCURVE) and exact B-spline SSI.
 - [ ] Property-based testing for topology.
 - [ ] Fuzz testing for STEP parser and NURBS solver.
