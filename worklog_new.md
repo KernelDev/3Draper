@@ -4783,6 +4783,7 @@ https://kerneldev.github.io/3Draper модель test/as1-oc-214.stp выгля�
   кандидат на tolerant-snap швов в merge.
 - Vision 2036: продолжить по PLAN.md.
 
+
 # Сессия 24 — Шовные микро-щели: boundary T-junction gate + финальный пост-winding проход (2026-09-09)
 
 ## Контекст
@@ -5462,3 +5463,120 @@ Coverage прек-пасса: 36-41 из 72-97 NURBS-групп на BREP стр
 - Seam-split защита в canonical extraction (233 граней в легаси-фолбэке).
 - Rim-aliasing twins (305) — SSI-реассоциация (§1.4 основная линия).
 - Non-determinism chunked/non-cached путей конвертера (6405 vs 6757).
+
+---
+
+# Сессия 31 — Vision 2036 §1.4: SSI-восстановление потерянных рёбер (edge recovery) (2026-09-11)
+
+## Контекст
+
+Продолжение Vision 2036 (после §1.1 итеративных дополнений §2.1/§2.2
+из сессий 19–22 и as1-oc-214 из сессии 23). Пункт §1.4: «Implement
+surface-surface intersection for edge recovery — reconstruct lost
+edges by intersecting adjacent surfaces» — недеструктивная альтернатива
+удалению «плохих» граней и планарным заплатах fill_holes.
+
+Сброс песочницы: Rust 1.98 переустановлен (minimal); репо на ожидаемом
+HEAD 377910b, рабочее дерево чистое.
+
+## Реализация
+
+Новый модуль `crates/draper-topology/src/edge_recovery.rs` (~1200 строк
+вкл. тесты), пасс 2.5 пайплайна healing (между close_gaps и fill_holes):
+
+1. **Gap detection** — обход всех проводов всех граней; разрыв =
+   consecutive coedges, чьи эффективные концы не сходятся
+   (>= 2×gap_tolerance — отсекает tolerant-vertex несовпадения
+   присутствующей топологии; <= max_gap_length = диагональ bbox).
+2. **Gap pairing** — потерянное общее ребро оставляет СООТВЕТСТВУЮЩИЕ
+   разрывы в ОБЕИХ смежных гранях; паринг по совпадению концов
+   (reversed-ориентация первой — manifold-консистентная; затем
+   same-orientation для дезориентированных оболочек). Жадно,
+   детерминированно (порядок индексов, без HashMap-итераций).
+3. **SSI-реконструкция** — `boolean::intersect_surfaces` (§2.1/§2.2
+   машинерия): аналитические ветви + B-spline фиты + PCURVEs. Выбор
+   ветви: проекция обоих концов разрыва (512 сэмплов + тернарное
+   уточнение), отсев по projection_tolerance, лексикографический
+   score (max dist, arc len, branch idx).
+4. **Trim + insert** — сегмент между проекциями = восстановленное
+   ребро: точная кривая, param_range (t0, t1) (возможно убывающий —
+   «baked-reversed» контракт edge cache), авторитативные
+   start/end_vertex_point overrides (бит-идентичные концы —
+   водонепроницаемость), coedge в провод каждой грани (встречные
+   ориентации), ребро в оба working-списка с ОДНИМ id →
+   rebuild_store дедуплицирует.
+
+Ключевые решения:
+- **PCURVE-валидация перед прикреплением**: `curve_2d.point_at(t)` на
+  собственных параметрах кривой обязана воспроизводить 3D-точки на
+  поверхности (тот же контракт, что compute_uvs в mesh). Обнаружено:
+  ВСЕ Curve2d типы параметризованы [0,1] (Line2d аффинно по сегменту,
+  Circle2d нормализованно), а ручные PCURVEs аналитических ветвей
+  boolean параметризованы не-identity → не проходят валидацию и не
+  прикрепляются (mesh падает в проекцию — корректно). Nurbs2d из §2.2
+  generic-фитов СОВПАДАЮТ параметризацией → прикрепляются и дают
+  точные UV.
+- **Fix: v_on_cyl знак** в plane×cylinder circle-arm boolean: высота
+  линии UV = `-signed_dist·(normal·axis)` (было голое signed_dist —
+  ошибка при normal ∥ axis).
+- **Fix: merge_report** теперь переносит `self_intersections` (старый
+  пропуск) и новый `edges_recovered`; `HealingReport::edges_recovered`
+  в total_fixes.
+- `create_polyline_curve` → pub(crate) (переиспользован edge_recovery).
+
+## Верификация
+
+- 7 новых тестов: box lost edge (plane×plane → Line, точная геометрия,
+  водонепроницаемость на уровне проводов), quarter arc (plane⊥cylinder
+  → Circle, param_range (0, π/2), PCURVE-контракт), branch selection
+  (cylinder×cylinder parallel → 2 Line-ветви, ближняя выигрывает),
+  no-partner no-op, idempotence, детерминизм (структурные сигнатуры),
+  heal_solid end-to-end (edges_recovered=1, store содержит ребро).
+- Полные сьюты: topology 275 | mesh 269 | core 75 | json 13 | step
+  186 (lib 135 вкл. transmission 141.7s; industrial 2/2; determinism
+  probe PASS; all_files_instance_conversion пропущен — debug-runtime
+  >580s, конвертер не затронут). Регрессий нет.
+
+## Ограничения (задокументированы в модуле)
+
+- Закрытые потерянные рёбра (полная окружность cap, «gap» вырожден в
+  точку + пустой провод) — не обнаруживаются; нужен loop-level
+  recovery (будущая работа).
+- Периодические кривые: выбирается КОРОЧАЙШАЯ дуга (Pac-Man
+  3/4-дисковая грань получит минорную дугу — оболочка замкнётся, но
+  регион неверен); концы разрыва не дезамбигуируют.
+- Односторонние потери (ребро живо в одном проводе) — stitching-дефект,
+  не потеря: вне скоупа (close_gaps-класс).
+
+## Пост-ребейз-верификация (после интеграции с origin/main f118387)
+
+Пуш отклонён: remote ушёл вперёд на 20 коммитов (сессии 24–30:
+§1.2/§1.3/§1.5 закрыты, §1.4 частично — OFFSET_SURFACE нативно,
+self-intersection false-positive фикс, canonical CDT). Ребейз: конфликты
+только ROADMAP (объединение чекбоксов §1.4) и worklog (ренумерация
+этой записи 24→31); healing.rs смержился автоматически и корректно
+(оба новых параметра/поля/пасса сосуществуют; merge_report сохранён).
+
+Полная переверификация merged-дерева:
+- topology 246 | mesh 275 | core 75 | json 13 (debug) — green.
+- step debug: lib 138 (+transmission 141.7s) | integration 5/7 быстро,
+  drill_top > 570s в DEBUG — инструментирование показало: edge-recovery
+  пасс no-op (gaps=0, ~2ms/оболочка), узкое место — КОНВЕРТЕР:
+  308 «NURBS projection failed» → brute-force (1296 evals каждый) на
+  пути remote-сессий (collect/loop UV). Предсуществующее поведение
+  debug-режима, НЕ регрессия этого коммита.
+- step RELEASE (санкционированный режим): integration 7/7 вкл.
+  drill_top (92s суммарно), lib 140/140 вкл. all_files (234s),
+  industrial 2/2, determinism probe PASS, nist 19, tolerance 3.
+
+## Осталось
+
+- Loop-level recovery закрытых рёбер (пустые провода + вырожденные gap).
+- Identity-параметризация PCURVEs аналитических ветвей boolean (сейчас
+  [0,1]-домен — не проходят identity-валидацию; кандидат — делегирование
+  generic §2.2 фитам geometry-крейта).
+- Plane∥axis ветвь plane×cylinder в boolean: вырожденный эллипс
+  (semi_major ~1e10) вместо двух точных Line — известный B1-беклог.
+- Vision 2036: следующий пункт §1.4 — surface extension algorithms.
+
+

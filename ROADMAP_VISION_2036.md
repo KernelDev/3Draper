@@ -170,8 +170,26 @@ approximation of the intersection.
       handled by `extract_float_from_step_value`.
 - [ ] **Implement surface extension algorithms** — extend surfaces to close
       micro-gaps instead of removing faces.
-- [ ] **Implement surface-surface intersection for edge recovery** —
+- [x] **Implement surface-surface intersection for edge recovery** —
       reconstruct lost edges by intersecting adjacent surfaces.
+
+      Done in `crates/draper-topology/src/edge_recovery.rs` (2026-09-11):
+      the healing pipeline (pass 2.5, after `close_gaps`) detects
+      open-wire gaps where a coedge is missing from BOTH adjacent
+      faces, pairs the gaps by endpoint coincidence (reversed
+      orientation first, then same-orientation), and reconstructs the
+      lost edge from the exact SSI branch (analytic curve / §2.1
+      B-spline, trimmed by endpoint projection, authoritative
+      vertex-point overrides for bit-identical endpoints, PCURVEs
+      attached only when they satisfy the identity parameter-space
+      contract). Non-destructive by design — the planar-patch
+      `fill_holes` remains the fallback; complements the root-cause
+      audit above (their remaining HOUSING rim-aliasing twins are a
+      candidate consumer). Bonus fixes: `merge_report` now propagates
+      `self_intersections`/`edges_recovered` across shell sub-reports,
+      and the plane×cylinder circle-arm cylinder PCURVE height sign
+      (`v_on_cyl` = `-signed_dist·(normal·axis)`).
+
 - [x] **Root-cause audit + never-worsen healing gate for "lost edges"**
       (2026-09-10): the HOUSING #47598 "lost edges" were not parser losses —
       healing itself deleted 27 valid faces (265→238) on the strength of
@@ -208,6 +226,7 @@ approximation of the intersection.
       self-intersection removal skips NURBS; normal-repair removal skips
       NURBS). The STEP converter delegates all removal to the guarded
       healing pipeline (`apply_healing_to_face_data`).
+
 
 **Priority:** P1
 

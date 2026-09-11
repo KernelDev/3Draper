@@ -116,6 +116,14 @@ pub struct HealingParams {
     /// with adjacent faces even after the orientation repair step.
     pub remove_inconsistent_normals: bool,
 
+    /// Whether to reconstruct LOST edges — edges missing from BOTH
+    /// adjacent faces' wires — by intersecting the adjacent surfaces
+    /// (Vision 2036 §1.4). Non-destructive: it only ADDS the exact
+    /// junction geometry (analytic curve / B-spline + PCURVEs) and
+    /// closes both wires; nothing is moved or removed. See
+    /// [`crate::edge_recovery`].
+    pub recover_lost_edges: bool,
+
     /// Optional tolerance context from the STEP file or model scale.
     /// When present, the coincidence tolerance from this context is used
     /// as a floor for all entity tolerances during propagation.
@@ -139,6 +147,7 @@ impl Default for HealingParams {
             fix_self_intersections: false,
             remove_self_intersecting_faces: false,
             remove_inconsistent_normals: false,
+            recover_lost_edges: true,
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -181,6 +190,7 @@ impl HealingParams {
             fix_self_intersections: false, // Expensive, may remove geometry
             remove_self_intersecting_faces: false, // §1.4 never-worsen
             remove_inconsistent_normals: false, // May remove geometry
+            recover_lost_edges: true, // Additive repair — never removes geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -227,6 +237,7 @@ impl HealingParams {
             // edges). Detection is report-only unless explicitly opted in.
             remove_self_intersecting_faces: false,
             remove_inconsistent_normals: true,
+            recover_lost_edges: true,
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -318,6 +329,9 @@ pub struct HealingReport {
     pub tolerances_propagated: u32,
     /// Number of self-intersections detected.
     pub self_intersections: u32,
+    /// Number of lost edges reconstructed via surface-surface
+    /// intersection (Vision 2036 §1.4).
+    pub edges_recovered: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -334,6 +348,7 @@ impl HealingReport {
             + self.faces_merged
             + self.tolerances_propagated
             + self.self_intersections
+            + self.edges_recovered
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -751,6 +766,28 @@ fn heal_staged(
 
     // 2. Close gaps
     close_gaps(&mut staged, params, &mut report);
+
+    // 2.5 Recover lost edges via surface-surface intersection
+    // (Vision 2036 §1.4): whatever gaps remain after the cheap
+    // topological merging are candidates for geometric reconstruction —
+    // the missing coedge is rebuilt from the adjacent surfaces' exact
+    // intersection curve. Standalone shells (no edge payload) no-op.
+    if params.recover_lost_edges {
+        let er_params = crate::edge_recovery::EdgeRecoveryParams::from_healing(
+            params,
+            &staged.shell,
+            &staged.working,
+        );
+        let er_report = crate::edge_recovery::recover_lost_edges(
+            &mut staged.shell,
+            &mut staged.working,
+            &er_params,
+        );
+        report.edges_recovered += er_report.edges_recovered;
+        for m in er_report.messages {
+            report.add_msg(m);
+        }
+    }
 
     // 3. Fill small holes
     fill_holes(&mut staged, params, &mut report);
@@ -3614,6 +3651,8 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.sliver_triangles_detected += source.sliver_triangles_detected;
     target.faces_merged += source.faces_merged;
     target.tolerances_propagated += source.tolerances_propagated;
+    target.self_intersections += source.self_intersections;
+    target.edges_recovered += source.edges_recovered;
     target.messages.extend(source.messages.iter().cloned());
 }
 
@@ -4501,6 +4540,7 @@ mod tests {
             faces_merged: 0,
             tolerances_propagated: 2,
             self_intersections: 0,
+            edges_recovered: 0,
             messages: Vec::new(),
         };
         assert_eq!(report.total_fixes(), 13);

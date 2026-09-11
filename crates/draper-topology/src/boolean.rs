@@ -838,9 +838,17 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
             })
             .collect();
 
-        // Build PCurve on the cylinder: v = signed_dist (constant height),
-        // u goes from 0 to 2π. This is a straight horizontal line in UV.
-        let v_on_cyl = signed_dist; // height along cylinder axis
+        // Build PCurve on the cylinder: v = the intersection circle's
+        // height along the cylinder AXIS. The circle center sits at
+        // `cyl.origin - signed_dist * plane.normal`, so its axis height
+        // is `-signed_dist * (plane.normal · cyl.axis)` — NOT the raw
+        // `signed_dist` (sign flip when the plane normal is parallel,
+        // not antiparallel, to the axis). u goes from 0 to 2π. This is
+        // a straight horizontal line in UV.
+        let n_dot_axis = plane.normal.x * cyl.axis.x
+            + plane.normal.y * cyl.axis.y
+            + plane.normal.z * cyl.axis.z;
+        let v_on_cyl = -signed_dist * n_dot_axis; // height along cylinder axis
         let pcurve_cyl = Curve2d::Line(Line2d::new(
             Point2d::new(0.0, v_on_cyl),
             Point2d::new(2.0 * PI, v_on_cyl),
@@ -2743,7 +2751,7 @@ fn split_general_face(
 }
 
 /// Create a polyline NURBS curve through a set of points.
-fn create_polyline_curve(points: &[Point3d]) -> Curve3d {
+pub(crate) fn create_polyline_curve(points: &[Point3d]) -> Curve3d {
     if points.len() < 2 {
         return Curve3d::Line(Line::new(Point3d::ORIGIN, Direction3d::X));
     }

@@ -15,6 +15,7 @@ pub mod traversal;
 pub mod validation;
 pub mod validator;
 pub mod healing;
+pub mod edge_recovery;
 pub mod boolean;
 pub mod queries;
 pub mod operations;
