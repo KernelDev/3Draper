@@ -5580,3 +5580,83 @@ self-intersection false-positive фикс, canonical CDT). Ребейз: кон�
 - Vision 2036: следующий пункт §1.4 — surface extension algorithms.
 
 
+
+---
+
+# Сессия 24 (дельта-порт) — инцидент песочницы: сверка с remote и перенос недублирующей части
+
+## Инцидент
+
+Локальная работа §1.4 (см. предыдущую запись) была сделана на устаревшей
+базе: push отклонён — remote оказалась на 9 коммитов впереди (сессии
+25–30: canonical CDT, §1.3 аудит, §1.4 SSI edge_recovery, trimmed-domain
+self-intersection fixes). То есть /home/z восстановлен из бэкапа
+СТАРОГО состояния (после сессии 23), а remote хранит более поздние
+сессии. Сигнал пользователя подтверждён буквально: «ушёл по коммитам
+вперёд = sandbox перезагружен и восстановлен из бэкапа».
+
+Мой локальный коммит сохранён в ветке `backup-s24-local` (a695c07).
+
+## Сверка покрытия §1.4 (remote vs моя сессия)
+
+| Пункт | remote (сессии 25–30) | моя сессия 24 | решение |
+|---|---|---|---|
+| 1 толерансы | аудит converter-пути ✓ | фикс validation.rs | ПОРТ (gap реален) |
+| 2 extension | НЕ сделан | NurbsCurve/Surface::extended + pass | ПОРТ (уникален) |
+| 3 SSI recovery | edge_recovery.rs (зрелее: PCURVEs, vertex overrides) | мой recover_edges_by_ssi | ОТКАЗАТЬСЯ от моего |
+| 4 OffsetSurface | нативный импорт/экспорт ✓ | то же + fold-over guard | ПОРТ только guard |
+| 5 guards | NURBS-only | Nurbs\|Offset\|Ruled | ПОРТ (gap реален) |
+
+## Перенесённая дельта (один коммит поверх 091ea86)
+
+- **validation.rs**: `extract_float_recursive` — Typed/List-aware
+  извлечение во всех трёх ветках (canonical
+  `UNCERTAINTY((LENGTH_MEASURE(v)),...)` больше не даёт None); +3 теста.
+- **geometry**: `NurbsCurve::extended`/`extended_by_distance`,
+  `NurbsSurface::extended` (+greville_clamped) — точные C¹
+  прямолинейные extension-спаны; +12 тестов (layout-инвариант,
+  стабильность исходного домена, C¹-стыки, прямолинейность, метрика,
+  unclamped/closed no-op).
+- **healing**: pass `close_endpoint_gaps_by_extension` (шаг 2b, до 2.5
+  edge_recovery) — вершинные микрощели между cross-face boundary-рёбрами
+  закрываются растяжением кривых к junction; `WhichEnd`,
+  `boundary_working_edges`, `extend_edge_endpoint` (Line/Nurbs/Arc);
+  поле `close_gaps_by_extension` (default true во всех пресетах),
+  счётчик `edge_gaps_extended` (+merge_report+total_fixes); +2 теста.
+- **guards**: `is_exact_complex_surface` (Nurbs|Offset|Ruled) в трёх
+  путях удаления (small-area, self-intersection, inconsistent-normals);
+  +тест offset-guard.
+- **converter**: fold-over предохранитель
+  `offset_surface_is_well_formed` (24×24 якобиан vs нормаль базиса) —
+  выворачивающие оффсеты (|d| ≥ κ⁻¹) падают на NURBS-аппроксимацию;
+  approximate_offset_surface возвращён из cfg(test) в модуль; +тест
+  fold-fallback (цилиндр R=1, offset −2).
+- **exporter**: Ruled-ветка — NURBS-грид вместо висячего dummy id
+  (`approximate_surface_as_nurbs`); converter-хелперы сделаны pub(crate).
+- ROADMAP §1.4: пункт 2 закрыт, к 1/4/5 дописаны session-24 дельты.
+
+## Отброшенное (дубли)
+
+- Мой `recover_edges_by_ssi` — их edge_recovery.rs (pass 2.5) зрелее:
+  открыто-проволочные gap-пары, аналитические кривые/§2.1 B-splines,
+  PCURVE-контракт, авторитетные vertex-override.
+- Мой нативный OFFSET-импорт/экспорт — идентичен их (даже их .T. флаг
+  полнее).
+
+## Верификация порта
+
+- draper-geometry: 258 (246+12 новых) — зелёные.
+- draper-topology: 248 (вкл. их edge_recovery-тесты + мои 3 порта) —
+  зелёные.
+- draper-mesh: 275 — зелёные.
+- draper-step lib (tolerance/offset/pcurve/export): 34 — зелёные;
+  integration: tolerance_hierarchy 3, seam_junction 5,
+  compacted_solids 3 — зелёные.
+
+## Правила на будущее
+
+- ПЕРВЫМ делом сессии: `git fetch && git log HEAD..origin/main` —
+  расхождение = перезагруженная песочница; НЕ force-push, сверять
+  покрытие и делать дельта-порт.
+- Фоновые процессы (даже setsid) убиваются между вызовами Bash —
+  длинные тесты foreground с timeout.

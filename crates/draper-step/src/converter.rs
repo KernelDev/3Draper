@@ -11892,11 +11892,25 @@ impl<'a> StepConverter<'a> {
             return Some(surface);
         }
 
-        info!(
-            "OFFSET_SURFACE #{}: native Surface::Offset (distance={}) over {}",
-            entity.id, offset_dist, surface.type_name()
-        );
-        Some(Surface::Offset(OffsetSurface::new(surface, offset_dist)))
+        // Fold-over safety valve (session-24 §1.4 hardening): an exact
+        // offset S = B + d·n is regular only where |d|·κ_max < 1. Past
+        // that threshold it self-intersects and the §2.3 Steiner-grid
+        // mesher would triangulate garbage — fall back to the legacy
+        // NURBS approximation so downstream still yields a
+        // manifold-ish surface.
+        if offset_surface_is_well_formed(&surface, offset_dist) {
+            info!(
+                "OFFSET_SURFACE #{}: native Surface::Offset (distance={}) over {}",
+                entity.id, offset_dist, surface.type_name()
+            );
+            Some(Surface::Offset(OffsetSurface::new(surface, offset_dist)))
+        } else {
+            info!(
+                "OFFSET_SURFACE #{}: offset {} folds the base — falling back to NURBS approximation",
+                entity.id, offset_dist
+            );
+            Some(approximate_offset_surface(&surface, offset_dist))
+        }
     }
 
     /// Find a curve reference from an entity's parameters.
@@ -15808,7 +15822,89 @@ fn solve_linear_system_gauss(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
 /// Given a basis surface and an offset distance, this samples the basis surface
 /// on a grid, offsets each grid point along the surface normal, and creates
 /// a NURBS surface from the offset grid.
-#[cfg(test)]
+/// Check that an exact offset of `basis_surface` by `distance` is well-formed
+/// (does not fold over itself).
+///
+/// Vision 2036 §1.4: an offset surface S(u,v) = B(u,v) + d·n(u,v) is regular
+/// wherever (I − d·W) stays positive-definite (W = shape operator), i.e.
+/// |d|·κ_max < 1. Past that threshold the offset develops cusps and
+/// self-intersections. We detect the equivalent geometric symptom directly:
+/// at a sample grid, the offset's own tangent frame (numerical S_u × S_v)
+/// must keep agreeing in orientation with the base normal n. A sign flip
+/// means the parametrization has folded — the exact offset is garbage there
+/// and the caller should fall back to the NURBS approximation.
+///
+/// Planes have zero curvature and never fold (short-circuit).
+/// NaN/Inf or degenerate normals at any sample also count as ill-formed
+/// (e.g. NURBS pole regions where the normal is undefined).
+fn offset_surface_is_well_formed(basis_surface: &Surface, distance: f64) -> bool {
+    if matches!(basis_surface, Surface::Plane(_)) {
+        return true; // κ = 0 everywhere — |d|·κ < 1 trivially
+    }
+
+    let (u_min, u_max) = surface_param_range_u(basis_surface);
+    let (v_min, v_max) = surface_param_range_v(basis_surface);
+
+    // Grid resolution: enough to catch local curvature hot-spots without
+    // paying a full tessellation cost at import time.
+    const N: usize = 24;
+    let eps = 1e-5 * ((u_max - u_min).abs().max(1.0) + (v_max - v_min).abs().max(1.0));
+
+    for i in 0..N {
+        let u = u_min + (u_max - u_min) * i as f64 / (N - 1) as f64;
+        for j in 0..N {
+            let v = v_min + (v_max - v_min) * j as f64 / (N - 1) as f64;
+
+            // Base normal — the reference orientation.
+            let n = basis_surface.normal_at(u, v);
+            let n_len = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+            if !n_len.is_finite() || n_len < 1e-12 {
+                return false; // degenerate normal (pole / singular point)
+            }
+
+            // Offset mapping S = B + d·n, numerical partials.
+            let s = |uu: f64, vv: f64| -> Point3d {
+                let p = basis_surface.point_at(uu, vv);
+                let nn = basis_surface.normal_at(uu, vv);
+                Point3d::new(
+                    p.x + distance * nn.x,
+                    p.y + distance * nn.y,
+                    p.z + distance * nn.z,
+                )
+            };
+            let s00 = s(u, v);
+            let su = s(u + eps, v);
+            let sv = s(u, v + eps);
+            let du = Vec3d::new(
+                (su.x - s00.x) / eps,
+                (su.y - s00.y) / eps,
+                (su.z - s00.z) / eps,
+            );
+            let dv = Vec3d::new(
+                (sv.x - s00.x) / eps,
+                (sv.y - s00.y) / eps,
+                (sv.z - s00.z) / eps,
+            );
+
+            // Cross product orientation vs base normal.
+            let cr = du.cross(&dv);
+            let det = cr.x * n.x + cr.y * n.y + cr.z * n.z;
+            if !det.is_finite() {
+                return false;
+            }
+            // A fold flips the orientation: det changes sign against the
+            // base normal. Allow a tiny negative slack for numerical noise
+            // near-inflection samples, but any solidly negative value means
+            // the offset parametrization has folded.
+            let scale = (du.length() * dv.length()).max(1e-30);
+            if det / scale < -1e-9 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn approximate_offset_surface(basis_surface: &Surface, distance: f64) -> Surface {
     let n_u = 16;
     let n_v = 16;
@@ -15862,7 +15958,7 @@ fn approximate_offset_surface(basis_surface: &Surface, distance: f64) -> Surface
 }
 
 /// Get the parameter range for u direction of a surface.
-fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
+pub(crate) fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
     match surface {
         Surface::Nurbs(n) => n.u_range(),
         Surface::Plane(_) => (0.0, 1.0),
@@ -15884,7 +15980,7 @@ fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
 }
 
 /// Get the parameter range for v direction of a surface.
-fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
+pub(crate) fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
     match surface {
         Surface::Nurbs(n) => n.v_range(),
         Surface::Plane(_) => (0.0, 1.0),
@@ -15906,7 +16002,7 @@ fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
 }
 
 /// Generate a clamped uniform knot vector for n control points and given degree.
-fn generate_clamped_knots(n: usize, degree: usize) -> Vec<f64> {
+pub(crate) fn generate_clamped_knots(n: usize, degree: usize) -> Vec<f64> {
     let m = n + degree + 1;
     let mut knots = Vec::with_capacity(m);
 
@@ -17468,6 +17564,35 @@ mod step_parser_extension_tests {
         } else {
             panic!("Expected NURBS surface for offset plane");
         }
+    }
+
+    /// Session-24 §1.4 hardening: inward cylinder offset beyond the radius
+    /// folds the surface (|d| > R) — the importer must fall back to the
+    /// NURBS approximation instead of an exact-but-self-intersecting offset.
+    #[test]
+    fn test_offset_surface_fold_fallback_to_nurbs() {
+        // Cylinder radius 1.0; offset −2.0 → the offset folds through the
+        // axis (|d| = 2 > R = 1): ill-formed.
+        let step_text = make_step(
+            "#11 = CARTESIAN_POINT('',(0.,0.,0.));
+\
+             #12 = DIRECTION('',(0.,0.,1.));
+\
+             #13 = DIRECTION('',(1.,0.,0.));
+\
+             #14 = AXIS2_PLACEMENT_3D('',#11,#12,#13);
+\
+             #15 = CYLINDRICAL_SURFACE('',#14,1.0);
+\
+             #16 = OFFSET_SURFACE('',#15,-2.0,.T.);"
+        );
+        let step = parse_step(&step_text).expect("synthetic fold STEP parses");
+        let conv = StepConverter::new(&step);
+        let surf = conv.extract_surface(16, 0).expect("folding offset extracts");
+        assert!(
+            matches!(surf, Surface::Nurbs(_)),
+            "folding offset (|d| > R) must fall back to NURBS approximation"
+        );
     }
 
     /// §1.4/§2.3: OFFSET_SURFACE must extract NATIVELY as Surface::Offset

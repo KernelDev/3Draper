@@ -515,6 +515,159 @@ impl NurbsCurve {
 
         Vec3d::new(dx, dy, dz)
     }
+
+    /// Vision 2036 §1.4 — surface/curve extension algorithms.
+    ///
+    /// Extend a **clamped** NURBS curve's parameter domain on either side by
+    /// exact-C¹ straight extensions:
+    ///
+    /// - the extension on each side is ONE extra Bézier span
+    ///   (`[t0 − extend_start, t0]` and `[t1, t1 + extend_end]`),
+    /// - its control points are placed **collinearly along the boundary
+    ///   tangent** `C'(t_boundary)` at uniform parameter spacing, with
+    ///   uniform weights equal to the boundary control point's weight,
+    /// - collinear control points ⇒ the convex hull is a segment ⇒ the
+    ///   extension span is **exactly straight**,
+    /// - spacing `Q_k = P_end + (k/d)·L·C'(t_end)` makes the extension's
+    ///   boundary derivative equal `C'(t_end)` exactly ⇒ **C¹ junction**.
+    ///
+    /// This is the standard CAD-kernel "extend curve" used for micro-gap
+    /// repair: the gap is closed by growing the curve along its own
+    /// direction instead of dropping/snapping geometry.
+    ///
+    /// Returns `self.clone()` unchanged when the curve is not clamped
+    /// (periodic/unclamped knot layout) or both extensions are ~0 — callers
+    /// must treat extension as best-effort.
+    pub fn extended(&self, extend_start: f64, extend_end: f64) -> NurbsCurve {
+        let no_start = extend_start.abs() < 1e-14;
+        let no_end = extend_end.abs() < 1e-14;
+        if no_start && no_end {
+            return self.clone();
+        }
+
+        let d = self.degree;
+        let n_cp = self.control_points.len();
+        if n_cp < d + 1 || self.knots.len() != n_cp + d + 1 || d == 0 {
+            // Malformed knot layout — nothing sane to extend.
+            return self.clone();
+        }
+
+        let t0 = self.knots[d];
+        let t1 = self.knots[self.knots.len() - d - 1];
+
+        // Clamped requirement: the first d+1 and last d+1 knots repeat the
+        // domain ends (extension assumes endpoint interpolation).
+        let clamped_start = self.knots[..=d].iter().all(|&k| (k - t0).abs() < 1e-12);
+        let clamped_end = self.knots[n_cp..].iter().all(|&k| (k - t1).abs() < 1e-12);
+        if !clamped_start || !clamped_end {
+            return self.clone();
+        }
+
+        let mut knots = self.knots.clone();
+        let mut cps = self.control_points.clone();
+        let mut ws = self.weights.clone();
+        if ws.len() != n_cp {
+            ws = vec![1.0; n_cp];
+        }
+
+        // ── End extension: Bézier span over [t1, t1 + L]. ──────────────
+        if !no_end {
+            let l = extend_end;
+            let w_end = ws[n_cp - 1];
+            let p_end = cps[n_cp - 1];
+            // Rational boundary derivative (parameter speed) at t1.
+            let d1 = self.derivative_at(t1);
+            if d1.x.is_finite() && d1.y.is_finite() && d1.z.is_finite() {
+                for k in 1..=d {
+                    let s = k as f64 * l / d as f64;
+                    cps.push(Point3d::new(
+                        p_end.x + s * d1.x,
+                        p_end.y + s * d1.y,
+                        p_end.z + s * d1.z,
+                    ));
+                    ws.push(w_end);
+                }
+                // Knot bookkeeping: the trailing clamped knot t1 becomes
+                // t1 + L (junction keeps multiplicity d — a Bézier-to-Bézier
+                // join with matching one-sided derivatives = C¹), then d
+                // more copies clamp the new end. Net +d knots for +d CPs,
+                // preserving knots.len() == n_cp + degree + 1.
+                let last = knots.len() - 1;
+                knots[last] = t1 + l;
+                for _ in 0..d {
+                    knots.push(t1 + l);
+                }
+            }
+        }
+
+        // ── Start extension: Bézier span over [t0 − L', t0]. ───────────
+        if !no_start {
+            let l = extend_start;
+            let w0 = ws[0];
+            let p0 = cps[0];
+            // Derivative at t0 points INTO the curve; the extension grows
+            // against it, so prepend R_k = P_0 − ((d−k)/d)·L'·C'(t0).
+            let d0 = self.derivative_at(t0);
+            if d0.x.is_finite() && d0.y.is_finite() && d0.z.is_finite() {
+                let mut pre_cps = Vec::with_capacity(d);
+                let mut pre_ws = Vec::with_capacity(d);
+                for k in 0..d {
+                    let s = (d - k) as f64 * l / d as f64;
+                    pre_cps.push(Point3d::new(
+                        p0.x - s * d0.x,
+                        p0.y - s * d0.y,
+                        p0.z - s * d0.z,
+                    ));
+                    pre_ws.push(w0);
+                }
+                pre_cps.extend(cps.drain(..));
+                pre_ws.extend(ws.drain(..));
+                // Knot bookkeeping (mirror of the end side): prepend d
+                // copies of t0 − L, then mutate the original leading
+                // clamped knot (now at index d) to t0 − L. Net +d knots.
+                let mut pre_knots = vec![t0 - l; d];
+                pre_knots.extend(knots.drain(..));
+                pre_knots[d] = t0 - l;
+                cps = pre_cps;
+                ws = pre_ws;
+                knots = pre_knots;
+            }
+        }
+
+        NurbsCurve {
+            degree: d,
+            control_points: cps,
+            weights: ws,
+            knots,
+        }
+    }
+
+    /// Metric-distance variant of [`NurbsCurve::extended`]: extends each
+    /// end by the given **Euclidean length** (converted to a parameter-space
+    /// extension via the local boundary speed |C'(t_boundary)|).
+    ///
+    /// Vision 2036 §1.4: healing closes micro-gaps of known metric width
+    /// (e.g. `gap_tolerance()`), so the distance form is the ergonomic API.
+    pub fn extended_by_distance(&self, dist_start: f64, dist_end: f64) -> NurbsCurve {
+        if dist_start.abs() < 1e-14 && dist_end.abs() < 1e-14 {
+            return self.clone();
+        }
+        let d = self.degree;
+        if self.control_points.len() < d + 1 || self.knots.len() != self.control_points.len() + d + 1 {
+            return self.clone();
+        }
+        let t0 = self.knots[d];
+        let t1 = self.knots[self.knots.len() - d - 1];
+
+        let speed = |t: f64| {
+            let dv = self.derivative_at(t);
+            (dv.x * dv.x + dv.y * dv.y + dv.z * dv.z).sqrt()
+        };
+        let speed0 = speed(t0).max(1e-12);
+        let speed1 = speed(t1).max(1e-12);
+
+        self.extended(dist_start / speed0, dist_end / speed1)
+    }
 }
 
 impl Curve3d {
@@ -1081,6 +1234,183 @@ mod tests {
         };
         let curve = Curve3d::Nurbs(nurbs);
         assert!(!curve.is_degenerate(1e-6), "A NURBS curve with distinct control points should not be degenerate");
+    }
+
+    // ─── Vision 2036 §1.4: curve extension ────────────────────────────
+
+    /// Helper: a degree-2 clamped NURBS curve over [0, 2] with an
+    /// interior knot (so the layout is non-trivial), unit weights.
+    fn quad_nurbs_for_extension() -> NurbsCurve {
+        // Quadratic, 4 control points, knots [0,0,0,1,2,2,2].
+        NurbsCurve {
+            degree: 2,
+            control_points: vec![
+                Point3d::new(0.0, 0.0, 0.0),
+                Point3d::new(1.0, 2.0, 0.0),
+                Point3d::new(3.0, 2.0, 0.0),
+                Point3d::new(4.0, 0.0, 0.0),
+            ],
+            weights: vec![1.0; 4],
+            knots: vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
+        }
+    }
+
+    #[test]
+    fn test_nurbs_extended_knot_layout() {
+        let c = quad_nurbs_for_extension();
+        let e = c.extended(0.5, 1.0);
+        // degree 2 → d = 2 new control points and +d knots per side.
+        assert_eq!(e.control_points.len(), 4 + 2 + 2);
+        assert_eq!(e.knots.len(), 7 + 2 + 2);
+        assert_eq!(e.knots.len(), e.control_points.len() + e.degree + 1);
+        // Domain grew exactly by the requested amounts (clamped ends).
+        assert!((e.knots[e.degree] - (-0.5)).abs() < 1e-12);
+        let t1 = e.knots[e.knots.len() - e.degree - 1];
+        assert!((t1 - 3.0).abs() < 1e-12);
+        // Interior knot untouched; t0/t1 keep multiplicity d (Bézier joins).
+        // Layout: [−0.5×3, 0×2, 1, 2×2, 3×3]
+        assert!((e.knots[5] - 1.0).abs() < 1e-12, "interior knot 1.0 must survive");
+        assert!((e.knots[3] - 0.0).abs() < 1e-12 && (e.knots[4] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_nurbs_extended_endpoint_continuity() {
+        // The extended curve must pass through the ORIGINAL endpoints at
+        // the original parameter values (extension only appends spans).
+        let c = quad_nurbs_for_extension();
+        let e = c.extended(0.5, 1.0);
+        for t in [0.0, 0.7, 1.0, 1.5, 2.0] {
+            let pa = nurbs_eval(&c, t);
+            let pb = nurbs_eval(&e, t);
+            assert!(
+                pa.distance_sq_to(&pb) < 1e-20,
+                "original span must be bit-stable after extension at t={}", t
+            );
+        }
+    }
+
+    #[test]
+    fn test_nurbs_extended_c1_junction() {
+        // Tangent continuity at both junction parameters.
+        let c = quad_nurbs_for_extension();
+        let e = c.extended(0.5, 1.0);
+
+        // End junction at t = 2: derivative from the LEFT on the original
+        // vs from the RIGHT on the extended.
+        let d_left = c.derivative_at(2.0);
+        let d_right = e.derivative_at(2.0 + 1e-9);
+        for (a, b) in [(d_left.x, d_right.x), (d_left.y, d_right.y), (d_left.z, d_right.z)] {
+            assert!(
+                (a - b).abs() < 1e-6 * (1.0 + a.abs().max(b.abs())),
+                "C¹ junction violated at end: {} vs {}",
+                a,
+                b
+            );
+        }
+
+        // Start junction at t = 0 on the extended curve.
+        let d_start_left = e.derivative_at(-0.5 + 1e-9);
+        let d_start_right = e.derivative_at(1e-9);
+        let d_orig = c.derivative_at(0.0);
+        for (a, b) in [
+            (d_start_left.x, d_orig.x),
+            (d_start_left.y, d_orig.y),
+            (d_start_left.z, d_orig.z),
+        ] {
+            assert!(
+                (a - b).abs() < 1e-6 * (1.0 + a.abs().max(b.abs())),
+                "extension start derivative must match original C'(t0): {} vs {}",
+                a,
+                b
+            );
+        }
+        // Sanity: the original's own derivative just right of 0 matches too
+        // (junction is AT t=0; extension spans [−0.5, 0]).
+        for (a, b) in [
+            (d_start_right.x, d_orig.x),
+            (d_start_right.y, d_orig.y),
+            (d_start_right.z, d_orig.z),
+        ] {
+            assert!(
+                (a - b).abs() < 1e-6 * (1.0 + a.abs().max(b.abs())),
+                "original start derivative mismatch: {} vs {}",
+                a,
+                b
+            );
+        }
+    }
+
+    #[test]
+    fn test_nurbs_extended_straight_extension() {
+        // The extension span is exactly straight: samples on [2, 3] lie on
+        // the tangent line from C(2).
+        let c = quad_nurbs_for_extension();
+        let e = c.extended(0.0, 1.0);
+        let p2 = nurbs_eval(&c, 2.0);
+        let d = c.derivative_at(2.0);
+        for k in 1..=5 {
+            let t = 2.0 + k as f64 * 0.2;
+            let p = nurbs_eval(&e, t);
+            // p − p2 must be parallel to d.
+            let cross = (
+                (p.y - p2.y) * d.z - (p.z - p2.z) * d.y,
+                (p.z - p2.z) * d.x - (p.x - p2.x) * d.z,
+                (p.x - p2.x) * d.y - (p.y - p2.y) * d.x,
+            );
+            let mag = (cross.0 * cross.0 + cross.1 * cross.1 + cross.2 * cross.2).sqrt();
+            let scale = ((p.x - p2.x).powi(2) + (p.y - p2.y).powi(2) + (p.z - p2.z).powi(2)).sqrt()
+                * (d.x * d.x + d.y * d.y + d.z * d.z).sqrt();
+            assert!(
+                mag < 1e-9 * scale.max(1e-30),
+                "extension must be exactly straight, deviation {} at t={}",
+                mag,
+                t
+            );
+        }
+    }
+
+    #[test]
+    fn test_nurbs_extended_by_distance_end() {
+        // Metric variant: extending by distance D at the end moves the end
+        // point exactly D along the unit tangent.
+        let c = quad_nurbs_for_extension();
+        let d = 0.75;
+        let e = c.extended_by_distance(0.0, d);
+        let p_old = nurbs_eval(&c, 2.0);
+        // Parameter length L = D / |C'(t1)|.
+        let dv = c.derivative_at(2.0);
+        let speed = (dv.x * dv.x + dv.y * dv.y + dv.z * dv.z).sqrt();
+        let t_end = 2.0 + d / speed;
+        let p_new = nurbs_eval(&e, t_end);
+        let disp = ((p_new.x - p_old.x).powi(2)
+            + (p_new.y - p_old.y).powi(2)
+            + (p_new.z - p_old.z).powi(2))
+        .sqrt();
+        assert!(
+            (disp - d).abs() < 1e-9,
+            "metric extension must move the endpoint by exactly {}, got {}",
+            d,
+            disp
+        );
+    }
+
+    #[test]
+    fn test_nurbs_extended_unclamped_noop() {
+        // Unclamped (periodic-style) knot layout: extension must no-op
+        // instead of corrupting the curve.
+        let c = NurbsCurve {
+            degree: 2,
+            control_points: vec![
+                Point3d::new(0.0, 0.0, 0.0),
+                Point3d::new(1.0, 1.0, 0.0),
+                Point3d::new(2.0, 0.0, 0.0),
+            ],
+            weights: vec![1.0; 3],
+            knots: vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+        };
+        let e = c.extended(0.5, 0.5);
+        assert_eq!(e.control_points.len(), 3, "unclamped extension must no-op");
+        assert_eq!(e.knots.len(), 6);
     }
 
     #[test]

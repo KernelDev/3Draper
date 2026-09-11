@@ -167,9 +167,26 @@ approximation of the intersection.
       entities carry unit-conversion factors (0.0254 = inch→metre) and
       property measures — NOT tolerances; correctly not used as tolerance
       source. The Typed `LENGTH_MEASURE` wrapper inside UNCERTAINTY is
-      handled by `extract_float_from_step_value`.
-- [ ] **Implement surface extension algorithms** — extend surfaces to close
+      handled by `extract_float_from_step_value`. Session-24 delta
+      (2026-09-12): `validation.rs::extract_tolerances` was still the
+      weak Float-only extractor — the canonical
+      `UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(v)),...)` form
+      returned `uncertainty = None` on the VALIDATION path (the converter
+      path was complete). Now uses the same recursive Typed/List-aware
+      extraction on all three branches (uncertainty/geometric/shape).
+- [x] **Implement surface extension algorithms** — extend surfaces to close
       micro-gaps instead of removing faces.
+      (Session-24, 2026-09-12: `NurbsCurve::extended`/`extended_by_distance`
+      and `NurbsSurface::extended` — exact-C¹ straight extension spans
+      (collinear boundary-tangent control points, uniform boundary
+      weights, Bézier-to-Bézier knot bookkeeping preserving
+      knots.len() == n_cp + degree + 1); healing pass
+      `close_endpoint_gaps_by_extension` (step 2b) closes vertex
+      micro-gaps between cross-face boundary edges by extending the edge
+      curves toward the junction (line rebuild / NURBS C¹ extension /
+      arc angle growth) — repair, never removal. Counter:
+      `edge_gaps_extended`. Candidate consumer: the HOUSING rim-aliasing
+      twins noted in the self-intersection audit above.)
 - [x] **Implement surface-surface intersection for edge recovery** —
       reconstruct lost edges by intersecting adjacent surfaces.
 
@@ -220,12 +237,24 @@ approximation of the intersection.
       normals, inherited periodicity for §3.3 seam handling, exporter emits
       OFFSET_SURFACE for round-trip — the 16×16 NURBS approximation moved
       to tests). Dedicated meshing refinements tracked under §2.3.
+      Session-24 delta (2026-09-12): fold-over safety valve —
+      `offset_surface_is_well_formed` (sampled Jacobian orientation vs
+      base normal) falls back to the NURBS approximation when
+      |d| ≥ κ⁻¹ (e.g. inward offset deeper than the radius), where the
+      exact offset would self-intersect and triangulate garbage; the
+      `Ruled` export arm now emits a sampled-grid NURBS instead of a
+      dangling dummy id.
 - [x] **Audit healing NURBS guards** — verified 2026-09-09: all 4 face
       removal paths protect NURBS (merge requires Nurbs×Nurbs compatible —
       mixed surface types never merge; small-face removal retains NURBS;
       self-intersection removal skips NURBS; normal-repair removal skips
       NURBS). The STEP converter delegates all removal to the guarded
-      healing pipeline (`apply_healing_to_face_data`).
+      healing pipeline (`apply_healing_to_face_data`). Session-24 delta
+      (2026-09-12): the guards were NURBS-only while the converter had
+      been producing native `Surface::Offset` faces since 2026-09-09 —
+      extended via `is_exact_complex_surface` (Nurbs|Offset|Ruled) in
+      all three removal paths; face merging stays safe by construction
+      (mixed surface types never merge).
 
 
 **Priority:** P1

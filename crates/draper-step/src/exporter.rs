@@ -57,6 +57,48 @@ fn fmt_f64(v: f64) -> String {
     }
 }
 
+/// Approximate an arbitrary surface as a B-spline surface by sampling a
+/// regular parameter grid (session-24 §1.4 export fallback for surfaces
+/// without a direct STEP representation, e.g. our internal `Ruled` type).
+///
+/// The grid is interpolated as control points of a clamped degree-3
+/// (bi-cubic) B-spline with uniform knots.
+fn approximate_surface_as_nurbs(
+    surface: &Surface,
+    n_u: usize,
+    n_v: usize,
+) -> draper_geometry::NurbsSurface {
+    let (u_min, u_max) = crate::converter::surface_param_range_u(surface);
+    let (v_min, v_max) = crate::converter::surface_param_range_v(surface);
+
+    let mut grid: Vec<Vec<Point3d>> = Vec::with_capacity(n_u);
+    for i in 0..n_u {
+        let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1) as f64;
+        let mut row = Vec::with_capacity(n_v);
+        for j in 0..n_v {
+            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
+            row.push(surface.point_at(u, v));
+        }
+        grid.push(row);
+    }
+
+    let u_degree = 3.min(n_u - 1);
+    let v_degree = 3.min(n_v - 1);
+    let u_knots = crate::converter::generate_clamped_knots(n_u, u_degree);
+    let v_knots = crate::converter::generate_clamped_knots(n_v, v_degree);
+
+    draper_geometry::NurbsSurface {
+        u_degree,
+        v_degree,
+        control_points: grid,
+        weights: vec![vec![1.0; n_v]; n_u],
+        u_knots,
+        v_knots,
+        u_closed: false,
+        v_closed: false,
+    }
+}
+
 /// A write buffer for STEP entities with deduplication.
 struct StepWriter {
     out: String,
@@ -1069,10 +1111,12 @@ impl StepWriter {
                 id
             }
             Surface::Ruled(_) => {
-                // Audit item 4.3 (2026-07-19): Ruled surfaces are not yet
-                // supported in STEP export.
-                log::warn!("Ruled surface export not yet implemented, skipping");
-                self.alloc_id() // Return a dummy ID
+                // Session-24 §1.4: no direct STEP representation for our
+                // internal ruled surfaces in this exporter — approximate on
+                // a sampled grid instead of emitting a dangling dummy id.
+                log::warn!("Ruled surface exported as NURBS approximation");
+                let nurbs = approximate_surface_as_nurbs(surface, 16, 16);
+                self.emit_nurbs_surface(&nurbs)
             }
         };
         self.surface_cache.insert(key, id);

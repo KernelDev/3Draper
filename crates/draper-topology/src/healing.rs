@@ -47,8 +47,27 @@ use crate::entity::*;
 use draper_geometry::{
     CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
-    SphereSurface, ConeSurface, TorusSurface, NurbsSurface,
+    SphereSurface, ConeSurface, TorusSurface, NurbsSurface, NurbsCurve, Curve3d,
 };
+
+/// Surfaces that carry exact/complex geometry and must NEVER be removed by
+/// healing steps (small-area removal, self-intersection cleanup, normal
+/// consistency fixes).
+///
+/// Session-24 §1.4 (audit of healing NURBS guards): the historic guard
+/// protected only `Surface::Nurbs` — fillets, threads, organic shapes.
+/// Since the STEP converter imports `OFFSET_SURFACE` natively as
+/// `Surface::Offset` (exact evaluation, dedicated mesher path §2.3), the
+/// same protection extends to it and to `Surface::Ruled`: their areas and
+/// sampled normals are equally unreliable heuristics for removal decisions,
+/// and dropping them destroys exact imported geometry irrecoverably.
+#[inline]
+fn is_exact_complex_surface(surface: &Surface) -> bool {
+    matches!(
+        surface,
+        Surface::Nurbs(_) | Surface::Offset(_) | Surface::Ruled(_)
+    )
+}
 
 // ============================================================
 // HealingParams
@@ -124,6 +143,13 @@ pub struct HealingParams {
     /// [`crate::edge_recovery`].
     pub recover_lost_edges: bool,
 
+    /// Session-24 §1.4 (item 2): close vertex-level micro-gaps between
+    /// boundary edges of different faces by EXTENDING the edge curves
+    /// along their own tangents (line rebuild / NURBS C¹ extension / arc
+    /// angle growth) toward the junction point — repairing geometry
+    /// instead of dropping the sliver faces the gaps would form.
+    pub close_gaps_by_extension: bool,
+
     /// Optional tolerance context from the STEP file or model scale.
     /// When present, the coincidence tolerance from this context is used
     /// as a floor for all entity tolerances during propagation.
@@ -148,6 +174,7 @@ impl Default for HealingParams {
             remove_self_intersecting_faces: false,
             remove_inconsistent_normals: false,
             recover_lost_edges: true,
+            close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -191,6 +218,7 @@ impl HealingParams {
             remove_self_intersecting_faces: false, // §1.4 never-worsen
             remove_inconsistent_normals: false, // May remove geometry
             recover_lost_edges: true, // Additive repair — never removes geometry
+            close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -238,6 +266,7 @@ impl HealingParams {
             remove_self_intersecting_faces: false,
             remove_inconsistent_normals: true,
             recover_lost_edges: true,
+            close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -332,6 +361,9 @@ pub struct HealingReport {
     /// Number of lost edges reconstructed via surface-surface
     /// intersection (Vision 2036 §1.4).
     pub edges_recovered: u32,
+    /// Session-24 §1.4 (item 2): endpoint micro-gaps closed by extending
+    /// the boundary edge curves (geometric repair, not face removal).
+    pub edge_gaps_extended: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -349,6 +381,7 @@ impl HealingReport {
             + self.tolerances_propagated
             + self.self_intersections
             + self.edges_recovered
+            + self.edge_gaps_extended
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -767,6 +800,12 @@ fn heal_staged(
     // 2. Close gaps
     close_gaps(&mut staged, params, &mut report);
 
+    // 2b. Session-24 §1.4 (item 2): geometric micro-gap closure by
+    //     extending the boundary edge curves toward the junction.
+    if params.close_gaps_by_extension {
+        close_endpoint_gaps_by_extension(&mut staged, params, &mut report);
+    }
+
     // 2.5 Recover lost edges via surface-surface intersection
     // (Vision 2036 §1.4): whatever gaps remain after the cheap
     // topological merging are candidates for geometric reconstruction —
@@ -1129,6 +1168,241 @@ fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
     if gap_count > 0 {
         report.gaps_closed = gap_count;
         report.add_msg(format!("Closed {} gaps between boundary edges", gap_count));
+    }
+}
+
+/// Which endpoint of an edge.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum WhichEnd {
+    Start,
+    End,
+}
+
+/// Collect `(face_idx, working_idx)` of boundary edges that carry working
+/// geometry: referenced by exactly ONE coedge (consistent with the
+/// boundary notion in `close_gaps`) and present in their face's working
+/// list (C5 7.6b: only store-staged solids have edge payload).
+fn boundary_working_edges(staged: &StagedShell) -> Vec<(usize, usize)> {
+    let mut use_count: std::collections::HashMap<TopoId, u32> =
+        std::collections::HashMap::new();
+    for face in &staged.shell.faces {
+        for wire in face.outer_wire.iter().chain(face.inner_wires.iter()) {
+            for coedge in &wire.coedges {
+                *use_count.entry(coedge.edge).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (fi, edges) in staged.working.iter().enumerate() {
+        for (ei, e) in edges.iter().enumerate() {
+            if use_count.get(&e.id).copied().unwrap_or(0) == 1 {
+                out.push((fi, ei));
+            }
+        }
+    }
+    out
+}
+
+/// Extend the curve of `edge` at `end` toward `junction` (which sits within
+/// `gap_tolerance` of the current endpoint). Returns `true` when the
+/// geometry changed.
+///
+/// Type-aware extension (Vision 2036 §1.4 item 2):
+/// - **Line** — rebuilt exactly through (other endpoint → junction): the
+///   new edge ends exactly at the junction.
+/// - **NurbsCurve** — C¹ straight extension by the metric gap along the
+///   boundary tangent; the authoritative vertex point snaps to the
+///   junction (first-order repair, residual ⊥ offset ≤ gap).
+/// - **Arc** — angle growth when the junction lies on the circle.
+/// - Other curve kinds are left untouched (best-effort pass).
+fn extend_edge_endpoint(edge: &mut Edge, end: WhichEnd, junction: Point3d) -> bool {
+    let curve = match edge.curve.as_ref() {
+        Some(c) => c.clone(),
+        None => return false,
+    };
+    let (t0, t1) = edge.param_range;
+
+    match (&curve, end) {
+        (Curve3d::Line(_), _) => {
+            // Rebuild exactly: other endpoint → junction.
+            let other = if end == WhichEnd::Start {
+                curve.point_at(t1)
+            } else {
+                curve.point_at(t0)
+            };
+            let dist = other.distance_to(&junction);
+            if dist < 1e-15 {
+                return false;
+            }
+            match draper_geometry::Line::through_points(other, junction) {
+                Some(line) => {
+                    edge.curve = Some(Curve3d::Line(line));
+                    edge.param_range = (0.0, dist);
+                    match end {
+                        WhichEnd::Start => edge.start_vertex_point = Some(junction),
+                        WhichEnd::End => edge.end_vertex_point = Some(junction),
+                    }
+                    true
+                }
+                None => false,
+            }
+        }
+        (Curve3d::Nurbs(n), which) => {
+            let boundary = match which {
+                WhichEnd::Start => curve.point_at(t0),
+                WhichEnd::End => curve.point_at(t1),
+            };
+            let dist = boundary.distance_to(&junction);
+            if dist < 1e-15 {
+                return false;
+            }
+            let extended = match which {
+                WhichEnd::Start => n.extended_by_distance(dist, 0.0),
+                WhichEnd::End => n.extended_by_distance(0.0, dist),
+            };
+            let new_domain = (
+                extended.knots[extended.degree],
+                extended.knots[extended.knots.len() - extended.degree - 1],
+            );
+            edge.curve = Some(Curve3d::Nurbs(extended));
+            edge.param_range = new_domain;
+            match which {
+                WhichEnd::Start => edge.start_vertex_point = Some(junction),
+                WhichEnd::End => edge.end_vertex_point = Some(junction),
+            }
+            true
+        }
+        (Curve3d::Arc(a), which) => {
+            // Angle growth: valid only when the junction lies on the arc's
+            // circle (within gap-scale slack), else the arc would be lying.
+            let d = a.circle.center.distance_to(&junction);
+            if (d - a.circle.radius).abs() > a.circle.radius.max(1e-9) * 1e-3 {
+                return false;
+            }
+            // Angle of the junction in the circle's OWN basis
+            // (x_axis, y_axis = normal × x_axis) — matches point_at(t).
+            let x_axis = a.circle.x_axis;
+            let y_axis = a.circle.normal.cross(&x_axis);
+            let radial = draper_geometry::Vec3d::new(
+                junction.x - a.circle.center.x,
+                junction.y - a.circle.center.y,
+                junction.z - a.circle.center.z,
+            );
+            let r = a.circle.radius.max(1e-12);
+            let cos = (radial.x * x_axis.x + radial.y * x_axis.y + radial.z * x_axis.z) / r;
+            let sin = (radial.x * y_axis.x + radial.y * y_axis.y + radial.z * y_axis.z) / r;
+            let angle = sin.atan2(cos);
+            let angle = if angle < 0.0 { angle + 2.0 * std::f64::consts::PI } else { angle };
+            let mut arc_new = a.clone();
+            match which {
+                WhichEnd::Start => {
+                    arc_new.start_angle = angle;
+                    edge.start_vertex_point = Some(junction);
+                }
+                WhichEnd::End => {
+                    arc_new.end_angle = angle;
+                    edge.end_vertex_point = Some(junction);
+                }
+            }
+            edge.curve = Some(Curve3d::Arc(arc_new));
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Vision 2036 §1.4 item 2 — close vertex-level micro-gaps between
+/// boundary edges of DIFFERENT faces by extending the edge curves toward
+/// the junction (geometric repair) instead of removing faces.
+///
+/// Symptom: boundary edge endpoints of two faces sit within
+/// `gap_tolerance` of each other but are not coincident — the model has a
+/// microscopic open seam at that corner. The pass extends both curves and
+/// welds the junction point as the authoritative vertex coordinate.
+fn close_endpoint_gaps_by_extension(
+    staged: &mut StagedShell,
+    params: &HealingParams,
+    report: &mut HealingReport,
+) {
+    let gap_tol = params.gap_tolerance();
+    if !gap_tol.is_finite() || gap_tol <= 1e-15 {
+        return;
+    }
+
+    let boundary = boundary_working_edges(staged);
+
+    // Immutable snapshot: (face, widx, id, start_pt, end_pt).
+    let snaps: Vec<(usize, usize, TopoId, Point3d, Point3d)> = boundary
+        .iter()
+        .filter_map(|&(fi, ei)| {
+            let e = staged.working[fi].get(ei)?;
+            let s = e.start_point()?;
+            let en = e.end_point()?;
+            Some((fi, ei, e.id, s, en))
+        })
+        .collect();
+    if snaps.len() < 2 {
+        return;
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    let mut repaired: std::collections::HashSet<(TopoId, WhichEnd)> =
+        std::collections::HashSet::new();
+    let mut pending: Vec<(usize, WhichEnd, usize, WhichEnd, Point3d)> = Vec::new();
+
+    for i in 0..snaps.len() {
+        for j in (i + 1)..snaps.len() {
+            if snaps[i].0 == snaps[j].0 {
+                continue; // only cross-face corner gaps
+            }
+            for (pi, ea) in [(3usize, WhichEnd::Start), (4usize, WhichEnd::End)] {
+                for (pj, eb) in [(3usize, WhichEnd::Start), (4usize, WhichEnd::End)] {
+                    let pa = if pi == 3 { snaps[i].3 } else { snaps[i].4 };
+                    let pb = if pj == 3 { snaps[j].3 } else { snaps[j].4 };
+                    let d = pa.distance_to(&pb);
+                    if d <= 1e-15 || d > gap_tol {
+                        continue;
+                    }
+                    let key_a = (snaps[i].2, ea);
+                    let key_b = (snaps[j].2, eb);
+                    if repaired.contains(&key_a) || repaired.contains(&key_b) {
+                        continue;
+                    }
+                    let junction = Point3d::new(
+                        (pa.x + pb.x) * 0.5,
+                        (pa.y + pb.y) * 0.5,
+                        (pa.z + pb.z) * 0.5,
+                    );
+                    repaired.insert(key_a);
+                    repaired.insert(key_b);
+                    pending.push((i, ea, j, eb, junction));
+                }
+            }
+        }
+    }
+
+    let mut fixes = 0u32;
+    for (i, ea, j, eb, junction) in pending {
+        let (fi, wi, ..) = snaps[i];
+        let (fj, wj, ..) = snaps[j];
+        let mut changed = false;
+        if let Some(e) = staged.working[fi].get_mut(wi) {
+            changed |= extend_edge_endpoint(e, ea, junction);
+        }
+        if let Some(e) = staged.working[fj].get_mut(wj) {
+            changed |= extend_edge_endpoint(e, eb, junction);
+        }
+        if changed {
+            fixes += 1;
+        }
+    }
+
+    if fixes > 0 {
+        report.edge_gaps_extended = fixes;
+        report.add_msg(format!(
+            "Closed {} endpoint micro-gaps by curve extension",
+            fixes
+        ));
     }
 }
 
@@ -1979,7 +2253,10 @@ fn remove_small_features(staged: &mut StagedShell, params: &HealingParams, repor
             // These represent complex geometry (fillets, organic shapes) that
             // may have small area but are topologically important. Removing
             // them was the root cause of "healing drops valid NURBS faces" bug.
-            if matches!(surface, Surface::Nurbs(_)) {
+            // Session-24 §1.4: exact `Offset`/`Ruled` surfaces get the same
+            // protection — the STEP converter imports OFFSET_SURFACE
+            // natively, so the guard must follow.
+            if is_exact_complex_surface(surface) {
                 return true;
             }
 
@@ -2178,17 +2455,19 @@ fn fix_self_intersections_heal(staged: &mut StagedShell, params: &HealingParams,
             continue; // Already removing one of the faces
         }
 
-        // Check if either face is a NURBS surface — if so, skip this intersection
-        let is_nurbs_a = staged.shell.faces.get(si.face_a)
+        // Check if either face is an exact complex surface (NURBS/Offset/Ruled)
+        // — if so, skip this intersection. Session-24 §1.4: Offset surfaces
+        // join the protected set since the converter imports them natively.
+        let is_protected_a = staged.shell.faces.get(si.face_a)
             .and_then(|f| f.surface.as_ref())
-            .map(|s| matches!(s, Surface::Nurbs(_)))
+            .map(|s| is_exact_complex_surface(s))
             .unwrap_or(false);
-        let is_nurbs_b = staged.shell.faces.get(si.face_b)
+        let is_protected_b = staged.shell.faces.get(si.face_b)
             .and_then(|f| f.surface.as_ref())
-            .map(|s| matches!(s, Surface::Nurbs(_)))
+            .map(|s| is_exact_complex_surface(s))
             .unwrap_or(false);
-        if is_nurbs_a || is_nurbs_b {
-            continue; // Don't remove NURBS faces
+        if is_protected_a || is_protected_b {
+            continue; // Don't remove NURBS/Offset/Ruled faces
         }
 
         let edges_a = staged.edge_count(si.face_a);
@@ -2246,10 +2525,12 @@ fn remove_inconsistent_normal_faces(staged: &mut StagedShell, _params: &HealingP
             None => continue,
         };
 
-        // NEVER remove NURBS faces — their normals at (0,0) may not be
-        // representative of the actual surface orientation, leading to
-        // false-positive "inconsistent normal" detection.
-        if matches!(surface, Surface::Nurbs(_)) {
+        // NEVER remove exact complex-surface faces (NURBS/Offset/Ruled) —
+        // their normals at (0,0) may not be representative of the actual
+        // surface orientation, leading to false-positive "inconsistent
+        // normal" detection. Session-24 §1.4 extends the NURBS-only guard
+        // to natively-imported Offset surfaces.
+        if is_exact_complex_surface(surface) {
             continue;
         }
 
@@ -3653,6 +3934,8 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.tolerances_propagated += source.tolerances_propagated;
     target.self_intersections += source.self_intersections;
     target.edges_recovered += source.edges_recovered;
+    // Session-24 §1.4: the geometric-repair counter rides along.
+    target.edge_gaps_extended += source.edge_gaps_extended;
     target.messages.extend(source.messages.iter().cloned());
 }
 
@@ -3710,6 +3993,207 @@ fn compute_face_representative_point(
 
 #[cfg(test)]
 mod tests {
+    /// Vision 2036 §1.4: tiny `Surface::Offset` faces must NEVER be removed
+    /// by the small-area pass. The STEP converter now imports OFFSET_SURFACE
+    /// natively; dropping an offset face would irrecoverably lose exact
+    /// imported geometry (the historic guard only protected `Surface::Nurbs`).
+    #[test]
+    fn test_remove_small_faces_spares_offset_surfaces() {
+        let mut faces = Vec::new();
+        let mut working: Vec<Vec<Edge>> = Vec::new();
+
+        // Tiny face (area ≈ 5e-7) whose surface is an exact Offset over a
+        // plane — e.g. a thin offset wall imported from OFFSET_SURFACE.
+        let (mut tiny_face, tiny_face_w) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(0.001, 0.0, 0.0),
+            Point3d::new(0.0, 0.001, 0.0),
+        ])
+        .unwrap();
+        tiny_face.surface = Some(Surface::Offset(draper_geometry::OffsetSurface::new(
+            Surface::Plane(Plane::xy()),
+            0.5,
+        )));
+        faces.push(tiny_face);
+        working.push(tiny_face_w);
+
+        // Normal face (area ≈ 0.5) for contrast.
+        let (normal_face, normal_face_w) = ShapeBuilder::make_polygon_face(&[
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(0.0, 1.0, 0.0),
+        ])
+        .unwrap();
+        faces.push(normal_face);
+        working.push(normal_face_w);
+
+        let shell = Shell::new(faces);
+        let params = HealingParams {
+            min_face_area: 1e-5, // Threshold above the tiny face's area
+            fix_normals: false,
+            stitch_edges: false,
+            ..HealingParams::default()
+        };
+
+        let solid = Solid::from_edges_only(shell, working);
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert_eq!(
+            report.small_faces_removed, 0,
+            "offset-surface faces must be spared by the small-area pass"
+        );
+        assert_eq!(healed.faces().len(), 2);
+        // The offset surface must survive verbatim (order-independent check).
+        assert!(
+            healed
+                .faces()
+                .iter()
+                .any(|f| matches!(f.surface, Some(Surface::Offset(_)))),
+            "the exact offset surface must survive healing untouched"
+        );
+    }
+
+
+    // ─── Session-24 §1.4 (item 2): geometric gap repair by curve extension ────
+
+    /// Build a face from an explicit edge list (wire coedges follow the
+    /// list order; working list parallel to the wire).
+    fn face_from_edge_list(surface: Surface, edges: Vec<Edge>) -> (Face, Vec<Edge>) {
+        let coedges: Vec<CoEdge> = edges.iter().map(|e| CoEdge::new(e.id, true)).collect();
+        let face = Face::new(surface, Wire::new(coedges));
+        (face, edges)
+    }
+
+    /// Minimal healing params for the §1.4 pass tests: every unrelated
+    /// pass disabled so the assertions isolate the pass under test.
+    fn s14_params() -> HealingParams {
+        HealingParams {
+            max_hole_edges: 0, // no hole capping on open test shells
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            propagate_tolerances: false,
+            fix_self_intersections: false,
+            remove_inconsistent_normals: false,
+            ..HealingParams::default()
+        }
+    }
+
+    /// Vision 2036 §1.4 item 2: endpoint micro-gaps between boundary edges
+    /// of different faces close by EXTENDING the edge curves toward the
+    /// junction — geometry is repaired, no face is removed.
+    #[test]
+    fn test_close_endpoint_gaps_by_extension() {
+        // Face A: z=0 rectangle (0,0,0),(1,0,0),(1,1,0),(0,1,0).
+        // Face B: x=0 rectangle spanning y∈[−1,0], z∈[0,1] — its corners
+        // near the origin sit at (0,−5e-6,0) instead of (0,0,0): two
+        // cross-face corner micro-gaps of 5e-6 (gap_tol = 1e-5).
+        let gap = 5e-6;
+        let junction_y = -gap / 2.0;
+
+        let a_edges = vec![
+            Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0)),
+            Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 1.0, 0.0)),
+            Edge::new_line(Point3d::new(1.0, 1.0, 0.0), Point3d::new(0.0, 1.0, 0.0)),
+            Edge::new_line(Point3d::new(0.0, 1.0, 0.0), Point3d::new(0.0, 0.0, 0.0)),
+        ];
+        let b_edges = vec![
+            Edge::new_line(
+                Point3d::new(0.0, -gap, 0.0),
+                Point3d::new(0.0, -1.0, 0.0),
+            ),
+            Edge::new_line(
+                Point3d::new(0.0, -1.0, 0.0),
+                Point3d::new(0.0, -1.0, 1.0),
+            ),
+            Edge::new_line(
+                Point3d::new(0.0, -1.0, 1.0),
+                Point3d::new(0.0, 0.0, 1.0),
+            ),
+            Edge::new_line(
+                Point3d::new(0.0, 0.0, 1.0),
+                Point3d::new(0.0, -gap, 0.0),
+            ),
+        ];
+
+        let (face_a, wa) = face_from_edge_list(
+            Surface::Plane(Plane {
+                origin: Point3d::ORIGIN,
+                u_dir: Direction3d::X,
+                v_dir: Direction3d::Y,
+                normal: Direction3d::Z,
+            }),
+            a_edges,
+        );
+        let (face_b, wb) = face_from_edge_list(
+            Surface::Plane(Plane {
+                origin: Point3d::ORIGIN,
+                u_dir: Direction3d::Y,
+                v_dir: Direction3d::Z,
+                normal: Direction3d::X,
+            }),
+            b_edges,
+        );
+
+        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(shell, vec![wa, wb]);
+        let (healed, report) = heal_solid(&solid, &s14_params());
+
+        // The pass did geometric work and removed nothing.
+        assert!(
+            report.edge_gaps_extended >= 1,
+            "extension pass must fire, report: {:?}",
+            report
+        );
+        assert_eq!(healed.faces().len(), 2, "no face may be removed");
+
+        // Collect all healed edge curves from the store.
+        let healed_edges: Vec<&Edge> = healed
+            .faces()
+            .iter()
+            .flat_map(|f| f.edge_ids.iter())
+            .filter_map(|id| healed.edge_store.get(*id))
+            .collect();
+
+        // A's bottom edge extended backwards to the junction:
+        // (1,0,0) → (0, junction_y, 0).
+        let near = |p: &Point3d, q: &Point3d| p.distance_to(q) < 1e-12;
+        let j0 = Point3d::new(0.0, junction_y, 0.0);
+        assert!(
+            healed_edges.iter().any(|e| {
+                let (Some(s), Some(en)) = (e.start_point(), e.end_point()) else {
+                    return false;
+                };
+                (near(&s, &j0) && near(&en, &Point3d::new(1.0, 0.0, 0.0)))
+                    || (near(&en, &j0) && near(&s, &Point3d::new(1.0, 0.0, 0.0)))
+            }),
+            "face A's bottom edge must be extended to the junction {j0:?}"
+        );
+        // B's first edge starts at the junction: (0, junction_y, 0) → (0,−1,0).
+        assert!(
+            healed_edges.iter().any(|e| {
+                let (Some(s), Some(en)) = (e.start_point(), e.end_point()) else {
+                    return false;
+                };
+                (near(&s, &j0) && near(&en, &Point3d::new(0.0, -1.0, 0.0)))
+                    || (near(&en, &j0) && near(&s, &Point3d::new(0.0, -1.0, 0.0)))
+            }),
+            "face B's first edge must be extended to the junction"
+        );
+        // A's left edge now runs (0,1,0) → (0, junction_y, 0) — i.e. it
+        // REACHED PAST the old corner to the welded junction.
+        assert!(
+            healed_edges.iter().any(|e| {
+                let (Some(s), Some(en)) = (e.start_point(), e.end_point()) else {
+                    return false;
+                };
+                (near(&s, &Point3d::new(0.0, 1.0, 0.0)) && near(&en, &j0))
+                    || (near(&en, &Point3d::new(0.0, 1.0, 0.0)) && near(&s, &j0))
+            }),
+            "face A's left edge must be extended down to the junction"
+        );
+    }
+
     fn fb_edge_ids_empty(face: &crate::entity::Face) -> bool {
         face.edge_ids.is_empty()
     }
@@ -4541,9 +5025,10 @@ mod tests {
             tolerances_propagated: 2,
             self_intersections: 0,
             edges_recovered: 0,
+            edge_gaps_extended: 1,
             messages: Vec::new(),
         };
-        assert_eq!(report.total_fixes(), 13);
+        assert_eq!(report.total_fixes(), 14);
     }
 
     /// Test triangle_aspect_ratio for an equilateral triangle.

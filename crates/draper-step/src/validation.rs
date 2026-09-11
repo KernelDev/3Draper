@@ -226,6 +226,22 @@ impl StepTolerances {
     }
 }
 
+/// Recursively extract a float from any `StepValue`, handling nested
+/// `List` and `Typed` wrappers.
+///
+/// Vision 2036 §1.4 item 1: the canonical CAD format is
+/// `UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(1.E-005)),#20,$,$)` — the
+/// value is wrapped in a typed `LENGTH_MEASURE(...)` inside a list.
+fn extract_float_recursive(val: &StepValue) -> Option<f64> {
+    match val {
+        StepValue::Float(f) => Some(*f),
+        StepValue::Integer(i) => Some(*i as f64),
+        StepValue::List(params) => params.iter().find_map(extract_float_recursive),
+        StepValue::Typed { value, .. } => extract_float_recursive(value),
+        _ => None,
+    }
+}
+
 /// Extract tolerance information from STEP file entities.
 ///
 /// STEP files can contain explicit tolerance information via:
@@ -240,31 +256,32 @@ pub fn extract_tolerances(step_file: &StepFile) -> StepTolerances {
         let type_name = entity.type_name.to_uppercase();
 
         if type_name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
-            // Format: UNCERTAINTY_MEASURE_WITH_UNIT((value, ...), ...)
-            // or: UNCERTAINTY_MEASURE_WITH_UNIT(value, ...)
-            if let Some(StepValue::List(params)) = entity.params.get(0) {
-                if let Some(StepValue::Float(val)) = params.first() {
+            // Formats seen in the wild:
+            //   UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(1.E-005)),#20,$,$)
+            //   UNCERTAINTY_MEASURE_WITH_UNIT((1.E-005),#20,$,$)
+            //   UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.E-005),#20,$,$)
+            // Vision 2036 §1.4 item 1: use the recursive Typed/List-aware
+            // extractor so the canonical `LENGTH_MEASURE` wrapper is honored
+            // (the old code only matched a bare float and silently missed
+            // the most common real-world form).
+            for param in &entity.params {
+                if let Some(val) = extract_float_recursive(param) {
                     let tol = val.abs();
-                    uncertainty_found = Some(match uncertainty_found {
-                        Some(existing) => existing.min(tol),
-                        None => tol,
-                    });
+                    if tol > 0.0 && tol.is_finite() {
+                        uncertainty_found = Some(match uncertainty_found {
+                            Some(existing) => existing.min(tol),
+                            None => tol,
+                        });
+                        break;
+                    }
                 }
-            }
-            // Also try direct float parameter
-            if let Some(StepValue::Float(val)) = entity.params.get(0) {
-                let tol = val.abs();
-                uncertainty_found = Some(match uncertainty_found {
-                    Some(existing) => existing.min(tol),
-                    None => tol,
-                });
             }
         }
 
         if type_name.starts_with("GEOMETRIC_TOLERANCE") {
             // The first numeric parameter is typically the tolerance value
             for param in &entity.params {
-                if let StepValue::Float(val) = param {
+                if let Some(val) = extract_float_recursive(param) {
                     let tol = val.abs();
                     if tol > 1e-15 && tol < 1000.0 {
                         tolerances.geometric_tolerances.push(tol);
@@ -276,7 +293,7 @@ pub fn extract_tolerances(step_file: &StepFile) -> StepTolerances {
 
         if type_name.starts_with("SHAPE_TOLERANCE") {
             for param in &entity.params {
-                if let StepValue::Float(val) = param {
+                if let Some(val) = extract_float_recursive(param) {
                     let tol = val.abs();
                     if tol > 1e-15 && tol < 1000.0 {
                         tolerances.shape_tolerances.push(tol);
@@ -2532,10 +2549,51 @@ END-ISO-10303-21;
 "#;
         let file = parse_step_string(step);
         let tolerances = extract_tolerances(&file);
-        // The first param is a list, which may or may not be parsed correctly
-        // depending on the parser. Let's check if we get something.
-        // The key thing is the function doesn't crash.
-        assert!(tolerances.uncertainty.is_some() || tolerances.geometric_tolerances.is_empty());
+        assert_eq!(tolerances.uncertainty, Some(0.01));
+        assert_eq!(tolerances.tightest_tolerance, Some(0.01));
+    }
+
+    #[test]
+    fn test_extract_tolerances_uncertainty_length_measure() {
+        // Vision 2036 §1.4 item 1: canonical CAD form emitted by
+        // CATIA/NX/Creo — the value is wrapped in LENGTH_MEASURE(...)
+        // inside a list. The old extractor missed this entirely.
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#19 = UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(1.E-005)), #20, '', '');
+#20 = (CONVERSION_BASED_UNIT('MILLIMETRE', #21) LENGTH_UNIT() NAMED_UNIT(#22));
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let tolerances = extract_tolerances(&file);
+        assert_eq!(tolerances.uncertainty, Some(1e-5));
+        assert_eq!(tolerances.tightest_tolerance, Some(1e-5));
+    }
+
+    #[test]
+    fn test_extract_tolerances_uncertainty_multiple_takes_min() {
+        // Multiple uncertainty entities: the tightest (smallest) wins.
+        let step = r#"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION(('test'), '2;1');
+FILE_NAME('test.stp', '2024-01-01', (''), (''), 'test', '', '');
+FILE_SCHEMA(('AUTOMOTIVE_DESIGN'));
+ENDSEC;
+DATA;
+#1 = UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(1.E-003)), #20, '', '');
+#2 = UNCERTAINTY_MEASURE_WITH_UNIT((LENGTH_MEASURE(2.26E-006)), #20, '', '');
+ENDSEC;
+END-ISO-10303-21;
+"#;
+        let file = parse_step_string(step);
+        let tolerances = extract_tolerances(&file);
+        assert_eq!(tolerances.uncertainty, Some(2.26e-6));
     }
 
     #[test]

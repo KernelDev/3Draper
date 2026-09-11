@@ -1518,6 +1518,273 @@ impl NurbsSurface {
         SurfaceDerivatives { point, du, dv }
     }
 
+    /// Vision 2036 §1.4 — surface extension algorithms.
+    ///
+    /// Extend a **clamped** NURBS surface's parameter domain on each side by
+    /// exact-C¹ straight strips, independently in U and V:
+    ///
+    /// - `extend_u.0` / `extend_u.1` extend the u-domain at `u_min` / `u_max`
+    ///   (in parameter units); `extend_v` likewise,
+    /// - each extension strip is ONE Bézier span whose new control
+    ///   points/rows lie **collinearly along the boundary tangent field**
+    ///   `∂S/∂u` (or `∂S/∂v`) evaluated at the boundary for every
+    ///   cross-section, at uniform parameter spacing,
+    /// - uniform per-boundary weights ⇒ the strip is exactly "ruled" along
+    ///   the extension direction and **C¹ across the junction** for every
+    ///   cross-section,
+    /// - analytic surfaces don't need this (unbounded); NURBS faces whose
+    ///   trim must grow past the natural domain (micro-gap closure, edge
+    ///   recovery on a shared boundary) use it.
+    ///
+    /// Returns `self.clone()` unchanged when the surface is not clamped or
+    /// closed in a direction the caller asks to extend — extension is
+    /// strictly best-effort.
+    pub fn extended(
+        &self,
+        extend_u: (f64, f64),
+        extend_v: (f64, f64),
+    ) -> NurbsSurface {
+        let p = self.u_degree;
+        let q = self.v_degree;
+        let n_u = self.control_points.len();
+        let n_v = if n_u > 0 { self.control_points[0].len() } else { 0 };
+        if n_u < p + 1 || n_v < q + 1 || n_u == 0 || n_v == 0 || p == 0 || q == 0 {
+            return self.clone();
+        }
+        if self.u_knots.len() != n_u + p + 1 || self.v_knots.len() != n_v + q + 1 {
+            return self.clone();
+        }
+
+        let u0 = self.u_knots[p];
+        let u1 = self.u_knots[self.u_knots.len() - p - 1];
+        let v0 = self.v_knots[q];
+        let v1 = self.v_knots[self.v_knots.len() - q - 1];
+
+        let u_clamped = self.u_knots[..=p].iter().all(|&k| (k - u0).abs() < 1e-12)
+            && self.u_knots[n_u..].iter().all(|&k| (k - u1).abs() < 1e-12);
+        let v_clamped = self.v_knots[..=q].iter().all(|&k| (k - v0).abs() < 1e-12)
+            && self.v_knots[n_v..].iter().all(|&k| (k - v1).abs() < 1e-12);
+
+        let want_u = extend_u.0.abs() >= 1e-14 || extend_u.1.abs() >= 1e-14;
+        let want_v = extend_v.0.abs() >= 1e-14 || extend_v.1.abs() >= 1e-14;
+        if (want_u && (!u_clamped || self.u_closed))
+            || (want_v && (!v_clamped || self.v_closed))
+        {
+            return self.clone();
+        }
+
+        // ── Work on the V-rows layout (grid[v][u]) — extension appends
+        //    rows/cols at the ends, which is symmetric to read here.
+        //    control_points[u][v] → grid[v][u]
+        let mut grid: Vec<Vec<Point3d>> = (0..n_v)
+            .map(|j| (0..n_u).map(|i| self.control_points[i][j]).collect())
+            .collect();
+        let mut wgrid: Vec<Vec<f64>> = (0..n_v)
+            .map(|j| (0..n_u).map(|i| self.weights[i][j]).collect())
+            .collect();
+        let mut u_knots = self.u_knots.clone();
+        let mut v_knots = self.v_knots.clone();
+
+        // ── U extensions (each row j extends along ∂S/∂u at the boundary).
+        // ─────────────────────────────────────────────────────────────────
+        if extend_u.1.abs() >= 1e-14 {
+            let l = extend_u.1;
+            let mut new_cols: Vec<Vec<Point3d>> = Vec::with_capacity(p);
+            let mut new_wcols: Vec<Vec<f64>> = Vec::with_capacity(p);
+            let mut ok = true;
+            for k in 1..=p {
+                let s = k as f64 * l / p as f64;
+                let mut col = Vec::with_capacity(n_v);
+                let mut wcol = Vec::with_capacity(n_v);
+                for j in 0..n_v {
+                    let v = greville_clamped(&self.v_knots, q, j, v0, v1);
+                    let du = self.derivatives_at(u1, v).du;
+                    let base = grid[j][grid[j].len() - 1];
+                    col.push(Point3d::new(
+                        base.x + s * du.x,
+                        base.y + s * du.y,
+                        base.z + s * du.z,
+                    ));
+                    wcol.push(wgrid[j][wgrid[j].len() - 1]);
+                }
+                if col.iter().any(|c| !c.x.is_finite() || !c.y.is_finite() || !c.z.is_finite()) {
+                    ok = false;
+                    break;
+                }
+                new_cols.push(col);
+                new_wcols.push(wcol);
+            }
+            if ok {
+                for j in 0..n_v {
+                    for (col, wcol) in new_cols.iter().zip(new_wcols.iter()) {
+                        grid[j].push(col[j]);
+                        wgrid[j].push(wcol[j]);
+                    }
+                }
+                // Mutate the trailing clamped knot u1 → u1 + L, then p more
+                // copies (net +p knots for +p control columns).
+                let last = u_knots.len() - 1;
+                u_knots[last] = u1 + l;
+                for _ in 0..p {
+                    u_knots.push(u1 + l);
+                }
+            }
+        }
+        if extend_u.0.abs() >= 1e-14 {
+            let l = extend_u.0;
+            let mut new_cols: Vec<Vec<Point3d>> = Vec::with_capacity(p);
+            let mut new_wcols: Vec<Vec<f64>> = Vec::with_capacity(p);
+            let mut ok = true;
+            for k in 0..p {
+                let s = (p - k) as f64 * l / p as f64;
+                let mut col = Vec::with_capacity(n_v);
+                let mut wcol = Vec::with_capacity(n_v);
+                for j in 0..n_v {
+                    let v = greville_clamped(&self.v_knots, q, j, v0, v1);
+                    let du = self.derivatives_at(u0, v).du;
+                    let base = grid[j][0];
+                    col.push(Point3d::new(
+                        base.x - s * du.x,
+                        base.y - s * du.y,
+                        base.z - s * du.z,
+                    ));
+                    wcol.push(wgrid[j][0]);
+                }
+                if col.iter().any(|c| !c.x.is_finite() || !c.y.is_finite() || !c.z.is_finite()) {
+                    ok = false;
+                    break;
+                }
+                new_cols.push(col);
+                new_wcols.push(wcol);
+            }
+            if ok {
+                for j in 0..n_v {
+                    for (col, wcol) in new_cols.iter().zip(new_wcols.iter()) {
+                        grid[j].insert(0, col[j]);
+                        wgrid[j].insert(0, wcol[j]);
+                    }
+                }
+                // Prepend p copies of u0 − L, then mutate the original
+                // leading clamped knot (now at index p) to u0 − L.
+                let mut pre = vec![u0 - l; p];
+                pre.extend(u_knots.drain(..));
+                pre[p] = u0 - l;
+                u_knots = pre;
+            }
+        }
+
+        // ── V extensions (each column i extends along ∂S/∂v at the boundary).
+        // ─────────────────────────────────────────────────────────────────
+        // grid rows now may have grown in u — recompute row length.
+        let n_u_now = grid[0].len();
+        if extend_v.1.abs() >= 1e-14 {
+            let l = extend_v.1;
+            let mut new_rows: Vec<Vec<Point3d>> = Vec::with_capacity(q);
+            let mut new_wrows: Vec<Vec<f64>> = Vec::with_capacity(q);
+            let mut ok = true;
+            for k in 1..=q {
+                let s = k as f64 * l / q as f64;
+                let mut row = Vec::with_capacity(n_u_now);
+                let mut wrow = Vec::with_capacity(n_u_now);
+                for i in 0..n_u_now {
+                    let u = greville_clamped(&self.u_knots, p, i, u0, u1);
+                    let dv = self.derivatives_at(u, v1).dv;
+                    let base = grid[grid.len() - 1][i];
+                    row.push(Point3d::new(
+                        base.x + s * dv.x,
+                        base.y + s * dv.y,
+                        base.z + s * dv.z,
+                    ));
+                    wrow.push(wgrid[grid.len() - 1][i]);
+                }
+                if row.iter().any(|c| !c.x.is_finite() || !c.y.is_finite() || !c.z.is_finite()) {
+                    ok = false;
+                    break;
+                }
+                new_rows.push(row);
+                new_wrows.push(wrow);
+            }
+            if ok {
+                for (row, wrow) in new_rows.into_iter().zip(new_wrows.into_iter()) {
+                    grid.push(row);
+                    wgrid.push(wrow);
+                }
+                // Mutate the trailing clamped knot v1 → v1 + L, then q more
+                // copies (net +q knots for +q control rows).
+                let last = v_knots.len() - 1;
+                v_knots[last] = v1 + l;
+                for _ in 0..q {
+                    v_knots.push(v1 + l);
+                }
+            }
+        }
+        if extend_v.0.abs() >= 1e-14 {
+            let l = extend_v.0;
+            let mut new_rows: Vec<Vec<Point3d>> = Vec::with_capacity(q);
+            let mut new_wrows: Vec<Vec<f64>> = Vec::with_capacity(q);
+            let mut ok = true;
+            for k in 0..q {
+                let s = (q - k) as f64 * l / q as f64;
+                let mut row = Vec::with_capacity(n_u_now);
+                let mut wrow = Vec::with_capacity(n_u_now);
+                for i in 0..n_u_now {
+                    let u = greville_clamped(&self.u_knots, p, i, u0, u1);
+                    let dv = self.derivatives_at(u, v0).dv;
+                    let base = grid[0][i];
+                    row.push(Point3d::new(
+                        base.x - s * dv.x,
+                        base.y - s * dv.y,
+                        base.z - s * dv.z,
+                    ));
+                    wrow.push(wgrid[0][i]);
+                }
+                if row.iter().any(|c| !c.x.is_finite() || !c.y.is_finite() || !c.z.is_finite()) {
+                    ok = false;
+                    break;
+                }
+                new_rows.push(row);
+                new_wrows.push(wrow);
+            }
+            if ok {
+                for (row, wrow) in new_rows.into_iter().zip(new_wrows.into_iter()) {
+                    grid.insert(0, row);
+                    wgrid.insert(0, wrow);
+                }
+                // Prepend q copies of v0 − L, then mutate the original
+                // leading clamped knot (now at index q) to v0 − L.
+                let mut pre = vec![v0 - l; q];
+                pre.extend(v_knots.drain(..));
+                pre[q] = v0 - l;
+                v_knots = pre;
+            }
+        }
+
+        // ── Transpose back to control_points[u][v].
+        let n_u_final = grid[0].len();
+        let n_v_final = grid.len();
+        let mut cps: Vec<Vec<Point3d>> = (0..n_u_final)
+            .map(|i| (0..n_v_final).map(|j| grid[j][i]).collect())
+            .collect();
+        let mut ws: Vec<Vec<f64>> = (0..n_u_final)
+            .map(|i| (0..n_v_final).map(|j| wgrid[j][i]).collect())
+            .collect();
+        // Weight-grid repair for malformed inputs.
+        if ws.len() != cps.len() || ws.iter().any(|w| w.len() != n_v_final) {
+            ws = vec![vec![1.0; n_v_final]; n_u_final];
+        }
+
+        NurbsSurface {
+            u_degree: p,
+            v_degree: q,
+            control_points: cps,
+            weights: ws,
+            u_knots,
+            v_knots,
+            u_closed: false,
+            v_closed: false,
+        }
+    }
+
     /// Compute the partial derivative dS/du analytically using degree reduction.
     fn compute_partial_derivative_u(
         &self, u: f64, v: f64, k_u: usize, k_v: usize,
@@ -2916,6 +3183,24 @@ impl Surface {
     }
 }
 
+/// Greville abscissa of control point `i` for a degree-`p` knot vector,
+/// clamped into the curve/surface domain `[lo, hi]`.
+///
+/// Vision 2036 §1.4 (surface extension): the cross-section parameter for
+/// control row/column `i` when evaluating boundary tangent fields.
+#[inline]
+fn greville_clamped(knots: &[f64], degree: usize, i: usize, lo: f64, hi: f64) -> f64 {
+    let mut sum = 0.0;
+    for k in 1..=degree {
+        sum += knots
+            .get(i + k)
+            .copied()
+            .unwrap_or(*knots.last().unwrap_or(&0.0));
+    }
+    let g = sum / degree.max(1) as f64;
+    g.clamp(lo, hi)
+}
+
 /// NURBS surface evaluation using de Boor's algorithm.
 /// Uses tensor-product approach: evaluate B-spline in v for each relevant row,
 /// then evaluate B-spline in u on the resulting intermediate points.
@@ -3064,6 +3349,181 @@ mod tests {
     use super::*;
     use crate::curve::{Circle, Line};
     use std::f64::consts::PI;
+
+    // ─── Vision 2036 §1.4: surface extension ──────────────────────────
+
+    /// Helper: bi-quadratic NURBS surface, u∈[0,2], v∈[0,2], 4×4 CP grid
+    /// (interior knot in each direction), unit weights. A shallow "hill".
+    fn quad_surface_for_extension() -> NurbsSurface {
+        NurbsSurface {
+            u_degree: 2,
+            v_degree: 2,
+            // control_points[u][v] — 4 columns × 4 rows.
+            control_points: vec![
+                vec![
+                    Point3d::new(0.0, 0.0, 0.0),
+                    Point3d::new(0.0, 1.0, 1.0),
+                    Point3d::new(0.0, 2.0, 1.0),
+                    Point3d::new(0.0, 3.0, 0.0),
+                ],
+                vec![
+                    Point3d::new(1.0, 0.0, 1.0),
+                    Point3d::new(1.0, 1.0, 2.0),
+                    Point3d::new(1.0, 2.0, 2.0),
+                    Point3d::new(1.0, 3.0, 1.0),
+                ],
+                vec![
+                    Point3d::new(2.0, 0.0, 1.0),
+                    Point3d::new(2.0, 1.0, 2.0),
+                    Point3d::new(2.0, 2.0, 2.0),
+                    Point3d::new(2.0, 3.0, 1.0),
+                ],
+                vec![
+                    Point3d::new(3.0, 0.0, 0.0),
+                    Point3d::new(3.0, 1.0, 1.0),
+                    Point3d::new(3.0, 2.0, 1.0),
+                    Point3d::new(3.0, 3.0, 0.0),
+                ],
+            ],
+            weights: vec![vec![1.0; 4]; 4],
+            u_knots: vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
+            v_knots: vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
+            u_closed: false,
+            v_closed: false,
+        }
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_layout() {
+        let s = quad_surface_for_extension();
+        let e = s.extended((0.5, 1.0), (0.0, 0.0));
+        // U-extension both sides: +2 control columns each → 4+2+2 = 8.
+        assert_eq!(e.control_points.len(), 8);
+        assert_eq!(e.control_points[0].len(), 4);
+        assert_eq!(e.u_knots.len(), 7 + 2 + 2);
+        assert_eq!(
+            e.u_knots.len(),
+            e.control_points.len() + e.u_degree + 1,
+            "knot invariant must hold after extension"
+        );
+        assert_eq!(e.v_knots.len(), 7, "v untouched");
+        // Domains.
+        assert!((e.u_knots[e.u_degree] - (-0.5)).abs() < 1e-12);
+        let u1 = e.u_knots[e.u_knots.len() - e.u_degree - 1];
+        assert!((u1 - 3.0).abs() < 1e-12);
+        // Interior knot survives; layout: [−0.5×3, 0×2, 1, 2×2, 3×3].
+        assert!((e.u_knots[5] - 1.0).abs() < 1e-12);
+        assert!((e.u_knots[3] - 0.0).abs() < 1e-12 && (e.u_knots[4] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_original_region_stable() {
+        let s = quad_surface_for_extension();
+        let e = s.extended((0.5, 1.0), (0.25, 0.75));
+        for (u, v) in [
+            (0.0, 0.0),
+            (0.5, 1.0),
+            (1.0, 1.5),
+            (2.0, 2.0),
+            (1.3, 0.4),
+        ] {
+            let pa = s.point_at(u, v);
+            let pb = e.point_at(u, v);
+            assert!(
+                pa.distance_sq_to(&pb) < 1e-20,
+                "original region must be bit-stable after extension at ({},{})",
+                u,
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_c1_junction_u() {
+        // Tangent-field continuity across the u = u1 junction: compare
+        // ∂S/∂u just inside (original side) and just outside (extension).
+        let s = quad_surface_for_extension();
+        let e = s.extended((0.0, 1.0), (0.0, 0.0));
+        for v in [0.0, 0.5, 1.0, 1.5, 2.0] {
+            let du_in = s.derivatives_at(2.0 - 1e-9, v).du;
+            let du_out = e.derivatives_at(2.0 + 1e-9, v).du;
+            for (a, b) in [(du_in.x, du_out.x), (du_in.y, du_out.y), (du_in.z, du_out.z)] {
+                assert!(
+                    (a - b).abs() < 1e-6 * (1.0 + a.abs().max(b.abs())),
+                    "C¹ junction violated at v={} in u: {} vs {}",
+                    v,
+                    a,
+                    b
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_straight_strip_u() {
+        // The extension strip [u1, u1+L] is ruled along u: for each v,
+        // samples lie on the tangent ray from S(u1, v).
+        let s = quad_surface_for_extension();
+        let e = s.extended((0.0, 1.0), (0.0, 0.0));
+        for v in [0.3, 1.0, 1.7] {
+            let base = s.point_at(2.0, v);
+            let du = s.derivatives_at(2.0, v).du;
+            for k in 1..=4 {
+                let u = 2.0 + k as f64 * 0.25;
+                let p = e.point_at(u, v);
+                let cross = (
+                    (p.y - base.y) * du.z - (p.z - base.z) * du.y,
+                    (p.z - base.z) * du.x - (p.x - base.x) * du.z,
+                    (p.x - base.x) * du.y - (p.y - base.y) * du.x,
+                );
+                let mag = (cross.0 * cross.0 + cross.1 * cross.1 + cross.2 * cross.2).sqrt();
+                let scale = ((p.x - base.x).powi(2)
+                    + (p.y - base.y).powi(2)
+                    + (p.z - base.z).powi(2))
+                .sqrt()
+                    * (du.x * du.x + du.y * du.y + du.z * du.z).sqrt();
+                assert!(
+                    mag < 1e-9 * scale.max(1e-30),
+                    "extension strip must be straight along u at v={} u={}",
+                    v,
+                    u
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_v_direction() {
+        let s = quad_surface_for_extension();
+        let e = s.extended((0.0, 0.0), (0.0, 0.6));
+        assert_eq!(e.control_points[0].len(), 6, "+2 control rows in v");
+        assert_eq!(e.v_knots.len(), 7 + 2);
+        assert_eq!(
+            e.v_knots.len(),
+            e.control_points[0].len() + e.v_degree + 1
+        );
+        let v1 = e.v_knots[e.v_knots.len() - e.v_degree - 1];
+        assert!((v1 - 2.6).abs() < 1e-12);
+        // Original region stable.
+        let pa = s.point_at(1.0, 1.0);
+        let pb = e.point_at(1.0, 1.0);
+        assert!(pa.distance_sq_to(&pb) < 1e-20);
+    }
+
+    #[test]
+    fn test_nurbs_surface_extended_closed_noop() {
+        let mut s = quad_surface_for_extension();
+        s.u_closed = true;
+        let e = s.extended((0.0, 1.0), (0.0, 0.0));
+        assert_eq!(
+            e.control_points.len(),
+            4,
+            "u-closed surface must not extend in u"
+        );
+        // v-extension on the same (now u-closed) surface still works.
+        let e2 = s.extended((0.0, 0.0), (0.0, 0.5));
+        assert_eq!(e2.control_points[0].len(), 6);
+    }
 
     #[test]
     fn test_cone_apex_degenerate() {
