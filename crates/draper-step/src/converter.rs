@@ -2505,9 +2505,73 @@ fn extract_float_from_step_value(val: &StepValue) -> Option<f64> {
             }
             None
         }
-        StepValue::Typed { value, .. } => extract_float_from_step_value(value),
+        StepValue::Typed { type_name, value } => {
+            // Angle-typed wrappers (PLANE_ANGLE_MEASURE / SOLID_ANGLE_MEASURE)
+            // are rejected so an angular measure never leaks into a length
+            // tolerance.
+            if type_name.to_uppercase().contains("ANGLE") {
+                return None;
+            }
+            extract_float_from_step_value(value)
+        }
         _ => None,
     }
+}
+
+/// Resolve a tolerance value from a parameter that is either an inline
+/// measure (`LENGTH_MEASURE(v)`, a bare float) or a REFERENCE into the
+/// AP242 measure chain (`MEASURE_REPRESENTATION_ITEM →
+/// LENGTH_MEASURE_WITH_UNIT`).
+///
+/// Reference following is whitelisted by entity type: only entities whose
+/// type name contains `MEASURE` are followed (LENGTH_MEASURE_WITH_UNIT,
+/// MEASURE_REPRESENTATION_ITEM, MEASURE_WITH_UNIT, complex
+/// `(LENGTH_MEASURE()MEASURE_REPRESENTATION_ITEM(...))` entities). This
+/// guarantees that references to DATUM / DIRECTION / CARTESIAN_POINT /
+/// placement entities reachable from `*_TOLERANCE` parameters can never
+/// leak their coordinates into a tolerance value. Angle-typed entities
+/// (PLANE_ANGLE_*) are rejected. Depth is bounded at 3 (tolerance →
+/// measure item → measure-with-unit → inline typed value).
+fn resolve_measure_value(step_file: &StepFile, param: &StepValue) -> Option<f64> {
+    fn resolve_inner(
+        step_file: &StepFile,
+        param: &StepValue,
+        depth: usize,
+    ) -> Option<f64> {
+        if depth > 3 {
+            return None; // measure chains are at most 3 entities deep
+        }
+        match param {
+            StepValue::Ref(id) => {
+                let entity = step_file.find_entity(*id)?;
+                let t = entity.type_name.to_uppercase();
+                if t.contains("ANGLE") {
+                    return None; // angular measure — not a length tolerance
+                }
+                if t.contains("MEASURE") {
+                    // Measure-typed entity: scan its parameters for the value
+                    // (one more level of references allowed).
+                    for p in &entity.params {
+                        if let Some(v) = resolve_inner(step_file, p, depth + 1) {
+                            return Some(v);
+                        }
+                    }
+                }
+                None // non-measure entity (datum, direction, ...) — stop
+            }
+            StepValue::List(items) => {
+                // Tolerance/datum lists: refs inside get type-checked above.
+                for item in items {
+                    if let Some(v) = resolve_inner(step_file, item, depth) {
+                        return Some(v);
+                    }
+                }
+                None
+            }
+            other => extract_float_from_step_value(other),
+        }
+    }
+    resolve_inner(step_file, param, 0)
 }
 
 pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
@@ -2517,10 +2581,11 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
         let type_name = entity.type_name.to_uppercase();
 
         if type_name == "UNCERTAINTY_MEASURE_WITH_UNIT" {
-            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(value), unit_ref)
-            // The value is inside a TypedValue wrapper (LENGTH_MEASURE).
+            // Format: UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE(value), unit_ref, ...)
+            // The value is inside a TypedValue wrapper (LENGTH_MEASURE), or —
+            // for some writers — a reference to a measure entity.
             for param in &entity.params {
-                if let Some(val) = extract_float_from_step_value(param) {
+                if let Some(val) = resolve_measure_value(step_file, param) {
                     if val > 0.0 && val.is_finite() {
                         // Accept any positive uncertainty value (was: val < 1.0).
                         // Some CAD systems report uncertainty >= 1mm for large
@@ -2534,17 +2599,29 @@ pub fn extract_step_tolerance(step_file: &StepFile) -> Option<f64> {
                     }
                 }
             }
-        }
-
-        if type_name.starts_with("GEOMETRIC_TOLERANCE") || type_name.starts_with("SHAPE_TOLERANCE") {
+        } else if type_name.ends_with("_TOLERANCE") {
+            // GD&T family: GEOMETRIC_TOLERANCE / SHAPE_TOLERANCE and every
+            // concrete AP214/AP242 subtype (FLATNESS_TOLERANCE,
+            // PERPENDICULARITY_TOLERANCE, CYLINDRICITY_TOLERANCE, ... — all
+            // end with `_TOLERANCE`; the old prefix rule missed them all).
+            // Non-tolerance entities such as GEOMETRIC_TOLERANCE_REPRESENTATION
+            // (ends with `_REPRESENTATION`) are excluded by the suffix rule.
+            // The measure is an inline float (AP214 style) or a reference
+            // into the AP242 measure chain (resolved above). Standalone
+            // LENGTH_MEASURE_WITH_UNIT entities are deliberately NOT
+            // tolerance sources — in real files they are unit declarations
+            // (value = unit magnitude, e.g. as1-oc-214_bolt.stp
+            // `#5=LENGTH_MEASURE_WITH_UNIT(LENGTH_MEASURE(1.0),#4)`).
             for param in &entity.params {
-                if let Some(val) = extract_float_from_step_value(param) {
+                if let Some(val) = resolve_measure_value(step_file, param) {
                     if val > 1e-15 && val < 1000.0 {
                         best_tolerance = Some(match best_tolerance {
                             Some(existing) => existing.min(val),
                             None => val,
                         });
                     }
+                    // Only the FIRST measure-bearing parameter is the
+                    // tolerance value; later params are datums/aspects.
                     break;
                 }
             }

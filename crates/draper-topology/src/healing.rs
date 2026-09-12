@@ -61,11 +61,21 @@ use draper_geometry::{
 /// same protection extends to it and to `Surface::Ruled`: their areas and
 /// sampled normals are equally unreliable heuristics for removal decisions,
 /// and dropping them destroys exact imported geometry irrecoverably.
+///
+/// Session-32 delta-port: `Surface::Revolution` and `Surface::Extrusion`
+/// join the protected set — the converter produces them natively
+/// (SURFACE_OF_REVOLUTION / SURFACE_OF_LINEAR_EXTRUSION / SWEPT_SURFACE),
+/// and their UV(0,0) normals / boundary-polygon areas are exactly the
+/// same kind of unreliable heuristics (profile-seam and pole effects).
 #[inline]
 fn is_exact_complex_surface(surface: &Surface) -> bool {
     matches!(
         surface,
-        Surface::Nurbs(_) | Surface::Offset(_) | Surface::Ruled(_)
+        Surface::Nurbs(_)
+            | Surface::Offset(_)
+            | Surface::Ruled(_)
+            | Surface::Revolution(_)
+            | Surface::Extrusion(_)
     )
 }
 
@@ -3993,6 +4003,48 @@ fn compute_face_representative_point(
 
 #[cfg(test)]
 mod tests {
+    /// Session-32 delta-port: the removal-protection classifier covers
+    /// every complex surface the converter can produce natively — not only
+    /// Nurbs/Offset/Ruled but also Revolution and Extrusion (their UV(0,0)
+    /// normals and boundary-polygon areas are the same unreliable
+    /// heuristics: profile-seam and pole effects).
+    #[test]
+    fn test_exact_complex_surface_covers_swept_types() {
+        use draper_geometry::{ExtrusionSurface, RevolutionSurface};
+
+        // Analytic primitives — removal-eligible.
+        assert!(!is_exact_complex_surface(&Surface::Plane(Plane::xy())));
+        assert!(!is_exact_complex_surface(&Surface::Cylinder(
+            draper_geometry::CylinderSurface {
+                origin: Point3d::ORIGIN,
+                axis: draper_geometry::Direction3d::Z,
+                radius: 1.0,
+                x_dir: draper_geometry::Direction3d::X,
+            }
+        )));
+
+        // Swept/complex — removal-protected.
+        assert!(is_exact_complex_surface(&Surface::Revolution(
+            RevolutionSurface {
+                profile: draper_geometry::Curve3d::Line(draper_geometry::Line {
+                    origin: Point3d::new(1.0, 0.0, 0.0),
+                    direction: draper_geometry::Direction3d::Z,
+                }),
+                axis: draper_geometry::Direction3d::Z,
+                origin: Point3d::ORIGIN,
+            }
+        )));
+        assert!(is_exact_complex_surface(&Surface::Extrusion(
+            ExtrusionSurface {
+                profile: draper_geometry::Curve3d::Line(draper_geometry::Line {
+                    origin: Point3d::ORIGIN,
+                    direction: draper_geometry::Direction3d::X,
+                }),
+                direction: draper_geometry::Direction3d::Z,
+            }
+        )));
+    }
+
     /// Vision 2036 §1.4: tiny `Surface::Offset` faces must NEVER be removed
     /// by the small-area pass. The STEP converter now imports OFFSET_SURFACE
     /// natively; dropping an offset face would irrecoverably lose exact

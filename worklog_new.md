@@ -5660,3 +5660,61 @@ self-intersection fixes). То есть /home/z восстановлен из б
   покрытие и делать дельта-порт.
 - Фоновые процессы (даже setsid) убиваются между вызовами Bash —
   длинные тесты foreground с timeout.
+
+---
+
+# Сессия 32 (дельта-порт 2) — инцидент песочницы: полный redo §1.4 сверен с remote, портирована недублирующая дельта (2026-09-12)
+
+## Инцидент
+
+Сессия стартовала из бэкапа на 377910b (конец сессии 23) — ПОВТОРНО.
+По правилу из «Сессия 24 (дельта-порт)»: `git push` отклонён →
+`git fetch && git log HEAD..origin/main` → 15 коммитов сессий 24–31
+впереди. Среда также сброшена (rustup переустановлен, cargo check
+workspace green). Полный redo §1.4 (все 5 пунктов, ~2000 строк, коммит
+29fdddf) выполнен ДО обнаружения расхождения и сохранён в локальной
+ветке `local-redo-14` (не пушится).
+
+## Сверка покрытия (redo vs canonical)
+
+| Пункт | canonical (сессии 24–31 + дельта-порт) | мой redo | решение |
+|---|---|---|---|
+| 1 допуски | validation.rs fixed; конвертер — СТАРЫЙ prefix-матчинг | `*_TOLERANCE` suffix + ref-цепочки AP242 + LMWU-unit-decl guard + ANGLE-отказ | ПОРТ (gap реален) |
+| 2 extension | NurbsSurface::extended (C¹-точные спаны) + healing-pass | extend_domain (C⁰-композит) | ОТКАЗАТЬСЯ (canonical зрелее) |
+| 3 SSI recovery | edge_recovery.rs pass 2.5 (PCURVEs, vertex overrides) | recover_edges_by_ssi в close_gaps | ОТКАЗАТЬСЯ (canonical зрелее) |
+| 4 Offset | нативный импорт/экспорт + fold-over guard | то же без fold-over | ОТКАЗАТЬСЯ (идентично/уже) |
+| 5 guards | is_exact_complex_surface (Nurbs\|Offset\|Ruled) | + Revolution\|Extrusion | ПОРТ (gap реален) |
+
+## Портированная дельта
+
+- **converter.rs**: `extract_step_tolerance` — суффиксное правило
+  `ends_with("_TOLERANCE")` (FLATNESS/PERPENDICULARITY/CYLINDRICITY/...
+  ранее не матчились; gdt_test.stp терял 0.01/0.02) + `resolve_measure_value`
+  (whitelist-разрешение `StepValue::Ref` по цепочке
+  `*_TOLERANCE → MEASURE_REPRESENTATION_ITEM → LENGTH_MEASURE_WITH_UNIT`,
+  глубина ≤ 3, ANGLE-отказ, DATUM-координаты протекать не могут) +
+  ANGLE-guard в `extract_float_from_step_value`. Отдельные
+  LENGTH_MEASURE_WITH_UNIT(1.0) — объявления единиц, не допуски.
+- **healing.rs**: `is_exact_complex_surface` += `Revolution` |
+  `Extrusion` (конвертер производит их нативно; UV(0,0)-нормали и
+  polygon-площади — те же ненадёжные эвристики, шов/полюс профиля).
+- Тесты: `tests/tolerance_extraction_test.rs` (9 кейсов) +
+  `test_exact_complex_surface_covers_swept_types`.
+
+## Верификация
+
+- draper-topology 249 (248+1); draper-step tolerance_extraction 9 (нов.),
+  tolerance_hierarchy 3, seam_junction 5; draper-testing gdt_ap242 5;
+  transmission lib-тест 1/1 (191с).
+- A/B (git stash, release, single_file_test) — порт бит-в-бит к
+  canonical: transmission_top 259274/23.63%/32.6с; drill_top
+  61638/14.33%/79.7с; as1-oc-214 23168/**0.00% WATERTIGHT**/1.18с
+  (watertight-нуль — заслуга canonical-эволюции сессий 24–31, не порта).
+- Диск 9.9G rootfs: чистились incremental/release/устаревшие тест-бинари
+  (e2e_workflow 321M и др.); CARGO_INCREMENTAL=0 для тяжёлых прогонов.
+
+## Правила (подтверждение)
+
+- `git fetch && git log HEAD..origin/main` ПЕРВЫМ делом — правило
+  дельта-порта сработало; НЕ force-push.
+- local-redo-14 хранится локально как справочник (НЕ для мержа).
