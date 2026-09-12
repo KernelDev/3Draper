@@ -206,6 +206,23 @@ approximation of the intersection.
       `self_intersections`/`edges_recovered` across shell sub-reports,
       and the plane×cylinder circle-arm cylinder PCURVE height sign
       (`v_on_cyl` = `-signed_dist·(normal·axis)`).
+      Session-33 delta (2026-09-12): the B1 backlog closed — the
+      plane∥axis section of plane×cylinder now emits 0/1/2 EXACT Lines
+      (was a degenerate ellipse with semi_major ~1e10 from dividing by
+      cos_angle) with identity PCURVEs on both surfaces; the
+      perpendicular circle arm's PCURVEs re-parameterized to EXACT
+      identity (frame-angle θ/φ construction — the legacy
+      normalized-domain PCURVEs failed both `compute_uvs` candidates
+      and were always dropped to projection); every hand-rolled
+      boolean PCURVE is now identity-parameterized, so recovered
+      plane×cylinder edges attach their PCURVEs instead of falling to
+      the projection fallback. The boolean shared-edge consumer now
+      derives Line param ranges from the marched polyline ends (the
+      legacy blanket `(0, 1)` disagreed with the vertex overrides at
+      ±1000/±2R extents). A/B never-worsen on the canonical files:
+      as1-oc-214 23168/0.00% WATERTIGHT, drill_top 61638/14.33%,
+      transmission_top 259274/23.63% — bit-identical to the
+      session-32 baseline.
 
 - [x] **Root-cause audit + never-worsen healing gate for "lost edges"**
       (2026-09-10): the HOUSING #47598 "lost edges" were not parser losses —
@@ -754,6 +771,17 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | Remove global TOLERANCE constants | Done | `065b9e2` |
 | 1 | Parse UNCERTAINTY_MEASURE_WITH_UNIT | Done | `93df2de` |
 | 1 | Contextual hierarchical tolerances | Done | `dd99d0a` + propagation/consistency/round-trip |
+| 1 | §1.2 manifold gate before BREP cache (single retry) | Done | `edab292` |
+| 1 | §3.2 Euler characteristic check (χ = V−E+F−H) | Done | `51a9927` + `2a56c7e` |
+| 1 | §3.3 seam topological gluing, all paths | Done | `c55ce44` |
+| 1 | §1.3 analytical derivatives + projections, all Curve2d | Done | `cb8c3ca` |
+| 1 | §1.5 degeneracy audit (NaN-tolerant comparators) | Done | `0743823` |
+| 1 | §1.4 tolerance extraction: validation path + GD&T subtypes + swept guards | Done | `58b959f` |
+| 1 | §1.4 surface-extension healing pass (C¹ exact spans) | Done | `0facc2c` |
+| 1 | §1.4 SSI-based edge recovery for lost edges | Done | `091ea86` |
+| 1 | §1.4 native OffsetSurface + fold-over safety valve | Done | `0b8bbf4` + `0facc2c` |
+| 1 | §1.4 healing self-intersection false positives (trimmed-domain + contact; never-worsen removal gate) | Done | `f723bd4` |
+| 1 | §1.4 B1: plane∥axis plane×cylinder exact Lines + identity PCURVEs (all hand-rolled boolean PCURVEs identity-parameterized) | Done | session 33 (2026-09-12) |
 | 1 | NURBS healing guards | Done | `eb46eb1` |
 | 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
 | 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |

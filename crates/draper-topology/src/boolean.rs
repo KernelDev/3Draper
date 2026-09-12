@@ -843,18 +843,42 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
         // `cyl.origin - signed_dist * plane.normal`, so its axis height
         // is `-signed_dist * (plane.normal · cyl.axis)` — NOT the raw
         // `signed_dist` (sign flip when the plane normal is parallel,
-        // not antiparallel, to the axis). u goes from 0 to 2π. This is
-        // a straight horizontal line in UV.
+        // not antiparallel, to the axis).
+        //
+        // Identity parameterization (Vision 2036 §2.2 identity contract,
+        // 2026-09-12): `curve_2d.point_at(t)` at the 3D circle's own
+        // parameter t must reproduce the 3D point on the surface. The
+        // legacy normalized PCURVEs — Line2d over u ∈ [0, 2π] and a full
+        // [0,1]-domain Circle2d — failed BOTH `compute_uvs` candidates
+        // (identity and remap) and were always dropped to the projection
+        // fallback.
+        //
+        // The circle's frame (x_c, y_c = normal × x_c) vs the cylinder's
+        // (x_dir, y_dir = axis × x_dir), with x_c = cos θ·x_dir +
+        // sin θ·y_dir, gives the cylinder angle
+        //     u(t) = θ + t   (normal = +axis: both frames right-handed)
+        //     u(t) = θ − t   (normal = −axis: mirrored frame)
+        // A Line2d from (θ, v) to (θ ± 1, v) evaluates to exactly that —
+        // affine extrapolation over the edge's full [0, 2π] domain.
         let n_dot_axis = plane.normal.x * cyl.axis.x
             + plane.normal.y * cyl.axis.y
             + plane.normal.z * cyl.axis.z;
         let v_on_cyl = -signed_dist * n_dot_axis; // height along cylinder axis
+        let y_dir_cyl = cyl.axis.cross(&cyl.x_dir);
+        let xc_xd = circle.x_axis.x * cyl.x_dir.x
+            + circle.x_axis.y * cyl.x_dir.y
+            + circle.x_axis.z * cyl.x_dir.z;
+        let xc_yd = circle.x_axis.x * y_dir_cyl.x
+            + circle.x_axis.y * y_dir_cyl.y
+            + circle.x_axis.z * y_dir_cyl.z;
+        let theta = xc_yd.atan2(xc_xd);
+        let u_step = if n_dot_axis >= 0.0 { 1.0 } else { -1.0 };
         let pcurve_cyl = Curve2d::Line(Line2d::new(
-            Point2d::new(0.0, v_on_cyl),
-            Point2d::new(2.0 * PI, v_on_cyl),
+            Point2d::new(theta, v_on_cyl),
+            Point2d::new(theta + u_step, v_on_cyl),
         ));
 
-        // Build PCurve on the plane: a circle in the plane's UV domain.
+        // Build PCurve on the plane: the circle in the plane's UV domain.
         // The plane's UV origin is at plane.origin, with u_dir and v_dir.
         // The intersection circle has center at center_on_axis and radius cyl.radius.
         // Project the circle center into plane UV:
@@ -863,9 +887,26 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
         let dcz = center_on_axis.z - plane.origin.z;
         let center_u = dcx * plane.u_dir.x + dcy * plane.u_dir.y + dcz * plane.u_dir.z;
         let center_v = dcx * plane.v_dir.x + dcy * plane.v_dir.y + dcz * plane.v_dir.z;
-        let pcurve_plane = Curve2d::Circle(Circle2d::new_full(
+        // Identity parameterization: the circle's frame vs the plane's
+        // (u_dir, v_dir) — both right-handed wrt the plane normal, so
+        // x_c = cos φ·u_dir + sin φ·v_dir and
+        //     UV(t) = center + R·(cos(t + φ), sin(t + φ)).
+        // A Circle2d arc with start angle φ and span 1 radian evaluates
+        // to exactly that at the raw parameter t (affine angle
+        // extrapolation over the edge's full [0, 2π] domain).
+        let phi = (circle.x_axis.x * plane.v_dir.x
+            + circle.x_axis.y * plane.v_dir.y
+            + circle.x_axis.z * plane.v_dir.z)
+            .atan2(
+                circle.x_axis.x * plane.u_dir.x
+                    + circle.x_axis.y * plane.u_dir.y
+                    + circle.x_axis.z * plane.u_dir.z,
+            );
+        let pcurve_plane = Curve2d::Circle(Circle2d::new_arc(
             Point2d::new(center_u, center_v),
             cyl.radius,
+            phi,
+            phi + 1.0,
         ));
 
         vec![IntersectionCurve {
@@ -875,6 +916,12 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
             pcurve_b: Some(pcurve_cyl),     // PCurve on cylinder (surface B)
             tolerance: tol,
         }]
+    } else if cos_angle < 1e-8 {
+        // Plane PARALLEL to the cylinder axis: the section is 0, 1, or 2
+        // straight lines along the axis — NOT an ellipse. The legacy path
+        // divided by cos_angle here, producing a degenerate ellipse with
+        // semi_major ~1e10 (B1-backlog, fixed 2026-09-12).
+        intersect_plane_cylinder_parallel(plane, cyl, signed_dist, tol)
     } else {
         // Ellipse intersection
         // Semi-minor axis = sqrt(R² - d²)
@@ -926,6 +973,144 @@ fn intersect_plane_cylinder(plane: &Plane, cyl: &CylinderSurface, tol: f64) -> V
             tolerance: tol,
         }]
     }
+}
+
+/// Plane ∥ cylinder-axis section: 0, 1, or 2 exact straight lines
+/// (B1-backlog fix, 2026-09-12).
+///
+/// With the axis perpendicular to the plane normal, the cylinder's v
+/// parameter drops out of the plane equation and every point of a
+/// solution generator line lies on the plane:
+///
+/// ```text
+/// n·(S(u, v) − P0) = signed_dist + R·(cos u·nx + sin u·ny) = 0
+/// ```
+///
+/// where n = nx·x_dir + ny·y_dir in the cylinder's cross-section basis
+/// (ρ = |(nx, ny)| ≈ 1 in the parallel case). Writing the left side as
+/// ρ·cos(u − φ) with φ = atan2(ny, nx) gives
+///
+/// ```text
+/// cos(u − φ) = −signed_dist / (R·ρ) =: ratio
+/// ```
+///
+/// |ratio| > 1 → the plane misses the cylinder; |ratio| ≈ 1 → a single
+/// tangent line; otherwise two lines at u± = φ ± acos(ratio), each
+/// running along the axis through the surface point at u±.
+///
+/// Both PCURVEs are EXACT and satisfy the identity parameter-space
+/// contract (the same one `edge_recovery::pcurve_validates` and the
+/// mesh edge cache's `compute_uvs` apply): `curve_2d.point_at(t)` at the
+/// 3D line's own parameter t reproduces the 3D point on the surface.
+/// The cylinder-side PCurve is the constant-u generator (u±, t); the
+/// plane-side PCurve is the axis direction expressed in plane UV. Both
+/// are `Line2d`s, whose affine evaluation extrapolates past [0, 1] —
+/// the identity holds over the whole (infinite) line, not just a
+/// normalized segment.
+fn intersect_plane_cylinder_parallel(
+    plane: &Plane,
+    cyl: &CylinderSurface,
+    signed_dist: f64,
+    tol: f64,
+) -> Vec<IntersectionCurve> {
+    let y_dir = cyl.axis.cross(&cyl.x_dir);
+    let nx = plane.normal.x * cyl.x_dir.x
+        + plane.normal.y * cyl.x_dir.y
+        + plane.normal.z * cyl.x_dir.z;
+    let ny = plane.normal.x * y_dir.x + plane.normal.y * y_dir.y + plane.normal.z * y_dir.z;
+    let rho = (nx * nx + ny * ny).sqrt();
+    if rho < 1e-12 {
+        // The normal is (numerically) parallel to the axis — contradicts
+        // the dispatch guard; treat as no intersection.
+        return Vec::new();
+    }
+
+    let ratio = -signed_dist / (cyl.radius * rho);
+    let phi = ny.atan2(nx);
+    // Relative tangency band: tol is an absolute length; scale it into
+    // the cosine domain.
+    let band = (tol / cyl.radius) / rho;
+
+    let u_solutions: Vec<f64> = if ratio > 1.0 + band || ratio < -1.0 - band {
+        // Plane misses the cylinder (the dispatcher's early return only
+        // screened |signed_dist| > R + tol; ρ < 1 slightly widens the
+        // reachable ratio band, so re-check here).
+        return Vec::new();
+    } else if ratio >= 1.0 - band {
+        vec![phi] // tangent on the +n side
+    } else if ratio <= -1.0 + band {
+        vec![phi + PI] // tangent on the −n side
+    } else {
+        let half = ratio.acos();
+        vec![phi + half, phi - half]
+    };
+
+    // Sampling extent along the axis: the SSI window convention — the
+    // marching polyline bounds the evaluation window (plane×plane marches
+    // ±1000; scale up for large radii). `branch_window` (edge recovery)
+    // projects these samples onto the line to derive the trim window, and
+    // the boolean split clips them against the face boundary.
+    let extent = 1000.0_f64.max(cyl.radius * 100.0);
+    let n_samples = 100;
+
+    u_solutions
+        .into_iter()
+        .map(|u_raw| {
+            // Normalize u into [0, 2π) — the cylinder's parameter domain —
+            // so the PCurve UV values land inside the surface's u_range
+            // (the 3D geometry is unchanged: cos/sin are 2π-periodic).
+            let u = u_raw.rem_euclid(2.0 * PI);
+
+            // Base point of the line: on the cylinder at v = 0, and on the
+            // plane by construction (the generator equation above).
+            let base = Point3d::new(
+                cyl.origin.x + cyl.radius * (u.cos() * cyl.x_dir.x + u.sin() * y_dir.x),
+                cyl.origin.y + cyl.radius * (u.cos() * cyl.x_dir.y + u.sin() * y_dir.y),
+                cyl.origin.z + cyl.radius * (u.cos() * cyl.x_dir.z + u.sin() * y_dir.z),
+            );
+            let line = Line::new(base, cyl.axis);
+
+            let points: Vec<Point3d> = (0..=n_samples)
+                .map(|i| {
+                    let t = -extent + 2.0 * extent * (i as f64 / n_samples as f64);
+                    line.point_at(t)
+                })
+                .collect();
+
+            // PCurve on the cylinder (surface B): constant u, v = t. A
+            // Line2d from (u, 0) to (u, 1) evaluates to (u, t) — identity
+            // with the 3D line's parameterization (affine extrapolation).
+            let pcurve_cyl = Curve2d::Line(Line2d::new(
+                Point2d::new(u, 0.0),
+                Point2d::new(u, 1.0),
+            ));
+
+            // PCurve on the plane (surface A): P(t) = base + t·axis in the
+            // plane's orthonormal UV frame:
+            //   UV(t) = (u0 + t·du, v0 + t·dv),  du = axis·u_dir, dv = axis·v_dir
+            // (|du, dv| = 1 because the axis lies IN the plane). A Line2d
+            // from (u0, v0) to (u0 + du, v0 + dv) evaluates to exactly that.
+            let bx = base.x - plane.origin.x;
+            let by = base.y - plane.origin.y;
+            let bz = base.z - plane.origin.z;
+            let u0 = bx * plane.u_dir.x + by * plane.u_dir.y + bz * plane.u_dir.z;
+            let v0 = bx * plane.v_dir.x + by * plane.v_dir.y + bz * plane.v_dir.z;
+            let du = cyl.axis.x * plane.u_dir.x + cyl.axis.y * plane.u_dir.y + cyl.axis.z * plane.u_dir.z;
+            let dv = cyl.axis.x * plane.v_dir.x + cyl.axis.y * plane.v_dir.y + cyl.axis.z * plane.v_dir.z;
+            let pcurve_plane = Curve2d::Line(Line2d::new(
+                Point2d::new(u0, v0),
+                Point2d::new(u0 + du, v0 + dv),
+            ));
+
+            IntersectionCurve {
+                points,
+                curve: Some(Curve3d::Line(line)),
+                pcurve_a: Some(pcurve_plane),   // PCurve on plane (surface A)
+                pcurve_b: Some(pcurve_cyl),     // PCurve on cylinder (surface B)
+                tolerance: tol,
+            }
+        })
+        .collect()
 }
 
 /// Plane-Sphere intersection: returns a circle (or point, or nothing).
@@ -2861,7 +3046,30 @@ pub fn boolean_operation(
                 let (int_curve, param_range) = if let Some(ref analytic) = curve.curve {
                     let pr = match analytic {
                         Curve3d::Circle(_) => (0.0, 2.0 * PI),
-                        Curve3d::Line(_) => (0.0, 1.0),
+                        Curve3d::Line(line) => {
+                            // The line's own parameterization (t = signed
+                            // arc length along the unit direction, §2.1
+                            // "curve's own parametrization" philosophy):
+                            // the polyline ends become this edge's vertex
+                            // points, so the param range must cover them.
+                            // The legacy blanket (0, 1) covered only one
+                            // unit of length while the vertex overrides sat
+                            // at the marched extent (±1000 for plane×plane,
+                            // ±2·max(R) for parallel cylinders) — start/end
+                            // evaluations disagreed with the vertices.
+                            // A decreasing range (points reversed by the
+                            // dispatch arms) is the baked-reversed contract
+                            // the mesh edge cache canonicalizes.
+                            let t_of = |p: &Point3d| {
+                                (p.x - line.origin.x) * line.direction.x
+                                    + (p.y - line.origin.y) * line.direction.y
+                                    + (p.z - line.origin.z) * line.direction.z
+                            };
+                            (
+                                t_of(&curve.points[0]),
+                                t_of(&curve.points[curve.points.len() - 1]),
+                            )
+                        }
                         Curve3d::Ellipse(_) => (0.0, 2.0 * PI),
                         // Vision 2036 §2.1 consumer: the B-spline's own
                         // knot domain — discretization and downstream
@@ -4202,6 +4410,342 @@ mod tests {
                 "Circle radius should be 3.0, got {}",
                 circle.radius
             );
+        }
+    }
+
+    #[test]
+    fn test_plane_cylinder_circle_pcurve_identity() {
+        // The perpendicular-plane circle arm's PCURVEs must satisfy the
+        // identity parameter-space contract (Vision 2036 §2.2): at the
+        // 3D circle's own parameter t, `curve_2d.point_at(t)` reproduces
+        // the 3D point on the surface — the contract the mesh edge cache's
+        // `compute_uvs` (candidate A) and `edge_recovery::pcurve_validates`
+        // both enforce. Exercise all frame combinations: ±normal, Z and
+        // non-Z axes, and a rotated plane UV frame.
+        let tol_ctx = ToleranceContext::new();
+
+        let configs: Vec<(Plane, CylinderSurface)> = vec![
+            // (1) Z-axis cylinder, plane normal +Z at height 2.
+            (
+                Plane::from_origin_and_normal(
+                    Point3d::new(0.0, 0.0, 2.0),
+                    Direction3d::Z,
+                ),
+                CylinderSurface::new_z(3.0),
+            ),
+            // (2) Same, but the plane normal is −Z (antiparallel axis):
+            // the circle frame becomes mirrored — u(t) = θ − t.
+            (
+                Plane::from_origin_and_normal(
+                    Point3d::new(0.0, 0.0, 2.0),
+                    Direction3d::new(0.0, 0.0, -1.0).unwrap(),
+                ),
+                CylinderSurface::new_z(3.0),
+            ),
+            // (3) Non-Z axis cylinder (axis +X), plane normal +X.
+            (
+                Plane::from_origin_and_normal(
+                    Point3d::new(2.0, 0.0, 0.0),
+                    Direction3d::X,
+                ),
+                CylinderSurface::new(
+                    Point3d::ORIGIN,
+                    Direction3d::X,
+                    3.0,
+                ),
+            ),
+            // (4) Z-axis cylinder with a ROTATED plane UV frame (u_dir at
+            // 30° in-plane): exercises the φ phase of the plane-side arc.
+            {
+                let mut p = Plane::from_origin_and_normal(
+                    Point3d::new(0.0, 0.0, 2.0),
+                    Direction3d::Z,
+                );
+                let c = (std::f64::consts::PI / 6.0).cos();
+                let s = (std::f64::consts::PI / 6.0).sin();
+                p.u_dir = Direction3d::new(c, s, 0.0).unwrap();
+                p.v_dir = Direction3d::new(-s, c, 0.0).unwrap();
+                (p, CylinderSurface::new_z(3.0))
+            },
+        ];
+
+        for (plane, cyl) in &configs {
+            let curves = intersect_surfaces(
+                &Surface::Plane(plane.clone()),
+                &Surface::Cylinder(cyl.clone()),
+                &tol_ctx,
+            );
+            assert_eq!(curves.len(), 1, "perpendicular plane must give one circle");
+            let ic = &curves[0];
+            let circle = match ic.curve.as_ref().expect("analytic circle") {
+                Curve3d::Circle(c) => c,
+                other => panic!("expected Curve3d::Circle, got {other:?}"),
+            };
+            let pa = ic
+                .pcurve_a
+                .as_ref()
+                .expect("circle arm must carry a plane-side PCURVE");
+            let pb = ic
+                .pcurve_b
+                .as_ref()
+                .expect("circle arm must carry a cylinder-side PCURVE");
+
+            const SAMPLES: usize = 16;
+            for i in 0..=SAMPLES {
+                let t = 2.0 * PI * (i as f64 / SAMPLES as f64);
+                let expect = circle.point_at(t);
+
+                let uv_a = pa.point_at(t);
+                let got_a = plane.point_at(uv_a.u, uv_a.v);
+                assert!(
+                    got_a.distance_to(&expect) < 1e-9,
+                    "plane-side PCURVE identity broken at t={t}: uv=({}, {}), {:?} vs {:?}",
+                    uv_a.u,
+                    uv_a.v,
+                    got_a,
+                    expect
+                );
+
+                let uv_b = pb.point_at(t);
+                let got_b = cyl.point_at(uv_b.u, uv_b.v);
+                assert!(
+                    got_b.distance_to(&expect) < 1e-9,
+                    "cylinder-side PCURVE identity broken at t={t}: uv=({}, {}), {:?} vs {:?}",
+                    uv_b.u,
+                    uv_b.v,
+                    got_b,
+                    expect
+                );
+            }
+        }
+    }
+
+    // ---- Plane ∥ cylinder axis: 0/1/2 exact lines (B1-backlog fix) ----
+
+    /// Helper: both PCURVEs of a parallel-arm branch must satisfy the
+    /// identity parameter-space contract — `c2d.point_at(t)` at the 3D
+    /// line's own parameters reproduces the 3D point on the surface
+    /// (the same contract `edge_recovery::pcurve_validates` applies).
+    fn assert_parallel_pcurve_identity(
+        ic: &IntersectionCurve,
+        plane: &Plane,
+        cyl: &CylinderSurface,
+        line: &Line,
+    ) {
+        // Recover the evaluation window from the polyline (branch_window
+        // convention): project the samples onto the line.
+        let t_of = |p: &Point3d| {
+            (p.x - line.origin.x) * line.direction.x
+                + (p.y - line.origin.y) * line.direction.y
+                + (p.z - line.origin.z) * line.direction.z
+        };
+        let ts: Vec<f64> = ic.points.iter().map(|p| t_of(p)).collect();
+        let (t_lo, t_hi) = (
+            ts.iter().cloned().fold(f64::INFINITY, f64::min),
+            ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+        );
+
+        let pa = ic
+            .pcurve_a
+            .as_ref()
+            .expect("parallel branch must carry a plane-side PCURVE");
+        let pb = ic
+            .pcurve_b
+            .as_ref()
+            .expect("parallel branch must carry a cylinder-side PCURVE");
+
+        const SAMPLES: usize = 9;
+        for i in 0..=SAMPLES {
+            let t = t_lo + (t_hi - t_lo) * (i as f64 / SAMPLES as f64);
+            let expect = line.point_at(t);
+
+            let uv_a = pa.point_at(t);
+            let got_a = plane.point_at(uv_a.u, uv_a.v);
+            assert!(
+                got_a.distance_to(&expect) < 1e-6,
+                "plane-side PCURVE identity broken at t={t}: {got_a:?} vs {expect:?}"
+            );
+
+            let uv_b = pb.point_at(t);
+            let got_b = cyl.point_at(uv_b.u, uv_b.v);
+            assert!(
+                got_b.distance_to(&expect) < 1e-6,
+                "cylinder-side PCURVE identity broken at t={t}: uv=({u}, {v}), {got_b:?} vs {expect:?}",
+                u = uv_b.u,
+                v = uv_b.v,
+            );
+        }
+    }
+
+    #[test]
+    fn test_plane_cylinder_parallel_two_lines() {
+        // Plane x = 1.5 ∥ cylinder axis Z (R = 3): two straight lines at
+        // u = ±60° — x = 1.5, y = ±3·sin(60°) ≈ ±2.598, direction Z.
+        // The legacy path returned a degenerate ellipse (semi_major ~1e10).
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(1.5, 0.0, 0.0),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(3.0);
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(
+            &Surface::Plane(plane.clone()),
+            &Surface::Cylinder(cyl.clone()),
+            &tol,
+        );
+        assert_eq!(curves.len(), 2, "secant plane ∥ axis must give exactly 2 lines");
+
+        let ys: Vec<f64> = curves
+            .iter()
+            .map(|ic| match ic.curve.as_ref().expect("analytic curve") {
+                Curve3d::Line(l) => l.origin.y,
+                other => panic!("expected Curve3d::Line, got {other:?}"),
+            })
+            .collect();
+        assert!(
+            (ys[0] + ys[1]).abs() < 1e-9,
+            "lines must be symmetric about the axis-normal plane, got y = {ys:?}"
+        );
+        for y in &ys {
+            assert!(
+                (y.abs() - 3.0 * 0.866_025_403_784_438_6).abs() < 1e-9,
+                "line must sit at y = ±3·sin(60°), got {y}"
+            );
+        }
+
+        for ic in &curves {
+            let line = match ic.curve.as_ref().expect("analytic curve") {
+                Curve3d::Line(l) => l,
+                other => panic!("expected Curve3d::Line, got {other:?}"),
+            };
+            // Direction = the cylinder axis.
+            assert!((line.direction.z - 1.0).abs() < 1e-9, "direction must be +Z");
+            // Base point on the plane (x = 1.5) AND on the cylinder
+            // (radial distance from the Z axis = R).
+            assert!((line.origin.x - 1.5).abs() < 1e-9, "base point must lie on the plane");
+            let r = (line.origin.x * line.origin.x + line.origin.y * line.origin.y).sqrt();
+            assert!((r - 3.0).abs() < 1e-9, "base point must lie on the cylinder");
+            // Sampled points span the window symmetrically.
+            assert_eq!(ic.points.len(), 101);
+            assert!(ic
+                .points
+                .iter()
+                .all(|p| (p.x - 1.5).abs() < 1e-9), "every sample must stay on the plane");
+            assert_parallel_pcurve_identity(ic, &plane, &cyl, line);
+        }
+    }
+
+    #[test]
+    fn test_plane_cylinder_parallel_tangent_single_line() {
+        // Plane x = 3 (touching R = 3): exactly one tangent line through
+        // (3, 0, 0) along Z.
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(3.0, 0.0, 0.0),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(3.0);
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(
+            &Surface::Plane(plane.clone()),
+            &Surface::Cylinder(cyl.clone()),
+            &tol,
+        );
+        assert_eq!(curves.len(), 1, "tangent plane ∥ axis must give exactly 1 line");
+
+        let line = match curves[0].curve.as_ref().expect("analytic curve") {
+            Curve3d::Line(l) => l,
+            other => panic!("expected Curve3d::Line, got {other:?}"),
+        };
+        assert!((line.origin.x - 3.0).abs() < 1e-9);
+        assert!(line.origin.y.abs() < 1e-9);
+        assert!((line.direction.z - 1.0).abs() < 1e-9);
+        assert_parallel_pcurve_identity(&curves[0], &plane, &cyl, line);
+    }
+
+    #[test]
+    fn test_plane_cylinder_parallel_miss() {
+        // Plane x = 4 > R = 3: no intersection at all.
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(4.0, 0.0, 0.0),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(3.0);
+        let tol = ToleranceContext::new();
+
+        let curves = intersect_surfaces(
+            &Surface::Plane(plane),
+            &Surface::Cylinder(cyl),
+            &tol,
+        );
+        assert!(
+            curves.is_empty(),
+            "plane beyond the radius must produce no curves, got {}",
+            curves.len()
+        );
+    }
+
+    #[test]
+    fn test_plane_cylinder_parallel_order_swap() {
+        // The (Cylinder, Plane) dispatch arm must swap the PCURVEs (so
+        // pcurve_a always belongs to surface A = the cylinder) and reverse
+        // the sampled points — same contract as the circle arm.
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(1.5, 0.0, 0.0),
+            Direction3d::X,
+        );
+        let cyl = CylinderSurface::new_z(3.0);
+        let tol = ToleranceContext::new();
+
+        let direct = intersect_surfaces(
+            &Surface::Plane(plane.clone()),
+            &Surface::Cylinder(cyl.clone()),
+            &tol,
+        );
+        let reversed = intersect_surfaces(
+            &Surface::Cylinder(cyl.clone()),
+            &Surface::Plane(plane.clone()),
+            &tol,
+        );
+        assert_eq!(direct.len(), 2);
+        assert_eq!(reversed.len(), 2);
+
+        for (d, r) in direct.iter().zip(reversed.iter()) {
+            // Same analytic lines, reversed sample order.
+            assert_eq!(d.points.len(), r.points.len());
+            assert!(d
+                .points
+                .iter()
+                .zip(r.points.iter().rev())
+                .all(|(a, b)| a.distance_to(b) < 1e-12));
+            // PCURVEs swapped sides: pcurve_a now validates against the
+            // cylinder (surface A), pcurve_b against the plane.
+            let line = match r.curve.as_ref().expect("analytic curve") {
+                Curve3d::Line(l) => l,
+                other => panic!("expected Curve3d::Line, got {other:?}"),
+            };
+            let t_of = |p: &Point3d| {
+                (p.x - line.origin.x) * line.direction.x
+                    + (p.y - line.origin.y) * line.direction.y
+                    + (p.z - line.origin.z) * line.direction.z
+            };
+            let pa = r.pcurve_a.as_ref().expect("cylinder-side pcurve_a");
+            let pb = r.pcurve_b.as_ref().expect("plane-side pcurve_b");
+            for i in 0..=4usize {
+                let t = t_of(&r.points[i]);
+                let expect = line.point_at(t);
+                let uv_a = pa.point_at(t);
+                assert!(cyl
+                    .point_at(uv_a.u, uv_a.v)
+                    .distance_to(&expect)
+                    < 1e-6);
+                let uv_b = pb.point_at(t);
+                assert!(plane
+                    .point_at(uv_b.u, uv_b.v)
+                    .distance_to(&expect)
+                    < 1e-6);
+            }
         }
     }
 

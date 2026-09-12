@@ -5718,3 +5718,117 @@ workspace green). Полный redo §1.4 (все 5 пунктов, ~2000 стр
 - `git fetch && git log HEAD..origin/main` ПЕРВЫМ делом — правило
   дельта-порта сработало; НЕ force-push.
 - local-redo-14 хранится локально как справочник (НЕ для мержа).
+
+---
+
+# Сессия 33 — §1.4 хвосты: B1 plane∥axis точные Line + identity-PCURVEs всех ручных ветвей boolean (2026-09-12)
+
+## Инцидент песочницы (третий)
+
+Сессия стартовала из бэкапа на 377910b (конец сессии 23) — ПОВТОРНО
+(как в сессиях 24-дельта и 32-дельта-2). Среда сброшена: rustup
+переустановлен (stable 1.98.1), `cargo check --workspace` green за
+2м16с. По правилу дельта-порта: `git fetch && git log HEAD..origin/main`
+→ 24 коммита сессий 24–32 впереди → fast-forward к `58b959f` (рабочее
+дерево чистое, конфликтов нет; `local-redo-14` в локальном бэкапе
+отсутствует — был локальной веткой сессии 32, не пушился, потеря
+допустима: его недублирующая дельта уже в `58b959f`).
+
+Актуальное состояние из ворклога: §1.4 закрыт по всем 5 пунктам;
+«Осталось» сессии 31: loop-level recovery, identity-параметризация
+ручных PCURVEs, B1 plane∥axis. Последний пункт — цель этой сессии.
+
+## Реализация
+
+### 1. B1: plane∥axis ветвь plane×cylinder — точные Line вместо вырожденного эллипса
+
+- `intersect_plane_cylinder` (boolean.rs): новая ветка
+  `cos_angle < 1e-8` → `intersect_plane_cylinder_parallel`. Легаси-путь
+  делил на cos_angle → эллипс с semi_major ~1e10 (мусорная геометрия).
+- Математика: n ⊥ axis → v выпадает из уравнения плоскости;
+  `ρ·cos(u−φ) = −signed_dist/R` → 0/1/2 генератрисы u± = φ ± acos(ratio)
+  (касательная в полосе ±tol/R; промах при |ratio| > 1+band).
+- Каждая линия: `Line::new(base, axis)` (base на цилиндре при v=0, на
+  плоскости по построению), сэмплы 101 шт. по t ∈ [−extent, +extent],
+  extent = max(1000, R·100) — конвенция plane×plane (±1000); окно
+  оценки ветви выводится проекцией сэмплов (`branch_window`).
+- **Identity-PCURVEs обеих поверхностей**: цилиндр — `Line2d((u_i,0),
+  (u_i,1))` → point_at(t) = (u_i, t) (v = t, аффинная экстраполяция);
+  плоскость — `Line2d((u0,v0),(u0+du,v0+dv))` → UV(t) = base + t·axis в
+  плоскостном UV-кадре. Обе выполняют контракт `pcurve_validates`/
+  `compute_uvs` глобально (Line2d аффинна вне [0,1]).
+- Порядок PCURVEs plane-first как в остальной функции; arm
+  (Cylinder, Plane) свапает (тест order_swap).
+
+### 2. Identity-PCURVEs circle-ветки (перпендикулярная плоскость)
+
+Легаси-эмит: `Line2d((0,v),(2π,v))` + `Circle2d::new_full` — домены
+[0,1]/[0,2π] не совпадают с доменом 3D-окружности [0,2π] → проваливали
+ОБА кандидата `compute_uvs` (identity и remap) → mesh всегда падал в
+проекцию (корректно, но медленно и без точных UV).
+
+- **Цилиндр-сторона**: кадр окружности (x_c, y_c=normal×x_c) vs кадр
+  цилиндра (x_dir, y_dir): u(t) = θ+t (normal=+axis, оба кадра
+  правые) или u(t) = θ−t (normal=−axis, зеркальный кадр); θ =
+  atan2(x_c·y_dir, x_c·x_dir). `Line2d((θ,v),(θ±1,v))` — точный
+  identity.
+- **Плоскость-сторона**: кадр окружности vs (u_dir, v_dir) — оба
+  правые относительно normal → UV(t) = center + R·(cos(t+φ), sin(t+φ));
+  `Circle2d::new_arc(center, R, φ, φ+1)` (спан 1 радиан!) — точный
+  identity на всём [0, 2π] (аффинная экстраполяция угла).
+- Все ручные PCURVEs boolean.rs (2 ветви: circle + parallel) теперь
+  identity — пункт «Осталось» сессии 31 закрыт БЕЗ делегирования §2.2
+  фитам (аналитическое построение точнее LSQ-приближения).
+
+### 3. Line param_range в boolean-потребителе общих рёбер
+
+Бланкет `(0.0, 1.0)` для `Curve3d::Line` заменён проекциями концов
+marching-polyline (t = (p−origin)·direction): рёбра самосогласованы
+(vertex overrides при ±1000/±2R теперь совпадают с
+start/end_point()); убывающий диапазон (реверс arm'ов) — это
+«baked-reversed» контракт edge cache. Чинит и латентное
+несоответствие cylinder×cylinder-параллелей / plane×plane.
+
+## Тесты (новые, boolean.rs)
+
+- `test_plane_cylinder_circle_pcurve_identity` — 4 конфигурации
+  (±normal, ось +X, повёрнутый UV-кадр плоскости 30°): обе PCURVEs
+  воспроизводят 3D-точки окружности при собственных t (17 сэмплов,
+  1e-9).
+- `test_plane_cylinder_parallel_two_lines` — секанс x=1.5, R=3: ровно
+  2 линии, u=±60°, y=±3·sin60°, направление +Z, сэмплы на плоскости,
+  identity-PCURVEs.
+- `test_plane_cylinder_parallel_tangent_single_line` — x=3: 1
+  касательная линия через (3,0,0).
+- `test_plane_cylinder_parallel_miss` — x=4: пусто.
+- `test_plane_cylinder_parallel_order_swap` — arm (Cylinder, Plane):
+  реверс сэмплов + свап PCURVEs, обе валидируются на своих
+  поверхностях.
+
+## Верификация
+
+- draper-topology 254 (lib, +5 новых) | integration 17+11+3 — green.
+- draper-mesh 275 lib + 4+1+11+12 — green.
+- draper-step: lib 141 (+transmission 194.22s debug) — green;
+  RELEASE: integration 7/7 за 94.03с (базлайн 92с), all_files 234.29с
+  (базлайн 234с), determinism probe PASS, industrial 2/2, nist 19,
+  seam_junction 5, tolerance 9+3, compacted 3, diag-сьюты 11.
+- draper-testing release: abc_dataset 2 (1 ignored), gdt_ap242 5,
+  step_regression 33 — green.
+- **A/B never-worsen (single_file_test, release)**: as1-oc-214 23168
+  tris / 0.00% WATERTIGHT / 1.18с; drill_top 61638 / 14.33% / 80.9с;
+  transmission_top 259274 / 23.63% / 33.4с — бит-в-бит с базлайном
+  сессии 32 (новые ветви на этих файлах не активируются; изменения
+  строго аддитивны).
+
+## Осталось
+
+- Loop-level recovery закрытых потерянных рёбер (пустые провода +
+  вырожденные gap) — единственный незакрытый пункт «Осталось»
+  сессии 31.
+- Canonical CDT default-on: pinched rims (57/97 HOUSING-групп) +
+  sliver-UV fallbacks (233 грани) — блокирующие дефекты сессии 30.
+- Булев сплит cylinder-грани продольными линиями (parallel arm в
+  split_cylinder_face_multi_shared трактует линии как
+  окружности-на-высоте) — латентно и до фикса, отдельная задача.
+- WebGPU compute shaders — требует GPU-стенда.
