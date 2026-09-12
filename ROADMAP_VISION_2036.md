@@ -223,6 +223,26 @@ approximation of the intersection.
       as1-oc-214 23168/0.00% WATERTIGHT, drill_top 61638/14.33%,
       transmission_top 259274/23.63% — bit-identical to the
       session-32 baseline.
+      Session-34 delta (2026-09-12): loop-level recovery of lost
+      CLOSED edges (`recover_lost_closed_loops`, second phase of pass
+      2.5) — the session-31 limitation closed. A lost closed edge
+      (full circle capping a cylinder) leaves no open gap: the capped
+      face's wire becomes EMPTY and the neighbor's flanking coedges
+      still meet exactly (the degenerate gap). Detection: empty-wire
+      candidates filtered by an orphan guard (working edges not
+      referenced by other faces' wires — the native cylinder's
+      sanctioned wire-less lateral face is NOT a candidate); recovery:
+      SSI against each other face, closed branches only (endpoints
+      coincide), a closed existing-edge guard (start/mid/end on the
+      curve = survivor, no duplication), junction match on the
+      neighbor's wire (meeting flanks projecting onto the curve);
+      construction: periodic curves re-parameterized to the junction
+      projection (`(t_v, t_v + 2π)` — vertex lands ON the curve, no
+      closure kink), vertex-point overrides = the junction's own
+      flank points, G's coedge FORWARD (walk continuity) + F's
+      REVERSED (manifold), one closed edge per empty wire, junctions
+      consumed once. A/B never-worsen: bit-identical on all three
+      canonical files (incl. the drill_top HOUSING BREP).
 
 - [x] **Root-cause audit + never-worsen healing gate for "lost edges"**
       (2026-09-10): the HOUSING #47598 "lost edges" were not parser losses —
@@ -782,6 +802,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | §1.4 native OffsetSurface + fold-over safety valve | Done | `0b8bbf4` + `0facc2c` |
 | 1 | §1.4 healing self-intersection false positives (trimmed-domain + contact; never-worsen removal gate) | Done | `f723bd4` |
 | 1 | §1.4 B1: plane∥axis plane×cylinder exact Lines + identity PCURVEs (all hand-rolled boolean PCURVEs identity-parameterized) | Done | session 33 (2026-09-12) |
+| 1 | §1.4 loop-level recovery of closed lost edges (empty wires + degenerate junction gaps) | Done | session 34 (2026-09-12) |
 | 1 | NURBS healing guards | Done | `eb46eb1` |
 | 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
 | 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |

@@ -53,12 +53,54 @@
 //! `compute_uvs`' candidate A evaluates `curve_2d.point_at(t)` at the
 //! edge's own global curve parameters.
 //!
+//! # Loop-level recovery (closed lost edges)
+//!
+//! A lost CLOSED edge — a full circle capping a cylinder, an ellipse
+//! from an oblique cut — leaves no open gap at all: the flanking
+//! coedges of the neighbor face still meet exactly at the shared
+//! vertex (the gap "degenerates to a point"), and the capped face's
+//! wire becomes EMPTY. The pass [`recover_lost_closed_loops`] detects
+//! that defect signature and reconstructs the closed edge from the
+//! same SSI machinery:
+//!
+//! 1. **Candidate** — a face with an empty outer/inner wire whose
+//!    working-list edges are not referenced by any OTHER face's wire
+//!    (the orphan filter). The native cylinder's wire-less lateral
+//!    face shares its circles with the disk faces' wires and is
+//!    therefore NOT a candidate — an empty wire alone is a sanctioned
+//!    full-surface representation (see `ShapeBuilder::make_cylinder`).
+//! 2. **Neighbor search** — every other face G (deterministic face
+//!    order) is intersected with the candidate's surface; a branch
+//!    whose curve is CLOSED (endpoints coincide) and free of surviving
+//!    edges (the closed existing-edge guard: an edge whose start,
+//!    midpoint and end all lie on the closed curve is a survivor, not
+//!    a loss) qualifies.
+//! 3. **Junction match** — the closed edge's vertex is where G's wire
+//!    has a junction (consecutive coedges meeting within gap
+//!    tolerance — the degenerate gap) whose endpoints project onto the
+//!    closed curve within projection tolerance.
+//! 4. **Re-parameterize & insert** — the edge is anchored to G's
+//!    traversal: `param_range = (t_v, t_v + period)` where `t_v` is
+//!    the junction's projection (periodic curves rotate their domain
+//!    so the vertex lands ON the curve — no closure kink), the
+//!    vertex-point overrides are the junction's own arrive/depart
+//!    points, and G's coedge is FORWARD (walk continuity through the
+//!    junction) while the empty-wire face's coedge is REVERSED
+//!    (manifold pair).
+//!
 //! # Limitations (documented, by design)
 //!
-//! - Only OPEN gaps are recovered. A lost CLOSED edge (a full circle
-//!   capping a cylinder, where the "gap" degenerates to a point and
-//!   the capped face's wire becomes empty) is not detected here; that
-//!   defect needs loop-level recovery (future work).
+//! - Loop-level recovery reconstructs ONE closed curve per empty wire.
+//!   A lost loop made of several edges on DIFFERENT intersection
+//!   curves (a square hole, one edge per neighbor face) is not
+//!   recovered — that needs multi-neighbor loop assembly (future
+//!   work). A loop whose edges all lie on one intersection curve is
+//!   recovered as a single edge (heals the shell, changes the edge
+//!   count).
+//! - If BOTH faces' wires are empty and the shared edge survives only
+//!   in the working lists (orphaned), the existing-edge guard skips
+//!   recovery — that defect is edge re-referencing (stitching class),
+//!   not SSI reconstruction.
 //! - For periodic curves (circle/ellipse) the SHORTER arc between the
 //!   two gap endpoints is chosen. A face bounded by the longer arc
 //!   (e.g. a 3/4-disc "Pac-Man" face that lost its major arc) is
@@ -133,8 +175,15 @@ impl EdgeRecoveryParams {
 pub struct EdgeRecoveryReport {
     /// Number of open wire gaps detected (after length filtering).
     pub gaps_detected: u32,
-    /// Number of lost edges reconstructed via SSI.
+    /// Number of lost edges reconstructed via SSI (open gaps and
+    /// closed loops).
     pub edges_recovered: u32,
+    /// Number of empty-wire loop-loss candidates detected (after the
+    /// orphan filter).
+    pub loops_detected: u32,
+    /// Number of lost CLOSED edges reconstructed via loop-level SSI
+    /// (counted in `edges_recovered` as well).
+    pub loops_recovered: u32,
     /// Human-readable messages.
     pub messages: Vec<String>,
 }
@@ -201,7 +250,9 @@ struct RecoveredEdge {
 // ============================================================
 
 /// Detect open-wire gaps and reconstruct the lost shared edges via
-/// surface-surface intersection (Vision 2036 §1.4).
+/// surface-surface intersection (Vision 2036 §1.4), then run the
+/// loop-level pass for lost CLOSED edges (empty wires + degenerate
+/// junction gaps).
 ///
 /// Mutates `shell` (coedge insertions into the gapped wires) and
 /// `working` (the recovered edge joins both faces' lists with the
@@ -232,9 +283,6 @@ pub fn recover_lost_edges(
     let min_gap = 2.0 * params.gap_tolerance;
     let gaps = collect_gaps(shell, working, min_gap, params.max_gap_length);
     report.gaps_detected = gaps.len() as u32;
-    if gaps.is_empty() {
-        return report;
-    }
 
     let model_scale = shell_model_scale(shell, working);
 
@@ -256,6 +304,9 @@ pub fn recover_lost_edges(
     // manifold-consistent interpretation of a shared edge), then
     // same-orientation (misoriented shells). Greedy + deterministic.
     for prefer_reversed in [true, false] {
+        if gaps.is_empty() {
+            break;
+        }
         for i in 0..gaps.len() {
             if used[i] {
                 continue;
@@ -339,6 +390,16 @@ pub fn recover_lost_edges(
             report.edges_recovered
         ));
     }
+
+    // Loop-level phase (Vision 2036 §1.4, session 34): lost CLOSED
+    // edges leave empty wires and degenerate junction gaps — no open
+    // gap for the pairing phase above. Runs on the post-open-gap
+    // state (an open-gap insertion can shift junction indices).
+    let loop_report = recover_lost_closed_loops(shell, working, params);
+    report.loops_detected = loop_report.loops_detected;
+    report.loops_recovered = loop_report.loops_recovered;
+    report.edges_recovered += loop_report.loops_recovered;
+    report.messages.extend(loop_report.messages);
 
     report
 }
@@ -801,6 +862,474 @@ fn segment_arc_length(win: &CurveWindow, t0: f64, t1: f64) -> f64 {
 }
 
 // ============================================================
+// Loop-level recovery (closed lost edges)
+// ============================================================
+
+/// A junction between two consecutive coedges of a wire: the walk
+/// arrives at `arrive` (end of `coedges[after]`) and departs from
+/// `depart` (start of `coedges[(after + 1) % n]`). A lost CLOSED edge
+/// leaves a junction whose endpoints still meet within gap tolerance
+/// (the "degenerate gap") — the closed curve used to pass through it.
+#[derive(Clone, Debug)]
+struct WireJunction {
+    wire: WireRef,
+    /// Index of the coedge the junction FOLLOWS (insertion happens at
+    /// `after + 1`).
+    after: usize,
+    /// Effective end point of `coedges[after]` — the arriving flank.
+    arrive: Point3d,
+    /// Effective start point of `coedges[(after + 1) % n]` — the
+    /// departing flank.
+    depart: Point3d,
+}
+
+/// An empty wire whose whole loop is lost (loop-recovery candidate).
+#[derive(Clone, Copy, Debug)]
+struct EmptyWire {
+    face: usize,
+    wire: WireRef,
+}
+
+/// The recovered closed edge plus the two coedges that reference it:
+/// G's coedge is FORWARD (walk continuity through the junction —
+/// arrive → depart), the empty-wire face's coedge is REVERSED (the
+/// manifold opposite traversal; an empty wire has no continuity
+/// constraint of its own).
+struct RecoveredClosed {
+    edge: Edge,
+    coedge_g: CoEdge,
+    coedge_f: CoEdge,
+}
+
+/// Collect empty-wire loop-loss candidates: faces whose outer/inner
+/// wire exists but has no coedges, and whose working-list edges are
+/// not all shared with other faces' wires.
+///
+/// The orphan filter is what separates a real loss from the
+/// SANCTIONED empty-wire representation: the native cylinder's
+/// wire-less lateral face keeps its circles in the working lists,
+/// referenced by the disk faces' wires (`ShapeBuilder::make_cylinder`)
+/// — not a loss. A face with an EMPTY working list, or with edges no
+/// other face references, has lost its loop.
+fn collect_empty_wire_candidates(shell: &Shell, working: &[Vec<Edge>]) -> Vec<EmptyWire> {
+    // Edge ids referenced by any face's wires. Empty wires contribute
+    // nothing, so this is exactly "referenced by OTHER faces" for
+    // candidate faces.
+    let mut referenced: std::collections::HashSet<TopoId> = std::collections::HashSet::new();
+    for face in &shell.faces {
+        if let Some(ref w) = face.outer_wire {
+            for ce in &w.coedges {
+                referenced.insert(ce.edge);
+            }
+        }
+        for w in &face.inner_wires {
+            for ce in &w.coedges {
+                referenced.insert(ce.edge);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (fi, face) in shell.faces.iter().enumerate() {
+        if face.surface.is_none() {
+            continue;
+        }
+        // Sanctioned full-surface representation: a non-empty working
+        // list whose every edge is referenced elsewhere.
+        let shared = working
+            .get(fi)
+            .map(|list| !list.is_empty() && list.iter().all(|e| referenced.contains(&e.id)))
+            .unwrap_or(false);
+        if shared {
+            continue;
+        }
+        if let Some(ref w) = face.outer_wire {
+            if w.coedges.is_empty() {
+                out.push(EmptyWire {
+                    face: fi,
+                    wire: WireRef::Outer,
+                });
+            }
+        }
+        for (wi, w) in face.inner_wires.iter().enumerate() {
+            if w.coedges.is_empty() {
+                out.push(EmptyWire {
+                    face: fi,
+                    wire: WireRef::Inner(wi),
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Collect the junctions of one face's wires (consecutive coedges
+/// whose effective endpoints MEET within `meet_tol` — including exact
+/// meetings, i.e. the degenerate gaps the open-gap pass cannot see).
+/// The same edge may appear as both flanks (a seam edge referenced
+/// twice — forward then reversed — puts the closed edge's vertex at
+/// exactly such a junction); the dangerous doubled-CLOSED-edge case
+/// is rejected downstream by the existing-edge guard. Deterministic
+/// order: outer wire first, then inner wires, coedge index ascending.
+fn collect_junctions(
+    face: &Face,
+    endpoints: &std::collections::HashMap<TopoId, (Point3d, Point3d)>,
+    meet_tol: f64,
+) -> Vec<WireJunction> {
+    let mut out = Vec::new();
+    let mut scan = |wire: &Wire, wref: WireRef| {
+        let n = wire.coedges.len();
+        if n < 2 {
+            return;
+        }
+        for i in 0..n {
+            let ce = &wire.coedges[i];
+            let nxt = &wire.coedges[(i + 1) % n];
+            let arrive = match coedge_span(ce, endpoints) {
+                Some((_, e)) => e,
+                None => continue,
+            };
+            let depart = match coedge_span(nxt, endpoints) {
+                Some((s, _)) => s,
+                None => continue,
+            };
+            if arrive.distance_to(&depart) <= meet_tol {
+                out.push(WireJunction {
+                    wire: wref,
+                    after: i,
+                    arrive,
+                    depart,
+                });
+            }
+        }
+    };
+    if let Some(ref w) = face.outer_wire {
+        scan(w, WireRef::Outer);
+    }
+    for (wi, w) in face.inner_wires.iter().enumerate() {
+        scan(w, WireRef::Inner(wi));
+    }
+    out
+}
+
+/// True when an existing edge lies ON the closed curve — its start,
+/// midpoint and end all project within `tol` — the closed edge
+/// survives somewhere in the working lists and recovery would
+/// duplicate it. A 16-sample bounding box pre-filter rejects distant
+/// edges before any projection.
+fn existing_edge_on_curve(working: &[Vec<Edge>], win: &CurveWindow, tol: f64) -> bool {
+    // Bounding box of the closed curve (16 samples — generous for the
+    // guard's purpose; the projection test below is exact).
+    let mut lo = Point3d::new(f64::MAX, f64::MAX, f64::MAX);
+    let mut hi = Point3d::new(f64::MIN, f64::MIN, f64::MIN);
+    for i in 0..=16 {
+        let t = win.t_lo + (win.t_hi - win.t_lo) * (i as f64 / 16.0);
+        let p = win.curve.point_at(t);
+        lo.x = lo.x.min(p.x);
+        lo.y = lo.y.min(p.y);
+        lo.z = lo.z.min(p.z);
+        hi.x = hi.x.max(p.x);
+        hi.y = hi.y.max(p.y);
+        hi.z = hi.z.max(p.z);
+    }
+    let pad = tol;
+
+    for list in working {
+        for e in list {
+            if e.degenerate || e.curve.is_none() {
+                continue;
+            }
+            let mut on = true;
+            for k in 0..=2usize {
+                let Some(p) = e.point_at(k as f64 / 2.0) else {
+                    on = false;
+                    break;
+                };
+                // Bbox pre-filter.
+                if p.x < lo.x - pad
+                    || p.x > hi.x + pad
+                    || p.y < lo.y - pad
+                    || p.y > hi.y + pad
+                    || p.z < lo.z - pad
+                    || p.z > hi.z + pad
+                {
+                    on = false;
+                    break;
+                }
+                let (_, d) = project_onto_window(win, &p);
+                if d > tol {
+                    on = false;
+                    break;
+                }
+            }
+            if on {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Build the recovered closed edge for a matched junction: the edge
+/// is anchored to G's traversal (param range starting at the junction
+/// projection, vertex-point overrides = the junction's own flank
+/// points), with SSI PCURVEs attached when they satisfy the identity
+/// contract over the FULL closed range.
+fn build_closed_recovery(
+    win: &CurveWindow,
+    ic: &crate::boolean::IntersectionCurve,
+    junc: &WireJunction,
+    surf_f: &Surface,
+    surf_g: &Surface,
+    params: &EdgeRecoveryParams,
+) -> Option<RecoveredClosed> {
+    let period = win.t_hi - win.t_lo;
+    let (t0, t1) = match &win.curve {
+        Curve3d::Circle(_) | Curve3d::Ellipse(_) => {
+            // Periodic: rotate the domain so the vertex lands ON the
+            // junction's projection — point_at(t_v) IS the vertex
+            // (no closure kink from snapping an off-curve override).
+            let (t_v, _) = project_onto_window(win, &junc.arrive);
+            (t_v, t_v + period)
+        }
+        _ => {
+            // Non-rotatable parameterizations (polyline/NURBS loops):
+            // the junction must sit at the loop's own closure point —
+            // the parameterization cannot start elsewhere.
+            let (t_v, d) = project_onto_window(win, &junc.arrive);
+            let at_lo = (t_v - win.t_lo).abs() <= params.gap_tolerance;
+            let at_hi = (t_v - win.t_hi).abs() <= params.gap_tolerance;
+            if !at_lo && !at_hi {
+                return None;
+            }
+            let _ = d;
+            (win.t_lo, win.t_hi)
+        }
+    };
+
+    let edge = Edge {
+        id: TopoId::new(),
+        curve: Some(win.curve.clone()),
+        param_range: (t0, t1),
+        vertex_start: None,
+        vertex_end: None,
+        start_vertex_point: Some(junc.arrive),
+        end_vertex_point: Some(junc.depart),
+        forward: true, // increasing range by construction
+        tolerance: ic.tolerance.max(params.tolerance),
+        degenerate: false,
+        step_entity_id: None,
+    };
+
+    // Attach only PCURVEs satisfying the identity parameter-space
+    // contract over the full closed range (affine/periodic PCURVEs
+    // extrapolate exactly — see `pcurve_validates`).
+    let pcurve_f = ic
+        .pcurve_a
+        .as_ref()
+        .filter(|c| pcurve_validates(c, &win.curve, (t0, t1), surf_f, params.projection_tolerance))
+        .cloned();
+    let pcurve_g = ic
+        .pcurve_b
+        .as_ref()
+        .filter(|c| pcurve_validates(c, &win.curve, (t0, t1), surf_g, params.projection_tolerance))
+        .cloned();
+
+    let mut coedge_g = CoEdge::new(edge.id, true);
+    coedge_g.curve_2d = pcurve_g;
+    let mut coedge_f = CoEdge::new(edge.id, false);
+    coedge_f.curve_2d = pcurve_f;
+
+    Some(RecoveredClosed {
+        edge,
+        coedge_g,
+        coedge_f,
+    })
+}
+
+/// Loop-level recovery of lost CLOSED edges (Vision 2036 §1.4):
+/// reconstruct the closed curve capping an empty-wire face by
+/// intersecting it with a neighbor face whose wire has a matching
+/// degenerate junction gap.
+///
+/// Deterministic: candidates in (face, wire) order, neighbors in face
+/// order, branches in index order, junctions in (wire, coedge) order;
+/// first match wins; one closed edge per empty wire. Junctions are
+/// consumed once — two candidates cannot recover into the same wire
+/// position.
+fn recover_lost_closed_loops(
+    shell: &mut Shell,
+    working: &mut [Vec<Edge>],
+    params: &EdgeRecoveryParams,
+) -> EdgeRecoveryReport {
+    let mut report = EdgeRecoveryReport::default();
+
+    let candidates = collect_empty_wire_candidates(shell, working);
+    report.loops_detected = candidates.len() as u32;
+    if candidates.is_empty() {
+        return report;
+    }
+
+    let model_scale = shell_model_scale(shell, working);
+
+    let mut insertions: Vec<Insertion> = Vec::new();
+    let mut new_edges: Vec<(usize, Edge)> = Vec::new();
+    // Empty wires that received a closed coedge — their `closed` flag
+    // must be set explicitly (the single-coedge len() > 1 rule of the
+    // shared insertion code does not fire).
+    let mut close_wires: Vec<(usize, WireRef)> = Vec::new();
+    // Junctions consumed by a recovery (face, wire key, after) — a
+    // second candidate must not insert into the same wire position.
+    let mut used_junctions: Vec<(usize, (u8, usize), usize)> = Vec::new();
+
+    'candidates: for cand in &candidates {
+        let surf_f = match shell.faces[cand.face].surface.as_ref() {
+            Some(s) => s,
+            None => continue,
+        };
+
+        for (gi, g_face) in shell.faces.iter().enumerate() {
+            if gi == cand.face {
+                continue;
+            }
+            let surf_g = match g_face.surface.as_ref() {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let endpoints: std::collections::HashMap<TopoId, (Point3d, Point3d)> = working
+                .get(gi)
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|e| effective_endpoints(e).map(|ep| (e.id, ep)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let junctions = collect_junctions(g_face, &endpoints, params.gap_tolerance);
+            if junctions.is_empty() {
+                continue;
+            }
+
+            let tol_ctx = params
+                .tolerance_context
+                .clone()
+                .unwrap_or_else(|| ToleranceContext::from_model_scale(model_scale));
+            let branches = intersect_surfaces(surf_f, surf_g, &tol_ctx);
+
+            for ic in branches.iter() {
+                let win = match branch_window(ic) {
+                    Some(w) => w,
+                    None => continue,
+                };
+                // Closed branch only: the window's endpoints coincide
+                // (full circle/ellipse, or a closed polyline loop).
+                let closure = win
+                    .curve
+                    .point_at(win.t_lo)
+                    .distance_to(&win.curve.point_at(win.t_hi));
+                if closure > params.gap_tolerance {
+                    continue;
+                }
+                // Existing-edge guard (closed variant): a surviving
+                // edge on the curve means no loss.
+                let guard_tol = params.gap_tolerance.max(ic.tolerance);
+                if existing_edge_on_curve(working, &win, guard_tol) {
+                    continue;
+                }
+
+                for junc in &junctions {
+                    let jkey = (gi, junc.wire.key(), junc.after);
+                    if used_junctions.contains(&jkey) {
+                        continue;
+                    }
+                    let (_, d_arrive) = project_onto_window(&win, &junc.arrive);
+                    if d_arrive > params.projection_tolerance {
+                        continue;
+                    }
+                    let (_, d_depart) = project_onto_window(&win, &junc.depart);
+                    if d_depart > params.projection_tolerance {
+                        continue;
+                    }
+                    if let Some(rec) =
+                        build_closed_recovery(&win, ic, junc, surf_f, surf_g, params)
+                    {
+                        used_junctions.push(jkey);
+                        insertions.push(Insertion {
+                            face: gi,
+                            wire: junc.wire,
+                            after: junc.after,
+                            coedge: rec.coedge_g,
+                        });
+                        insertions.push(Insertion {
+                            face: cand.face,
+                            wire: cand.wire,
+                            after: 0,
+                            coedge: rec.coedge_f,
+                        });
+                        close_wires.push((cand.face, cand.wire));
+                        new_edges.push((cand.face, rec.edge.clone()));
+                        new_edges.push((gi, rec.edge));
+                        report.loops_recovered += 1;
+                        continue 'candidates; // one closed edge per empty wire
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply the coedge insertions in DESCENDING (face, wire, after)
+    // order — pre-computed positions stay valid (same contract as the
+    // open-gap phase).
+    insertions.sort_by(|a, b| {
+        let ka = (a.face, a.wire.key(), a.after);
+        let kb = (b.face, b.wire.key(), b.after);
+        kb.cmp(&ka)
+    });
+    for ins in insertions {
+        if ins.face >= shell.faces.len() {
+            continue;
+        }
+        let face = &mut shell.faces[ins.face];
+        if let Some(wire) = wire_mut(face, ins.wire) {
+            let pos = (ins.after + 1).min(wire.coedges.len());
+            wire.coedges.insert(pos, ins.coedge);
+            if wire.coedges.len() > 1 {
+                wire.closed = true;
+            }
+        }
+    }
+
+    // The empty wires that received a closed coedge are closed loops
+    // by construction.
+    for (fi, wref) in close_wires {
+        if fi < shell.faces.len() {
+            if let Some(wire) = wire_mut(&mut shell.faces[fi], wref) {
+                if wire.coedges.len() == 1 {
+                    wire.closed = true;
+                }
+            }
+        }
+    }
+
+    // The recovered edge joins both faces' working lists with the SAME
+    // id — rebuild_store dedups it into one canonical edge.
+    for (face_idx, edge) in new_edges {
+        if face_idx < working.len() {
+            working[face_idx].push(edge);
+        }
+    }
+
+    if report.loops_recovered > 0 {
+        report.messages.push(format!(
+            "Recovered {} lost closed edge(s) via loop-level surface-surface intersection",
+            report.loops_recovered
+        ));
+    }
+
+    report
+}
+
+// ============================================================
 // Misc helpers
 // ============================================================
 
@@ -855,7 +1384,7 @@ mod tests {
     use crate::builder::ShapeBuilder;
     use crate::healing::{heal_solid, HealingParams};
     use crate::Solid;
-    use draper_geometry::{Circle2d, CylinderSurface, Direction3d, Line2d, Plane};
+    use draper_geometry::{Circle, Circle2d, CylinderSurface, Direction3d, Line2d, Plane};
 
     /// Recovery params for unit-scale tests.
     fn test_params() -> EdgeRecoveryParams {
@@ -1235,5 +1764,341 @@ mod tests {
                 None => false,
             }
         }), "recovered edge not found in the healed bottom face");
+    }
+
+    // ============================================================
+    // Loop-level recovery (closed lost edges)
+    // ============================================================
+
+    /// A cylinder (R=1, height 2) whose bottom cap circle edge is
+    /// LOST: the cap face's wire is EMPTY and its working list is
+    /// empty; the lateral face keeps the realistic seam-twice wire
+    /// [seam forward, top circle, seam reversed] — the B0 junction
+    /// (the seam's own start/end point, wrap position) is the
+    /// degenerate gap where the bottom circle belongs.
+    fn broken_cylinder_cap() -> (Shell, Vec<Vec<Edge>>) {
+        // Cap face: plane z=0, empty wire, no edges.
+        let cap_face = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::ORIGIN,
+                Direction3d::Z,
+            )),
+            Wire::new(vec![]),
+        );
+
+        // Lateral face: cylinder R=1 axis Z; the seam edge is
+        // referenced twice (forward then reversed — the native STEP
+        // pattern), so no pass merges it away.
+        let seam = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 2.0));
+        let top_circle = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 2.0), 1.0)),
+            (0.0, 2.0 * std::f64::consts::PI),
+        );
+        let lateral_wire = Wire::new(vec![
+            CoEdge::new(seam.id, true),
+            CoEdge::new(top_circle.id, true),
+            CoEdge::new(seam.id, false),
+        ]);
+        let lateral_face = Face::new(Surface::Cylinder(CylinderSurface::new_z(1.0)), lateral_wire);
+
+        (
+            Shell::new(vec![cap_face, lateral_face]),
+            vec![vec![], vec![seam, top_circle]],
+        )
+    }
+
+    /// Lost CLOSED edge (full circle capping a cylinder): the cap's
+    /// wire is empty, the lateral face's B0 junction is the degenerate
+    /// gap. Loop-level recovery reconstructs the exact circle,
+    /// re-parameterized to the junction vertex, with identity PCURVEs
+    /// on both surfaces.
+    #[test]
+    fn test_recover_lost_closed_circle_cylinder_cap() {
+        let (mut shell, mut working) = broken_cylinder_cap();
+        let report = recover_lost_edges(&mut shell, &mut working, &test_params());
+
+        assert_eq!(report.gaps_detected, 0);
+        assert_eq!(report.loops_detected, 1, "messages: {:?}", report.messages);
+        assert_eq!(report.loops_recovered, 1, "messages: {:?}", report.messages);
+        assert_eq!(report.edges_recovered, 1);
+
+        // The cap's empty wire received ONE coedge — reversed (the
+        // manifold opposite of the lateral traversal) — and is a
+        // closed loop.
+        let cap_wire = shell.faces[0].outer_wire.as_ref().unwrap();
+        assert_eq!(cap_wire.coedges.len(), 1);
+        assert!(!cap_wire.coedges[0].forward);
+        assert!(cap_wire.closed);
+
+        // The lateral face's wire: seam, top circle, seam reversed,
+        // plus the recovered circle at the B0 junction (wrap position).
+        let lat_wire = shell.faces[1].outer_wire.as_ref().unwrap();
+        assert_eq!(lat_wire.coedges.len(), 4);
+        assert!(lat_wire.coedges[3].forward);
+
+        // The recovered edge is the exact full circle, re-parameterized
+        // to the junction vertex (t_v = 0: B0 IS the branch circle's
+        // frame origin).
+        let e = working[0].last().unwrap().clone();
+        assert!(matches!(e.curve, Some(Curve3d::Circle(_))), "curve: {:?}", e.curve);
+        assert!(e.param_range.0.abs() < 1e-9, "t0: {}", e.param_range.0);
+        assert!(
+            (e.param_range.1 - 2.0 * std::f64::consts::PI).abs() < 1e-9,
+            "t1: {}",
+            e.param_range.1
+        );
+        let b0 = Point3d::new(1.0, 0.0, 0.0);
+        assert!(e.start_vertex_point.unwrap().distance_to(&b0) < 1e-12);
+        assert!(e.end_vertex_point.unwrap().distance_to(&b0) < 1e-12);
+        assert!(e.forward);
+
+        // Same edge id in both working lists (rebuild_store dedups).
+        assert_eq!(working[0].len(), 1);
+        assert_eq!(working[1].len(), 3);
+        assert_eq!(working[0].last().unwrap().id, working[1].last().unwrap().id);
+
+        // Identity-PCURVE contract over the FULL closed range (both
+        // surfaces) when attached.
+        let (t0, t1) = e.param_range;
+        let curve3d = e.curve.clone().unwrap();
+        let plane = Plane::from_origin_and_normal(Point3d::ORIGIN, Direction3d::Z);
+        let cyl = CylinderSurface::new_z(1.0);
+        for (coedge, surface) in [
+            (&cap_wire.coedges[0], Surface::Plane(plane)),
+            (&lat_wire.coedges[3], Surface::Cylinder(cyl)),
+        ] {
+            if let Some(c2d) = &coedge.curve_2d {
+                for k in 0..=8 {
+                    let t = t0 + (t1 - t0) * (k as f64 / 8.0);
+                    let uv = c2d.point_at(t);
+                    let p3 = surface.point_at(uv.u, uv.v);
+                    let expect = curve3d.point_at(t);
+                    assert!(
+                        p3.distance_to(&expect) < 1e-6,
+                        "attached PCURVE off by {} at t={t}",
+                        p3.distance_to(&expect)
+                    );
+                }
+            }
+        }
+
+        // Walk closure: no open junctions remain anywhere.
+        assert!(max_wire_opening(&shell, &working) < 2.0 * test_params().gap_tolerance);
+    }
+
+    /// The native cylinder's wire-less lateral face is the SANCTIONED
+    /// empty-wire representation (its circles are shared with the disk
+    /// faces' wires) — the orphan filter must not flag it, and nothing
+    /// is recovered on a healthy solid.
+    #[test]
+    fn test_closed_loop_native_cylinder_not_recovered() {
+        let solid = ShapeBuilder::make_cylinder(1.0, 2.0);
+        let mut shell = solid.outer_shell.clone().expect("cylinder outer shell");
+        let mut working: Vec<Vec<Edge>> = shell
+            .faces
+            .iter()
+            .map(|f| solid.resolve_face_edges(f))
+            .collect();
+
+        let report = recover_lost_edges(&mut shell, &mut working, &test_params());
+        assert_eq!(report.gaps_detected, 0);
+        assert_eq!(report.loops_detected, 0, "messages: {:?}", report.messages);
+        assert_eq!(report.loops_recovered, 0);
+        assert_eq!(report.edges_recovered, 0);
+
+        // Nothing changed.
+        assert!(shell.faces[2].outer_wire.as_ref().unwrap().coedges.is_empty());
+        assert_eq!(working[2].len(), 2);
+    }
+
+    /// The cap's wire is empty, but the bottom circle edge SURVIVES in
+    /// the lateral face's working list (orphaned — its ORIENTED_EDGEs
+    /// were dropped from both wires): the closed existing-edge guard
+    /// must reject recovery instead of duplicating the edge.
+    #[test]
+    fn test_closed_loop_surviving_circle_guard() {
+        let cap_face = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::ORIGIN,
+                Direction3d::Z,
+            )),
+            Wire::new(vec![]),
+        );
+        let seam = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 2.0));
+        let lateral_face = Face::new(
+            Surface::Cylinder(CylinderSurface::new_z(1.0)),
+            Wire::new(vec![CoEdge::new(seam.id, true), CoEdge::new(seam.id, false)]),
+        );
+        // The surviving bottom circle — orphaned in the working list.
+        let bottom_circle = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::ORIGIN, 1.0)),
+            (0.0, 2.0 * std::f64::consts::PI),
+        );
+        let (mut shell, mut working) = shell_from(vec![
+            (cap_face, vec![]),
+            (lateral_face, vec![seam, bottom_circle]),
+        ]);
+
+        let report = recover_lost_edges(&mut shell, &mut working, &test_params());
+        assert_eq!(report.loops_detected, 1);
+        assert_eq!(report.loops_recovered, 0, "messages: {:?}", report.messages);
+        assert_eq!(report.edges_recovered, 0);
+        assert_eq!(shell.faces[1].outer_wire.as_ref().unwrap().coedges.len(), 2);
+        assert_eq!(working[1].len(), 2);
+    }
+
+    /// The lateral wire's seam lines end 2e-6 apart at B0 (a tolerant
+    /// junction, within gap tolerance): the junction still qualifies,
+    /// and the vertex-point overrides keep each flank's OWN endpoint
+    /// (bit-identical discretization on both sides of the tolerant
+    /// junction).
+    #[test]
+    fn test_closed_loop_tolerant_junction() {
+        let cap_face = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::ORIGIN,
+                Direction3d::Z,
+            )),
+            Wire::new(vec![]),
+        );
+        let seam_a = Edge::new_line(Point3d::new(1.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 2.0));
+        let top_circle = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 2.0), 1.0)),
+            (0.0, 2.0 * std::f64::consts::PI),
+        );
+        let seam_b = Edge::new_line(
+            Point3d::new(1.0, 0.0, 2.0),
+            Point3d::new(1.0, 2.0e-6, 0.0),
+        );
+        let lateral_face = Face::new(
+            Surface::Cylinder(CylinderSurface::new_z(1.0)),
+            Wire::new(vec![
+                CoEdge::new(seam_a.id, true),
+                CoEdge::new(top_circle.id, true),
+                CoEdge::new(seam_b.id, true),
+            ]),
+        );
+        let (mut shell, mut working) = shell_from(vec![
+            (cap_face, vec![]),
+            (lateral_face, vec![seam_a, top_circle, seam_b]),
+        ]);
+
+        let report = recover_lost_edges(&mut shell, &mut working, &test_params());
+        assert_eq!(report.loops_recovered, 1, "messages: {:?}", report.messages);
+
+        let e = working[0].last().unwrap();
+        // arrive = seam_b's end; depart = seam_a's start.
+        assert!(
+            e.start_vertex_point
+                .unwrap()
+                .distance_to(&Point3d::new(1.0, 2.0e-6, 0.0)) < 1e-12
+        );
+        assert!(
+            e.end_vertex_point
+                .unwrap()
+                .distance_to(&Point3d::new(1.0, 0.0, 0.0)) < 1e-12
+        );
+        // The periodic domain rotated to the arrive flank's projection
+        // (angle of (1, 2e-6) ≈ 2e-6 rad).
+        assert!(
+            (e.param_range.0 - 2.0e-6).abs() < 1e-7,
+            "t0: {}",
+            e.param_range.0
+        );
+        assert!(
+            (e.param_range.1 - e.param_range.0 - 2.0 * std::f64::consts::PI).abs() < 1e-9
+        );
+    }
+
+    /// Loop-level recovery is idempotent: the recovered coedge fills
+    /// the empty wire, so a second run detects no candidates.
+    #[test]
+    fn test_closed_loop_recovery_idempotent() {
+        let (mut shell, mut working) = broken_cylinder_cap();
+        let r1 = recover_lost_edges(&mut shell, &mut working, &test_params());
+        assert_eq!(r1.loops_recovered, 1);
+
+        let r2 = recover_lost_edges(&mut shell, &mut working, &test_params());
+        assert_eq!(r2.loops_detected, 0);
+        assert_eq!(r2.loops_recovered, 0);
+        assert_eq!(r2.edges_recovered, 0);
+        assert_eq!(shell.faces[0].outer_wire.as_ref().unwrap().coedges.len(), 1);
+        assert_eq!(shell.faces[1].outer_wire.as_ref().unwrap().coedges.len(), 4);
+        assert_eq!(working[0].len(), 1);
+        assert_eq!(working[1].len(), 3);
+    }
+
+    /// Same input → structurally identical output (curve kind,
+    /// rotated range, vertex points, orientations, wire sizes) — the
+    /// loop-level determinism contract.
+    #[test]
+    fn test_closed_loop_recovery_deterministic() {
+        fn signature(
+            shell: &Shell,
+            working: &[Vec<Edge>],
+        ) -> (String, (f64, f64), Point3d, Point3d, bool, bool, bool, usize, usize) {
+            let e = working[0].last().unwrap();
+            let kind = match &e.curve {
+                Some(Curve3d::Circle(_)) => "circle",
+                Some(Curve3d::Ellipse(_)) => "ellipse",
+                Some(Curve3d::Line(_)) => "line",
+                _ => "other",
+            };
+            let cap_fwd = shell.faces[0].outer_wire.as_ref().unwrap().coedges[0].forward;
+            let lat = shell.faces[1].outer_wire.as_ref().unwrap();
+            let lat_fwd = lat.coedges[3].forward;
+            (
+                kind.to_string(),
+                e.param_range,
+                e.start_vertex_point.unwrap(),
+                e.end_vertex_point.unwrap(),
+                e.forward,
+                cap_fwd,
+                lat_fwd,
+                lat.coedges.len(),
+                working[1].len(),
+            )
+        }
+
+        let (mut shell1, mut working1) = broken_cylinder_cap();
+        recover_lost_edges(&mut shell1, &mut working1, &test_params());
+        let (mut shell2, mut working2) = broken_cylinder_cap();
+        recover_lost_edges(&mut shell2, &mut working2, &test_params());
+
+        assert_eq!(signature(&shell1, &working1), signature(&shell2, &working2));
+    }
+
+    /// End-to-end through the healing pipeline: `heal_solid` recovers
+    /// the lost closed cap circle and rebuilds the store with it.
+    #[test]
+    fn test_heal_solid_recovers_lost_closed_loop() {
+        let (shell, working) = broken_cylinder_cap();
+        let broken = Solid::from_edges_only(shell, working);
+
+        let params = HealingParams {
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&broken, &params);
+        assert_eq!(report.edges_recovered, 1, "messages: {:?}", report.messages);
+
+        let sh = healed.outer_shell.as_ref().expect("healed outer shell");
+        assert_eq!(sh.faces[0].outer_wire.as_ref().unwrap().coedges.len(), 1);
+        assert_eq!(sh.faces[1].outer_wire.as_ref().unwrap().coedges.len(), 4);
+
+        // The recovered circle is resolvable in the store with the
+        // seam vertex as its (closed) endpoints.
+        let b0 = Point3d::new(1.0, 0.0, 0.0);
+        let cap_edges = healed.resolve_face_edges(&sh.faces[0]);
+        assert!(
+            cap_edges.iter().any(|e| {
+                matches!(e.curve, Some(Curve3d::Circle(_)))
+                    && e.start_point().map(|p| p.distance_to(&b0) < 1e-9).unwrap_or(false)
+                    && e.end_point().map(|p| p.distance_to(&b0) < 1e-9).unwrap_or(false)
+            }),
+            "recovered circle not found in the healed cap face"
+        );
     }
 }
