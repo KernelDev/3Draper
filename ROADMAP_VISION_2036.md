@@ -695,6 +695,30 @@ CPU-side copies.
       NURBS groups fail the >2-adjacency validation — needs loop
       splitting at the pinch vertex) and sliver-UV extraction
       fallbacks (233 faces, legacy via rim-contract guard).
+      **Progress note (2026-09-14, session 35):** the 57/97 group
+      failures ROOT-CAUSED — NOT pinched rings (0 interned-id pinches
+      in the failing groups; the session-28 "225 duplicates" were
+      seam 3D-positions with distinct UVs). The actual mechanism:
+      sqrt-singular micro-sliver faces (UV chains 1e-6..1e-4 apart,
+      iso-u/iso-v collinear boundary chains) corrupted the incremental
+      CDT — `locate` treated zero-area triangles as containers (all
+      orient signs collapse), `nearest_edge` split wrong sub-segments,
+      and the Case-1/2 enforcement splits re-created existing
+      triangles (duplicates → edges with 4-6 adjacency). Fixes
+      (all in `surface_canonical.rs`, corruption now structurally
+      impossible): degenerate-triangle transparency in locate/linear
+      fallback, parametric `containing_edge`, duplicate-guarded
+      `split_edge`, spanning-vertex rejection in `flip_is_valid`,
+      `BlockedOnEdge` walk outcome, `repair_spanning_edge` re-routing,
+      env-gated diagnostics (`DRAPER_CANON_DEBUG`/`DRAPER_CANON_TRACE`
+      with per-phase degeneracy stats). Failing groups 299 → 199
+      (remaining: constraint enforcement on collinear chains blocked
+      by insert-time spanning edges — needs greedy-insertion
+      legalization or exact-predicate redesign); A/B unchanged
+      (never-worsen held: as1-oc-214 23168 tris / 0 boundary
+      bit-identical; drill_top totals identical to session-34
+      baseline). Default-on still blocked by the remaining 199
+      groups + the 233-face sliver extraction fallback.
 - [ ] Analytical `Curve2d` (PCURVE) and exact B-spline SSI.
 - [ ] Property-based testing for topology.
 - [ ] Fuzz testing for STEP parser and NURBS solver.

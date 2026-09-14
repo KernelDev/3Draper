@@ -57,6 +57,16 @@ use crate::mesh::TriangleMesh;
 /// semantics; kept local so this module never drifts from it).
 const EPS: f64 = 1e-10;
 
+/// A triangle whose UV vertices are collinear within this orient2d
+/// magnitude covers zero area: its predicates are meaningless (every
+/// point off the line reads as "strictly inside" — all three orient
+/// signs collapse to one side). Session-35: iso-parametric boundary
+/// chains (v=0 / v=1 lines) and sqrt-singular micro-sliver strips
+/// (chains 1e-6 apart) produced such triangles; treating them as
+/// containers made `insert_vertex` split them into OVERLAPPING
+/// triangles — the source of the >2-adjacency validation failures.
+const DEGENERATE_AREA_EPS: f64 = 1e-14;
+
 /// One face's boundary loops, collected by the converter from the shared
 /// edge cache (bit-identical across faces sharing an EDGE_CURVE).
 #[derive(Clone, Debug)]
@@ -297,6 +307,9 @@ impl Triangulation {
 
     fn add_tri(&mut self, mut tri: [u32; 3]) -> usize {
         self.normalize_ccw(&mut tri);
+        if trace_enabled() {
+            self.trace_duplicate("add_tri", tri);
+        }
         let idx = self.tris.len();
         self.tris.push(tri);
         self.index_tri(idx, tri);
@@ -339,10 +352,35 @@ impl Triangulation {
     /// Replace `tris[idx]` with `new` (same winding), updating adjacency.
     fn replace_tri(&mut self, idx: usize, mut new: [u32; 3]) {
         self.normalize_ccw(&mut new);
+        if trace_enabled() {
+            self.trace_duplicate("replace_tri", new);
+        }
         let old = self.tris[idx];
         self.deindex_tri(idx, old);
         self.tris[idx] = new;
         self.index_tri(idx, new);
+    }
+
+    /// Trace helper (DRAPER_CANON_TRACE=1): fire when a triangle with
+    /// the same vertex set as `tri` already exists — the duplication
+    /// mechanism behind the >2-adjacency failures (session-35).
+    fn trace_duplicate(&self, label: &str, tri: [u32; 3]) {
+        let key = (tri[0].min(tri[1]), tri[0].max(tri[1]));
+        if let Some(list) = self.edge_map.get(&key) {
+            for &ti in list {
+                let t = self.tris[ti];
+                let same_set = (t.contains(&tri[0]) && t.contains(&tri[1]) && t.contains(&tri[2]))
+                    || (t[0] == t[1] || t[1] == t[2] || t[0] == t[2]);
+                if same_set {
+                    eprintln!(
+                        "CANON-TRACE: {} DUPLICATE {:?} (existing tri[{}] = {:?})",
+                        label, tri, ti, t
+                    );
+                    eprintln!("{}", std::backtrace::Backtrace::force_capture());
+                    return;
+                }
+            }
+        }
     }
 
     /// Orientation normalization: swap the last two indices when the
@@ -397,9 +435,15 @@ impl Triangulation {
                 }) {
                     return ti;
                 }
-                let edge = nearest_edge(self.verts.as_ref(), tri, p);
+                // Prefer the edge that CONTAINS p (parametrically) —
+                // nearest_edge can pick a wrong sub-segment on
+                // degenerate/zero-area chains (session-35).
+                let edge = self
+                    .containing_edge(tri, p)
+                    .or_else(|| nearest_edge(self.verts.as_ref(), tri, p));
                 if let Some((v1, v2)) = edge {
-                    self.split_edge(v1, v2, vi);
+                    // vi is brand-new: the duplicate guard cannot fire.
+                    let _ = self.split_edge(v1, v2, vi);
                 }
                 ti
             }
@@ -435,13 +479,18 @@ impl Triangulation {
                 }) {
                     return usize::MAX; // duplicate vertex — skip
                 }
-                let edge = nearest_edge(self.verts.as_ref(), tri, p);
+                // Containing edge first (session-35); constraint check
+                // applies to whichever edge is chosen.
+                let edge = self
+                    .containing_edge(tri, p)
+                    .or_else(|| nearest_edge(self.verts.as_ref(), tri, p));
                 if let Some((v1, v2)) = edge {
                     let key = (v1.min(v2), v1.max(v2));
                     if constraints.contains(&key) {
                         return usize::MAX; // on a constraint edge — skip
                     }
-                    self.split_edge(v1, v2, vi);
+                    // vi is brand-new: the duplicate guard cannot fire.
+                    let _ = self.split_edge(v1, v2, vi);
                 }
                 ti
             }
@@ -451,12 +500,28 @@ impl Triangulation {
 
     /// Split edge (v1, v2) at existing vertex `p_idx` in ALL adjacent
     /// triangles (winding-preserving), updating adjacency.
-    fn split_edge(&mut self, v1: u32, v2: u32, p_idx: u32) {
+    ///
+    /// Returns `false` WITHOUT modifying anything when edge (v1, p_idx)
+    /// or (p_idx, v2) already exists — the split would re-create a
+    /// triangle whose vertex set is already present (p_idx connected to
+    /// an endpoint through a different path): the exact duplication
+    /// mechanism behind the >2-adjacency failures (session-35 observed
+    /// tri[295] == tri[320] on the micro-sliver chains).
+    fn split_edge(&mut self, v1: u32, v2: u32, p_idx: u32) -> bool {
         let key = (v1.min(v2), v1.max(v2));
-        let adjacent: Vec<usize> = match self.edge_map.get(&key) {
+        if self.edge_exists(v1, p_idx) || self.edge_exists(p_idx, v2) {
+            return false; // would duplicate an existing triangle
+        }
+        let mut adjacent: Vec<usize> = match self.edge_map.get(&key) {
             Some(v) => v.clone(),
-            None => return,
+            None => return false,
         };
+        // Defense against duplicate listings: a combinatorially
+        // degenerate triangle registers its repeated edge twice, and
+        // processing the same index twice duplicates triangles on
+        // every subsequent split (session-35 observed tri[295]==tri[320]).
+        adjacent.sort_unstable();
+        adjacent.dedup();
         for ti in adjacent {
             let [a, b, c] = self.tris[ti];
             // Winding-preserving split, mirroring custom_cdt's
@@ -482,6 +547,139 @@ impl Triangulation {
             self.replace_tri(ti, t1);
             self.add_tri(t2);
         }
+        true
+    }
+
+    /// Repair a SPANNING edge (v1, v2) that passes over vertex `p` (p
+    /// lies ON the segment and is already connected to v1 or v2 through
+    /// other paths — which is why `split_edge` refused). For each
+    /// triangle [v1, v2, opp] on the spanning edge: when the half
+    /// triangle {p, v2, opp} already exists, replace with [v1, p, opp]
+    /// (the region is preserved — the dropped half is exactly the
+    /// existing one); symmetrically, when {v1, p, opp} exists, replace
+    /// with [p, v2, opp]. Removes the spanning edge and creates the
+    /// missing connection through p (session-35).
+    ///
+    /// Returns false WITHOUT modifying anything when any triangle on
+    /// the edge has no clean replacement (ambiguous or missing halves).
+    fn repair_spanning_edge(&mut self, v1: u32, v2: u32, p: u32) -> bool {
+        let key = (v1.min(v2), v1.max(v2));
+        let adjacent: Vec<usize> = match self.edge_map.get(&key) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        if adjacent.is_empty() || adjacent.len() > 2 {
+            return false; // corrupted edge (>2) — refuse to touch
+        }
+        let opp_of = |t: [u32; 3]| -> u32 {
+            if t[0] != v1 && t[0] != v2 {
+                t[0]
+            } else if t[1] != v1 && t[1] != v2 {
+                t[1]
+            } else {
+                t[2]
+            }
+        };
+        let has_half = |x: u32, y: u32, opp: u32| -> bool {
+            let hk = (x.min(y), x.max(y));
+            self.edge_map
+                .get(&hk)
+                .map(|l| l.iter().any(|&ti| self.tris[ti].contains(&opp)))
+                .unwrap_or(false)
+        };
+        // Pre-check every triangle for a clean replacement.
+        let mut plan: Vec<(usize, [u32; 3])> = Vec::with_capacity(adjacent.len());
+        for &ti in &adjacent {
+            let t = self.tris[ti];
+            let opp = opp_of(t);
+            let half_p_v2 = has_half(p, v2, opp);
+            let half_v1_p = has_half(v1, p, opp);
+            // The replacement triangle introduces edge (p, opp): the
+            // matching half already contributes one triangle there — a
+            // second pre-existing one would make three (>2).
+            let third_count = self
+                .edge_map
+                .get(&(p.min(opp), p.max(opp)))
+                .map(|l| l.len())
+                .unwrap_or(0);
+            if third_count > 1 {
+                return false;
+            }
+            if half_p_v2 && !half_v1_p {
+                plan.push((ti, [v1, p, opp]));
+            } else if half_v1_p && !half_p_v2 {
+                plan.push((ti, [p, v2, opp]));
+            } else {
+                return false; // ambiguous or missing halves — refuse
+            }
+        }
+        for (ti, new) in plan {
+            self.replace_tri(ti, new);
+        }
+        true
+    }
+
+    /// A combinatorially (repeated vertex) or geometrically (collinear
+    /// UVs) degenerate triangle. Covers zero area, contains nothing.
+    fn tri_is_degenerate(&self, t: [u32; 3]) -> bool {
+        if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+            return true;
+        }
+        let (a, b, c) = (
+            self.verts[t[0] as usize],
+            self.verts[t[1] as usize],
+            self.verts[t[2] as usize],
+        );
+        orient2d(a, b, c).abs() <= DEGENERATE_AREA_EPS
+    }
+
+    /// Debug statistics: (repeated-vertex triangles, collinear triangles).
+    fn degenerate_stats(&self) -> (usize, usize) {
+        let mut repeated = 0usize;
+        let mut collinear = 0usize;
+        for t in &self.tris {
+            if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+                repeated += 1;
+            } else {
+                let (a, b, c) = (
+                    self.verts[t[0] as usize],
+                    self.verts[t[1] as usize],
+                    self.verts[t[2] as usize],
+                );
+                if orient2d(a, b, c).abs() <= DEGENERATE_AREA_EPS {
+                    collinear += 1;
+                }
+            }
+        }
+        (repeated, collinear)
+    }
+
+    /// Edge of `tri` whose segment CONTAINS `p` (collinear within a
+    /// scale-relative tolerance, parametric t in [-eps, 1+eps]).
+    /// Unlike `nearest_edge` (pure distance), this never picks an edge
+    /// the point is merely CLOSE to — on zero-area collinear chains the
+    /// nearest-edge split landed on the wrong sub-segment and created
+    /// triangles spanning other rim vertices (session-35).
+    fn containing_edge(&self, tri: [u32; 3], p: [f64; 2]) -> Option<(u32, u32)> {
+        for i in 0..3 {
+            let (a, b) = (tri[i], tri[(i + 1) % 3]);
+            let (pa, pb) = (self.verts[a as usize], self.verts[b as usize]);
+            let ab = [pb[0] - pa[0], pb[1] - pa[1]];
+            let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+            if len2 < 1e-24 {
+                continue;
+            }
+            // |orient2d| = |ab| * dist(p, line) → collinear within
+            // 1e-9 * |ab| iff |orient2d| <= 1e-9 * len2.
+            if orient2d(pa, pb, p).abs() > 1e-9 * len2 {
+                continue;
+            }
+            let t = ((p[0] - pa[0]) * ab[0] + (p[1] - pa[1]) * ab[1]) / len2;
+            if (-1e-9..=1.0 + 1e-9).contains(&t) {
+                return Some((a, b));
+            }
+        }
+        None
     }
 
     /// Locate `p`: visibility walk from `hint`.
@@ -492,6 +690,12 @@ impl Triangulation {
         let max_steps = self.tris.len() + 8;
         for _ in 0..max_steps {
             let tri = self.tris[t];
+            if self.tri_is_degenerate(tri) {
+                // Degenerate triangles are transparent: their orient
+                // predicates collapse (all one sign) and would claim
+                // any point on one side of their line as "inside".
+                return linear_locate(self, p);
+            }
             let d = [
                 orient2d(self.verts[tri[0] as usize], self.verts[tri[1] as usize], p),
                 orient2d(self.verts[tri[1] as usize], self.verts[tri[2] as usize], p),
@@ -533,6 +737,9 @@ impl Triangulation {
 
 fn linear_locate(t: &Triangulation, p: [f64; 2]) -> Option<(usize, bool)> {
     for (i, tri) in t.tris.iter().enumerate() {
+        if t.tri_is_degenerate(*tri) {
+            continue; // zero-area triangles are transparent
+        }
         let d = [
             orient2d(t.verts[tri[0] as usize], t.verts[tri[1] as usize], p),
             orient2d(t.verts[tri[1] as usize], t.verts[tri[2] as usize], p),
@@ -645,6 +852,8 @@ pub fn build_canonical_surface_cdt(
     // loop_idx: 0 = outer, 1..=holes = hole loops.
     let mut constraints: Vec<(usize, usize, u32, u32)> = Vec::with_capacity(512);
     let mut face_loops_uv: Vec<(Vec<Vec<[f64; 2]>>)> = Vec::with_capacity(faces.len());
+    // Interned vertex-id loops per face (diagnostics + pinch splitting).
+    let mut face_loop_ids: Vec<Vec<Vec<u32>>> = Vec::with_capacity(faces.len());
 
     for (fi, f) in faces.iter().enumerate() {
         if f.outer_3d.len() != f.outer_uv.len() || f.outer_3d.len() < 3 {
@@ -652,6 +861,7 @@ pub fn build_canonical_surface_cdt(
             return None;
         }
         let mut loops: Vec<Vec<[f64; 2]>> = Vec::with_capacity(1 + f.holes_uv.len());
+        let mut loop_ids: Vec<Vec<u32>> = Vec::with_capacity(1 + f.holes_uv.len());
         let mut outer_ids: Vec<u32> = Vec::with_capacity(f.outer_3d.len());
         for (p, q) in f.outer_3d.iter().zip(f.outer_uv.iter()) {
             let id = intern_rim(p, q, &mut uv, &mut p3d, &mut by_pos, &mut by_uv);
@@ -670,6 +880,7 @@ pub fn build_canonical_surface_cdt(
             constraints.push((fi, 0, outer_ids[w], outer_ids[(w + 1) % outer_ids.len()]));
         }
         loops.push(outer_ids.iter().map(|&id| uv[id as usize]).collect());
+        loop_ids.push(outer_ids.clone());
 
         for (hi, (h3d, huv)) in f.holes_3d.iter().zip(f.holes_uv.iter()).enumerate() {
             if h3d.len() != huv.len() || h3d.len() < 3 {
@@ -692,8 +903,10 @@ pub fn build_canonical_surface_cdt(
                 constraints.push((fi, hi + 1, hole_ids[w], hole_ids[(w + 1) % hole_ids.len()]));
             }
             loops.push(hole_ids.iter().map(|&id| uv[id as usize]).collect());
+            loop_ids.push(hole_ids.clone());
         }
         face_loops_uv.push(loops);
+        face_loop_ids.push(loop_ids);
     }
 
     // ── 3. Seed triangulation over the CONVEX HULL of the rim vertices ──
@@ -732,6 +945,17 @@ pub fn build_canonical_surface_cdt(
         }
         hint = tri.insert_vertex(vi as u32, hint);
     }
+    if debug_enabled() {
+        let (r, c) = tri.degenerate_stats();
+        if r + c > 0 {
+            eprintln!(
+                "CANON-DEBUG: phase 'rim-insert' degenerates: repeated={} collinear={} ({} tris)",
+                r,
+                c,
+                tri.tris.len()
+            );
+        }
+    }
 
     // ── 4. Constraint enforcement — FLIP-ONLY (contract-safe) ──
     // A rim edge is a cross-face contract: the neighbor's mesh contains
@@ -752,6 +976,12 @@ pub fn build_canonical_surface_cdt(
                  flip-only — dropping canonical surface triangulation (legacy fallback)",
                 a, b
             );
+            if debug_enabled() {
+                dump_build_debug(
+                    &tri, &p3d, &constraints, &face_loop_ids, &faces, a, b,
+                    DebugCause::ConstraintUnenforced,
+                );
+            }
             return None;
         }
     }
@@ -759,6 +989,17 @@ pub fn build_canonical_surface_cdt(
         .iter()
         .filter_map(|&(_, _, a, b)| if a == b { None } else { Some((a.min(b), a.max(b))) })
         .collect();
+    if debug_enabled() {
+        let (r, c) = tri.degenerate_stats();
+        if r + c > 0 {
+            eprintln!(
+                "CANON-DEBUG: phase 'enforce' degenerates: repeated={} collinear={} ({} tris)",
+                r,
+                c,
+                tri.tris.len()
+            );
+        }
+    }
 
     // ── 4.5 Insert Steiner points — CONSTRAINT-EDGE PROTECTED ──
     // Mirrors `custom_cdt::insert_interior_points`'s ring protection: a
@@ -782,6 +1023,17 @@ pub fn build_canonical_surface_cdt(
             hint = hint_new;
         }
     }
+    if debug_enabled() {
+        let (r, c) = tri.degenerate_stats();
+        if r + c > 0 {
+            eprintln!(
+                "CANON-DEBUG: phase 'steiner' degenerates: repeated={} collinear={} ({} tris)",
+                r,
+                c,
+                tri.tris.len()
+            );
+        }
+    }
 
 
     // ── 6. Validation: no edge with >2 adjacent triangles ──
@@ -799,6 +1051,12 @@ pub fn build_canonical_surface_cdt(
                  canonical surface triangulation (legacy fallback)",
                 a, b
             );
+            if debug_enabled() {
+                dump_build_debug(
+                    &tri, &p3d, &constraints, &face_loop_ids, &faces, a, b,
+                    DebugCause::EdgeOverused,
+                );
+            }
             return None;
         }
         if tri.tris.is_empty() {
@@ -870,15 +1128,29 @@ fn enforce_constraint(tri: &mut Triangulation, a: u32, b: u32) -> bool {
         // EXISTING canonical vertex, present in the neighbor's polyline).
         // Case 1: `b` lies ON an existing edge (a, c) — the constraint is
         // a sub-segment of a longer collinear edge (common after greedy
-        // insertion skips intermediate rim vertices).
+        // insertion skips intermediate rim vertices). DUPLICATE-GUARDED
+        // (session-35): when b is already connected to a or c through
+        // another path, the split would re-create an existing triangle —
+        // refuse and let the visibility walk handle the constraint.
         if let Some(c) = edge_from_containing(tri, a, b) {
-            tri.split_edge(a, c, b);
-            continue;
+            if tri.split_edge(a, c, b) {
+                continue;
+            }
+            // Blocked by the duplicate guard: b already connected to a
+            // or c. The edge (a, c) SPANS b — repair it by re-routing
+            // through b (region-preserving triangle replacement).
+            if tri.repair_spanning_edge(a, c, b) {
+                continue;
+            }
         }
         // Case 2: `a` lies ON an existing edge (c, b).
         if let Some(c) = edge_from_containing(tri, b, a) {
-            tri.split_edge(c, b, a);
-            continue;
+            if tri.split_edge(c, b, a) {
+                continue;
+            }
+            if tri.repair_spanning_edge(c, b, a) {
+                continue;
+            }
         }
         match walk_crossings(tri, a, b) {
             WalkOutcome::Done => {
@@ -912,6 +1184,15 @@ fn enforce_constraint(tri: &mut Triangulation, a: u32, b: u32) -> bool {
                 // The segment leaves a along an existing edge chain.
                 return enforce_constraint(tri, a, v) && enforce_constraint(tri, v, b);
             }
+            WalkOutcome::BlockedOnEdge(p, q) => {
+                // b lies ON edge (p, q): split it at b — guarded against
+                // duplication (b already connected to p or q through
+                // another path → refuse, the constraint is blocked).
+                if tri.split_edge(p, q, b) {
+                    continue; // edge (a, b) may exist now — re-check
+                }
+                return false;
+            }
             WalkOutcome::Failed => return false,
         }
     }
@@ -927,6 +1208,11 @@ enum WalkOutcome {
     ThroughVertex(u32),
     /// The segment leaves `a` along an existing edge to this vertex.
     Valley(u32),
+    /// `b` lies ON an edge (p, q) of a walk triangle: the constraint
+    /// is a sub-segment of that edge — the walk can neither properly
+    /// cross it nor step past it. The caller splits (p, q) at b
+    /// (duplicate-guarded).
+    BlockedOnEdge(u32, u32),
     /// Walk degenerated irrecoverably.
     Failed,
 }
@@ -973,7 +1259,30 @@ fn walk_crossings(tri: &Triangulation, a: u32, b: u32) -> WalkOutcome {
             Some(ti) => ti,
             None => match vertex_on_segment_from(tri, a, pa, pb) {
                 Some(v) => return WalkOutcome::Valley(v),
-                None => return WalkOutcome::Failed,
+                None => {
+                    if trace_enabled() {
+                        eprintln!(
+                            "CANON-TRACE: initial-selection FAILED a={} b={} uv a=({:.6},{:.6}) b=({:.6},{:.6})",
+                            a, b, pa[0], pa[1], pb[0], pb[1]
+                        );
+                        if let Some(ts) = tri.vert_tris.get(&a) {
+                            eprintln!("  {} incident tris:", ts.len());
+                            for &ti in ts.iter().take(14) {
+                                let t = tri.tris[ti];
+                                eprintln!(
+                                    "    tri[{}] = {:?} uv ({:.5},{:.5}) ({:.5},{:.5}) ({:.5},{:.5})",
+                                    ti, t,
+                                    tri.verts[t[0] as usize][0], tri.verts[t[0] as usize][1],
+                                    tri.verts[t[1] as usize][0], tri.verts[t[1] as usize][1],
+                                    tri.verts[t[2] as usize][0], tri.verts[t[2] as usize][1],
+                                );
+                            }
+                        } else {
+                            eprintln!("  a has NO incident triangles (orphan)!");
+                        }
+                    }
+                    return WalkOutcome::Failed;
+                }
             },
         }
     };
@@ -1005,6 +1314,29 @@ fn walk_crossings(tri: &Triangulation, a: u32, b: u32) -> WalkOutcome {
             v != a && v != b && point_on_line(pa, pb, tri.verts[v as usize])
         }) {
             return WalkOutcome::ThroughVertex(v);
+        }
+        // `b` lying ON an edge of this triangle (not as its endpoint):
+        // the constraint is a sub-segment of that edge — no proper
+        // crossing is possible and the facing-side step cannot move.
+        // Split the edge at b (caller-side, duplicate-guarded).
+        for i in 0..3 {
+            let (p, q) = (tri_cur[i], tri_cur[(i + 1) % 3]);
+            if p == b || q == b {
+                continue;
+            }
+            let (pp, pq2) = (tri.verts[p as usize], tri.verts[q as usize]);
+            let eq = [pq2[0] - pp[0], pq2[1] - pp[1]];
+            let len2 = eq[0] * eq[0] + eq[1] * eq[1];
+            if len2 < 1e-24 {
+                continue;
+            }
+            if orient2d(pp, pq2, pb).abs() > 1e-9 * len2 {
+                continue; // not collinear with the edge
+            }
+            let t = ((pb[0] - pp[0]) * eq[0] + (pb[1] - pp[1]) * eq[1]) / len2;
+            if t > 1e-9 && t < 1.0 - 1e-9 {
+                return WalkOutcome::BlockedOnEdge(p, q);
+            }
         }
         // First properly crossed edge of this triangle (never the entry
         // edge; never edges incident to a in the start triangle).
@@ -1115,6 +1447,38 @@ fn flip_is_valid(
     if segments_properly_cross(pa, pb, p1, p2) {
         return None;
     }
+    // The new diagonal must not SPAN an existing vertex: a vertex on
+    // segment (o1, o2) keeps its own incident triangles, which would
+    // overlap the flipped pair (session-35: flips created edges like
+    // (99,101) passing over vertex 100 — the exact configuration that
+    // later blocked constraint enforcement and inflated edge usage).
+    // Bbox-pruned full scan; vertices are few hundreds per surface.
+    {
+        let (minx, maxx) = (p1[0].min(p2[0]), p1[0].max(p2[0]));
+        let (miny, maxy) = (p1[1].min(p2[1]), p1[1].max(p2[1]));
+        for (wi, w) in tri.verts.iter().enumerate() {
+            let wi = wi as u32;
+            if wi == o1 || wi == o2 || wi == u || wi == v {
+                continue;
+            }
+            if w[0] < minx - 1e-12
+                || w[0] > maxx + 1e-12
+                || w[1] < miny - 1e-12
+                || w[1] > maxy + 1e-12
+            {
+                continue;
+            }
+            if point_on_line(p1, p2, *w) {
+                // strictly between o1 and o2?
+                let t = ((w[0] - p1[0]) * (p2[0] - p1[0])
+                    + (w[1] - p1[1]) * (p2[1] - p1[1]))
+                    / ((p2[0] - p1[0]).powi(2) + (p2[1] - p1[1]).powi(2));
+                if t > 1e-9 && t < 1.0 - 1e-9 {
+                    return None; // diagonal would span this vertex
+                }
+            }
+        }
+    }
     Some((o1, o2))
 }
 
@@ -1198,6 +1562,11 @@ fn edge_from_containing(tri: &Triangulation, a: u32, b: u32) -> Option<u32> {
             }
         }
     }
+    // NEAREST candidate (session-35): the closest c minimizes the
+    // spanning window — the split edge (a, c) is as short as the
+    // neighborhood allows, so fewer intermediate vertices can be
+    // jumped over.
+    let mut best: Option<(f64, u32)> = None;
     for c in seen {
         let pc = tri.verts[c as usize];
         // b collinear with (a, c)…
@@ -1215,10 +1584,134 @@ fn edge_from_containing(tri: &Triangulation, a: u32, b: u32) -> Option<u32> {
         }
         let tpar = (ab * acx + aby * acy) / len2;
         if tpar > 1e-9 && tpar <= 1.0 + 1e-9 {
-            return Some(c);
+            if best.map(|(bd, _)| len2 < bd).unwrap_or(true) {
+                best = Some((len2, c));
+            }
         }
     }
-    None
+    best.map(|(_, c)| c)
+}
+
+// ============================================================
+// Build diagnostics (env-gated: DRAPER_CANON_DEBUG=1)
+// ============================================================
+
+fn debug_enabled() -> bool {
+    // Cached via std::env (cheap enough per build; builds are per-surface).
+    std::env::var("DRAPER_CANON_DEBUG").is_ok()
+}
+
+/// Fine-grained per-triangle tracing (DRAPER_CANON_TRACE=1): duplicate
+/// and degenerate triangle creation with backtraces. OnceLock-cached —
+/// checked on EVERY add_tri/replace_tri call.
+fn trace_enabled() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var("DRAPER_CANON_TRACE").is_ok())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum DebugCause {
+    ConstraintUnenforced,
+    EdgeOverused,
+}
+
+/// Dump the failing canonical build state to stderr: the offending edge
+/// (UV + 3D), its adjacent triangles, repeated-vertex triangles, the
+/// constraints touching either endpoint, and a per-face pinch report
+/// (non-consecutive revisits of an interned rim vertex).
+#[allow(clippy::too_many_arguments)]
+fn dump_build_debug(
+    tri: &Triangulation,
+    p3d: &[Point3d],
+    constraints: &[(usize, usize, u32, u32)],
+    face_loop_ids: &[Vec<Vec<u32>>],
+    faces: &[CanonicalFaceLoops],
+    a: u32,
+    b: u32,
+    cause: DebugCause,
+) {
+    let key = (a.min(b), a.max(b));
+    eprintln!("CANON-DEBUG: cause={:?} edge=({},{})", cause, key.0, key.1);
+    eprintln!(
+        "  uv a=({:.6},{:.6}) b=({:.6},{:.6})  3d a=({:.4},{:.4},{:.4}) b=({:.4},{:.4},{:.4})",
+        tri.verts[a as usize][0],
+        tri.verts[a as usize][1],
+        tri.verts[b as usize][0],
+        tri.verts[b as usize][1],
+        p3d[a as usize].x,
+        p3d[a as usize].y,
+        p3d[a as usize].z,
+        p3d[b as usize].x,
+        p3d[b as usize].y,
+        p3d[b as usize].z,
+    );
+    if let Some(ts) = tri.edge_map.get(&key) {
+        eprintln!("  edge_map[({},{})] = {} tris {:?}", key.0, key.1, ts.len(), ts);
+        for &ti in ts.iter().take(6) {
+            let t = tri.tris[ti];
+            eprintln!(
+                "    tri[{}] = {:?}  uv ({:.5},{:.5}) ({:.5},{:.5}) ({:.5},{:.5})",
+                ti,
+                t,
+                tri.verts[t[0] as usize][0],
+                tri.verts[t[0] as usize][1],
+                tri.verts[t[1] as usize][0],
+                tri.verts[t[1] as usize][1],
+                tri.verts[t[2] as usize][0],
+                tri.verts[t[2] as usize][1],
+            );
+        }
+    } else {
+        eprintln!("  edge_map[({},{})] = ABSENT", key.0, key.1);
+    }
+    // Repeated-vertex triangles (degenerate combinatorics inflate usage).
+    let mut degenerate = 0usize;
+    for (ti, t) in tri.tris.iter().enumerate() {
+        if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
+            if degenerate < 6 {
+                eprintln!(
+                    "  REPEATED-VERTEX tri[{}] = {:?} uv ({:.5},{:.5}) ({:.5},{:.5})",
+                    ti,
+                    t,
+                    tri.verts[t[0] as usize][0],
+                    tri.verts[t[0] as usize][1],
+                    tri.verts[t[1] as usize][0],
+                    tri.verts[t[1] as usize][1],
+                );
+            }
+            degenerate += 1;
+        }
+    }
+    if degenerate > 0 {
+        eprintln!("  repeated-vertex triangles: {}", degenerate);
+    }
+    // Constraints touching either endpoint.
+    for &(fi, li, ca, cb) in constraints.iter() {
+        if ca == a || cb == a || ca == b || cb == b {
+            eprintln!("  constraint face#{} loop{} = ({},{})", fi, li, ca, cb);
+        }
+    }
+    // Pinch report: per face+loop, non-consecutive revisits.
+    for (fi, loops) in face_loop_ids.iter().enumerate() {
+        for (li, ids) in loops.iter().enumerate() {
+            for i in 0..ids.len() {
+                for j in (i + 2)..ids.len() {
+                    if ids[i] == ids[j] && !(i == 0 && j == ids.len() - 1) {
+                        eprintln!(
+                            "  PINCH face#{} loop{} revisits vertex {} at {} and {} (loop len {})",
+                            fi,
+                            li,
+                            ids[i],
+                            i,
+                            j,
+                            ids.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    let _ = faces;
 }
 
 // ============================================================
@@ -1678,6 +2171,108 @@ mod tests {
             holes_uv: Vec::new(),
         }];
         assert!(build_canonical_surface_cdt(&nurbs, bad, &[]).is_none());
+    }
+
+    /// Session-35 regression: `split_edge` must REFUSE to split an edge
+    /// at a vertex already connected to one of its endpoints — the
+    /// unguarded split re-created existing triangles (tri[295]==tri[320]
+    /// on the HOUSING micro-sliver chains), inflating edge usage to 4
+    /// and failing the whole canonical group with >2 adjacency.
+    #[test]
+    fn canonical_cdt_split_edge_duplicate_guard() {
+        // Square 0(0,0) 1(2,0) 2(2,2) 3(0,2); vertices 5=(0.5,0) and
+        // 6=(1.5,0) on the bottom edge (0,1).
+        let verts = vec![
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 2.0],
+            [0.0, 2.0],
+            [1.0, 1.0],
+            [0.5, 0.0],
+            [1.5, 0.0],
+        ];
+        let mut t = Triangulation::new(verts, [[0, 1, 2], [0, 2, 3]]);
+        // Split (0,1) at 6, then (0,6) at 5: both fresh — must succeed.
+        assert!(t.split_edge(0, 1, 6));
+        assert!(t.split_edge(0, 6, 5));
+        assert!(t.edge_exists(0, 5) && t.edge_exists(5, 6) && t.edge_exists(6, 1));
+        let tris_before = t.tris.len();
+        // Re-splitting (0,6) at 5 would re-create {0,5,opp} — REFUSED.
+        assert!(!t.split_edge(0, 6, 5));
+        assert_eq!(t.tris.len(), tris_before);
+        // Same for (5,6) at ... (0,5) now exists: splitting (0,5) at 6
+        // is geometrically wrong anyway (6 beyond 5) — the guard keys on
+        // connectivity: edge (6,0) exists → refuse.
+        assert!(!t.split_edge(0, 5, 6));
+        assert_eq!(t.tris.len(), tris_before);
+        // Manifold invariant after all operations.
+        let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &t.tris {
+            for i in 0..3 {
+                let k = (tri[i].min(tri[(i + 1) % 3]), tri[i].max(tri[(i + 1) % 3]));
+                *usage.entry(k).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            usage.values().all(|&n| n <= 2),
+            "edge usage >2 after guarded splits"
+        );
+    }
+
+    /// Session-35 regression: `repair_spanning_edge` re-routes a
+    /// spanning edge through the vertex it jumps over, preserving the
+    /// region (the dropped half already exists) and manifoldness.
+    #[test]
+    fn canonical_cdt_repair_spanning_edge() {
+        // 0(0,0) 1(2,0) 2(2,2) 3(0,2); 4=(1,0) ON edge (0,1) with the
+        // half {4,1,2} present — the corrupt "spanning" configuration
+        // the duplicate-guarded split refuses to touch.
+        let verts = vec![[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0], [1.0, 0.0]];
+        let mut t = Triangulation::new(verts, [[0, 1, 2], [0, 2, 3], [4, 1, 2]]);
+        assert!(t.edge_exists(0, 1)); // the spanning edge
+        assert!(!t.split_edge(0, 1, 4)); // guard: edge (4,1) exists
+        assert!(t.repair_spanning_edge(0, 1, 4));
+        assert!(!t.edge_exists(0, 1)); // spanning edge removed
+        assert!(t.edge_exists(0, 4)); // re-routed connection created
+        // Manifold invariant.
+        let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
+        for tri in &t.tris {
+            for i in 0..3 {
+                let k = (tri[i].min(tri[(i + 1) % 3]), tri[i].max(tri[(i + 1) % 3]));
+                *usage.entry(k).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            usage.values().all(|&n| n <= 2),
+            "edge usage >2 after spanning repair"
+        );
+        // Idempotence: repairing a non-spanning/gone edge refuses.
+        assert!(!t.repair_spanning_edge(0, 1, 4)); // edge gone
+    }
+
+    /// Session-35 regression: a zero-area (collinear) triangle is
+    /// TRANSPARENT to `locate` — every point off its line used to read
+    /// as "strictly inside" (all orient signs collapse), and the
+    /// interior split produced overlapping triangles.
+    #[test]
+    fn canonical_cdt_locate_degenerate_transparent() {
+        // 0(0,0) 1(2,0) 2(1,0): collinear "triangle" (zero area);
+        // 3(0,2) 4(2,2) above.
+        let verts = vec![[0.0, 0.0], [2.0, 0.0], [1.0, 0.0], [0.0, 2.0], [2.0, 2.0]];
+        let t = Triangulation::new(verts, [[0, 1, 2], [0, 3, 4], [0, 4, 1]]);
+        // A point strictly inside the healthy region: the degenerate
+        // [0,1,2] must NOT be returned as its container (linear
+        // fallback finds the healthy triangle instead).
+        let found = t.locate(0, [0.25, 1.0]);
+        let (ti, on_edge) = found.expect("point inside the healthy region");
+        assert!(!t.tri_is_degenerate(t.tris[ti]));
+        assert!(!on_edge);
+        // A point ON the collinear line between 0 and 1, e.g. (0.5, 0):
+        // must resolve to a HEALTHY triangle having it on an edge —
+        // never the degenerate one.
+        let (ti2, on_edge2) = t.locate(0, [0.5, 0.0]).expect("on-edge point located");
+        assert!(!t.tri_is_degenerate(t.tris[ti2]));
+        assert!(on_edge2);
     }
 }
 
