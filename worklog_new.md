@@ -6097,3 +6097,40 @@ origin/main = 4c969f4 (26 коммитов сессий 24–34 + инциден
 - Seam-split защита canonical extraction (233 грани легаси-фолбэк).
 - Rim-aliasing twins (305) — SSI-реассоциация.
 - Non-determinism chunked/non-cached путей (6405 vs 6757).
+
+---
+
+# Сессия (второй повтор сброса песочницы) — сверка таймлайнов, дубль-§1.4 сохранён в session24-local-ssi14-replay
+
+## Инцидент
+
+Второй повтор того же сценария (см. заметку выше от 2026-09-13):
+песочница восстановлена из бэкапа состояния сессии 23 (HEAD=377910b),
+origin/main в это время = 55d548b (28 коммитов сессий 24+, вкл. канон. CDT
+fix). Обнаружено по отказу push (non-fast-forward) — правило
+пользователя сработало: «коммиты ушли вперёд = sandbox перезагружен».
+
+## Действия
+
+- Сверка `HEAD..origin/main` (28 коммитов, все мои, более поздний
+  таймлайн); force-push НЕ выполнялся.
+- Локальная ре-реализация §1.4 (SSI edge recovery `recover_edges_by_ssi`
+  c кэшем на пару граней + префильтром dissimilarity, close_gaps фикс
+  фантомных рёбер, нативный OFFSET_SURFACE + экспорт, аудиты 1/5 —
+  сделанная вслепую до обнаружения расхождения) сохранена в локальной
+  ветке `session24-local-ssi14-replay` (commit b19a7a1) — как референс;
+  НЕ пушена: сверка показала, что канонический таймлайн покрывает то же
+  зрелее (`091ea86` SSI recovery + `0facc2c`/`58b959f`/`18764fd`/`d78de9e`
+  дельты, `0b8bbf4` нативный OFFSET_SURFACE + round-trip — расхождения
+  косметические, напр. `.U.` vs `.T.` у self_intersect).
+- main сброшен на origin/main (55d548b).
+- Верификация каноничного состояния: cargo check workspace ok (23с);
+  topology 292 passed / 0 failed; mesh 340 passed / 0 failed.
+
+## Осталось (перенос из канонического ворклога)
+
+- Canonical CDT default-on: pinched rims (57/97 HOUSING-групп) +
+  sliver-UV fallbacks (233 грани) — блокирующие дефекты.
+- Булев сплит cylinder-грани продольными линиями.
+- Multi-neighbor loop assembly.
+- WebGPU compute shaders (GPU-стенд).
