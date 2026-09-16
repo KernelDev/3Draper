@@ -3897,7 +3897,17 @@ fn shoelace_yz(points: &[Point3d]) -> f64 {
 }
 
 /// Check if two edges are collinear (their directions are parallel).
-fn are_edges_collinear(e1: &Edge, e2: &Edge, angular_tol: f64, _tolerance: f64) -> bool {
+fn are_edges_collinear(e1: &Edge, e2: &Edge, angular_tol: f64, tolerance: f64) -> bool {
+    // NURBS guard (delta-port from session24-local-ssi14-replay-4,
+    // §1.4 audit): chord-parallelism alone merges BENT kinks whose
+    // chords happen to be parallel (an S-shaped seam split into two
+    // arcs, subdivided fillet approximations…) and then "extends" the
+    // surviving curve's param range past its span — silently corrupting
+    // NURBS/Circle geometry. Both kinks must be STRAIGHT within
+    // `tolerance` before the merge is legal.
+    if !edge_is_straight(e1, tolerance) || !edge_is_straight(e2, tolerance) {
+        return false;
+    }
     // Get direction vectors
     let dir1 = edge_direction(e1);
     let dir2 = edge_direction(e2);
@@ -3911,6 +3921,45 @@ fn are_edges_collinear(e1: &Edge, e2: &Edge, angular_tol: f64, _tolerance: f64) 
         }
         _ => false,
     }
+}
+
+/// Is the edge geometrically a straight segment within `tolerance`?
+/// `Curve3d::Line` is straight by construction; every other curve
+/// (Circle/Arc/Ellipse/Nurbs/…) is sampled and its maximum sagitta
+/// (deviation from the start→end chord) must stay within tolerance.
+/// Degenerate zero-length kinks are NOT straight (no direction).
+fn edge_is_straight(edge: &Edge, tolerance: f64) -> bool {
+    let Some(curve) = &edge.curve else {
+        return false; // no geometry — nothing to certify
+    };
+    if matches!(curve, Curve3d::Line(_)) {
+        return true;
+    }
+    let (t0, t1) = edge.param_range;
+    if t1 - t0 <= 1e-14 {
+        return false;
+    }
+    let start = curve.point_at(t0);
+    let end = curve.point_at(t1);
+    let chord = Vec3d::new(end.x - start.x, end.y - start.y, end.z - start.z);
+    let chord_len = chord.length();
+    if chord_len <= 1e-14 {
+        return false; // closed/degenerate kink — not a line candidate
+    }
+    // Sample the curve and measure deviation from the chord.
+    const SAMPLES: usize = 8;
+    for k in 1..SAMPLES {
+        let t = t0 + (k as f64 / SAMPLES as f64) * (t1 - t0);
+        let p = curve.point_at(t);
+        let rel = Vec3d::new(p.x - start.x, p.y - start.y, p.z - start.z);
+        // Perpendicular distance to the chord line.
+        let along = (rel.x * chord.x + rel.y * chord.y + rel.z * chord.z) / chord_len;
+        let perp_sq = rel.length_sq() - along * along;
+        if perp_sq > tolerance * tolerance {
+            return false;
+        }
+    }
+    true
 }
 
 /// Get the direction of an edge (from start to end).
@@ -5178,6 +5227,74 @@ mod tests {
 
         let e3 = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.0, 1.0, 0.0));
         assert!(!are_edges_collinear(&e1, &e3, 1e-6, 1e-6));
+    }
+
+    /// §1.4 NURBS guard (delta-port from session24-local-ssi14-replay-4):
+    /// bent kinks with COLLINEAR chords (an S-shaped seam split in two)
+    /// must NOT be stitchable — chord-parallelism alone merged such pairs
+    /// and corrupted both curves by extending param ranges past their
+    /// spans. Straight Line kinks keep merging.
+    #[test]
+    fn test_collinear_edges_rejects_bent_kinks() {
+        // S-shaped seam: two quadratic B-splines, chords strictly along
+        // +X, opposite 0.5 sagittas.
+        let bent_a = Edge::new(
+            Curve3d::Nurbs(NurbsCurve {
+                degree: 2,
+                control_points: vec![
+                    Point3d::new(0.0, 0.0, 0.0),
+                    Point3d::new(5.0, 1.0, 0.0),
+                    Point3d::new(10.0, 0.0, 0.0),
+                ],
+                weights: vec![],
+                knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }),
+            (0.0, 1.0),
+        );
+        let bent_b = Edge::new(
+            Curve3d::Nurbs(NurbsCurve {
+                degree: 2,
+                control_points: vec![
+                    Point3d::new(10.0, 0.0, 0.0),
+                    Point3d::new(15.0, -1.0, 0.0),
+                    Point3d::new(20.0, 0.0, 0.0),
+                ],
+                weights: vec![],
+                knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }),
+            (0.0, 1.0),
+        );
+
+        // Test validity: the chords ARE parallel (the old bug's trigger).
+        let d1 = edge_direction(&bent_a).expect("chord direction a");
+        let d2 = edge_direction(&bent_b).expect("chord direction b");
+        let dot = d1.x * d2.x + d1.y * d2.y + d1.z * d2.z;
+        assert!(dot > 0.999, "chords must be parallel for this test");
+
+        // The guard rejects the bent pair…
+        assert!(!are_edges_collinear(&bent_a, &bent_b, 0.01, 1e-6));
+        // …while genuinely straight collinear kinks keep merging.
+        let line_a = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(10.0, 0.0, 0.0));
+        let line_b = Edge::new_line(Point3d::new(10.0, 0.0, 0.0), Point3d::new(20.0, 0.0, 0.0));
+        assert!(are_edges_collinear(&line_a, &line_b, 0.01, 1e-6));
+
+        // A nearly-straight curve (sagitta within tolerance) still merges —
+        // the guard is a tolerance-scaled straightness test, not a
+        // Line-type whitelist.
+        let near_line = Edge::new(
+            Curve3d::Nurbs(NurbsCurve {
+                degree: 2,
+                control_points: vec![
+                    Point3d::new(0.0, 0.0, 0.0),
+                    Point3d::new(5.0, 1e-8, 0.0),
+                    Point3d::new(10.0, 0.0, 0.0),
+                ],
+                weights: vec![],
+                knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }),
+            (0.0, 1.0),
+        );
+        assert!(are_edges_collinear(&near_line, &line_b, 0.01, 1e-6));
     }
 
     /// Test that healing handles empty shells gracefully.
