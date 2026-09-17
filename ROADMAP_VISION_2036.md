@@ -719,6 +719,36 @@ CPU-side copies.
       bit-identical; drill_top totals identical to session-34
       baseline). Default-on still blocked by the remaining 199
       groups + the 233-face sliver extraction fallback.
+      **Progress note (2026-09-17, sessions 36–37):** session-36
+      landed the group-rescue infrastructure — attributed
+      `CanonicalBuildFailure`, `uv_sliver_ratio` micro-sliver
+      screening, `build_canonical_surface_cdt_resilient` (first
+      attempt bit-identical, then screening, then attributed drops);
+      diagnosis: all 199 remaining drill_top groups are SINGLE-face,
+      so rescue cannot help them — the fix must live INSIDE the CDT.
+      Session-37 landed the insertion legalization (Lawson flips
+      after every rim-vertex insertion: strict scale-aware incircle,
+      strict quad convexity, shared spanning-guard, degenerate/
+      hull-edge refusal, deterministic stack, flip cap), driven by
+      the resilient as ONE retry AFTER screening and BEFORE
+      attribution. 76 of the 199 groups now build canonically
+      (drill_top canonical-on: 60207 → 61282 tris, 17503 → 16685
+      boundary, −818). Extraction gained legalization-gated lenient
+      criteria (`CanonicalSurfaceCdt::legalized`): zero-length raw
+      rim-segment skip (closed-circle seam-vertex duplicates — 337
+      drill groups tripped on it), an EMITTED-mesh manifold check
+      (partial degenerate rim fans leave 1-adjacent chords), and an
+      additive connectivity flood for centroid-misclassified
+      non-degenerate stragglers — all inactive for plain builds, so
+      the never-worsen reference held: as1-oc-214 23168/0
+      bit-identical (verified down to the instance level). Extending
+      the lenient extraction to plain builds is blocked by the
+      legacy chunked/cached path non-determinism (the unlocked
+      canonical faces change which legacy variant neighbors take —
+      +239 boundary on as1 when ungated); that pre-existing item is
+      now the top of the canonical-CDT «Осталось». Remaining drill
+      groups: 123 (edge_overused/constraint failures persisting
+      under legalization).
 - [ ] Analytical `Curve2d` (PCURVE) and exact B-spline SSI.
 - [ ] Property-based testing for topology.
 - [ ] Fuzz testing for STEP parser and NURBS solver.
