@@ -277,6 +277,95 @@ fn seq_bits_eq(a: &[Point3d], b: &[Point3d]) -> bool {
 }
 
 // ============================================================
+// Build failure attribution + hostile-face screening (session-36)
+// ============================================================
+
+/// Why a canonical build failed, and — when attributable — which input
+/// face (index into the `faces` argument) owns the failure.
+///
+/// The converter's group rescue (`build_canonical_surface_cdt_resilient`)
+/// uses `failed_face` to drop the culprit face and retry the build with
+/// the survivors, converting whole-group legacy fallbacks into per-face
+/// ones (never-worsen: a dropped face takes exactly the legacy path it
+/// takes today when the entire group fails).
+#[derive(Clone, Debug)]
+pub struct CanonicalBuildFailure {
+    /// Index into the `faces` slice of the face whose rim geometry broke
+    /// the build: the constraint that could not be enforced flip-only,
+    /// or a face whose loops own the duplicated edge. `None` when the
+    /// failure is not attributable to a single face (degenerate hull,
+    /// empty triangulation, unowned edge).
+    pub failed_face: Option<usize>,
+    /// Short machine-readable cause: "no_faces", "malformed_loops",
+    /// "degenerate_loop", "hull_degenerate", "constraint_unenforced",
+    /// "edge_overused", "empty_triangulation".
+    pub cause: &'static str,
+}
+
+/// UV-domain micro-sliver threshold: minimum-width ratio
+/// (2·|area| / diameter²) below which a loop is considered hostile.
+///
+/// Session-35 measured the failing groups' strips at 1e-6..1e-4 width
+/// against ~0.7-long chains (ratio ≈ 3e-6..3e-4); legitimate thin faces
+/// sit orders of magnitude above. A rectangle with side ratio b/a reads
+/// ≈ 2b/a, so `1e-3` flags strips thinner than ~1:2000.
+pub const UV_SLIVER_RATIO: f64 = 1e-3;
+
+/// Minimum-width ratio of a closed UV loop: `2·|signed area| / diameter²`.
+///
+/// Scale-free sliver metric: a rectangle a×b (a ≥ b) reads `2ab/(a²+b²)`
+/// (≈ 2b/a for thin strips); an equilateral triangle reads ≈ 0.77.
+/// Degenerate loops (fewer than 3 distinct points, zero diameter) read
+/// as slivers (0.0).
+pub fn uv_sliver_ratio(puv: &[Point2d]) -> f64 {
+    let n = puv.len();
+    if n < 3 {
+        return 0.0;
+    }
+    // 2·signed area (shoelace).
+    let mut area2 = 0.0f64;
+    for i in 0..n {
+        let a = &puv[i];
+        let b = &puv[(i + 1) % n];
+        area2 += a.u * b.v - b.u * a.v;
+    }
+    let area2 = area2.abs();
+    // Squared diameter (exact pair scan — loops are at most a few
+    // hundred points, and this only runs for failing groups).
+    let mut d2 = 0.0f64;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let du = puv[i].u - puv[j].u;
+            let dv = puv[i].v - puv[j].v;
+            let dd = du * du + dv * dv;
+            if dd > d2 {
+                d2 = dd;
+            }
+        }
+    }
+    if d2 <= 0.0 {
+        return 0.0;
+    }
+    area2 / d2
+}
+
+/// Indices (into `faces`) of faces whose outer or hole UV loops are
+/// micro-slivers — the session-35 root cause of the EdgeOverused
+/// duplicate-triangle failures (sqrt-singular strips with UV chains
+/// 1e-6..1e-4 apart).
+pub fn hostile_face_indices(faces: &[CanonicalFaceLoops]) -> Vec<usize> {
+    faces
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| {
+            uv_sliver_ratio(&f.outer_uv) < UV_SLIVER_RATIO
+                || f.holes_uv.iter().any(|h| uv_sliver_ratio(h) < UV_SLIVER_RATIO)
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+// ============================================================
 // Incremental triangulation with adjacency maintenance
 // ============================================================
 
@@ -797,15 +886,20 @@ fn segments_properly_cross(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -
 /// from the shared edge cache); `steiner_uv` = the surface-level
 /// refinement grid (MS-2, `EdgeDiscretizationCache::get_nurbs_refinement_grid`).
 ///
-/// Returns `None` when validation fails (never-worsen: callers fall back
-/// to the legacy per-face path).
-pub fn build_canonical_surface_cdt(
+/// Returns `Err(CanonicalBuildFailure)` when validation fails, carrying
+/// the face that owns the failure when attributable — the group rescue
+/// (`build_canonical_surface_cdt_resilient`) drops that face and retries
+/// (never-worsen: dropped faces fall back to the legacy per-face path).
+pub fn build_canonical_surface_cdt_detailed(
     nurbs: &NurbsSurface,
     faces: Vec<CanonicalFaceLoops>,
     steiner_uv: &[Point2d],
-) -> Option<CanonicalSurfaceCdt> {
+) -> Result<CanonicalSurfaceCdt, CanonicalBuildFailure> {
     if faces.is_empty() {
-        return None;
+        return Err(CanonicalBuildFailure {
+            failed_face: None,
+            cause: "no_faces",
+        });
     }
 
     // ── 1. Canonical vertex array (3D-bits dedup with UV-collision guard) ──
@@ -857,8 +951,13 @@ pub fn build_canonical_surface_cdt(
 
     for (fi, f) in faces.iter().enumerate() {
         if f.outer_3d.len() != f.outer_uv.len() || f.outer_3d.len() < 3 {
-            // Malformed loops — the whole surface falls back to legacy.
-            return None;
+            // Malformed loops — attributed so the group rescue can drop
+            // just this face (the converter filters these upstream, this
+            // is defense in depth).
+            return Err(CanonicalBuildFailure {
+                failed_face: Some(fi),
+                cause: "malformed_loops",
+            });
         }
         let mut loops: Vec<Vec<[f64; 2]>> = Vec::with_capacity(1 + f.holes_uv.len());
         let mut loop_ids: Vec<Vec<u32>> = Vec::with_capacity(1 + f.holes_uv.len());
@@ -874,7 +973,10 @@ pub fn build_canonical_surface_cdt(
             outer_ids.pop();
         }
         if outer_ids.len() < 3 {
-            return None;
+            return Err(CanonicalBuildFailure {
+                failed_face: Some(fi),
+                cause: "degenerate_loop",
+            });
         }
         for w in 0..outer_ids.len() {
             constraints.push((fi, 0, outer_ids[w], outer_ids[(w + 1) % outer_ids.len()]));
@@ -927,7 +1029,10 @@ pub fn build_canonical_surface_cdt(
     let hull_ids = convex_hull_ids(&uv);
     if hull_ids.len() < 3 {
         log::warn!("canonical CDT: rim hull degenerate — legacy path");
-        return None;
+        return Err(CanonicalBuildFailure {
+            failed_face: None,
+            cause: "hull_degenerate",
+        });
     }
 
     // Seed: fan from hull_ids[0] — triangles (h0, hi, hi+1), CCW.
@@ -966,15 +1071,15 @@ pub fn build_canonical_surface_cdt(
     // blocked constraint (no flippable crossing) fails the build → the
     // surface takes the legacy per-face path (never-worsen).
     for &(fi, loop_idx, a, b) in constraints.iter() {
-        let _ = (fi, loop_idx);
         if a == b {
             continue;
         }
         if !tri.edge_exists(a, b) && !enforce_constraint(&mut tri, a, b) {
             log::warn!(
-                "canonical CDT: constraint edge ({}, {}) could not be enforced \
-                 flip-only — dropping canonical surface triangulation (legacy fallback)",
-                a, b
+                "canonical CDT: constraint edge ({}, {}) of face {} loop {} could \
+                 not be enforced flip-only — attributed failure (group rescue \
+                 may drop the face)",
+                a, b, fi, loop_idx
             );
             if debug_enabled() {
                 dump_build_debug(
@@ -982,7 +1087,10 @@ pub fn build_canonical_surface_cdt(
                     DebugCause::ConstraintUnenforced,
                 );
             }
-            return None;
+            return Err(CanonicalBuildFailure {
+                failed_face: Some(fi),
+                cause: "constraint_unenforced",
+            });
         }
     }
     let constraint_edges: std::collections::HashSet<(u32, u32)> = constraints
@@ -1045,10 +1153,19 @@ pub fn build_canonical_surface_cdt(
                 *usage.entry(key).or_insert(0) += 1;
             }
         }
-        if let Some(&(a, b)) = usage.iter().find(|(_, &n)| n > 2).map(|(k, _)| k) {
+        // Deterministic pick: the lexicographically smallest overused
+        // edge (HashMap iteration order is randomized — the group rescue
+        // must drop faces deterministically).
+        let mut overused: Vec<(u32, u32)> = usage
+            .iter()
+            .filter(|(_, &n)| n > 2)
+            .map(|(&(a, b), _)| (a, b))
+            .collect();
+        overused.sort_unstable();
+        if let Some(&(a, b)) = overused.first() {
             log::warn!(
-                "canonical CDT: edge ({}, {}) has >2 adjacent triangles — dropping \
-                 canonical surface triangulation (legacy fallback)",
+                "canonical CDT: edge ({}, {}) has >2 adjacent triangles — attributed \
+                 failure (group rescue may drop the owning face)",
                 a, b
             );
             if debug_enabled() {
@@ -1057,10 +1174,36 @@ pub fn build_canonical_surface_cdt(
                     DebugCause::EdgeOverused,
                 );
             }
-            return None;
+            // Attribute to a face whose loops own the duplicated edge:
+            // prefer a loop containing BOTH endpoints, else either; the
+            // lowest face index wins (deterministic). Unowned edges stay
+            // unattributed (whole-group failure).
+            let owner = face_loop_ids
+                .iter()
+                .enumerate()
+                .find(|(_, loops)| {
+                    loops.iter().any(|l| l.contains(&a) && l.contains(&b))
+                })
+                .map(|(fi, _)| fi)
+                .or_else(|| {
+                    face_loop_ids
+                        .iter()
+                        .enumerate()
+                        .find(|(_, loops)| {
+                            loops.iter().any(|l| l.contains(&a) || l.contains(&b))
+                        })
+                        .map(|(fi, _)| fi)
+                });
+            return Err(CanonicalBuildFailure {
+                failed_face: owner,
+                cause: "edge_overused",
+            });
         }
         if tri.tris.is_empty() {
-            return None;
+            return Err(CanonicalBuildFailure {
+                failed_face: None,
+                cause: "empty_triangulation",
+            });
         }
     }
 
@@ -1092,13 +1235,124 @@ pub fn build_canonical_surface_cdt(
         }
     }
 
-    Some(CanonicalSurfaceCdt {
+    Ok(CanonicalSurfaceCdt {
         uv: tri.verts,
         p3d,
         tris: tri.tris,
         face_tris,
         faces,
     })
+}
+
+/// Compatibility wrapper over [`build_canonical_surface_cdt_detailed`]
+/// (pre-session-36 signature; existing callers and tests unchanged).
+pub fn build_canonical_surface_cdt(
+    nurbs: &NurbsSurface,
+    faces: Vec<CanonicalFaceLoops>,
+    steiner_uv: &[Point2d],
+) -> Option<CanonicalSurfaceCdt> {
+    build_canonical_surface_cdt_detailed(nurbs, faces, steiner_uv).ok()
+}
+
+/// Never-worsen group rescue (session-36).
+///
+/// The FIRST attempt builds the FULL group — bit-identical to
+/// [`build_canonical_surface_cdt`], so currently-succeeding groups are
+/// unaffected. On the first failure a static micro-sliver screening
+/// pass ([`hostile_face_indices`], the session-35 root cause) drops UV
+/// micro-sliver faces and retries. On later failures the attributed
+/// face (a rim constraint that cannot be enforced flip-only, or a face
+/// owning the duplicated edge) is dropped — it takes the legacy
+/// per-face path, exactly the path it takes today when the whole group
+/// fails — and the build retries with the survivors.
+///
+/// Returns the built CDT (if any) plus the ORIGINAL indices of the
+/// dropped faces (ascending), for caller-side logging.
+pub fn build_canonical_surface_cdt_resilient(
+    nurbs: &NurbsSurface,
+    faces: Vec<CanonicalFaceLoops>,
+    steiner_uv: &[Point2d],
+) -> (Option<CanonicalSurfaceCdt>, Vec<usize>) {
+    if faces.is_empty() {
+        return (None, Vec::new());
+    }
+    // (original index, loops) — removals keep original ids for reporting.
+    let mut live: Vec<(usize, CanonicalFaceLoops)> =
+        faces.into_iter().enumerate().collect();
+    let mut dropped: Vec<usize> = Vec::new();
+    let mut screened = false;
+    let mut attempts = 0usize;
+
+    loop {
+        attempts += 1;
+        let attempt_faces: Vec<CanonicalFaceLoops> =
+            live.iter().map(|(_, f)| f.clone()).collect();
+        match build_canonical_surface_cdt_detailed(nurbs, attempt_faces, steiner_uv) {
+            Ok(cdt) => {
+                dropped.sort_unstable();
+                return (Some(cdt), dropped);
+            }
+            Err(failure) => {
+                if attempts > 32 {
+                    // Pathological ping-pong guard (each retry drops at
+                    // least one face, so this is unreachable in practice).
+                    dropped.sort_unstable();
+                    return (None, dropped);
+                }
+                // 1) First failure → static micro-sliver screening pass
+                //    (session-35 root cause). Hostile faces are dropped
+                //    BEFORE attributed ones so a sliver cannot shadow the
+                //    real culprit of an unrelated constraint failure.
+                if !screened {
+                    screened = true;
+                    let live_faces: Vec<CanonicalFaceLoops> =
+                        live.iter().map(|(_, f)| f.clone()).collect();
+                    let hostile = hostile_face_indices(&live_faces);
+                    if !hostile.is_empty() && hostile.len() < live.len() {
+                        for hi in hostile.into_iter().rev() {
+                            let (orig, _) = live.remove(hi);
+                            dropped.push(orig);
+                        }
+                        log::info!(
+                            "canonical CDT group rescue: screened {} micro-sliver \
+                             face(s) — retrying with {} faces",
+                            dropped.len(),
+                            live.len()
+                        );
+                        continue;
+                    }
+                }
+                // 2) Attributed face → drop it, retry. The failed build's
+                //    face index refers to the CURRENT live set (screening
+                //    retries rebuild before any attribution is consumed).
+                if let Some(fi) = failure.failed_face {
+                    if live.len() > 1 && fi < live.len() {
+                        let (orig, _) = live.remove(fi);
+                        log::info!(
+                            "canonical CDT group rescue: dropped face {} ({}) — \
+                             retrying with {} faces",
+                            orig,
+                            failure.cause,
+                            live.len()
+                        );
+                        dropped.push(orig);
+                        continue;
+                    }
+                    if live.len() <= 1 {
+                        // The only surviving face IS the failure — nothing
+                        // left to rescue.
+                        dropped.sort_unstable();
+                        return (None, dropped);
+                    }
+                    // Out-of-range attribution (defensive) → give up below.
+                }
+                // 3) Nothing left to try — whole-group legacy (today's
+                //    behavior).
+                dropped.sort_unstable();
+                return (None, dropped);
+            }
+        }
+    }
 }
 
 /// Enforce constraint edge (a, b) in the triangulation — FLIP-ONLY.
@@ -2274,5 +2528,219 @@ mod tests {
         assert!(!t.tri_is_degenerate(t.tris[ti2]));
         assert!(on_edge2);
     }
-}
 
+    // ── Session-36: hostile-face screening + group rescue ──
+
+    /// Face factory mirroring the converter's CanonicalFaceLoops.
+    fn face(
+        id: i64,
+        outer: (Vec<Point3d>, Vec<Point2d>),
+    ) -> CanonicalFaceLoops {
+        CanonicalFaceLoops {
+            step_face_id: id,
+            forward: true,
+            outer_3d: outer.0,
+            outer_uv: outer.1,
+            holes_3d: Vec::new(),
+            holes_uv: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn canonical_cdt_uv_sliver_ratio_metrics() {
+        // Rectangle 2×1 → 2·area/d² = 4/5 = 0.8 — not a sliver.
+        let (_, puv) = rect_loop(0.0, 2.0, 0.0, 1.0, 0);
+        assert!(uv_sliver_ratio(&puv) > UV_SLIVER_RATIO);
+        // Thin-but-legitimate strip 1:100 (0.02 wide × 2 long) — 0.04,
+        // comfortably above the threshold.
+        let (_, puv) = rect_loop(0.0, 2.0, 0.0, 0.02, 0);
+        assert!(uv_sliver_ratio(&puv) > UV_SLIVER_RATIO);
+        // Session-35 hostile geometry: 1e-6-wide strip of length 2
+        // (sqrt-singular micro-sliver) → ~1e-6 — flagged.
+        let (_, puv) = rect_loop(0.0, 2.0, 0.0, 1e-6, 0);
+        assert!(uv_sliver_ratio(&puv) < UV_SLIVER_RATIO);
+        // 1e-4-wide strip (upper end of the measured hostile range).
+        let (_, puv) = rect_loop(0.0, 2.0, 0.0, 1e-4, 0);
+        assert!(uv_sliver_ratio(&puv) < UV_SLIVER_RATIO);
+        // Degenerate inputs read as slivers.
+        assert!(uv_sliver_ratio(&[Point2d::new(0.0, 0.0)]) < UV_SLIVER_RATIO);
+        let z = Point2d::new(1.0, 1.0);
+        assert!(uv_sliver_ratio(&[z, z, z, z]) < UV_SLIVER_RATIO);
+    }
+
+    #[test]
+    fn canonical_cdt_hostile_face_indices_screening() {
+        // Normal face + micro-sliver face → only the sliver flagged.
+        let faces = vec![
+            face(1, rect_loop(0.0, 2.0, 0.0, 2.0, 1)),
+            face(2, rect_loop(2.0, 4.0, 0.0, 1e-6, 1)),
+        ];
+        assert_eq!(hostile_face_indices(&faces), vec![1]);
+        // A micro-sliver HOLE also flags the owning face.
+        let (outer3d, outeruv) = rect_loop(0.0, 2.0, 0.0, 2.0, 1);
+        let (hole3d, holeuv) = rect_loop(0.5, 1.5, 0.5, 0.5 + 1e-7, 0);
+        let faces_hole = vec![CanonicalFaceLoops {
+            step_face_id: 3,
+            forward: true,
+            outer_3d: outer3d,
+            outer_uv: outeruv,
+            holes_3d: vec![hole3d],
+            holes_uv: vec![holeuv],
+        }];
+        assert_eq!(hostile_face_indices(&faces_hole), vec![0]);
+        // Clean group → nothing flagged.
+        let faces_clean = vec![
+            face(4, rect_loop(0.0, 2.0, 0.0, 2.0, 1)),
+            face(5, rect_loop(2.0, 4.0, 0.0, 2.0, 1)),
+        ];
+        assert!(hostile_face_indices(&faces_clean).is_empty());
+    }
+
+    #[test]
+    fn canonical_cdt_resilient_drops_failing_face_and_rescues_group() {
+        // Face B is malformed (3D/UV length mismatch on a HEALTHY UV
+        // triangle — not a sliver, so the screening pass will not take
+        // it): the plain build fails the WHOLE group; the resilient
+        // build attributes B (malformed_loops), drops it, and survivor
+        // A triangulates canonically.
+        let nurbs = bilinear_patch(0.0, 4.0, 0.0, 2.0);
+        let (a3d, auv) = rect_loop(0.0, 2.0, 0.0, 2.0, 1);
+        let faces = vec![
+            face(201, (a3d.clone(), auv.clone())),
+            CanonicalFaceLoops {
+                step_face_id: 202,
+                forward: true,
+                outer_3d: vec![
+                    Point3d::new(3.0, 0.0, 0.0),
+                    Point3d::new(4.0, 0.0, 0.0),
+                    Point3d::new(4.0, 1.0, 0.0),
+                    Point3d::new(3.0, 1.0, 0.0),
+                ],
+                outer_uv: vec![
+                    Point2d::new(3.0, 0.0),
+                    Point2d::new(4.0, 0.0),
+                    Point2d::new(3.5, 1.0),
+                ],
+                holes_3d: Vec::new(),
+                holes_uv: Vec::new(),
+            },
+        ];
+        // Plain build (compat wrapper): whole-group failure (today's
+        // behavior).
+        assert!(build_canonical_surface_cdt(&nurbs, faces.clone(), &[]).is_none());
+        // The malformed face is NOT width-hostile — the screening pass
+        // finds nothing, so the rescue must proceed via attribution.
+        assert!(hostile_face_indices(&faces).is_empty());
+        // Resilient: B dropped (original index 1), A captured.
+        let (cdt, dropped) = build_canonical_surface_cdt_resilient(&nurbs, faces, &[]);
+        assert_eq!(dropped, vec![1], "the malformed face must be dropped");
+        let cdt = cdt.expect("survivor face must build");
+        assert_eq!(cdt.face_count(), 1);
+        let mesh = cdt
+            .extract_face_mesh(&nurbs, &a3d, &auv, &[], &[], true)
+            .expect("face A extraction");
+        assert!(!mesh.triangles.is_empty());
+        // The dropped face no longer matches any canonical entry — the
+        // caller routes it to the legacy path (extract returns None).
+        assert!(cdt
+            .extract_face_mesh(
+                &nurbs,
+                &[
+                    Point3d::new(3.0, 0.0, 0.0),
+                    Point3d::new(4.0, 0.0, 0.0),
+                    Point3d::new(4.0, 1.0, 0.0),
+                    Point3d::new(3.0, 1.0, 0.0),
+                ],
+                &[
+                    Point2d::new(3.0, 0.0),
+                    Point2d::new(4.0, 0.0),
+                    Point2d::new(3.5, 1.0),
+                ],
+                &[],
+                &[],
+                true
+            )
+            .is_none());
+    }
+
+    #[test]
+    fn canonical_cdt_resilient_sliver_group_never_regresses() {
+        // Session-35-shaped group: a normal face plus a 1e-6 UV strip
+        // face. Whatever the predicates do with the strip, the resilient
+        // contract holds: face A is either captured together with B
+        // (build succeeded) or rescued alone (B dropped → legacy), and
+        // the extracted A mesh stays manifold (no regression vs the
+        // whole-group legacy fallback of today).
+        let nurbs = bilinear_patch(0.0, 4.0, 0.0, 2.0);
+        let (a3d, auv) = rect_loop(0.0, 2.0, 0.0, 2.0, 1);
+        let (s3d, suv) = rect_loop(2.0, 4.0, 0.0, 1e-6, 1);
+        let faces = vec![
+            face(301, (a3d.clone(), auv.clone())),
+            face(302, (s3d, suv)),
+        ];
+        let (cdt, dropped) = build_canonical_surface_cdt_resilient(&nurbs, faces, &[]);
+        if dropped.is_empty() {
+            // The build survived the strip: both faces captured.
+            assert_eq!(cdt.as_ref().expect("build reported success").face_count(), 2);
+        } else {
+            // Rescue path: exactly the sliver dropped, A captured.
+            assert_eq!(dropped, vec![1]);
+            assert_eq!(cdt.as_ref().expect("survivor face must build").face_count(), 1);
+        }
+        // In BOTH branches A must extract cleanly (rim contract intact).
+        let cdt = cdt.as_ref().unwrap();
+        let mesh = cdt
+            .extract_face_mesh(&nurbs, &a3d, &auv, &[], &[], true)
+            .expect("face A extraction in every branch");
+        assert!(!mesh.triangles.is_empty());
+        // Rim edges of A are interior to the extracted mesh (closed loop).
+        let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in &mesh.triangles {
+            for i in 0..3 {
+                let k = (t[i].min(t[(i + 1) % 3]), t[i].max(t[(i + 1) % 3]));
+                *usage.entry(k).or_insert(0) += 1;
+            }
+        }
+        assert!(
+            usage.values().all(|&n| n <= 2),
+            "extracted face mesh must stay manifold"
+        );
+    }
+
+    #[test]
+    fn canonical_cdt_resilient_clean_group_untouched() {
+        // Never-worsen: a clean group's resilient result is bit-equal to
+        // the plain build (first attempt = full group, zero drops).
+        let nurbs = bilinear_patch(0.0, 4.0, 0.0, 2.0);
+        let steiner = vec![Point2d::new(1.0, 1.0), Point2d::new(3.0, 1.0)];
+        let faces = vec![
+            face(401, rect_loop(0.0, 2.0, 0.0, 2.0, 1)),
+            face(402, rect_loop(2.0, 4.0, 0.0, 2.0, 1)),
+        ];
+        let (cdt, dropped) =
+            build_canonical_surface_cdt_resilient(&nurbs, faces.clone(), &steiner);
+        assert!(dropped.is_empty(), "clean group must not lose faces");
+        let cdt = cdt.expect("clean group must build");
+        let plain =
+            build_canonical_surface_cdt(&nurbs, faces, &steiner).expect("plain build");
+        assert_eq!(
+            cdt.canonical_triangle_count(),
+            plain.canonical_triangle_count()
+        );
+        assert_eq!(cdt.face_count(), plain.face_count());
+    }
+
+    #[test]
+    fn canonical_cdt_resilient_all_hostile_group_fails_gracefully() {
+        // A group whose ONLY face is hostile: the rescue must not loop
+        // forever and must not panic — either a lone buildable sliver
+        // succeeds (Some) or the group returns None (whole-group legacy,
+        // today's behavior). The contract under test is termination.
+        let nurbs = bilinear_patch(0.0, 4.0, 0.0, 2.0);
+        let faces = vec![face(501, rect_loop(0.0, 2.0, 0.0, 1e-6, 1))];
+        let (cdt, _dropped) = build_canonical_surface_cdt_resilient(&nurbs, faces, &[]);
+        if let Some(cdt) = cdt {
+            assert_eq!(cdt.face_count(), 1);
+        }
+    }
+}

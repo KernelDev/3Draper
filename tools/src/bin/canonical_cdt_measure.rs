@@ -72,9 +72,10 @@ fn run(path: &str, canonical: bool) -> Vec<(String, i64, usize, usize, usize)> {
 }
 
 fn main() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Error)
-        .init();
+    // Respect RUST_LOG when set (e.g. RUST_LOG=draper_mesh=info,draper_step=info
+    // to see the canonical pre-pass built/dropped summaries and the group
+    // rescue actions); default to errors only.
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("error")).init();
     let files: Vec<String> = std::env::args().skip(1).collect();
     let files = if files.is_empty() {
         vec![

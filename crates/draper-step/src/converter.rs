@@ -13003,7 +13003,9 @@ impl<'a> StepConverter<'a> {
         edge_cache: &mut EdgeDiscretizationCache,
     ) {
         use draper_mesh::edge_cache::nurbs_surface_hash;
-        use draper_mesh::surface_canonical::{build_canonical_surface_cdt, CanonicalFaceLoops};
+        use draper_mesh::surface_canonical::{
+            build_canonical_surface_cdt_resilient, CanonicalFaceLoops,
+        };
 
         if !params.use_surface_canonical_cdt {
             return;
@@ -13057,8 +13059,23 @@ impl<'a> StepConverter<'a> {
                 continue;
             }
 
-            match build_canonical_surface_cdt(nurbs, loops, &steiner) {
-                Some(cdt) => {
+            // Session-36 group rescue: the first attempt is the full group
+            // (bit-identical to the pre-rescue build); on failure a static
+            // micro-sliver screening pass and per-failure attribution drop
+            // hostile faces (→ legacy per-face path) and retry, so a single
+            // hostile face no longer fails the whole surface group.
+            match build_canonical_surface_cdt_resilient(nurbs, loops, &steiner) {
+                (Some(cdt), rescued_out) => {
+                    if !rescued_out.is_empty() {
+                        log::info!(
+                            "canonical CDT: surface hash {:x} — group rescue dropped \
+                             {} hostile face(s) (legacy), {} of {} faces captured",
+                            h,
+                            rescued_out.len(),
+                            cdt.face_count(),
+                            face_idxs.len()
+                        );
+                    }
                     log::info!(
                         "canonical CDT: surface hash {:x} — {} faces, {} canonical triangles",
                         h,
@@ -13068,7 +13085,7 @@ impl<'a> StepConverter<'a> {
                     edge_cache.set_canonical_surface_cdt(nurbs, cdt);
                     built += 1;
                 }
-                None => {
+                (None, _) => {
                     log::warn!(
                         "canonical CDT: surface hash {:x} ({} faces) failed validation — legacy path",
                         h,
