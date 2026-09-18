@@ -4782,3 +4782,90 @@ https://kerneldev.github.io/3Draper модель test/as1-oc-214.stp выгля�
  полу-arc-сущностей STEP (2-pt LINE vs 48-pt цепочка на одной образующей) —
   кандидат на tolerant-snap швов в merge.
 - Vision 2036: продолжить по PLAN.md.
+
+---
+
+# Сессия 24 — Vision 2036 §1.4: SSI edge recovery (восстановление потерянных рёбер пересечением смежных поверхностей)
+
+## Контекст
+
+Продолжение Vision 2036 после §1.1 (иерархические допуски, сессия 21) и
+асидного фикс-фикса as1-oc-214 (сессия 23). Целевой пункт §1.4 «STEP
+Parser and Healing»: «Implement surface-surface intersection for edge
+recovery — reconstruct lost edges by intersecting adjacent surfaces».
+До сих пор healing был частично деструктивным: ребро без 3D-кривой
+помечалось degenerate (mark_degenerate считает curve=None +
+start/end_point=None вырождением) и оставалось без геометрии; теперь
+такое ребро реконструируется.
+
+Окружение: sandbox был перезагружен (Rust toolchain исчез), git-история
+и рабочее дерево в норме (HEAD 377910b, признаков восстановления из
+бэкапа нет) — Rust 1.98.1 переустановлен из сохранённого
+scripts/rustup-init.sh.
+
+## Реализация
+
+- **draper-geometry/intersection.rs**: публичная
+  `fit_b_spline_to_points(pts, tolerance)` — точки→NURBS через
+  существующую `lsq_fit_branch` (методология §2.1: chord-length
+  параметризация, clamped averaged knots, проверка девиации).
+- **draper-topology/healing.rs** — новый проход пайплайна **1.5**
+  `recover_lost_edges_via_ssi` (после mark_degenerate, до close_gaps —
+  восстановленная кривая участвует в сшивке):
+  1. Группировка рабочих инстансов по каноническому id — StagedShell
+     теперь несёт `aliases` (instance→canonical, копия из EdgeStore при
+     store-first staging; from_shell — пустая карта).
+  2. Кандидат: ровно 2 инстанса в 2 разных гранях (манифольдное
+     внутреннее ребро) + (curve=None || degenerate) + оба
+     authoritative vertex points живы и различимы.
+  3. SSI смежных поверхностей через топологический диспетчер
+     `boolean::intersect_surfaces` (аналитические пары, вкл.
+     plane-plane, + marching fallback).
+  4. Выбор ветви: сегмент-проекция обоих якорей на полилинии ветвей,
+     score = сумма дистанций, захват в радиусе
+     max(tol, edge tol, gap tol)·100; ни одна ветвь не захватила →
+     ребро не трогаем (неправильная кривая хуже отсутствующей).
+  5. Тримминговая под-полилиния «якорь→якорь» (якоря снапятся как
+     концы цепочки — бит-идентичная концевая точность с вершинной
+     геометрией; обход ветви вперёд/назад с реверсом).
+  6. `build_recovered_curve`: прямая цепочка → точная
+     `Curve3d::Line` (t = длина дуги, конвенция new_line — line
+     special-cases стежки/слияния граней продолжают работать); изогнутая
+     → B-spline (fit_b_spline_to_points); отказ фита →
+     `Curve3d::Composite` из линейных сегментов.
+  7. Запись во ВСЕ инстансы ребра с сохранением направления обхода
+     (param_range переворачивается вместе с forward — конвенция
+     Edge::reversed), degenerate снимается.
+- **Парамтры/отчёт**: `HealingParams::recover_lost_edges` (true во всех
+  пресетах), `HealingReport::edges_recovered` + total_fixes/merge_report.
+- **Консервативность**: здоровые рёбра, совпадающие якоря (полюса,
+  замкнутые швы), одно-гранные и неманифольдные рёбра пропускаются.
+
+Найден и исправлен в процессе: баг реверса в extract_sub_polyline
+(цепочка шла в порядке ветви, а не в порядке ребра — линия получалась
+ep→sp при обратной проекции якорей); пойман тестом endpoint-fidelity.
+
+## Верификация
+
+- 6 новых тестов: box lost-curve→Line (endpoint+midpoint fidelity),
+  degenerate garbage curve (zero-radius circle)→Line, plane×cylinder
+  полукруг→кривая (midpoint на обеих поверхностях: r≈5, z≈3),
+  без-якорный skip, opt-out параметром, одно-гранное ребро skip.
+- Сьюты: topology 240 (+17/+11/+3), geometry все, **step release**
+  (lib 136 вкл. тяжёлый test_all_files_instance_conversion; NIST 19,
+  industrial 2, determinism probe, seam junction 5, tolerance
+  hierarchy 3, integration 7), mesh 269+, core 75, json 13, ffi 10,
+  wasm 30 — **регрессий нет**.
+- Заметка: draper-step lib в debug зависает на
+  test_all_files_instance_conversion (индустриальные файлы) —
+  канонический прогон release, как и в прошлых сессиях.
+
+## Осталось
+
+- §1.4: surface extension algorithms (закрытие микро-щелей
+  продолжением поверхностей вместо удаления граней); выделенные
+  алгоритмы OffsetSurface/SweptSurface; аудит NURBS-гардов healing;
+  верификация полноты извлечения UNCERTAINTY/LENGTH_MEASURE.
+- Микро-щели швов (перенос из сессии 23): tolerant-snap в merge.
+- Будущее: PCURVE-восстановление коэджей из pcurve_a/pcurve_b SSI-ветви
+  (пока намеренно не пишутся — тримминг 2D-образа ветви не определён).

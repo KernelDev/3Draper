@@ -116,8 +116,19 @@ approximation of the intersection.
       `LENGTH_MEASURE_WITH_UNIT` (verify existing extraction is complete).
 - [ ] **Implement surface extension algorithms** — extend surfaces to close
       micro-gaps instead of removing faces.
-- [ ] **Implement surface-surface intersection for edge recovery** —
-      reconstruct lost edges by intersecting adjacent surfaces.
+- [x] **Implement surface-surface intersection for edge recovery** —
+      reconstruct lost edges by intersecting adjacent surfaces. The
+      healing pipeline's `recover_lost_edges_via_ssi` pass rebuilds
+      manifold interior edges (exactly 2 incident faces, both
+      authoritative vertex points, distinct anchors) whose 3D curve is
+      missing or degenerate: the adjacent surfaces are intersected, the
+      branch capturing both anchors is selected, and the
+      anchor-to-anchor segment becomes the new curve — exact `Line` for
+      straight chains (downstream line special-cases keep working),
+      least-squares B-spline for curved ones (Vision 2036 §2.1
+      machinery), segmented `Composite` fallback. Capture-radius
+      guarded (a wrong curve is worse than a missing one); opt-out via
+      `HealingParams::recover_lost_edges`.
 - [ ] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
       stop force-approximating them as NURBS.
 - [ ] **Audit healing NURBS guards** — verify all healing steps protect
@@ -531,6 +542,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | Seam edge topological gluing | Done | `058805c` |
 | 1 | Analytical PCURVE (derive_pcurve) | Done | `830f782` |
 | 2 | Periodic 2D PCURVEs for closed branches (lattice C2 seam) | Done | `1039889` |
+| 1 | SSI edge recovery in healing (§1.4) | Done | `893ff70` |
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Property-based testing (proptest) | Done | `2d74d8c` |
 | 1 | Fuzz testing setup (quickcheck) | Done | `e7ee121` |
