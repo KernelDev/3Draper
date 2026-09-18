@@ -329,6 +329,20 @@ impl SurfaceSurfaceIntersection {
     }
 }
 
+/// Fit a B-spline curve to an arbitrary open 3D polyline (Vision 2036
+/// §1.4 — SSI edge recovery): the public points→NURBS entry reused by the
+/// healing pipeline to rebuild lost edge geometry from a trimmed SSI
+/// branch segment.
+///
+/// Same least-squares machinery as the per-branch SSI fitting
+/// (chord-length parameterization, clamped averaged knots, deviation
+/// checked against `tolerance`). Returns `Err` when the input is too
+/// short or the fit deviates more than `tolerance` — the caller is
+/// expected to fall back to a polyline-style representation.
+pub fn fit_b_spline_to_points(pts: &[Point3d], tolerance: f64) -> Result<NurbsCurve, FittingError> {
+    lsq_fit_branch(pts, tolerance)
+}
+
 // ============================================================
 // Vision 2036 §2.1: least-squares B-spline fitting machinery
 // ============================================================

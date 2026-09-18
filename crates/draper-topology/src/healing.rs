@@ -45,9 +45,8 @@
 
 use crate::entity::*;
 use draper_geometry::{
-    CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
-    ToleranceContext,
-    SphereSurface, ConeSurface, TorusSurface, NurbsSurface,
+    ConeSurface, Curve3d, CylinderSurface, Direction3d, Line, NurbsSurface,
+    Plane, Point3d, SphereSurface, Surface, ToleranceContext, TorusSurface, Vec3d,
 };
 
 // ============================================================
@@ -100,6 +99,16 @@ pub struct HealingParams {
     /// with adjacent faces even after the orientation repair step.
     pub remove_inconsistent_normals: bool,
 
+    /// Whether to reconstruct lost edge geometry via surface-surface
+    /// intersection (Vision 2036 §1.4). A manifold interior edge shared
+    /// by exactly two faces whose 3D curve is missing (or degenerate)
+    /// gets its curve rebuilt from the SSI curve of the two adjacent
+    /// faces: an exact `Line` when the trimmed branch is straight, a
+    /// least-squares B-spline otherwise, with a segmented polyline
+    /// fallback. Requires both authoritative vertex points to anchor
+    /// the trim; healthy edges are never touched.
+    pub recover_lost_edges: bool,
+
     /// Optional tolerance context from the STEP file or model scale.
     /// When present, the coincidence tolerance from this context is used
     /// as a floor for all entity tolerances during propagation.
@@ -122,6 +131,7 @@ impl Default for HealingParams {
             propagate_tolerances: true,
             fix_self_intersections: false,
             remove_inconsistent_normals: false,
+            recover_lost_edges: true,
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -163,6 +173,7 @@ impl HealingParams {
             propagate_tolerances: true, // Safe: ensures consistency
             fix_self_intersections: false, // Expensive, may remove geometry
             remove_inconsistent_normals: false, // May remove geometry
+            recover_lost_edges: true, // Safe: only fires on broken edges
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -203,6 +214,7 @@ impl HealingParams {
             propagate_tolerances: true,
             fix_self_intersections: true,
             remove_inconsistent_normals: true,
+            recover_lost_edges: true, // Reconstruct before any removal pass
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -294,6 +306,9 @@ pub struct HealingReport {
     pub tolerances_propagated: u32,
     /// Number of self-intersections detected.
     pub self_intersections: u32,
+    /// Number of lost edges reconstructed via surface-surface
+    /// intersection (Vision 2036 §1.4).
+    pub edges_recovered: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -310,6 +325,7 @@ impl HealingReport {
             + self.faces_merged
             + self.tolerances_propagated
             + self.self_intersections
+            + self.edges_recovered
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -581,6 +597,12 @@ struct StagedShell {
     shell: Shell,
     /// Per-face working edge lists, parallel to `shell.faces`.
     working: Vec<Vec<Edge>>,
+    /// Instance id → canonical id aliases (Vision 2036 §1.4), copied
+    /// from the source solid's `EdgeStore` at store-first staging so
+    /// mid-pipeline passes can group per-face instance copies of one
+    /// shared edge without holding a store reference. Bare-shell
+    /// staging leaves it empty (identity mapping).
+    aliases: std::collections::HashMap<TopoId, TopoId>,
 }
 
 impl StagedShell {
@@ -591,7 +613,11 @@ impl StagedShell {
     /// [`StagedShell::from_shell_store`].
     fn from_shell(shell: Shell) -> Self {
         let working = (0..shell.faces.len()).map(|_| Vec::new()).collect();
-        Self { shell, working }
+        Self {
+            shell,
+            working,
+            aliases: std::collections::HashMap::new(),
+        }
     }
 
     /// C5 7.6b — store-first staging for the `heal_solid` entry.
@@ -618,7 +644,12 @@ impl StagedShell {
                 }
             })
             .collect();
-        (Self { shell, working }, rederived)
+        // Vision 2036 §1.4: capture the store's instance→canonical alias
+        // map so the SSI edge-recovery pass can group per-face instance
+        // copies of one shared edge without holding a store reference.
+        let aliases: std::collections::HashMap<TopoId, TopoId> =
+            source.edge_store.iter_aliases().collect();
+        (Self { shell, working, aliases }, rederived)
     }
 
     /// Un-stage: return the shell TOGETHER with its per-face working
@@ -724,6 +755,14 @@ fn heal_staged(
 
     // 1. Mark degenerate edges
     mark_degenerate_edges(&mut staged, params, &mut report);
+
+    // 1.5. Recover lost edge geometry via surface-surface intersection
+    //      (Vision 2036 §1.4) — runs BEFORE gap closing so recovered
+    //      curves participate in the merge, and AFTER degenerate marking
+    //      so garbage curves are flagged as recovery candidates.
+    if params.recover_lost_edges {
+        recover_lost_edges_via_ssi(&mut staged, params, &mut report);
+    }
 
     // 2. Close gaps
     close_gaps(&mut staged, params, &mut report);
@@ -948,6 +987,414 @@ fn mark_degenerate_edges(staged: &mut StagedShell, params: &HealingParams, repor
     if count > 0 {
         report.degenerate_edges_marked = count;
         report.add_msg(format!("Marked {} degenerate edges", count));
+    }
+}
+
+// ============================================================
+// Vision 2036 §1.4: SSI edge recovery
+// ============================================================
+
+/// Recovery capture radius (Vision 2036 §1.4): how far an edge's
+/// authoritative vertex points may sit from an SSI branch polyline to
+/// still anchor the recovered curve. On dirty files the anchors can be
+/// off-surface by the gap-tolerance scale, so the capture radius is
+/// anchored to `max(tolerance, edge tolerance, gap tolerance)` with a
+/// 100× safety factor.
+fn ssi_recovery_capture_tol(params: &HealingParams, edge_tol: f64) -> f64 {
+    params
+        .tolerance
+        .max(edge_tol)
+        .max(params.gap_tolerance())
+        .max(1e-9)
+        * 100.0
+}
+
+/// Closest position on an open polyline: `(distance, segment index,
+/// segment fraction)` for the closest point on the segment
+/// `pts[i]..pts[i+1]`.
+fn closest_on_polyline(pts: &[Point3d], p: &Point3d) -> Option<(f64, usize, f64)> {
+    match pts.len() {
+        0 => None,
+        1 => Some((pts[0].distance_to(p), 0, 0.0)),
+        n => {
+            let mut best = (f64::MAX, 0usize, 0.0f64);
+            for i in 0..n - 1 {
+                let a = &pts[i];
+                let b = &pts[i + 1];
+                let abx = b.x - a.x;
+                let aby = b.y - a.y;
+                let abz = b.z - a.z;
+                let len_sq = abx * abx + aby * aby + abz * abz;
+                let t = if len_sq < 1e-30 {
+                    0.0
+                } else {
+                    let mut t =
+                        ((p.x - a.x) * abx + (p.y - a.y) * aby + (p.z - a.z) * abz) / len_sq;
+                    if t < 0.0 {
+                        t = 0.0;
+                    }
+                    if t > 1.0 {
+                        t = 1.0;
+                    }
+                    t
+                };
+                let dx = p.x - (a.x + t * abx);
+                let dy = p.y - (a.y + t * aby);
+                let dz = p.z - (a.z + t * abz);
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                if dist < best.0 {
+                    best = (dist, i, t);
+                }
+            }
+            Some(best)
+        }
+    }
+}
+
+/// Extract the sub-polyline of `pts` between the two projected anchor
+/// positions, with the ANCHOR points themselves snapped in as the chain
+/// endpoints (bit-identical endpoint fidelity with the edge's vertex
+/// geometry). `pos_* = (segment index, fraction)` from
+/// [`closest_on_polyline`]. The returned chain always runs
+/// `anchor_start → anchor_end` (the edge's own direction), walking the
+/// branch forwards or backwards as needed.
+fn extract_sub_polyline(
+    pts: &[Point3d],
+    pos_start: (usize, f64),
+    anchor_start: &Point3d,
+    pos_end: (usize, f64),
+    anchor_end: &Point3d,
+) -> Vec<Point3d> {
+    let start_after_end =
+        pos_start.0 > pos_end.0 || (pos_start.0 == pos_end.0 && pos_start.1 > pos_end.1);
+    // Branch-order walk bounds: `from` → `to` along the polyline. When
+    // the start anchor projects AFTER the end anchor, the walk runs
+    // end→start and the finished chain is reversed below so the caller
+    // always receives anchor_start → anchor_end order.
+    let (from, to) = if start_after_end {
+        (pos_end, pos_start)
+    } else {
+        (pos_start, pos_end)
+    };
+    // Anchors at the walk endpoints: the anchor whose projection opens
+    // the walk leads the branch-order chain, the other closes it.
+    let (lead, close) = if start_after_end {
+        (anchor_end, anchor_start)
+    } else {
+        (anchor_start, anchor_end)
+    };
+
+    let lerp_at = |seg: usize, frac: f64| -> Point3d {
+        let a = &pts[seg];
+        let b = &pts[seg + 1];
+        Point3d::new(
+            a.x + frac * (b.x - a.x),
+            a.y + frac * (b.y - a.y),
+            a.z + frac * (b.z - a.z),
+        )
+    };
+
+    let to_pos = to.0 as f64 + to.1;
+
+    let mut chain: Vec<Point3d> = Vec::new();
+    chain.push(*lead);
+    if from.1 > 1e-9 {
+        chain.push(lerp_at(from.0, from.1));
+    }
+    let mut k = from.0 + 1;
+    while (k as f64) < to_pos - 1e-9 {
+        chain.push(pts[k]);
+        k += 1;
+    }
+    if to.1 > 1e-9 {
+        chain.push(lerp_at(to.0, to.1));
+    }
+    chain.push(*close);
+
+    if start_after_end {
+        chain.reverse(); // → anchor_start … anchor_end (the edge's direction)
+    }
+
+    // Drop consecutive duplicates (anchor ≈ projection, repeated samples).
+    let mut deduped: Vec<Point3d> = Vec::with_capacity(chain.len());
+    for p in chain {
+        if let Some(last) = deduped.last() {
+            if p.distance_to(last) < 1e-12 {
+                continue;
+            }
+        }
+        deduped.push(p);
+    }
+    deduped
+}
+
+/// Build the recovered edge curve from a trimmed SSI sub-polyline.
+/// Returns `(curve, t_min, t_max)`:
+/// - exactly straight chains become an analytic `Curve3d::Line`
+///   (`t` = arc length, matching `Edge::new_line` conventions) so
+///   downstream passes (collinear stitching, face merging) keep their
+///   line special-cases working;
+/// - curved chains get a least-squares B-spline (Vision 2036 §2.1
+///   machinery, `t ∈ [0, 1]`);
+/// - when the fit misses the tolerance, a `Curve3d::Composite` of line
+///   segments through the sample points is the last-resort fallback.
+fn build_recovered_curve(
+    chain: &[Point3d],
+    params: &HealingParams,
+    edge_tol: f64,
+) -> Option<(Curve3d, f64, f64)> {
+    if chain.len() < 2 {
+        return None;
+    }
+    let p0 = chain.first()?;
+    let p1 = chain.last()?;
+    let span = p0.distance_to(p1);
+    if span < params.tolerance.max(edge_tol).max(1e-12) {
+        return None; // coincident anchors — not recoverable by trimming
+    }
+
+    let gx = p1.x - p0.x;
+    let gy = p1.y - p0.y;
+    let gz = p1.z - p0.z;
+    let len = (gx * gx + gy * gy + gz * gz).sqrt();
+    let (ux, uy, uz) = (gx / len, gy / len, gz / len);
+
+    // Straight-chain detection: max perpendicular deviation of the
+    // interior samples from the anchor chord.
+    let linear_tol = params.tolerance.max(edge_tol).max(1e-12) * 10.0;
+    let mut max_dev = 0.0f64;
+    for q in &chain[1..chain.len() - 1] {
+        let rx = q.x - p0.x;
+        let ry = q.y - p0.y;
+        let rz = q.z - p0.z;
+        let along = rx * ux + ry * uy + rz * uz;
+        let px = rx - along * ux;
+        let py = ry - along * uy;
+        let pz = rz - along * uz;
+        max_dev = max_dev.max((px * px + py * py + pz * pz).sqrt());
+    }
+    if max_dev <= linear_tol {
+        let dir = Direction3d::new(ux, uy, uz)?;
+        return Some((Curve3d::Line(Line::new(*p0, dir)), 0.0, span));
+    }
+
+    let fit_tol = params.tolerance.max(edge_tol).max(1e-9);
+    if let Ok(nurbs) = draper_geometry::intersection::fit_b_spline_to_points(chain, fit_tol) {
+        return Some((Curve3d::Nurbs(nurbs), 0.0, 1.0));
+    }
+
+    // Polyline-style fallback: Composite of line segments (arc-length
+    // proportional global parameter, `t ∈ [0, 1]`).
+    let mut segments: Vec<Curve3d> = Vec::with_capacity(chain.len() - 1);
+    let mut lengths: Vec<f64> = Vec::with_capacity(chain.len() - 1);
+    let mut total = 0.0f64;
+    for w in chain.windows(2) {
+        let seg_len = w[0].distance_to(&w[1]);
+        if seg_len > 1e-15 {
+            if let Some(line) = Line::through_points(w[0], w[1]) {
+                segments.push(Curve3d::Line(line));
+                lengths.push(seg_len);
+                total += seg_len;
+            }
+        }
+    }
+    if segments.is_empty() || total < 1e-15 {
+        return None;
+    }
+    let mut cum = 0.0f64;
+    let cum_lengths: Vec<f64> = lengths
+        .iter()
+        .map(|&l| {
+            cum += l;
+            cum / total
+        })
+        .collect();
+    Some((
+        Curve3d::Composite {
+            segments,
+            cum_lengths,
+        },
+        0.0,
+        1.0,
+    ))
+}
+
+/// Recover lost edge geometry via surface-surface intersection
+/// (Vision 2036 §1.4: "implement surface-surface intersection for edge
+/// recovery — reconstruct lost edges by intersecting adjacent surfaces").
+///
+/// Targets manifold interior edges — exactly two instances in two
+/// distinct faces (grouped through the store's instance→canonical
+/// aliases) — whose 3D curve is missing or degenerate while BOTH
+/// authoritative vertex points survive. The two adjacent faces'
+/// surfaces are intersected (topology-level dispatcher: analytic pairs
+/// first, marching fallback), the branch whose polyline captures both
+/// anchors is selected, and the anchor-to-anchor segment becomes the
+/// edge's new curve.
+///
+/// Conservatism (nothing healthy is ever touched):
+/// - edges with a live, non-degenerate curve are skipped;
+/// - coincident anchors (poles, closed seam curves) are skipped —
+///   anchor-to-anchor trimming is undefined there;
+/// - edges not shared by exactly two faces (boundary edges,
+///   non-manifold junctions, pole-type degenerates used by a single
+///   face) are skipped;
+/// - when no SSI branch captures both anchors within the recovery
+///   capture radius, the edge is left as-is — a wrong curve is worse
+///   than a missing one.
+fn recover_lost_edges_via_ssi(
+    staged: &mut StagedShell,
+    params: &HealingParams,
+    report: &mut HealingReport,
+) {
+    // Group working-list instances by canonical edge id (aliases
+    // captured at store-first staging; identity for bare shells, whose
+    // working lists are empty anyway).
+    let mut groups: std::collections::HashMap<TopoId, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    for (fi, list) in staged.working.iter().enumerate() {
+        for (ei, edge) in list.iter().enumerate() {
+            let canonical = staged.aliases.get(&edge.id).copied().unwrap_or(edge.id);
+            groups.entry(canonical).or_default().push((fi, ei));
+        }
+    }
+
+    let mut recovered = 0u32;
+    // Deterministic order: sorted canonical ids.
+    let mut canonical_ids: Vec<TopoId> = groups.keys().copied().collect();
+    canonical_ids.sort_unstable();
+
+    for canonical in canonical_ids {
+        let members = &groups[&canonical];
+        if members.len() != 2 || members[0].0 == members[1].0 {
+            continue; // not a manifold interior edge (2 instances, 2 distinct faces)
+        }
+        let (fa, ea) = members[0];
+        let (fb, eb) = members[1];
+
+        // Recovery candidates: geometry lost (no curve) or flagged
+        // degenerate by the marking pass (garbage curve). If either
+        // instance still carries a healthy curve, leave it alone — the
+        // store rebuild backfills curves across instances anyway.
+        let lost = |edge: &Edge| edge.curve.is_none() || edge.degenerate;
+        let (inst_a, inst_b) = (&staged.working[fa][ea], &staged.working[fb][eb]);
+        if !lost(inst_a) && !lost(inst_b) {
+            continue;
+        }
+
+        // Both authoritative vertex points must survive (read from
+        // whichever instance carries a complete pair) and be distinct.
+        let (p_start, p_end) = match (
+            inst_a
+                .start_vertex_point
+                .zip(inst_a.end_vertex_point),
+            inst_b
+                .start_vertex_point
+                .zip(inst_b.end_vertex_point),
+        ) {
+            (Some(pair), _) => pair,
+            (None, Some(pair)) => pair,
+            (None, None) => continue,
+        };
+        let edge_tol = inst_a.tolerance.max(inst_b.tolerance);
+        let anchor_tol = params.tolerance.max(edge_tol).max(1e-12);
+        if p_start.distance_to(&p_end) < anchor_tol {
+            continue; // coincident anchors: poles / closed seam curves
+        }
+
+        // The two adjacent faces' surfaces.
+        let surfaces = match (
+            staged.shell.faces[fa].surface.clone(),
+            staged.shell.faces[fb].surface.clone(),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+
+        // SSI of the adjacent surfaces. The tolerance context threads
+        // the model's STEP uncertainty when available; bare params fall
+        // back to the geometry crate's default-scale context.
+        let ctx = params.tolerance_context.clone().unwrap_or_else(|| {
+            ToleranceContext::from_model_scale(1.0).with_sewing_tol(params.tolerance)
+        });
+        let branches = crate::boolean::intersect_surfaces(&surfaces.0, &surfaces.1, &ctx);
+        if branches.is_empty() {
+            continue;
+        }
+
+        // Select the branch whose polyline captures both anchors.
+        let capture = ssi_recovery_capture_tol(params, edge_tol);
+        let mut best: Option<(f64, usize, (usize, f64), (usize, f64))> = None;
+        for (bi, branch) in branches.iter().enumerate() {
+            if branch.points.len() < 2 {
+                continue;
+            }
+            let (d_start, seg_start, frac_start) =
+                match closest_on_polyline(&branch.points, &p_start) {
+                    Some(v) => v,
+                    None => continue,
+                };
+            let pos_start = (seg_start, frac_start);
+            let (d_end, seg_end, frac_end) =
+                match closest_on_polyline(&branch.points, &p_end) {
+                    Some(v) => v,
+                    None => continue,
+                };
+            let pos_end = (seg_end, frac_end);
+            if d_start > capture || d_end > capture {
+                continue;
+            }
+            let score = d_start + d_end;
+            if best.as_ref().map_or(true, |(s, _, _, _)| score < *s) {
+                best = Some((score, bi, pos_start, pos_end));
+            }
+        }
+        let (_, bi, pos_start, pos_end) = match best {
+            Some(v) => v,
+            None => continue, // no branch captures the anchors — leave as-is
+        };
+        let branch_points = branches[bi].points.clone();
+
+        let chain = extract_sub_polyline(&branch_points, pos_start, &p_start, pos_end, &p_end);
+        let curve = match build_recovered_curve(&chain, params, edge_tol) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        // Write back to every instance of the shared edge, preserving
+        // each instance's own traversal direction: `param_range` flips
+        // together with `forward` (the `Edge::reversed` convention), so
+        // each instance's start/end vertex points keep mapping onto the
+        // matching curve ends.
+        for &(fi, ei) in members {
+            let (t0, t1) = (curve.1, curve.2);
+            let edge = &mut staged.working[fi][ei];
+            let forward = match (edge.start_vertex_point, edge.end_vertex_point) {
+                (Some(s), Some(e)) => s.distance_to(&p_start) <= e.distance_to(&p_start),
+                _ => true,
+            };
+            edge.curve = Some(curve.0.clone());
+            edge.param_range = if forward { (t0, t1) } else { (t1, t0) };
+            edge.forward = forward;
+            edge.degenerate = false;
+            if edge.start_vertex_point.is_none() {
+                edge.start_vertex_point = Some(p_start);
+                edge.end_vertex_point = Some(p_end);
+            }
+        }
+        recovered += 1;
+        report.add_msg(format!(
+            "Recovered edge via SSI of faces {} and {} (lost 3D curve reconstructed from the adjacent surfaces' intersection)",
+            fa, fb
+        ));
+    }
+
+    if recovered > 0 {
+        report.edges_recovered = recovered;
+        report.add_msg(format!(
+            "Recovered {} lost edge(s) via surface-surface intersection",
+            recovered
+        ));
     }
 }
 
@@ -3161,6 +3608,7 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.sliver_triangles_detected += source.sliver_triangles_detected;
     target.faces_merged += source.faces_merged;
     target.tolerances_propagated += source.tolerances_propagated;
+    target.edges_recovered += source.edges_recovered;
     target.messages.extend(source.messages.iter().cloned());
 }
 
@@ -3861,9 +4309,10 @@ mod tests {
             faces_merged: 0,
             tolerances_propagated: 2,
             self_intersections: 0,
+            edges_recovered: 1,
             messages: Vec::new(),
         };
-        assert_eq!(report.total_fixes(), 13);
+        assert_eq!(report.total_fixes(), 14);
     }
 
     /// Test triangle_aspect_ratio for an equilateral triangle.
@@ -4616,5 +5065,294 @@ mod tests {
         );
 
         assert!(report.tolerances_propagated > 0);
+    }
+
+    // ---- Vision 2036 §1.4: SSI edge recovery ----
+
+    /// Heal a box once so shared edges are unified into canonical store
+    /// entries (gap closing + store rebuild), then locate a shared Line
+    /// edge deterministically (sorted ids) for corruption experiments.
+    fn healed_box_with_victim() -> (Solid, TopoId, Point3d, Point3d) {
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (mut solid, _) = heal_solid(&ShapeBuilder::make_box(10.0, 10.0, 10.0), &params);
+
+        let mut ids: Vec<TopoId> = solid.edge_store.iter().map(|e| e.id).collect();
+        ids.sort_unstable();
+        let victim = *ids
+            .iter()
+            .find(|&&id| {
+                solid
+                    .edge_store
+                    .get(id)
+                    .and_then(|e| e.curve.as_ref())
+                    .map_or(false, |c| matches!(c, Curve3d::Line(_)))
+            })
+            .expect("healed box must have Line edges");
+
+        let e = solid.edge_store.get_mut(victim).unwrap();
+        let (sp, ep) = match &e.curve {
+            Some(Curve3d::Line(l)) => {
+                (l.point_at(e.param_range.0), l.point_at(e.param_range.1))
+            }
+            _ => unreachable!("victim selected as a Line edge"),
+        };
+        (solid, victim, sp, ep)
+    }
+
+    /// A lost 3D curve (missing EDGE_CURVE, surviving VERTEX_POINT) on a
+    /// shared box edge is recovered as the exact Line of the adjacent
+    /// planes' intersection.
+    #[test]
+    fn test_ssi_recovery_lost_curve_becomes_line() {
+        let (mut solid, victim, sp, ep) = healed_box_with_victim();
+
+        // Simulate the lost geometry: drop the curve, keep the anchors.
+        {
+            let e = solid.edge_store.get_mut(victim).unwrap();
+            e.curve = None;
+            e.degenerate = false;
+            e.start_vertex_point = Some(sp);
+            e.end_vertex_point = Some(ep);
+        }
+
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert_eq!(report.edges_recovered, 1, "exactly the victim recovers");
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.contains("via surface-surface intersection")),
+            "recovery must be reported: {:?}",
+            report.messages
+        );
+
+        let e = healed.edge_store.get(victim).expect("victim survives healing");
+        assert!(!e.degenerate, "recovered edge is no longer degenerate");
+        let curve = e.curve.as_ref().expect("curve reconstructed");
+        assert!(
+            matches!(curve, Curve3d::Line(_)),
+            "straight box edge must recover as a Line"
+        );
+        // Endpoint fidelity: the anchors map onto the curve ends.
+        assert!(curve.point_at(e.param_range.0).distance_to(&sp) < 1e-9);
+        assert!(curve.point_at(e.param_range.1).distance_to(&ep) < 1e-9);
+        // Midpoint lies on the original box edge.
+        let mid = curve.point_at((e.param_range.0 + e.param_range.1) * 0.5);
+        let expect_mid = Point3d::new((sp.x + ep.x) / 2.0, (sp.y + ep.y) / 2.0, (sp.z + ep.z) / 2.0);
+        assert!(mid.distance_to(&expect_mid) < 1e-6);
+    }
+
+    /// A degenerate garbage curve (zero-radius circle) on a shared box
+    /// edge is replaced by the SSI-reconstructed Line.
+    #[test]
+    fn test_ssi_recovery_degenerate_curve_replaced() {
+        use draper_geometry::{Circle, Direction3d};
+
+        let (mut solid, victim, sp, ep) = healed_box_with_victim();
+
+        {
+            let e = solid.edge_store.get_mut(victim).unwrap();
+            // Garbage curve: zero-radius circle is flagged degenerate by
+            // the marking pass while the anchors stay distinct.
+            e.curve = Some(Curve3d::Circle(Circle::new(
+                sp,
+                Direction3d::Z,
+                0.0,
+            )));
+            e.param_range = (0.0, std::f64::consts::PI);
+            e.degenerate = false;
+            e.start_vertex_point = Some(sp);
+            e.end_vertex_point = Some(ep);
+        }
+
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert!(report.degenerate_edges_marked >= 1, "garbage curve is marked");
+        assert_eq!(report.edges_recovered, 1, "the degenerate edge recovers");
+
+        let e = healed.edge_store.get(victim).unwrap();
+        assert!(!e.degenerate);
+        let curve = e.curve.as_ref().unwrap();
+        assert!(matches!(curve, Curve3d::Line(_)));
+        assert!(curve.point_at(e.param_range.0).distance_to(&sp) < 1e-9);
+        assert!(curve.point_at(e.param_range.1).distance_to(&ep) < 1e-9);
+    }
+
+    /// No authoritative vertex points → no anchors → no recovery (the
+    /// edge is left as-is rather than guessed).
+    #[test]
+    fn test_ssi_recovery_skips_edges_without_anchors() {
+        let (mut solid, victim, _, _) = healed_box_with_victim();
+
+        {
+            let e = solid.edge_store.get_mut(victim).unwrap();
+            e.curve = None;
+            e.degenerate = false;
+            e.start_vertex_point = None;
+            e.end_vertex_point = None;
+        }
+
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert_eq!(report.edges_recovered, 0, "no anchors — no recovery");
+        let e = healed.edge_store.get(victim).unwrap();
+        assert!(e.curve.is_none(), "edge must stay untouched");
+    }
+
+    /// The pass can be disabled via `recover_lost_edges: false`.
+    #[test]
+    fn test_ssi_recovery_disabled_by_param() {
+        let (mut solid, victim, sp, ep) = healed_box_with_victim();
+
+        {
+            let e = solid.edge_store.get_mut(victim).unwrap();
+            e.curve = None;
+            e.degenerate = false;
+            e.start_vertex_point = Some(sp);
+            e.end_vertex_point = Some(ep);
+        }
+
+        let params = HealingParams {
+            fix_normals: false,
+            recover_lost_edges: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert_eq!(report.edges_recovered, 0);
+        assert!(healed.edge_store.get(victim).unwrap().curve.is_none());
+    }
+
+    /// Plane × cylinder: a lost half-circle edge between a horizontal
+    /// plane and a Z-axis cylinder recovers as a curved B-spline (or
+    /// segmented fallback) whose midpoint lies on both surfaces.
+    #[test]
+    fn test_ssi_recovery_plane_cylinder_arc() {
+        use crate::entity::{CoEdge, Face, Shell, Wire};
+        use draper_geometry::{CylinderSurface, Direction3d, Plane, Surface};
+
+        let p_start = Point3d::new(5.0, 0.0, 3.0);
+        let p_end = Point3d::new(-5.0, 0.0, 3.0);
+        let edge = Edge {
+            id: TopoId::new(),
+            curve: None,
+            param_range: (0.0, 1.0),
+            vertex_start: Some(TopoId::new()),
+            vertex_end: Some(TopoId::new()),
+            start_vertex_point: Some(p_start),
+            end_vertex_point: Some(p_end),
+            forward: true,
+            tolerance: 1e-6,
+            degenerate: false,
+            step_entity_id: None,
+        };
+        let coedge = CoEdge::new(edge.id, true);
+        let plane_face = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::new(0.0, 0.0, 3.0),
+                Direction3d::Z,
+            )),
+            Wire::new(vec![coedge.clone()]),
+        );
+        let cyl_face = Face::new(
+            Surface::Cylinder(CylinderSurface::new_z(5.0)),
+            Wire::new(vec![coedge]),
+        );
+        let shell = Shell::new(vec![plane_face, cyl_face]);
+        let solid = Solid::from_edges_only(shell, vec![vec![edge.clone()], vec![edge]]);
+
+        let params = HealingParams::default(); // open shell: normal fixing skips itself
+        let (healed, report) = heal_solid(&solid, &params);
+
+        assert_eq!(report.edges_recovered, 1, "the arc edge recovers");
+
+        let e = healed
+            .edge_store
+            .iter()
+            .find(|e| e.curve.is_some())
+            .expect("recovered curve must be in the store");
+        assert!(!e.degenerate);
+        // Anchors preserved.
+        assert_eq!(e.start_vertex_point, Some(p_start));
+        assert_eq!(e.end_vertex_point, Some(p_end));
+        // Midpoint of the recovered arc lies on both surfaces:
+        // cylinder radius 5 and plane z = 3.
+        let mid = e.point_at(0.5).expect("recovered curve is evaluable");
+        let r = (mid.x * mid.x + mid.y * mid.y).sqrt();
+        assert!(
+            (r - 5.0).abs() < 1e-3,
+            "midpoint radius {:.6} must match the cylinder's 5.0",
+            r
+        );
+        assert!(
+            (mid.z - 3.0).abs() < 1e-3,
+            "midpoint z {:.6} must match the plane's 3.0",
+            mid.z
+        );
+    }
+
+    /// A boundary edge (used by a single face) is NOT recovered — SSI
+    /// needs two adjacent surfaces.
+    #[test]
+    fn test_ssi_recovery_skips_single_face_edges() {
+        use crate::entity::{CoEdge, Face, Shell, Wire};
+        use draper_geometry::{CylinderSurface, Direction3d, Plane, Surface};
+
+        let p_start = Point3d::new(5.0, 0.0, 3.0);
+        let p_end = Point3d::new(-5.0, 0.0, 3.0);
+        let edge = Edge {
+            id: TopoId::new(),
+            curve: None,
+            param_range: (0.0, 1.0),
+            vertex_start: Some(TopoId::new()),
+            vertex_end: Some(TopoId::new()),
+            start_vertex_point: Some(p_start),
+            end_vertex_point: Some(p_end),
+            forward: true,
+            tolerance: 1e-6,
+            degenerate: false,
+            step_entity_id: None,
+        };
+        let coedge = CoEdge::new(edge.id, true);
+        let plane_face = Face::new(
+            Surface::Plane(Plane::from_origin_and_normal(
+                Point3d::new(0.0, 0.0, 3.0),
+                Direction3d::Z,
+            )),
+            Wire::new(vec![coedge]),
+        );
+        let shell = Shell::new(vec![plane_face]);
+        let solid = Solid::from_edges_only(shell, vec![vec![edge]]);
+
+        let (healed, report) = heal_solid(&solid, &params_open_shell());
+
+        assert_eq!(report.edges_recovered, 0, "single-face edge is skipped");
+        let e = healed.edge_store.iter().next().unwrap();
+        assert!(e.curve.is_none(), "edge must stay untouched");
+    }
+
+    /// Shared healing params for open one/two-face shells (no normal
+    /// fixing — the shells are not closed).
+    fn params_open_shell() -> HealingParams {
+        HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        }
     }
 }
