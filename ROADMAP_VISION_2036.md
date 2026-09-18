@@ -857,6 +857,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | §1.4 healing self-intersection false positives (trimmed-domain + contact; never-worsen removal gate) | Done | `f723bd4` |
 | 1 | §1.4 B1: plane∥axis plane×cylinder exact Lines + identity PCURVEs (all hand-rolled boolean PCURVEs identity-parameterized) | Done | session 33 (2026-09-12) |
 | 1 | §1.4 loop-level recovery of closed lost edges (empty wires + degenerate junction gaps) | Done | session 34 (2026-09-12) |
+| 1 | §1.4 close_gaps merge upgrade: exact SSI curve for near-coincident boundary-edge pairs (stitching-class complement to lost-edge recovery) | Done | session 24 replay-5 (2026-09-18) |
 | 1 | NURBS healing guards | Done | `eb46eb1` |
 | 1 | ManifoldChecker::is_watertight() | Done | `f8f023c` |
 | 1 | GeometryError + panic-free production code | Done | `9d7ad7f` |

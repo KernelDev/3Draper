@@ -160,6 +160,23 @@ pub struct HealingParams {
     /// instead of dropping the sliver faces the gaps would form.
     pub close_gaps_by_extension: bool,
 
+    /// Session-24 replay-5 delta: upgrade `close_gaps` merges to the
+    /// EXACT surface-surface intersection curve. The legacy ID-merge
+    /// re-points face B's coedges at face A's edge, and A's geometry
+    /// silently "wins" — when the two boundary edges run over
+    /// different surfaces, the merged edge no longer lies on face B's
+    /// surface. With this flag on, the surviving edge's geometry is
+    /// replaced by the exact SSI curve trimmed between the pair's
+    /// junctions (see
+    /// [`crate::edge_recovery::recover_merged_edge_by_ssi`]); every
+    /// failed upgrade falls back to the legacy ID-merge, so enabling
+    /// this can only improve the merged geometry. Complementary to
+    /// `recover_lost_edges` (stitching-class pairs vs. edges missing
+    /// from both wires). Bounded by
+    /// [`crate::edge_recovery::MAX_SSI_MERGE_UPGRADES`] attempts per
+    /// pass.
+    pub upgrade_gap_merges_by_ssi: bool,
+
     /// Optional tolerance context from the STEP file or model scale.
     /// When present, the coincidence tolerance from this context is used
     /// as a floor for all entity tolerances during propagation.
@@ -185,6 +202,7 @@ impl Default for HealingParams {
             remove_inconsistent_normals: false,
             recover_lost_edges: true,
             close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
+            upgrade_gap_merges_by_ssi: true, // Replay-5 delta: only upgrades merge geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -229,6 +247,7 @@ impl HealingParams {
             remove_inconsistent_normals: false, // May remove geometry
             recover_lost_edges: true, // Additive repair — never removes geometry
             close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
+            upgrade_gap_merges_by_ssi: true, // Replay-5 delta: only upgrades merge geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -277,6 +296,7 @@ impl HealingParams {
             remove_inconsistent_normals: true,
             recover_lost_edges: true,
             close_gaps_by_extension: true, // Session-24 §1.4: geometric repair, never removes geometry
+            upgrade_gap_merges_by_ssi: true, // Replay-5 delta: only upgrades merge geometry
             tolerance_context: None,
             tolerance: 1e-6,
         }
@@ -371,6 +391,9 @@ pub struct HealingReport {
     /// Number of lost edges reconstructed via surface-surface
     /// intersection (Vision 2036 §1.4).
     pub edges_recovered: u32,
+    /// Session-24 replay-5 delta: number of `close_gaps` merge pairs
+    /// whose surviving edge was upgraded to the exact SSI curve.
+    pub merges_upgraded_by_ssi: u32,
     /// Session-24 §1.4 (item 2): endpoint micro-gaps closed by extending
     /// the boundary edge curves (geometric repair, not face removal).
     pub edge_gaps_extended: u32,
@@ -391,6 +414,7 @@ impl HealingReport {
             + self.tolerances_propagated
             + self.self_intersections
             + self.edges_recovered
+            + self.merges_upgraded_by_ssi
             + self.edge_gaps_extended
     }
 
@@ -1166,12 +1190,48 @@ fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
         }
     }
 
-    // Apply merges: replace references to id_b with id_a in coedges
+    // Session-24 replay-5 delta — Phase 1 (read-only): for each merge
+    // pair whose faces carry surfaces, intersect those surfaces and
+    // try to upgrade the surviving edge to the exact intersection
+    // curve. Bounded by MAX_SSI_MERGE_UPGRADES; every failed upgrade
+    // falls back to the legacy ID-merge below.
+    let ssi_upgrades: Vec<(TopoId, Edge)> =
+        if params.upgrade_gap_merges_by_ssi && !merges.is_empty() {
+            try_ssi_upgrade_for_merges(staged, &merges, params, gap_tol)
+        } else {
+            Vec::new()
+        };
+
+    // Phase 2 (mutating): apply merges — replace references to id_b
+    // with id_a in coedges. When an SSI-upgraded edge exists for the
+    // pair, ALSO swap the surviving edge's geometry to the exact
+    // intersection curve (it keeps id_a, so every coedge reference
+    // stays valid).
     let mut gap_count = 0u32;
+    let mut upgraded_count = 0u32;
     for (id_a, id_b) in &merges {
         let replaced = replace_coedge_edge_refs(&mut staged.shell.faces, *id_b, *id_a);
         if replaced > 0 {
             gap_count += 1;
+            // Swap in the upgraded geometry (if any) for the surviving
+            // edge. The upgraded edge keeps id_a — only the curve,
+            // param range and authoritative vertex points change.
+            if let Some(pos) = ssi_upgrades.iter().position(|(ida, _)| ida == id_a) {
+                let (_, up_edge) = &ssi_upgrades[pos];
+                let swapped = staged.working.iter_mut().any(|w| {
+                    w.iter_mut().any(|e| {
+                        if e.id == *id_a {
+                            *e = up_edge.clone();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                });
+                if swapped {
+                    upgraded_count += 1;
+                }
+            }
         }
     }
 
@@ -1179,6 +1239,84 @@ fn close_gaps(staged: &mut StagedShell, params: &HealingParams, report: &mut Hea
         report.gaps_closed = gap_count;
         report.add_msg(format!("Closed {} gaps between boundary edges", gap_count));
     }
+    if upgraded_count > 0 {
+        report.merges_upgraded_by_ssi = upgraded_count;
+        report.add_msg(format!(
+            "Upgraded {} merged edges to exact SSI curves (§1.4 merge upgrade)",
+            upgraded_count
+        ));
+    }
+}
+
+/// Session-24 replay-5 delta — compute SSI merge-upgrades for the
+/// pairs accepted by `close_gaps` (read-only pass; the caller applies
+/// them).
+///
+/// For every pair `(id_a, id_b)` (capped at
+/// [`crate::edge_recovery::MAX_SSI_MERGE_UPGRADES`]): resolve the
+/// owning faces of both boundary edges, look up their geometry in the
+/// staged working lists, and intersect the two faces' surfaces
+/// ([`crate::edge_recovery::recover_merged_edge_by_ssi`]). Pairs
+/// inside one face (a slit), faces without surfaces, or failed
+/// validation gates are silently skipped — they keep the legacy
+/// ID-merge behavior.
+fn try_ssi_upgrade_for_merges(
+    staged: &StagedShell,
+    merges: &[(TopoId, TopoId)],
+    params: &HealingParams,
+    gap_tol: f64,
+) -> Vec<(TopoId, Edge)> {
+    use crate::edge_recovery::{recover_merged_edge_by_ssi, MAX_SSI_MERGE_UPGRADES};
+    use std::collections::HashMap;
+
+    // Boundary edge id -> (face index, working-list index). Built from
+    // the same boundary notion `close_gaps` used to select the pairs.
+    let mut boundary_loc: HashMap<TopoId, (usize, usize)> = HashMap::new();
+    for (fi, ei) in boundary_working_edges(staged) {
+        if let Some(e) = staged.working.get(fi).and_then(|w| w.get(ei)) {
+            boundary_loc.entry(e.id).or_insert((fi, ei));
+        }
+    }
+
+    let tol_ctx = params
+        .tolerance_context
+        .clone()
+        .unwrap_or_else(|| ToleranceContext::from_model_scale(1.0).with_sewing_tol(gap_tol));
+
+    let mut out = Vec::new();
+    for (id_a, id_b) in merges.iter().take(MAX_SSI_MERGE_UPGRADES) {
+        // Both edges must live in distinct faces with surfaces.
+        let ((fa, ea_idx), (fb, eb_idx)) = match (boundary_loc.get(id_a), boundary_loc.get(id_b))
+        {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => continue,
+        };
+        if fa == fb {
+            // Slit inside one face — SSI of a surface with itself is
+            // degenerate; keep the legacy merge.
+            continue;
+        }
+        let (ea, eb) = match (
+            staged.working.get(fa).and_then(|w| w.get(ea_idx)),
+            staged.working.get(fb).and_then(|w| w.get(eb_idx)),
+        ) {
+            (Some(a), Some(b)) => (a.clone(), b.clone()),
+            _ => continue,
+        };
+        let surfaces = match (
+            staged.face(fa).surface.as_ref(),
+            staged.face(fb).surface.as_ref(),
+        ) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        if let Some(upgraded) =
+            recover_merged_edge_by_ssi(surfaces.0, surfaces.1, &ea, &eb, gap_tol, &tol_ctx)
+        {
+            out.push((*id_a, upgraded));
+        }
+    }
+    out
 }
 
 /// Which endpoint of an edge.
@@ -3993,6 +4131,7 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.tolerances_propagated += source.tolerances_propagated;
     target.self_intersections += source.self_intersections;
     target.edges_recovered += source.edges_recovered;
+    target.merges_upgraded_by_ssi += source.merges_upgraded_by_ssi;
     // Session-24 §1.4: the geometric-repair counter rides along.
     target.edge_gaps_extended += source.edge_gaps_extended;
     target.messages.extend(source.messages.iter().cloned());
@@ -4339,6 +4478,50 @@ mod tests {
         if let Some(ref shell) = healed.outer_shell {
             assert_eq!(shell.faces.len(), 6);
         }
+    }
+
+    /// Session-24 replay-5 delta — `close_gaps` upgrades merged box
+    /// edges to the exact plane-plane intersection lines.
+    ///
+    /// `make_box` creates each face with its own independent edge
+    /// objects; every merge pair is plane × plane with both edges
+    /// lying exactly ON the intersection line, so all 12 upgrades must
+    /// succeed (trim sanity, length and proximity gates all pass), and
+    /// the surviving edges' geometry is replaced by the exact SSI
+    /// lines.
+    #[test]
+    fn test_close_gaps_ssi_merge_upgrade_box() {
+        let box_solid = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let (healed, report) = heal_solid(&box_solid, &params);
+        assert_eq!(report.gaps_closed, 12);
+        assert_eq!(report.merges_upgraded_by_ssi, 12);
+        assert_eq!(report.small_faces_removed, 0);
+        if let Some(ref shell) = healed.outer_shell {
+            assert_eq!(shell.faces.len(), 6);
+        }
+    }
+
+    /// Session-24 replay-5 delta — the SSI merge upgrade is
+    /// deterministic: healing two clones of the same box yields
+    /// bit-identical store geometry and identical reports. (One
+    /// builder call + clones: the builder assigns fresh TopoIds per
+    /// call, and the fingerprint compares them positionally.)
+    #[test]
+    fn test_heal_box_ssi_merge_upgrade_deterministic() {
+        let params = HealingParams {
+            fix_normals: false,
+            ..HealingParams::default()
+        };
+        let base = ShapeBuilder::make_box(10.0, 10.0, 10.0);
+        let (h1, r1) = heal_solid(&base.clone(), &params);
+        let (h2, r2) = heal_solid(&base.clone(), &params);
+        assert_eq!(r1.gaps_closed, r2.gaps_closed);
+        assert_eq!(r1.merges_upgraded_by_ssi, r2.merges_upgraded_by_ssi);
+        assert_eq!(store_fingerprint(&h1), store_fingerprint(&h2));
     }
 
     // ---- C5 Stage 6.3: store-first healing input ----
@@ -5126,6 +5309,7 @@ mod tests {
             tolerances_propagated: 2,
             self_intersections: 0,
             edges_recovered: 0,
+            merges_upgraded_by_ssi: 0,
             edge_gaps_extended: 1,
             messages: Vec::new(),
         };

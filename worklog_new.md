@@ -6512,3 +6512,98 @@ non-convex blocked configurations flip-only enforcement). Главный
 - Seam-split защита canonical extraction (233 грани легаси-фолбэк);
   rim-aliasing twins (305) — SSI-реассоциация; WebGPU; булев сплит
   cylinder-грани; multi-neighbor loop assembly.
+
+---
+
+# Сессия (шестой повтор сброса песочницы) — fetch-first НЕ был исполнен до конца: локальная ре-реализация §1.4 (close_gaps-вариант) выполнена до сверки с remote; дельта-порт merge-upgrade (2026-09-18)
+
+## Инцидент
+
+Пришёл рабочий приказ «Продолжай согласно плана» (план = §1.4 SSI).
+Рутинная проверка `git log` (БЕЗ fetch) показала ожидаемый HEAD 377910b
+(сессия 23, 2026-09-08), рабочее дерево чистое — признаков сброса НЕ
+было видно. Rust toolchain отсутствовал → переустановлен (1.98.1,
+sandbox пересоздан). Была выполнена полная локальная реализация §1.4:
+новый модуль edge_recovery (~700 строк: recover_shared_edge_by_ssi —
+апгрейд close_gaps-мержей до точной SSI-кривой, инверсия параметров
+Line/Circle/Ellipse/Nurbs, 3 гейта, 12 тестов), коммиты 2a30640 +
+88c5258.
+
+**Push отклонён**: origin/main ушёл вперёд на 34 коммита — сессии
+24–37 (2026-09-08..09-17): канонический §1.4 lost-edge recovery
+(сессия 31, 091ea86), §1.4 хвосты (сессии 32–34), §1.3, canonical CDT
+(сессии 35–37) и ПЯТЬ задокументированных повторов этого же инцидента
+(ветки session24-local-ssi14-replay-N, коммиты 4c969f4, 373cd8d,
+2518158, 5a594c0, 43875a5).
+
+Диагноз (по правилу пользователя): sandbox восстановлен из бэкапа
+эпохи сессии 23; git-история ВНУТРИ бэкапа согласована с ожиданиями,
+поэтому БЕЗ fetch сигнал «коммиты ушли вперёд» не виден. Урок для
+следующих сессий: **fetch-first обязан включать `git fetch origin` +
+сравнение main..origin/main — локальный git log недостаточен**, если
+sandbox мог быть пересоздан (отсутствие toolchain — уже достаточный
+триггер).
+
+## Действия по протоколу повторов
+
+1. Локальные коммиты сохранены в ветке
+   `session24-local-ssi14-replay-5` (2a30640 — код, 88c5258 — доки).
+2. main сброшен на origin/main (60b7ffe); каноническое дерево
+   проверено: topology 262 lib green с восстановленным toolchain.
+3. Сверка дубля с каноном (сессия 31):
+   - lost-edge recovery (pass 2.5, gap detection + pairing + SSI
+     реконструкция + вставка) — у канона, у дубля НЕТ → не портed.
+   - merge_report self_intersections-фикс — у канона уже есть → дубль.
+   - NURBS-гарды (включая Revolution/Extrusion, stitch edge_is_straight)
+     — у канона полнее → дубль.
+   - **close_gaps ID-merge без геометрического апгрейда — у канона
+     оставлен как есть; в доке edge_recovery прямо сказано: one-sided
+     потери = stitching-класс = зона close_gaps. Дубль решает именно
+     эту задачу → НЕ дублирует канон.**
+
+## Дельта-порт (недублирующая часть дубля)
+
+`crates/draper-topology/src/edge_recovery.rs` + healing:
+
+- `recover_merged_edge_by_ssi(surf_a, surf_b, edge_a, edge_b, gap_tol,
+  tol_ctx) -> Option<Edge>` — апгрейд ПАРЫ close_gaps (оба boundary-
+  ребра существуют, разные id): выживающее ребро (id_a) получает
+  геометрию точной SSI-кривой, обрезанной по junction-серединам;
+  идентичность (id/вершины/step_entity_id) сохранена.
+- Инверсия параметров: Line — проекция; Circle/Ellipse — atan2 в
+  базисе (x_axis, y_axis) + unwrap свипа вдоль сэмплов ветви; Nurbs —
+  96-точечный скан + тернарное уточнение. Выбор ветви — по refined
+  junction→кривая расстоянию (не по дискретным сэмплам).
+- 3 гейта: trim sanity (2·gap_tol + 2·tol, NaN-режект), length bound
+  (≤ max(len_a,len_b) + 8·gap_tol), proximity к исходным рёбрам
+  (3·gap_tol + 2·tol + 1% длины — режектит «дополнительную дугу»,
+  т.е. кейс, который канонный lost-edge recovery документирует как
+  ограничение «endpoint data alone cannot disambiguate»).
+- Интеграция: `HealingParams::upgrade_gap_merges_by_ssi` (ON во всех
+  пресетах), `HealingReport::merges_upgraded_by_ssi` (+total_fixes,
+  +merge_report), close_gaps Phase 1 (read-only, cap
+  MAX_SSI_MERGE_UPGRADES=64, reuse boundary_working_edges) / Phase 2
+  (ID-merge + swap геометрии).
+
+## Верификация
+
+- Новые тесты: 10 в `edge_recovery::merge_upgrade_tests` (round-trip
+  инверсий, unwrap свипа, cylinder×plane с перевёрнутым ребром,
+  plane×plane line, 2 фолбэка, бит-детерминизм) + 2 в healing (box:
+  12/12 мержей апгрейднуты; store_fingerprint двух heal'ов клонов
+  бит-идентичен).
+- `cargo test -p draper-topology` — 274 lib + 31 integration green.
+- Release: step 143 (вкл. transmission ~284s), mesh 290, core 75 —
+  green. Регрессий нет (as1/drill_top пути не затронуты: их рёбра
+  shared, close_gaps-мержи не активируются).
+- clippy: новых варнингов в дельте нет.
+
+## Осталось
+
+- Прогнать dirty-STEP с не-сшитыми гранями: посмотреть
+  merges_upgraded_by_ssi в отчётах реального импорта.
+- Кандидат: HOUSING rim-aliasing twins (из аудита self-intersections)
+  — если их дефект stitching-класса, merge-upgrade может закрыть
+  точной геометрией.
+- Канонный CDT (сессии 35–37): 76/199 drill_top групп закрыто,
+  легализация вставки добавлена; продолжать по плану сессии 37.

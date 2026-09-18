@@ -119,7 +119,10 @@
 use crate::boolean::{create_polyline_curve, intersect_surfaces};
 use crate::entity::{CoEdge, Edge, Face, Shell, TopoId, Wire};
 use crate::healing::HealingParams;
-use draper_geometry::{Curve2d, Curve3d, Point3d, Surface, ToleranceContext};
+use draper_geometry::{
+    Circle, Curve2d, Curve3d, Direction3d, Ellipse, Line, NurbsCurve, Point3d, Surface,
+    ToleranceContext, Vec3d,
+};
 
 // ============================================================
 // Parameters & report
@@ -1375,6 +1378,419 @@ fn shell_model_scale(shell: &Shell, working: &[Vec<Edge>]) -> f64 {
 }
 
 // ============================================================
+// Merge-upgrade: exact SSI geometry for close_gaps merges
+// (session-24 replay-5 delta-port)
+// ============================================================
+//
+// `close_gaps` merges a pair of near-coincident boundary edges purely
+// topologically: face B's coedge references are re-pointed at face A's
+// edge, and A's geometry silently "wins". When the two edges run over
+// DIFFERENT surfaces (each boundary edge sampled on its own face's
+// surface — the classic unsewn-STEP shape), the merged edge no longer
+// lies exactly on face B's surface: a persistent source of leaky
+// triangulation seams that no post-hoc welding can repair.
+//
+// This section upgrades those merges geometrically. It is the
+// complementary half of `recover_lost_edges` above:
+//
+// - `recover_lost_edges` — the shared edge is missing from BOTH wires
+//   (gap pairing + reconstruction + insertion).
+// - `recover_merged_edge_by_ssi` — BOTH boundary edges exist (a
+//   stitching-class defect, explicitly out of `recover_lost_edges`'s
+//   scope); `close_gaps` has already accepted the pair for an ID-merge,
+//   and this function replaces the surviving edge's geometry with the
+//   exact intersection curve, trimmed between the pair's junction
+//   points, so the shared edge lies on BOTH surfaces.
+//
+// Safety model: every upgrade passes a chain of validation gates
+// (trim sanity, length bound, proximity to the original edges — the
+// proximity gate also rejects wrong sweep directions, e.g. the
+// complementary arc of the same circle, which the loop-level pass
+// documents as an unresolved limitation). On ANY failure the caller
+// falls back to the legacy ID-merge, so enabling the pass can only
+// improve the merged geometry, never regress it.
+
+/// Hard cap on SSI merge-upgrade attempts per healing pass. Pairs
+/// beyond the cap (and pairs whose upgrade fails a gate) keep the
+/// legacy ID-merge.
+pub const MAX_SSI_MERGE_UPGRADES: usize = 64;
+
+/// Uniform sample count used by the sanity gates (length, proximity).
+const MERGE_GATE_SAMPLES: usize = 64;
+
+fn p_diff(a: &Point3d, b: &Point3d) -> Vec3d {
+    Vec3d::new(a.x - b.x, a.y - b.y, a.z - b.z)
+}
+
+fn dir_vec(d: &Direction3d) -> Vec3d {
+    Vec3d::new(d.x, d.y, d.z)
+}
+
+fn midpoint(a: &Point3d, b: &Point3d) -> Point3d {
+    Point3d::new(
+        (a.x + b.x) * 0.5,
+        (a.y + b.y) * 0.5,
+        (a.z + b.z) * 0.5,
+    )
+}
+
+/// Wrap an angle difference to (-π, π].
+fn wrap_pi(x: f64) -> f64 {
+    const TWO_PI: f64 = 2.0 * std::f64::consts::PI;
+    let mut r = x % TWO_PI;
+    if r <= -std::f64::consts::PI {
+        r += TWO_PI;
+    }
+    if r > std::f64::consts::PI {
+        r -= TWO_PI;
+    }
+    r
+}
+
+/// Line parameter of the closest point to `p` (`Line::direction` is
+/// unit length, so the inverse of `Line::point_at` is a projection).
+fn line_param(line: &Line, p: &Point3d) -> f64 {
+    dir_vec(&line.direction).dot(&p_diff(p, &line.origin))
+}
+
+/// Angle of `p` in the circle's own `(x_axis, y_axis)` frame — the
+/// exact inverse of `Circle::point_at`.
+fn circle_angle(c: &Circle, p: &Point3d) -> f64 {
+    let y_axis = c.normal.cross(&c.x_axis);
+    let d = p_diff(p, &c.center);
+    d.dot(&dir_vec(&y_axis)).atan2(d.dot(&dir_vec(&c.x_axis)))
+}
+
+/// Angle of `p` in the ellipse's own frame — the exact inverse of
+/// `Ellipse::point_at` (axis-scaled atan2).
+fn ellipse_angle(e: &Ellipse, p: &Point3d) -> f64 {
+    let y_axis = e.normal.cross(&e.x_axis);
+    let d = p_diff(p, &e.center);
+    let ex = d.dot(&dir_vec(&e.x_axis)) / e.semi_major;
+    let ey = d.dot(&dir_vec(&y_axis)) / e.semi_minor;
+    ey.atan2(ex)
+}
+
+/// Unwrap a per-sample angle sequence so consecutive deltas stay in
+/// (-π, π] — the accumulated sequence follows the branch's sweep
+/// direction across the ±π discontinuity.
+fn unwrapped_angles(points: &[Point3d], angle_of: impl Fn(&Point3d) -> f64) -> Vec<f64> {
+    let mut out = Vec::with_capacity(points.len());
+    let mut prev_raw = angle_of(&points[0]);
+    let mut acc = prev_raw;
+    out.push(acc);
+    for p in &points[1..] {
+        let raw = angle_of(p);
+        acc += wrap_pi(raw - prev_raw);
+        prev_raw = raw;
+        out.push(acc);
+    }
+    out
+}
+
+/// Parameter domain of a NURBS curve:
+/// `[knots[degree], knots[len - degree - 1]]`.
+fn nurbs_domain(n: &NurbsCurve) -> (f64, f64) {
+    let p = n.degree;
+    let lo = n.knots.get(p).copied().unwrap_or(0.0);
+    let hi = n
+        .knots
+        .get(n.knots.len().saturating_sub(p + 1))
+        .copied()
+        .unwrap_or(1.0);
+    if hi > lo {
+        (lo, hi)
+    } else {
+        (0.0, 1.0)
+    }
+}
+
+/// Closest parameter on a NURBS curve to `p`: a uniform coarse scan
+/// over the domain followed by ternary-search refinement. Pure
+/// function of `(curve, point)` — deterministic.
+fn nurbs_closest_param(n: &NurbsCurve, p: &Point3d) -> f64 {
+    // One clone per call; every evaluation below goes through the
+    // wrapper without further copying.
+    let wrapper = Curve3d::Nurbs(n.clone());
+    let (lo, hi) = nurbs_domain(n);
+
+    const M: usize = 96;
+    let step = (hi - lo) / M as f64;
+    let mut best_t = lo;
+    let mut best_d = f64::MAX;
+    for i in 0..=M {
+        let t = lo + step * i as f64;
+        let d = wrapper.point_at(t).distance_sq_to(p);
+        if d < best_d {
+            best_d = d;
+            best_t = t;
+        }
+    }
+
+    // Ternary refinement within the coarse winner's bracket.
+    let mut a = (best_t - step).max(lo);
+    let mut b = (best_t + step).min(hi);
+    for _ in 0..60 {
+        let m1 = a + (b - a) / 3.0;
+        let m2 = b - (b - a) / 3.0;
+        let d1 = wrapper.point_at(m1).distance_sq_to(p);
+        let d2 = wrapper.point_at(m2).distance_sq_to(p);
+        if d1 < d2 {
+            b = m2;
+        } else {
+            a = m1;
+        }
+    }
+    (a + b) * 0.5
+}
+
+/// Curve parameter for every branch sample, in the branch's own sweep
+/// direction (angles unwrapped; NURBS by closest-parameter projection).
+/// Returns `None` for curve types without a supported inversion — the
+/// caller falls back to the legacy ID-merge.
+fn branch_sample_params(curve: &Curve3d, points: &[Point3d]) -> Option<Vec<f64>> {
+    match curve {
+        Curve3d::Line(l) => Some(points.iter().map(|p| line_param(l, p)).collect()),
+        Curve3d::Circle(c) => Some(unwrapped_angles(points, |p| circle_angle(c, p))),
+        Curve3d::Ellipse(e) => Some(unwrapped_angles(points, |p| ellipse_angle(e, p))),
+        Curve3d::Nurbs(n) => Some(points.iter().map(|p| nurbs_closest_param(n, p)).collect()),
+        // Arc / Hyperbola / Parabola / PCurve / Trimmed / Composite:
+        // inversion not implemented — fall back.
+        _ => None,
+    }
+}
+
+/// Index of the sample nearest to `p` (ties: lowest index).
+fn nearest_index(points: &[Point3d], p: &Point3d) -> usize {
+    let mut best = 0usize;
+    let mut best_d = f64::MAX;
+    for (i, q) in points.iter().enumerate() {
+        let d = q.distance_sq_to(p);
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+    }
+    best
+}
+
+/// Parameter of `junction`, interpolated in the local frame of the
+/// branch sample `i`: the junction is projected onto the 3D segment
+/// between the neighbouring samples, and the parameter is interpolated
+/// linearly between their (unwrapped) parameters. Endpoint samples use
+/// the boundary segment with mild extrapolation (`λ ∈ [-0.5, 1.5]`).
+fn interp_param(points: &[Point3d], params: &[f64], i: usize, junction: &Point3d) -> f64 {
+    let n = points.len();
+    if n == 0 || params.is_empty() {
+        return 0.0;
+    }
+    if n == 1 {
+        return params[0];
+    }
+    let (ia, ib) = if i == 0 {
+        (0, 1)
+    } else if i + 1 >= n {
+        (n - 2, n - 1)
+    } else {
+        (i - 1, i + 1)
+    };
+    let ab = p_diff(&points[ib], &points[ia]);
+    let ab_len_sq = ab.dot(&ab);
+    if ab_len_sq < 1e-30 {
+        return params[i.min(n - 1)];
+    }
+    let lambda = (p_diff(junction, &points[ia]).dot(&ab) / ab_len_sq).clamp(-0.5, 1.5);
+    params[ia] + lambda * (params[ib] - params[ia])
+}
+
+/// Approximate length of an edge by uniform sampling.
+fn sampled_edge_length(e: &Edge) -> f64 {
+    let mut len = 0.0;
+    let mut prev: Option<Point3d> = None;
+    for i in 0..=MERGE_GATE_SAMPLES {
+        let t = i as f64 / MERGE_GATE_SAMPLES as f64;
+        if let Some(p) = e.point_at(t) {
+            if let Some(ref q) = prev {
+                len += q.distance_to(&p);
+            }
+            prev = Some(p);
+        }
+    }
+    len
+}
+
+/// Approximate length of the curve span `[t0, t1]` by uniform sampling.
+fn sampled_span_length(curve: &Curve3d, t0: f64, t1: f64) -> f64 {
+    let mut len = 0.0;
+    let mut prev = curve.point_at(t0);
+    for i in 1..=MERGE_GATE_SAMPLES {
+        let t = i as f64 / MERGE_GATE_SAMPLES as f64;
+        let p = curve.point_at(t0 + t * (t1 - t0));
+        len += prev.distance_to(&p);
+        prev = p;
+    }
+    len
+}
+
+/// Uniform sample points along an edge (curve-less edges yield none).
+fn edge_sample_points(e: &Edge) -> Vec<Point3d> {
+    (0..=MERGE_GATE_SAMPLES)
+        .filter_map(|i| e.point_at(i as f64 / MERGE_GATE_SAMPLES as f64))
+        .collect()
+}
+
+/// Upgrade a `close_gaps` merge pair to the exact intersection curve.
+///
+/// * `surface_a` / `surface_b` — the surfaces of the two faces whose
+///   boundary edges are being merged (the pair already accepted by
+///   `close_gaps`' proximity criterion).
+/// * `edge_a` / `edge_b` — the two boundary edges. The upgraded edge
+///   KEEPS `edge_a`'s identity (`id`, vertex references, STEP entity
+///   id) so every coedge referencing it stays valid; only the geometry
+///   is replaced by the exact intersection curve, trimmed between the
+///   junction points (per-endpoint midpoints of the two edges'
+///   endpoints, honoring orientation).
+///
+/// Returns `None` when any validation gate fails or the intersection
+/// yields no usable curve — the caller then keeps the legacy ID-merge
+/// (`edge_a`'s geometry as-is).
+pub fn recover_merged_edge_by_ssi(
+    surface_a: &Surface,
+    surface_b: &Surface,
+    edge_a: &Edge,
+    edge_b: &Edge,
+    gap_tol: f64,
+    tol_ctx: &ToleranceContext,
+) -> Option<Edge> {
+    // Both edges need curve geometry to define the junctions.
+    let a0 = edge_a.start_point()?;
+    let a1 = edge_a.end_point()?;
+    let b0 = edge_b.start_point()?;
+    let b1 = edge_b.end_point()?;
+
+    // Orientation: face B's edge may run opposite to face A's.
+    let flipped = a0.distance_sq_to(&b1) < a0.distance_sq_to(&b0);
+    let (bs, be) = if flipped { (&b1, &b0) } else { (&b0, &b1) };
+    let junction_start = midpoint(&a0, bs);
+    let junction_end = midpoint(&a1, be);
+
+    // Degenerate pair (both junctions coincide): nothing to upgrade.
+    if junction_start.distance_sq_to(&junction_end) < 1e-30 {
+        return None;
+    }
+
+    let branches = intersect_surfaces(surface_a, surface_b, tol_ctx);
+
+    // Select the best branch by refined junction-to-curve distance
+    // (NOT raw sample distance — plane-plane branches are sampled over
+    // a huge extent, so the nearest sample can be far away even when
+    // the junction lies exactly ON the curve).
+    //
+    // (branch index, t_start, t_end, score)
+    let mut best: Option<(usize, f64, f64, f64)> = None;
+    for (bi, branch) in branches.iter().enumerate() {
+        let curve = match branch.curve.as_ref() {
+            Some(c) => c,
+            None => continue, // polyline-only branch (unfitted)
+        };
+        if branch.points.len() < 2 {
+            continue;
+        }
+        let params = match branch_sample_params(curve, &branch.points) {
+            Some(p) => p,
+            None => continue, // curve kind without inversion support
+        };
+        let i0 = nearest_index(&branch.points, &junction_start);
+        let i1 = nearest_index(&branch.points, &junction_end);
+        let t0 = interp_param(&branch.points, &params, i0, &junction_start);
+        let t1 = interp_param(&branch.points, &params, i1, &junction_end);
+        let d0 = curve.point_at(t0).distance_to(&junction_start);
+        let d1 = curve.point_at(t1).distance_to(&junction_end);
+        let score = d0.max(d1);
+        let better = match best {
+            None => true,
+            Some((_, _, _, s)) => score < s,
+        };
+        if better {
+            best = Some((bi, t0, t1, score));
+        }
+    }
+
+    let (bi, t0, t1, score) = best?;
+    let branch = &branches[bi];
+    let curve = branch.curve.as_ref().expect("checked in the scan loop");
+
+    // Gate 1 — trim sanity: the trimmed curve must land on both
+    // junctions. Rejects wrong branches and bad unwraps. (A NaN score
+    // also rejects — a NaN junction distance means the trim failed.)
+    let end_tol = 2.0 * gap_tol + 2.0 * branch.tolerance;
+    if score.is_nan() || score > end_tol {
+        return None;
+    }
+
+    // Gate 2 — length bound: the upgraded span must not run away
+    // (e.g. the long way around a full circle).
+    let rec_len = sampled_span_length(curve, t0, t1);
+    if rec_len <= 0.0 {
+        return None;
+    }
+    let len_a = sampled_edge_length(edge_a);
+    let len_b = sampled_edge_length(edge_b);
+    if rec_len > len_a.max(len_b) + 8.0 * gap_tol {
+        return None;
+    }
+
+    // Gate 3 — proximity: every upgraded sample must stay near at
+    // least one of the original edges. The `1% of edge length` slack
+    // absorbs the chord error of the ORIGINAL edges' sampling. This is
+    // what rejects wrong sweep directions (the complementary arc of
+    // the same circle), which `recover_lost_edges` documents as an
+    // endpoint-data-alone limitation.
+    let pts_a = edge_sample_points(edge_a);
+    let pts_b = edge_sample_points(edge_b);
+    if pts_a.is_empty() || pts_b.is_empty() {
+        return None;
+    }
+    let prox_tol = 3.0 * gap_tol + 2.0 * branch.tolerance + 0.01 * len_a.max(len_b);
+    for i in 0..=MERGE_GATE_SAMPLES {
+        let t = i as f64 / MERGE_GATE_SAMPLES as f64;
+        let p = curve.point_at(t0 + t * (t1 - t0));
+        let da = pts_a
+            .iter()
+            .map(|q| q.distance_sq_to(&p))
+            .fold(f64::MAX, f64::min);
+        let db = pts_b
+            .iter()
+            .map(|q| q.distance_sq_to(&p))
+            .fold(f64::MAX, f64::min);
+        if da.min(db) > prox_tol * prox_tol {
+            return None;
+        }
+    }
+
+    // Build the upgraded edge. `start_vertex_point` /
+    // `end_vertex_point` pin the junction coordinates so the shared
+    // vertices discretize bit-identically on both faces.
+    let upgraded = Edge {
+        id: edge_a.id,
+        curve: Some(curve.clone()),
+        param_range: (t0, t1),
+        vertex_start: edge_a.vertex_start,
+        vertex_end: edge_a.vertex_end,
+        start_vertex_point: Some(junction_start),
+        end_vertex_point: Some(junction_end),
+        forward: true,
+        tolerance: edge_a
+            .tolerance
+            .max(edge_b.tolerance)
+            .max(branch.tolerance),
+        degenerate: false,
+        step_entity_id: edge_a.step_entity_id,
+    };
+    Some(upgraded)
+}
+
+// ============================================================
 // Tests
 // ============================================================
 
@@ -2100,5 +2516,302 @@ mod tests {
             }),
             "recovered circle not found in the healed cap face"
         );
+    }
+}
+
+/// Merge-upgrade tests (session-24 replay-5 delta-port):
+/// `recover_merged_edge_by_ssi` — exact SSI geometry for the pairs
+/// `close_gaps` accepts for ID-merging.
+#[cfg(test)]
+mod merge_upgrade_tests {
+    use super::*;
+    use draper_geometry::{CylinderSurface, Plane, Surface};
+
+    fn tol_ctx() -> ToleranceContext {
+        ToleranceContext::from_model_scale(20.0).with_sewing_tol(0.05)
+    }
+
+    /// A degree-1 NURBS that reproduces the segment (0,0,0)-(2,0,0)
+    /// with a knot at the midpoint: domain [0, 2].
+    fn nurbs_x_axis() -> NurbsCurve {
+        NurbsCurve {
+            degree: 1,
+            control_points: vec![
+                Point3d::new(0.0, 0.0, 0.0),
+                Point3d::new(1.0, 0.0, 0.0),
+                Point3d::new(2.0, 0.0, 0.0),
+            ],
+            weights: vec![1.0, 1.0, 1.0],
+            knots: vec![0.0, 0.0, 1.0, 2.0, 2.0],
+        }
+    }
+
+    #[test]
+    fn merge_upgrade_line_param_projection() {
+        let line = Line::new(Point3d::new(1.0, 2.0, 3.0), Direction3d::X);
+        assert!((line_param(&line, &Point3d::new(4.0, 2.0, 3.0)) - 3.0).abs() < 1e-12);
+        assert!((line_param(&line, &Point3d::new(0.0, 9.0, 9.0)) + 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn merge_upgrade_circle_angle_inverse() {
+        let c = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        for &t in &[0.0_f64, 0.3, 1.25, 2.9, -1.7] {
+            let p = c.point_at(t);
+            let back = circle_angle(&c, &p);
+            assert!(
+                (wrap_pi(back - t)).abs() < 1e-12,
+                "angle inversion failed at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_upgrade_ellipse_angle_inverse() {
+        let e = Ellipse::new_xy(Point3d::ORIGIN, 5.0, 2.0);
+        for &t in &[0.0_f64, 0.7, 2.2, -2.9] {
+            let p = e.point_at(t);
+            let back = ellipse_angle(&e, &p);
+            assert!(
+                (wrap_pi(back - t)).abs() < 1e-12,
+                "ellipse inversion failed at t={t}"
+            );
+        }
+    }
+
+    #[test]
+    fn merge_upgrade_unwrapped_angles_follow_sweep() {
+        // Quarter-circle-plus branch sampled CCW from angle -3π/4 to
+        // +π/2: the raw angles jump at ±π; the unwrapped sequence must
+        // be monotonic with total sweep +5π/4.
+        let c = Circle::new_xy(Point3d::ORIGIN, 5.0);
+        let n = 40;
+        let start = -0.75 * std::f64::consts::PI;
+        let sweep = 1.25 * std::f64::consts::PI;
+        let points: Vec<Point3d> = (0..=n)
+            .map(|i| c.point_at(start + sweep * i as f64 / n as f64))
+            .collect();
+        let unwrapped = unwrapped_angles(&points, |p| circle_angle(&c, p));
+        assert!((unwrapped[0] - start).abs() < 1e-12);
+        assert!((unwrapped[n] - (start + sweep)).abs() < 1e-9);
+        for w in unwrapped.windows(2) {
+            assert!(w[1] > w[0], "unwrapped sequence must be monotonic");
+        }
+    }
+
+    #[test]
+    fn merge_upgrade_nurbs_closest_param() {
+        let n = nurbs_x_axis();
+        let t = nurbs_closest_param(&n, &Point3d::new(1.5, 0.25, 0.0));
+        assert!((t - 1.5).abs() < 1e-6, "got {t}");
+        // Before the domain: clamps to the start.
+        let t0 = nurbs_closest_param(&n, &Point3d::new(-1.0, 0.1, 0.0));
+        assert!(t0 >= -1e-9 && t0 < 0.05, "got {t0}");
+    }
+
+    /// Cylinder (r=5, axis Z) × plane z=3 — the SSI is the exact circle
+    /// r=5 at z=3. Two perturbed boundary edges (radii 5.002 / 4.998,
+    /// the second one reversed) must upgrade to the EXACT circle.
+    #[test]
+    fn merge_upgrade_cylinder_plane_edge() {
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(5.0));
+        let plane = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 3.0),
+            Direction3d::Z,
+        ));
+
+        // Face A edge: upper semicircle, slightly too large.
+        let edge_a = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 5.002)),
+            (0.0, std::f64::consts::PI),
+        );
+        // Face B edge: same semicircle, slightly too small, REVERSED
+        // (param range descending).
+        let edge_b = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 4.998)),
+            (std::f64::consts::PI, 0.0),
+        );
+
+        let gap_tol = 0.05;
+        let upgraded = recover_merged_edge_by_ssi(
+            &cylinder,
+            &plane,
+            &edge_a,
+            &edge_b,
+            gap_tol,
+            &tol_ctx(),
+        )
+        .expect("upgrade must succeed");
+
+        // The upgraded curve is the exact intersection circle.
+        match upgraded.curve.as_ref().unwrap() {
+            Curve3d::Circle(c) => {
+                assert!((c.radius - 5.0).abs() < 1e-9, "radius {}", c.radius);
+                assert!((c.center.z - 3.0).abs() < 1e-9);
+            }
+            other => panic!("expected Circle, got {other:?}"),
+        }
+
+        // Junctions: start = (5, 0, 3), end = (-5, 0, 3).
+        let s = upgraded.start_point().unwrap();
+        let e = upgraded.end_point().unwrap();
+        assert!(s.distance_to(&Point3d::new(5.0, 0.0, 3.0)) < 1e-6);
+        assert!(e.distance_to(&Point3d::new(-5.0, 0.0, 3.0)) < 1e-6);
+
+        // Midpoint of the upgraded span is exactly ON both surfaces
+        // (upper semicircle: (0, 5, 3)).
+        let mid = upgraded.point_at(0.5).unwrap();
+        assert!(mid.distance_to(&Point3d::new(0.0, 5.0, 3.0)) < 1e-6);
+
+        // Identity is preserved.
+        assert_eq!(upgraded.id, edge_a.id);
+        assert!(upgraded.start_vertex_point.is_some());
+        assert!(upgraded.end_vertex_point.is_some());
+    }
+
+    /// Two planes meeting along the X axis; the boundary edges are
+    /// offset lines. The upgrade must yield the exact intersection
+    /// LINE.
+    #[test]
+    fn merge_upgrade_skewed_planes_edge() {
+        // plane A: z = 0. plane B: y = 0. Intersection = X axis.
+        let plane_a = Surface::Plane(Plane::xy());
+        let plane_b = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::ORIGIN,
+            Direction3d::Y,
+        ));
+
+        // Face A edge: on plane z=0, along X, 0 -> 10.
+        let edge_a = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(10.0, 0.0, 0.0));
+        // Face B edge: on plane y=0, offset by dz = 0.01 (within gap_tol).
+        let edge_b = Edge::new_line(Point3d::new(0.0, 0.0, 0.01), Point3d::new(10.0, 0.0, 0.01));
+
+        let gap_tol = 0.05;
+        let upgraded = recover_merged_edge_by_ssi(
+            &plane_a,
+            &plane_b,
+            &edge_a,
+            &edge_b,
+            gap_tol,
+            &tol_ctx(),
+        )
+        .expect("upgrade must succeed");
+
+        match upgraded.curve.as_ref().unwrap() {
+            Curve3d::Line(_) => {}
+            other => panic!("expected Line, got {other:?}"),
+        }
+
+        // The whole span lies on the X axis (both surfaces).
+        for i in 0..=8 {
+            let p = upgraded.point_at(i as f64 / 8.0).unwrap();
+            assert!(p.y.abs() < 1e-9, "y = {}", p.y);
+            assert!(p.z.abs() < 1e-9, "z = {}", p.z);
+            assert!(p.x >= -1e-6 && p.x <= 10.0 + 1e-6, "x = {}", p.x);
+        }
+
+        // Param range must span ~10 units along the unit-direction line
+        // (the SSI line's direction follows the normals' cross product —
+        // Z × Y = −X here — so the range may be descending).
+        let (t0, t1) = upgraded.param_range;
+        assert!(((t1 - t0).abs() - 10.0).abs() < 1e-6, "t0 = {t0}, t1 = {t1}");
+        assert!(
+            upgraded.start_point().unwrap().x.abs() < 1e-6,
+            "start = {:?}",
+            upgraded.start_point()
+        );
+        assert!(
+            (upgraded.end_point().unwrap().x - 10.0).abs() < 1e-6,
+            "end = {:?}",
+            upgraded.end_point()
+        );
+    }
+
+    /// Parallel planes never intersect — the upgrade falls back (None).
+    #[test]
+    fn merge_upgrade_fallback_parallel_planes() {
+        let plane_a = Surface::Plane(Plane::xy());
+        let plane_b = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 2.0),
+            Direction3d::Z,
+        ));
+        let edge_a = Edge::new_line(Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0));
+        let edge_b = Edge::new_line(Point3d::new(0.0, 0.0, 2.0), Point3d::new(1.0, 0.0, 2.0));
+        assert!(recover_merged_edge_by_ssi(
+            &plane_a,
+            &plane_b,
+            &edge_a,
+            &edge_b,
+            0.05,
+            &tol_ctx()
+        )
+        .is_none());
+    }
+
+    /// Junctions far from the actual SSI curve (wrong geometry) — the
+    /// trim-sanity gate must reject.
+    #[test]
+    fn merge_upgrade_fallback_junctions_far_from_intersection() {
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(5.0));
+        let plane = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 3.0),
+            Direction3d::Z,
+        ));
+        // Edges hugging z = 3 but at radius 25 — the cylinder × plane
+        // circle (r = 5) is 20 units away.
+        let edge_a = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 25.0)),
+            (0.0, std::f64::consts::PI),
+        );
+        let edge_b = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 25.0)),
+            (0.0, std::f64::consts::PI),
+        );
+        assert!(recover_merged_edge_by_ssi(
+            &cylinder,
+            &plane,
+            &edge_a,
+            &edge_b,
+            0.05,
+            &tol_ctx()
+        )
+        .is_none());
+    }
+
+    /// The upgrade is a pure function: two calls on identical inputs
+    /// produce bit-identical geometry.
+    #[test]
+    fn merge_upgrade_is_deterministic() {
+        let cylinder = Surface::Cylinder(CylinderSurface::new_z(5.0));
+        let plane = Surface::Plane(Plane::from_origin_and_normal(
+            Point3d::new(0.0, 0.0, 3.0),
+            Direction3d::Z,
+        ));
+        let edge_a = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 5.002)),
+            (0.0, std::f64::consts::PI),
+        );
+        let edge_b = Edge::new(
+            Curve3d::Circle(Circle::new_xy(Point3d::new(0.0, 0.0, 3.0), 4.998)),
+            (std::f64::consts::PI, 0.0),
+        );
+
+        let r1 =
+            recover_merged_edge_by_ssi(&cylinder, &plane, &edge_a, &edge_b, 0.05, &tol_ctx())
+                .unwrap();
+        let r2 =
+            recover_merged_edge_by_ssi(&cylinder, &plane, &edge_a, &edge_b, 0.05, &tol_ctx())
+                .unwrap();
+
+        assert_eq!(r1.param_range.0.to_bits(), r2.param_range.0.to_bits());
+        assert_eq!(r1.param_range.1.to_bits(), r2.param_range.1.to_bits());
+        for i in 0..=16 {
+            let t = i as f64 / 16.0;
+            let p1 = r1.point_at(t).unwrap();
+            let p2 = r2.point_at(t).unwrap();
+            assert_eq!(p1.x.to_bits(), p2.x.to_bits());
+            assert_eq!(p1.y.to_bits(), p2.y.to_bits());
+            assert_eq!(p1.z.to_bits(), p2.z.to_bits());
+        }
     }
 }
