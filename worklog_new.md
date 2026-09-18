@@ -6660,3 +6660,111 @@ Fetch-first ОБЯЗАН выполняться ДО любой реализац
 гарантирована слепая ре-реализация уже сделанной работы (это 7-й
 инцидент; повторы 1–4 и 6 сделали ту же ошибку, только 5-й исполнил
 протокол до кода). Push-reject — НЕ сбой, а последний рубеж проверки.
+
+---
+
+# Сессия 38 — паритет chunked/cached путей конвертера (единый setup, seam-первый порядок) + un-gating manifold-чека и flood canonical-извлечения (2026-09-18)
+
+## Инцидент песочницы (восьмой повтор)
+
+Рабочий приказ «Продолжай согласно плана». Fetch-first исполнен ДО
+какой-либо реализации (урок сессии-37): local main = 377910b (сессия 23,
+2026-09-08, чистое дерево), origin/main = 84a2a0b — **36 коммитов
+впереди** (сессии 24–37, пять задокументированных повторов инцидента,
+дельта-порты replay-5/6/7). Toolchain Rust отсутствовал (~/.cargo исчез)
+→ переустановлен 1.98.1 из сохранённого
+/home/z/my-project/scripts/rustup-init.sh (диск 8.2G). Локальных коммитов
+не существовало → ветка-дубль не требуется, fast-forward чистый
+(377910b — предок origin/main). Канон верифицирован: workspace check
+2м41с, mesh lib 290, geometry 259, topology 274+31.
+
+## Задача
+
+Верх «Осталось» canonical-CDT (сессия-37): недетерминизм chunked/cached
+путей конвертера («6405 vs 6757», сессия-29+) — ГЛАВНЫЙ блокер
+расширения lenient-извлечения на plain-билды.
+
+## Диагностика (новый инструмент)
+
+`tools/src/bin/chunked_cached_diff.rs` — оба пути на native
+(`triangulate_pending` vs `triangulate_pending_chunked`, chunk-бюджет
+600s, native time-limits = MAX → дифф = чистая алгоритмика), per-BREP
+counts + order-sensitive FNV digest + order-insensitive digest; режимы
+ADAPTIVE / CANONICAL (env). Находка на drill_top + as1: расходится
+ТОЛЬКО GEAR #16033 — 2092 tris / 685 bnd / 180 nm (cached) против
+2086 / 682 / 171 (chunked); остальные BREPs бит-идентичны.
+
+Корень (логи обоих путей): Phase 2 coordinate-aliasing строится от
+РАЗНЫХ графов алиасов —
+- detailed путь: Phase 1 → Phase 2 (**216** алиасов, coord-grid tol
+  3.06e-2) → seam-алиасы ПОСЛЕДНИМИ (234): грубая координатная эвристика
+  ПЕРЕЗАПИСЫВАЛА точное §3.3 склеивание швов;
+- chunked путь: seam-алиасы ПЕРВЫМИ (234) → Phase 2 resolve-skip
+  корректно исключает уже-алиасные id → 954 coord-группы / **4** алиаса.
+
+Разные графы → разные ключи edge-cache (963 vs 966 entries) → разные
+дискретизации кромок. Legacy-путь (`triangulate_brep`) делал
+seam-первым — detailed был дрейфовавшим исключением (2 из 3 путей уже
+держали правильный порядок). Ещё дрейфы зеркал: Phase 1 chunked без
+ветки «different curve types → merge all» (класс болтовых
+transition-плоскостей); chunked НИКОГДА не применял `with_adaptive_lod`
+(прогрессивный WASM-вьюер молча игнорировал per-face бюджеты); KS-2
+circle-consistency debug-чек жил только в legacy.
+
+## Реализация
+
+`converter.rs::setup_brep_edge_cache` — ЕДИНАЯ реализация setup для
+всех трёх путей. Канонический порядок (контракт §3.3 «topological
+gluing before 3D coordinate generation» — точные факты первыми,
+эвристики дополняют): adaptive-бюджеты → chord override → 1) seam
+aliases (точные) → 2) circle_axis_n → 3) NURBS refinement grids →
+4) canonical CDTs → 5) Phase 1 vertex-pair (с merge-веткой разных типов
+кривых) → 6) Phase 2 coordinate (с resolve-skip) → 7) KS-2 debug-чек.
+Возвращает эффективные params (adaptive применён) — callers обязаны
+использовать возврат. Три зеркальные копии setup (detailed ~260 строк,
+chunked ~155, legacy ~310) удалены.
+
+## Un-gating lenient-извлечения: эксперимент + бисекция
+
+После фикса паритета повторён эксперимент сессии-37 (тогда +239 bnd на
+as1 при un-gating):
+- ВСЕ три гейта сняты: drill_top canonical-ON 17537 → **14900 bnd
+  (−2637)** (HOUSING 6405→5187, MIRROR 6358→5074, SLEEVE 3102→2967),
+  НО as1 0 → 239 bnd (nut #63 +10, l-bracket #1934 +31) — регрессия
+  РОВНО та же, что у сессии-37.
+- Вывод: +239 на as1 — НЕ chunked/cached недетерминизм (паритет теперь
+  битовый) — это ПОДЛИННАЯ canonical-vs-legacy rim-несогласованность:
+  разблокированные zero-length-skip'ом грани получают canonical rim,
+  не совпадающий с legacy-соседями.
+- Бисекция: **zero-length skip → re-gated** (legalized-only, числа
+  бисекции задокументированы инлайн); **manifold-чек + flood → оставлены
+  un-gated** — на канонических файлах инертны (plain-группы падают до
+  rim-контракта), manifold-чек = чистая безопасность (полу-вентилятор →
+  легаси), flood = строго аддитивен.
+
+## Верификация
+
+- chunked_cached_diff: бит-идентичность ВСЕХ BREPs во всех трёх режимах
+  (default / ADAPTIVE / CANONICAL) на drill_top + as1.
+- GEAR улучшен parity-фиксом: 2092/685/180 → 2086/682/171 (дефекты
+  865 → 853).
+- canonical A/B never-worsen per-BREP: as1 23168/0 бит-идентичен OFF↔ON;
+  drill_top OFF 60142/17537, ON 61230/16703 (сдвиг против сессии-37
+  61282/16685: canonical pre-pass теперь видит seam-алиасы, как chunked
+  всегда видел — новый честный базлайн).
+- Сьюты: step release 143 + integration (industrial 7 / 101с, nist 19,
+  determinism, seam, tolerance); mesh 290+; topology 274+31; geometry
+  259 — всё green. clippy: converter.rs 200 → 175 упоминаний (−25,
+  новых нет). wasm32 web-deploy check green (1м15с).
+
+## Осталось
+
+- **Rim-vertex source parity** — следующий большой шаг: канонические
+  римы из edge-cache дискретизации → un-gating zero-length skip для
+  plain-билдов принесёт drill_top −2637 bnd (замер этой сессии) без
+  as1-регрессии.
+- 123 группы drill_top (edge_overused/constraint под легализацией) —
+  точные предикаты или переработка split/dup-гардов.
+- Seam-split защита canonical extraction (233 грани легаси-фолбэк);
+  rim-aliasing twins (305) — SSI-реассоциация; булев сплит
+  cylinder-грани; multi-neighbor loop assembly.

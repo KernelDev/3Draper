@@ -749,6 +749,27 @@ CPU-side copies.
       now the top of the canonical-CDT «Осталось». Remaining drill
       groups: 123 (edge_overused/constraint failures persisting
       under legalization).
+      **Progress note (2026-09-18, session 38):** the legacy
+      chunked/cached non-determinism is FIXED — the three converter
+      paths (legacy `triangulate_brep` / detailed
+      `triangulate_brep_detailed` / chunked `prepare_brep_session`) now
+      share ONE `setup_brep_edge_cache` implementation with a
+      seam-first canonical order (the detailed path's old order
+      registered §3.3 seam aliases AFTER the Phase 1/2 heuristics —
+      the coarse coordinate grid re-aliased seam edges and shifted the
+      whole alias graph; GEAR #16033: 2092/685/180 → 2086/682/171).
+      Bit-parity is guarded by the new `chunked_cached_diff` tool
+      (default/ADAPTIVE/CANONICAL modes, per-BREP digests). Lenient
+      extraction bisect: the manifold check and the additive flood are
+      now un-gated for plain builds (inert on the canonical files —
+      pure safety + strictly additive recovery); the zero-length
+      rim-segment skip stays legalized-only — un-gated it gains
+      drill_top −2637 boundary edges (HOUSING 6405→5187) but regresses
+      as1 +239, which is NOT path non-determinism but a genuine
+      canonical-vs-legacy rim mismatch; the follow-up is rim-vertex
+      source parity (canonical rims derived from the edge-cache
+      discretization). New honest canonical-ON baseline: drill_top
+      61230 tris / 16703 bnd.
 - [ ] Analytical `Curve2d` (PCURVE) and exact B-spline SSI.
 - [ ] Property-based testing for topology.
 - [ ] Fuzz testing for STEP parser and NURBS solver.
