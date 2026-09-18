@@ -26,7 +26,7 @@
 use crate::schema::{StepFile, StepValue};
 use draper_geometry::{
     Point3d, Point2d, Direction3d, Vec3d, Surface, Plane, CylinderSurface, SphereSurface,
-    ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface,
+    ConeSurface, TorusSurface, RevolutionSurface, ExtrusionSurface, OffsetSurface,
     NurbsSurface, Curve3d, Curve2d, Line, Circle,  Arc, NurbsCurve,
     Line2d, Circle2d, Ellipse2d, Hyperbola2d, Parabola2d, Nurbs2d,
 };
@@ -11479,9 +11479,15 @@ impl<'a> StepConverter<'a> {
             return Some(surface);
         }
 
-        // Approximate the offset surface using NURBS
-        info!("OFFSET_SURFACE #{}: approximating offset={} as NURBS surface", entity.id, offset_dist);
-        Some(approximate_offset_surface(&surface, offset_dist))
+        // Vision 2036 §1.4: keep OFFSET_SURFACE native — no NURBS approximation.
+        // The dedicated `Surface::Offset` evaluates exactly
+        // (S(u,v) = base.point_at + d·base.normal), triangulates via its
+        // own Steiner grid (§2.3), and projects UVs analytically. The
+        // legacy 16×16 control-point approximation lost curvature, forced
+        // artificial parametric domains, and could not satisfy the
+        // surface.point_at(uv)≈3D edge-UV validation (22nd session).
+        info!("OFFSET_SURFACE #{}: native offset={} (Vision 2036 §1.4)", entity.id, offset_dist);
+        Some(Surface::Offset(OffsetSurface::new(surface, offset_dist)))
     }
 
     /// Find a curve reference from an entity's parameters.
@@ -15226,130 +15232,6 @@ fn solve_linear_system_gauss(a: &[Vec<f64>], b: &[f64]) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// Approximate an offset surface as a NURBS surface.
-///
-/// Given a basis surface and an offset distance, this samples the basis surface
-/// on a grid, offsets each grid point along the surface normal, and creates
-/// a NURBS surface from the offset grid.
-fn approximate_offset_surface(basis_surface: &Surface, distance: f64) -> Surface {
-    let n_u = 16;
-    let n_v = 16;
-
-    // Determine parameter ranges
-    let (u_min, u_max) = surface_param_range_u(basis_surface);
-    let (v_min, v_max) = surface_param_range_v(basis_surface);
-
-    let mut offset_grid: Vec<Vec<Point3d>> = Vec::with_capacity(n_u);
-
-    for i in 0..n_u {
-        let u = u_min + (u_max - u_min) * i as f64 / (n_u - 1) as f64;
-        let mut row = Vec::with_capacity(n_v);
-
-        for j in 0..n_v {
-            let v = v_min + (v_max - v_min) * j as f64 / (n_v - 1) as f64;
-            let p = basis_surface.point_at(u, v);
-            let normal = basis_surface.normal_at(u, v);
-
-            // Offset along the normal
-            row.push(Point3d::new(
-                p.x + distance * normal.x,
-                p.y + distance * normal.y,
-                p.z + distance * normal.z,
-            ));
-        }
-        offset_grid.push(row);
-    }
-
-    // Create a degree-3 NURBS surface with the offset grid as control points
-    let u_degree = 3.min(n_u - 1);
-    let v_degree = 3.min(n_v - 1);
-
-    // Generate clamped knot vectors
-    let u_knots = generate_clamped_knots(n_u, u_degree);
-    let v_knots = generate_clamped_knots(n_v, v_degree);
-
-    // Unit weights
-    let weights = vec![vec![1.0; n_v]; n_u];
-
-    Surface::Nurbs(NurbsSurface {
-        u_degree,
-        v_degree,
-        control_points: offset_grid,
-        weights,
-        u_knots,
-        v_knots,
-        u_closed: false,
-        v_closed: false,
-    })
-}
-
-/// Get the parameter range for u direction of a surface.
-fn surface_param_range_u(surface: &Surface) -> (f64, f64) {
-    match surface {
-        Surface::Nurbs(n) => n.u_range(),
-        Surface::Plane(_) => (0.0, 1.0),
-        Surface::Cylinder(c) => c.u_range(),
-        Surface::Cone(_) => (0.0, 2.0 * std::f64::consts::PI),
-        Surface::Sphere(_) => (0.0, 2.0 * std::f64::consts::PI),
-        Surface::Torus(_) => (0.0, 2.0 * std::f64::consts::PI),
-        Surface::Revolution(_) => (0.0, 2.0 * std::f64::consts::PI),
-        Surface::Extrusion(_) => {
-            if let Surface::Extrusion(e) = surface {
-                e.profile.param_range()
-            } else {
-                (0.0, 1.0)
-            }
-        }
-        Surface::Offset(o) => surface_param_range_u(&o.base),
-        Surface::Ruled(_) => (0.0, 1.0),
-    }
-}
-
-/// Get the parameter range for v direction of a surface.
-fn surface_param_range_v(surface: &Surface) -> (f64, f64) {
-    match surface {
-        Surface::Nurbs(n) => n.v_range(),
-        Surface::Plane(_) => (0.0, 1.0),
-        Surface::Cylinder(_) => (-10.0, 10.0), // Infinite in v
-        Surface::Cone(_) => (-10.0, 10.0),
-        Surface::Sphere(_) => (0.0, std::f64::consts::PI),
-        Surface::Torus(_) => (0.0, 2.0 * std::f64::consts::PI),
-        Surface::Revolution(_) => {
-            if let Surface::Revolution(r) = surface {
-                r.profile.param_range()
-            } else {
-                (0.0, 1.0)
-            }
-        }
-        Surface::Extrusion(_) => (-10.0, 10.0), // Infinite in v (extrusion direction)
-        Surface::Offset(o) => surface_param_range_v(&o.base),
-        Surface::Ruled(_) => (0.0, 1.0),
-    }
-}
-
-/// Generate a clamped uniform knot vector for n control points and given degree.
-fn generate_clamped_knots(n: usize, degree: usize) -> Vec<f64> {
-    let m = n + degree + 1;
-    let mut knots = Vec::with_capacity(m);
-
-    // First degree+1 knots = 0
-    for _ in 0..=degree {
-        knots.push(0.0);
-    }
-
-    // Interior knots: uniformly spaced
-    let n_interior = n - degree - 1;
-    for i in 1..=n_interior {
-        knots.push(i as f64 / (n_interior + 1) as f64);
-    }
-
-    // Last degree+1 knots = 1
-    for _ in 0..=degree {
-        knots.push(1.0);
-    }
-
-    knots
-}
 
 /// Merge holes into an outer polygon using the bridge-edge technique.
 /// For each hole, find the rightmost point of the hole, then find the
@@ -16756,6 +16638,141 @@ mod step_parser_extension_tests {
         let converter = StepConverter::new(&file);
         let surface = converter.extract_surface(1, 0);
         assert!(surface.is_some(), "Should resolve offset surface");
+        // Vision 2036 §1.4: OFFSET_SURFACE stays native — no NURBS approximation.
+        match surface.unwrap() {
+            Surface::Offset(offset) => {
+                assert!(
+                    (offset.distance - 0.5).abs() < 1e-12,
+                    "Offset distance should be 0.5"
+                );
+                assert!(
+                    matches!(*offset.base, Surface::Plane(_)),
+                    "Basis surface should stay the native plane"
+                );
+            }
+            other => panic!(
+                "Expected native Surface::Offset, got {} (NURBS approximation regression)",
+                other.type_name()
+            ),
+        }
+    }
+
+    /// Vision 2036 §1.4: nested OFFSET_SURFACE (offset of an offset) must
+    /// round-trip natively — the legacy path flattened the chain into one
+    /// 16×16 NURBS grid, losing both offsets' exactness.
+    #[test]
+    fn test_offset_surface_nested_parsing() {
+        let step = make_step(
+            "#1 = OFFSET_SURFACE('',#2,0.25,.T.);\n\
+             #2 = OFFSET_SURFACE('',#10,0.5,.T.);\n\
+             #10 = PLANE('',#100);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#101,#102,#103);\n\
+             #101 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #102 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #103 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0).expect("nested offset should resolve");
+        match surface {
+            Surface::Offset(outer) => {
+                assert!((outer.distance - 0.25).abs() < 1e-12);
+                assert!(matches!(*outer.base, Surface::Offset(_)), "inner offset must stay native");
+                // S(0,0) of plane offset twice by +0.75 along Z
+                let p = Surface::Offset(outer).point_at(0.0, 0.0);
+                assert!(
+                    (p.z - 0.75).abs() < 1e-9,
+                    "double offset should lift z to 0.75, got {}",
+                    p.z
+                );
+            }
+            other => panic!("Expected nested Surface::Offset, got {}", other.type_name()),
+        }
+    }
+
+    /// Vision 2036 §1.4: offset of a curved basis (cylinder) evaluates
+    /// exactly — S(u,v) = base + d·n. Radius must grow by |d|.
+    #[test]
+    fn test_offset_surface_cylinder_native_eval() {
+        let step = make_step(
+            "#1 = OFFSET_SURFACE('',#10,2.0,.T.);\n\
+             #10 = CYLINDRICAL_SURFACE('',#100,5.0);\n\
+             #100 = AXIS2_PLACEMENT_3D('',#101,#102,#103);\n\
+             #101 = CARTESIAN_POINT('',(0.0,0.0,0.0));\n\
+             #102 = DIRECTION('',(0.0,0.0,1.0));\n\
+             #103 = DIRECTION('',(1.0,0.0,0.0));"
+        );
+        let file = parse_step(&step).unwrap();
+        let converter = StepConverter::new(&file);
+        let surface = converter.extract_surface(1, 0).expect("cylinder offset should resolve");
+        match surface {
+            Surface::Offset(offset) => {
+                // Cylinder params: u = angle, v = height along the axis.
+                // At u=0, v=1 the base point is (5,0,1) and the outward
+                // normal is +X: the offset point must be exactly (7,0,1).
+                let p = Surface::Offset(offset).point_at(0.0, 1.0);
+                assert!((p.x - 7.0).abs() < 1e-9, "offset x should be 7.0, got {}", p.x);
+                assert!(p.y.abs() < 1e-9, "y should stay on the cylinder seam");
+                assert!((p.z - 1.0).abs() < 1e-9, "z should stay at v=1 height, got {}", p.z);
+            }
+            other => panic!("Expected native Surface::Offset, got {}", other.type_name()),
+        }
+    }
+
+    /// Vision 2036 §1.4: OFFSET_SURFACE full round-trip — export emits the
+    /// OFFSET_SURFACE entity (no NURBS baking), re-parsing yields the native
+    /// `Surface::Offset` with the exact distance and basis type.
+    #[test]
+    fn test_offset_surface_export_round_trip() {
+        use crate::exporter::export_step;
+
+        let basis = Surface::Plane(Plane::xy());
+        let offset_surface = Surface::Offset(OffsetSurface::new(basis, 2.0));
+        let face = Face::new_surface_only(offset_surface);
+        let shell = Shell::new_closed(vec![face]);
+        let solid = Solid::new(shell);
+        let step = export_step(&solid, "offset_roundtrip");
+
+        assert!(
+            step.contains("OFFSET_SURFACE('',#"),
+            "export must emit a native OFFSET_SURFACE entity:\n{}",
+            step
+        );
+        assert!(
+            !step.contains("B_SPLINE_SURFACE"),
+            "offset must not be baked into a NURBS approximation"
+        );
+
+        // Round-trip: re-parse and re-convert the exported file.
+        let file = parse_step(&step).expect("re-parse exported STEP");
+        let converter = StepConverter::new(&file);
+        let offset_entity = file
+            .entities
+            .iter()
+            .find(|e| e.type_name == "OFFSET_SURFACE")
+            .expect("OFFSET_SURFACE entity must survive the round-trip");
+        let surface = converter
+            .extract_surface(offset_entity.id, 0)
+            .expect("converter must resolve the re-parsed OFFSET_SURFACE");
+        match surface {
+            Surface::Offset(offset) => {
+                assert!(
+                    (offset.distance - 2.0).abs() < 1e-12,
+                    "distance must round-trip exactly, got {}",
+                    offset.distance
+                );
+                assert!(
+                    matches!(*offset.base, Surface::Plane(_)),
+                    "basis plane must survive the round-trip"
+                );
+                let p = Surface::Offset(offset).point_at(0.0, 0.0);
+                assert!((p.z - 2.0).abs() < 1e-9, "z must be 2.0, got {}", p.z);
+            }
+            other => panic!(
+                "round-trip must stay native Surface::Offset, got {}",
+                other.type_name()
+            ),
+        }
     }
 
     // ─── 3.3.6 RECTANGULAR_TRIMMED_SURFACE ─────────
@@ -16878,33 +16895,22 @@ mod step_parser_extension_tests {
 
     #[test]
     fn test_offset_surface_plane() {
+        // Vision 2036 §1.4: the native path offsets a plane EXACTLY —
+        // every point of the offset surface sits at z = distance, and the
+        // normal equals the base normal (Gauss map is preserved).
         let plane = Plane::xy();
-        let offset = approximate_offset_surface(&Surface::Plane(plane), 1.0);
-        if let Surface::Nurbs(nurbs) = &offset {
-            assert!(nurbs.u_degree >= 1);
-            assert!(nurbs.v_degree >= 1);
-            let (u_min, u_max) = nurbs.u_range();
-            let (v_min, v_max) = nurbs.v_range();
-            let p_mid = offset.point_at((u_min + u_max) / 2.0, (v_min + v_max) / 2.0);
-            assert!((p_mid.z - 1.0).abs() < 0.1, "Offset plane z should be ~1.0, got {}", p_mid.z);
-        } else {
-            panic!("Expected NURBS surface for offset plane");
-        }
-    }
-
-    #[test]
-    fn test_generate_clamped_knots() {
-        let knots = generate_clamped_knots(6, 3);
-        assert_eq!(knots.len(), 10);
-        for i in 0..=3 {
-            assert!((knots[i] - 0.0).abs() < 1e-10, "First 4 knots should be 0");
-        }
-        for i in 6..=9 {
-            assert!((knots[i] - 1.0).abs() < 1e-10, "Last 4 knots should be 1");
-        }
-        for i in 1..knots.len() {
-            assert!(knots[i] >= knots[i-1] - 1e-10, "Knots should be non-decreasing");
-        }
+        let offset = Surface::Offset(OffsetSurface::new(Surface::Plane(plane), 1.0));
+        let p_mid = offset.point_at(0.37, 0.61);
+        assert!(
+            (p_mid.z - 1.0).abs() < 1e-12,
+            "Offset plane z should be exactly 1.0, got {}",
+            p_mid.z
+        );
+        let n = offset.normal_at(0.37, 0.61);
+        assert!(n.z > 0.999999, "Offset normal should equal base normal (+Z)");
+        // Offsetting in the opposite direction must sink below the base.
+        let below = Surface::Offset(OffsetSurface::new(Surface::Plane(Plane::xy()), -2.0));
+        assert!((below.point_at(0.0, 0.0).z + 2.0).abs() < 1e-12);
     }
 
     // ─────────────────────────────────────────────────────────────────────

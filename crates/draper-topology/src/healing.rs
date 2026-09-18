@@ -48,6 +48,7 @@ use draper_geometry::{
     CylinderSurface, Direction3d, Plane, Point3d, Surface, Vec3d,
     ToleranceContext,
     SphereSurface, ConeSurface, TorusSurface, NurbsSurface,
+    Curve3d, NurbsCurve, intersect_surfaces,
 };
 
 // ============================================================
@@ -105,6 +106,30 @@ pub struct HealingParams {
     /// as a floor for all entity tolerances during propagation.
     pub tolerance_context: Option<ToleranceContext>,
 
+    /// Vision 2036 §1.4 — surface extension & edge recovery via SSI.
+    ///
+    /// When enabled, pairs of boundary edges (edges referenced by exactly
+    /// one coedge) from *different* faces whose surfaces genuinely intersect
+    /// are re-bound to a single shared edge whose 3D curve is the exact
+    /// surface-surface intersection curve (Newton-refined on both surfaces).
+    /// This closes micro-gaps by GEOMETRY RECONSTRUCTION instead of
+    /// topological snapping (`close_gaps`) or face removal, and recovers
+    /// lost edges between adjacent faces.
+    ///
+    /// The phase is strictly validated: an SSI branch must pass within
+    /// `gap_tolerance` of BOTH edge midpoints and cover both edges' extents,
+    /// and BOTH edges must be off the other face's surface by ≥ 50% of
+    /// `gap_tolerance` (mangled seams only — normal shared seams stay with
+    /// `close_gaps`). Same-surface pairs (degenerate SSI) are skipped, and
+    /// distinct surface pairs are intersected once (cache).
+    ///
+    /// OPT-IN: no preset enables this (each SSI march costs 50–500ms;
+    /// dirty files with hundreds of distinct mangled surface pairs would
+    /// stall the pipeline — activation criteria need per-corpus tuning).
+    /// Enable explicitly for exact-seam workflows:
+    /// `HealingParams { recover_edges_via_ssi: true, .. }`.
+    pub recover_edges_via_ssi: bool,
+
     /// Base geometric tolerance.
     pub tolerance: f64,
 }
@@ -123,6 +148,7 @@ impl Default for HealingParams {
             fix_self_intersections: false,
             remove_inconsistent_normals: false,
             tolerance_context: None,
+            recover_edges_via_ssi: false,
             tolerance: 1e-6,
         }
     }
@@ -164,6 +190,7 @@ impl HealingParams {
             fix_self_intersections: false, // Expensive, may remove geometry
             remove_inconsistent_normals: false, // May remove geometry
             tolerance_context: None,
+            recover_edges_via_ssi: false, // Conservative: geometry stays as-is
             tolerance: 1e-6,
         }
     }
@@ -204,6 +231,10 @@ impl HealingParams {
             fix_self_intersections: true,
             remove_inconsistent_normals: true,
             tolerance_context: None,
+            // §1.4 SSI edge recovery stays OPT-IN (see field docs) — the
+            // aggressive preset must not add per-seam SSI marching cost to
+            // every STEP import.
+            recover_edges_via_ssi: false,
             tolerance: 1e-6,
         }
     }
@@ -294,6 +325,9 @@ pub struct HealingReport {
     pub tolerances_propagated: u32,
     /// Number of self-intersections detected.
     pub self_intersections: u32,
+    /// Vision 2036 §1.4: number of boundary edge pairs re-bound to an
+    /// exact surface-surface intersection curve.
+    pub edges_recovered_via_ssi: u32,
     /// Human-readable messages describing each operation.
     pub messages: Vec<String>,
 }
@@ -310,6 +344,7 @@ impl HealingReport {
             + self.faces_merged
             + self.tolerances_propagated
             + self.self_intersections
+            + self.edges_recovered_via_ssi
     }
 
     fn add_msg(&mut self, msg: impl Into<String>) {
@@ -725,36 +760,44 @@ fn heal_staged(
     // 1. Mark degenerate edges
     mark_degenerate_edges(&mut staged, params, &mut report);
 
-    // 2. Close gaps
+    // 2. Recover lost shared edges via surface-surface intersection
+    //    (Vision 2036 §1.4). Runs BEFORE close_gaps: pairs whose surfaces
+    //    genuinely intersect get an exact reconstructed curve; close_gaps
+    //    then handles the remaining coincident pairs topologically.
+    if params.recover_edges_via_ssi {
+        recover_edges_via_ssi(&mut staged, params, &mut report);
+    }
+
+    // 3. Close gaps
     close_gaps(&mut staged, params, &mut report);
 
-    // 3. Fill small holes
+    // 4. Fill small holes
     fill_holes(&mut staged, params, &mut report);
 
-    // 4. Stitch collinear edges
+    // 5. Stitch collinear edges
     if params.stitch_edges {
         stitch_collinear_edges(&mut staged, params, &mut report);
     }
 
-    // 5. Merge coplanar and co-cylindrical faces
+    // 6. Merge coplanar and co-cylindrical faces
     if params.merge_faces {
         merge_faces(&mut staged, params, &mut report);
     }
 
-    // 6. Remove small-feature faces
+    // 7. Remove small-feature faces
     remove_small_features(&mut staged, params, &mut report);
 
-    // 7. Fix normal orientation for closed shells
+    // 8. Fix normal orientation for closed shells
     if params.fix_normals && staged.shell.closed {
         fix_normal_orientation(&mut staged, params, &mut report, is_void_shell);
     }
 
-    // 8. Detect and fix self-intersections
+    // 9. Detect and fix self-intersections
     if params.fix_self_intersections {
         fix_self_intersections_heal(&mut staged, params, &mut report);
     }
 
-    // 9. Remove faces with inconsistent normals
+    // 10. Remove faces with inconsistent normals
     if params.remove_inconsistent_normals {
         remove_inconsistent_normal_faces(&mut staged, params, &mut report);
     }
@@ -948,6 +991,775 @@ fn mark_degenerate_edges(staged: &mut StagedShell, params: &HealingParams, repor
     if count > 0 {
         report.degenerate_edges_marked = count;
         report.add_msg(format!("Marked {} degenerate edges", count));
+    }
+}
+
+// ============================================================
+// Vision 2036 §1.4 — SSI edge recovery & surface extension
+// ============================================================
+
+/// Upper bound on SSI computations per healing pass. Each computation is
+/// a full surface-surface intersection (marching + Newton refinement) —
+/// pathological shells with thousands of boundary edges must not turn
+/// healing into an O(n²·SSI) stall. The off-surface cross-check below
+/// makes this cap a pure safety net (normal shared seams never reach the
+/// SSI march). Pairs are processed in deterministic (sorted) order; the
+/// excess is left to `close_gaps`.
+const MAX_SSI_RECOVERY_PAIRS: usize = 256;
+
+/// Number of curve samples per boundary edge for the off-surface checks.
+const EDGE_SAMPLE_COUNT: usize = 5;
+
+/// Geometric snapshot of a boundary edge (read-only pass input).
+struct BoundaryEdgeGeom {
+    /// Owning face index (the face whose coedge references the edge).
+    face: usize,
+    start: Point3d,
+    end: Point3d,
+    mid: Point3d,
+    /// Curve samples at t = 0, 0.25, 0.5, 0.75, 1 (off-surface checks).
+    samples: Vec<Point3d>,
+    /// Polyline-approximated length of the edge.
+    length: f64,
+    tolerance: f64,
+}
+
+/// A validated SSI recovery plan (computed read-only, applied mutably).
+struct SsiRecoveryPlan {
+    /// Canonical edge id kept after the merge (edge A's id).
+    keep_id: TopoId,
+    /// Edge id re-bound to `keep_id` (edge B's id).
+    drop_id: TopoId,
+    /// The recovered shared edge (id = `keep_id`, curve = SSI curve).
+    recovered: Edge,
+    /// Edge B's geometric endpoints (orientation rebind input).
+    drop_start: Point3d,
+    drop_end: Point3d,
+}
+
+/// Reconstruct lost shared edges via surface-surface intersection
+/// (Vision 2036 §1.4: "surface-surface intersection for edge recovery" +
+/// "surface extension to close micro-gaps").
+///
+/// For each pair of boundary edges from different faces whose surfaces
+/// genuinely intersect near the gap, the exact SSI curve (Newton-refined
+/// on BOTH surfaces by `intersect_surfaces`) replaces both approximated
+/// boundary geometries. Both faces end up referencing ONE canonical edge
+/// with identical geometry — the seam becomes watertight BY CONSTRUCTION
+/// (edge cache dedup by id) and lies exactly on both surfaces (the
+/// "surface extension" closes the micro-gap without removing faces).
+///
+/// Validation gates (all must pass, else the pair is left untouched):
+/// 1. Edge midpoints closer than `gap_tolerance` (same pairing filter as
+///    `close_gaps` — SSI recovery is a strictly better fix for the same
+///    pairs, when surfaces allow it).
+/// 2. The two faces carry surfaces and they are not approximately equal
+///    (same-surface SSI is degenerate — those pairs belong to
+///    `close_gaps`' topological snap).
+/// 3. An SSI branch (fitted B-spline, or an analytic line for straight
+///    branches) passes within `gap_tolerance` of BOTH edge midpoints.
+/// 4. The branch covers both edges' extents: all four endpoint
+///    projections lie on the curve, the two "low" projections and the two
+///    "high" projections each cluster within 2×`gap_tolerance` (the edges
+///    overlap the same SSI segment), and the trimmed length is a sane
+///    fraction of the original edge lengths.
+///
+/// Determinism: boundary ids are processed in sorted order and pairs in
+/// sorted (a, b) order — the recovery is a pure function of the input
+/// topology and geometry.
+fn recover_edges_via_ssi(staged: &mut StagedShell, params: &HealingParams, report: &mut HealingReport) {
+    let gap_tol = params.gap_tolerance();
+    if !(gap_tol > 0.0) || !gap_tol.is_finite() {
+        return;
+    }
+    let gap_tol_sq = gap_tol * gap_tol;
+
+    // ── Pass 1 (read): boundary edges from coedge use counts ──
+    let mut coedge_use: std::collections::HashMap<TopoId, u32> = std::collections::HashMap::new();
+    for (_fi, face) in staged.shell.faces.iter().enumerate() {
+        let mut visit = |wire: &Wire| {
+            for coedge in &wire.coedges {
+                *coedge_use.entry(coedge.edge).or_insert(0) += 1;
+            }
+        };
+        if let Some(ref w) = face.outer_wire {
+            visit(w);
+        }
+        for w in &face.inner_wires {
+            visit(w);
+        }
+    }
+
+    let mut boundary_ids: Vec<TopoId> = coedge_use
+        .iter()
+        .filter(|(_, &count)| count == 1)
+        .map(|(&id, _)| id)
+        .collect();
+    boundary_ids.sort_unstable();
+    if boundary_ids.is_empty() {
+        return;
+    }
+    let boundary_set: std::collections::HashSet<TopoId> =
+        boundary_ids.iter().copied().collect();
+
+    // Geometry snapshot from the working lists (first instance wins —
+    // shared ids carry identical geometry by construction).
+    let mut geom: std::collections::HashMap<TopoId, BoundaryEdgeGeom> =
+        std::collections::HashMap::new();
+    for (fi, edges) in staged.working.iter().enumerate() {
+        for edge in edges.iter() {
+            if !boundary_set.contains(&edge.id) || geom.contains_key(&edge.id) {
+                continue;
+            }
+            let (start, end) = match (edge.start_point(), edge.end_point()) {
+                (Some(s), Some(e)) => (s, e),
+                _ => continue, // no evaluable geometry — close_gaps territory
+            };
+            let mid = Point3d::new(
+                (start.x + end.x) * 0.5,
+                (start.y + end.y) * 0.5,
+                (start.z + end.z) * 0.5,
+            );
+            let samples: Vec<Point3d> = (0..EDGE_SAMPLE_COUNT)
+                .map(|i| {
+                    edge.point_at(i as f64 / (EDGE_SAMPLE_COUNT - 1) as f64)
+                        .unwrap_or(mid)
+                })
+                .collect();
+            let mut length = start.distance_to(&end);
+            if let Some(curve) = &edge.curve {
+                // Chord-corrected length: sample the curve at 4 interior
+                // parameters (cheap polyline approximation).
+                let mut prev = start;
+                let mut total = 0.0;
+                for i in 1..8 {
+                    let t = i as f64 / 8.0;
+                    let p = edge.point_at(t).unwrap_or(prev);
+                    total += prev.distance_to(&p);
+                    prev = p;
+                }
+                total += prev.distance_to(&end);
+                if total > length {
+                    length = total;
+                }
+                let _ = curve;
+            }
+            geom.insert(
+                edge.id,
+                BoundaryEdgeGeom {
+                    face: fi,
+                    start,
+                    end,
+                    mid,
+                    samples,
+                    length,
+                    tolerance: edge.tolerance,
+                },
+            );
+        }
+    }
+
+    // ── Pass 2 (read): candidate pairs (different faces, midpoints close,
+    // seam-shaped) ──
+    // Cheap pre-filters run BEFORE any SSI march (a full SSI costs
+    // 50–120ms — 512 of them would stall healing for a minute per shell):
+    // a genuine lost-seam pair runs PARALLEL and its two edges OVERLAP
+    // along their common direction. Corner meetings (perpendicular edges
+    // of three faces meeting at a vertex) and partial touches die here
+    // for the cost of two dot products.
+    let mut pairs: Vec<(TopoId, TopoId)> = Vec::new();
+    for i in 0..boundary_ids.len() {
+        let id_a = boundary_ids[i];
+        let ga = match geom.get(&id_a) {
+            Some(g) => g,
+            None => continue,
+        };
+        for j in (i + 1)..boundary_ids.len() {
+            let id_b = boundary_ids[j];
+            let gb = match geom.get(&id_b) {
+                Some(g) => g,
+                None => continue,
+            };
+            if ga.face == gb.face {
+                continue;
+            }
+            if ga.mid.distance_sq_to(&gb.mid) >= gap_tol_sq {
+                continue;
+            }
+            if !seam_candidate(ga, gb) {
+                continue;
+            }
+            pairs.push((id_a, id_b));
+        }
+    }
+    // (pairs are already in sorted (a, b) order — deterministic.)
+    if pairs.is_empty() {
+        return;
+    }
+
+    // ── Pass 3 (read): SSI computation + validation → recovery plans ──
+    let mut plans: Vec<SsiRecoveryPlan> = Vec::new();
+    let mut ssi_computed = 0usize;
+    let mut ssi_cache: Vec<(Surface, Surface, draper_geometry::SurfaceSurfaceIntersection)> =
+        Vec::new();
+    for (id_a, id_b) in &pairs {
+        if ssi_computed >= MAX_SSI_RECOVERY_PAIRS {
+            log::warn!(
+                "SSI edge recovery: capped at {} pairs ({} left to close_gaps)",
+                MAX_SSI_RECOVERY_PAIRS,
+                pairs.len() - ssi_computed
+            );
+            break;
+        }
+        let ga = &geom[id_a];
+        let gb = &geom[id_b];
+        let face_a = &staged.shell.faces[ga.face];
+        let face_b = &staged.shell.faces[gb.face];
+        let (surf_a, surf_b) = match (&face_a.surface, &face_b.surface) {
+            (Some(a), Some(b)) => (a, b),
+            _ => continue,
+        };
+        // Same-surface pairs: degenerate SSI (a surface intersects itself
+        // everywhere) — those pairs belong to close_gaps' topological snap.
+        if surfaces_approx_equal(surf_a, surf_b, gap_tol) {
+            continue;
+        }
+        // OFF-SURFACE CROSS-CHECK (the cost gate): a NORMAL shared seam's
+        // boundary edges already lie on BOTH surfaces (within tolerance) —
+        // close_gaps' topological snap is the correct, cheap fix for them
+        // and no SSI is ever computed (drill_top: 500+ such pairs per
+        // shell, each would cost 50–120ms of marching). SSI recovery is
+        // reserved for MANGLED seams: each edge is off the OTHER face's
+        // surface by a MEANINGFUL fraction of the gap tolerance (≥ 50%) —
+        // sub-tolerance wobble (converter float drift ~1e-6) is not worth
+        // reconstructing and must not reach the SSI march.
+        let off_tol = gap_tol * 0.5;
+        if edge_lies_on_surface(&ga.samples, surf_b, off_tol) {
+            continue; // edge A already tracks face B's surface — normal seam
+        }
+        if edge_lies_on_surface(&gb.samples, surf_a, off_tol) {
+            continue; // edge B already tracks face A's surface — normal seam
+        }
+        // Surface-pair SSI cache: mangled seams repeat the same surface
+        // pair (e.g. 60 copies of one cylinder×plane junction) — compute
+        // the intersection ONCE per distinct pair (order-insensitive) and
+        // validate every edge pair against the cached branches.
+        let cached_idx = ssi_cache.iter().position(|(sa, sb, _)| {
+            (surfaces_approx_equal(sa, surf_a, gap_tol)
+                && surfaces_approx_equal(sb, surf_b, gap_tol))
+                || (surfaces_approx_equal(sa, surf_b, gap_tol)
+                    && surfaces_approx_equal(sb, surf_a, gap_tol))
+        });
+        let ssi = match cached_idx {
+            Some(i) => &ssi_cache[i].2,
+            None => {
+                ssi_computed += 1;
+                let ssi_tol = gap_tol.max(ga.tolerance).max(gb.tolerance);
+                let result = intersect_surfaces(surf_a, surf_b, ssi_tol);
+                ssi_cache.push((surf_a.clone(), surf_b.clone(), result));
+                &ssi_cache.last().expect("just pushed").2
+            }
+        };
+        if let Some(plan) = build_recovery_plan(*id_a, *id_b, ga, gb, ssi, gap_tol) {
+            plans.push(plan);
+        }
+    }
+
+    // ── Pass 4 (mut): apply plans — working lists + coedge rebind ──
+    for plan in &plans {
+        // 4a. Every working-list entry for either id becomes the recovered
+        //     edge (identical clones → rebuild_store dedups them into ONE
+        //     canonical edge; the edge cache then guarantees bit-identical
+        //     discretization on both faces — watertight by construction).
+        for edges in staged.working.iter_mut() {
+            for e in edges.iter_mut() {
+                if e.id == plan.keep_id || e.id == plan.drop_id {
+                    *e = plan.recovered.clone();
+                }
+            }
+        }
+        // 4b. Re-bind the dropped edge's coedges to the kept id, correcting
+        //     each coedge's orientation flag so the wire's geometric
+        //     traversal direction is preserved on the new curve.
+        let new_start = plan.recovered.start_vertex_point.unwrap_or(plan.drop_start);
+        let new_end = plan.recovered.end_vertex_point.unwrap_or(plan.drop_end);
+        rebind_coedge_with_orientation(
+            &mut staged.shell.faces,
+            plan.drop_id,
+            plan.keep_id,
+            plan.drop_start,
+            plan.drop_end,
+            new_start,
+            new_end,
+            gap_tol,
+        );
+    }
+
+    if !plans.is_empty() {
+        report.edges_recovered_via_ssi = plans.len() as u32;
+        report.add_msg(format!(
+            "Recovered {} edge(s) via exact surface-surface intersection (§1.4)",
+            plans.len()
+        ));
+    }
+    let _ = ssi_computed; // (cap accounting — see MAX_SSI_RECOVERY_PAIRS)
+}
+
+/// Whether every sample point lies on the surface within `tol` — i.e. the
+/// curve tracks the surface (a legitimate boundary of a face on it).
+fn edge_lies_on_surface(samples: &[Point3d], surface: &Surface, tol: f64) -> bool {
+    samples.iter().all(|p| {
+        let (u, v) = surface.project_point(p);
+        surface.point_at(u, v).distance_to(p) <= tol
+    })
+}
+
+/// Cheap geometric pre-filter: is this boundary pair SEAM-SHAPED?
+///
+/// A genuine lost shared edge consists of two boundary edges that run
+/// parallel and overlap along their common direction. This rejects the
+/// bulk of midpoint-near pairs (corner meetings of three faces, crossing
+/// diagonals, partial touches) before any expensive SSI computation.
+fn seam_candidate(ga: &BoundaryEdgeGeom, gb: &BoundaryEdgeGeom) -> bool {
+    let da = Vec3d::new(
+        ga.end.x - ga.start.x,
+        ga.end.y - ga.start.y,
+        ga.end.z - ga.start.z,
+    );
+    let db = Vec3d::new(
+        gb.end.x - gb.start.x,
+        gb.end.y - gb.start.y,
+        gb.end.z - gb.start.z,
+    );
+    let la = da.length();
+    let lb = db.length();
+    if la < 1e-12 || lb < 1e-12 {
+        return false;
+    }
+    // 1. Parallel chords (seams run along the same direction).
+    let dot = (da.x * db.x + da.y * db.y + da.z * db.z) / (la * lb);
+    if dot.abs() < 0.9 {
+        return false;
+    }
+    // 2. Extent overlap along edge A's direction: project B's endpoints
+    //    onto A's chord and require a substantial 1-D interval overlap
+    //    (the edges cover the same span of the seam, not just touch).
+    let ua = Vec3d::new(da.x / la, da.y / la, da.z / la);
+    let s_b0 = (gb.start.x - ga.start.x) * ua.x
+        + (gb.start.y - ga.start.y) * ua.y
+        + (gb.start.z - ga.start.z) * ua.z;
+    let s_b1 = (gb.end.x - ga.start.x) * ua.x
+        + (gb.end.y - ga.start.y) * ua.y
+        + (gb.end.z - ga.start.z) * ua.z;
+    let (b_lo, b_hi) = if s_b0 <= s_b1 {
+        (s_b0, s_b1)
+    } else {
+        (s_b1, s_b0)
+    };
+    let overlap = b_hi.min(la) - b_lo.max(0.0);
+    if overlap < 0.5 * la.min(lb) {
+        return false;
+    }
+    true
+}
+
+/// Build a validated recovery plan from an SSI result: find the branch
+/// that passes near both edge midpoints, trim it to the edges' extents,
+/// and construct the recovered shared edge.
+fn build_recovery_plan(
+    id_a: TopoId,
+    id_b: TopoId,
+    ga: &BoundaryEdgeGeom,
+    gb: &BoundaryEdgeGeom,
+    ssi: &draper_geometry::SurfaceSurfaceIntersection,
+    gap_tol: f64,
+) -> Option<SsiRecoveryPlan> {
+    // Gather candidate curves: fitted B-splines (primary) + straight
+    // polyline branches as INFINITE analytic lines (plane∩cylinder and
+    // plane∩plane seams are lines — the marching polyline's extent may be
+    // shorter than the gap, but the underlying intersection line is
+    // infinite; the Line candidate covers the full gap extent while a
+    // too-short fitted B-spline is rejected by the domain gate).
+    enum BranchCurve {
+        Nurbs(NurbsCurve),
+        Line(draper_geometry::Line),
+    }
+    let mut branches: Vec<BranchCurve> = Vec::new();
+    for nurbs in &ssi.b_spline_curves {
+        branches.push(BranchCurve::Nurbs(nurbs.clone()));
+    }
+    for polyline in &ssi.polylines {
+        if let Some(line) = straight_polyline_line(polyline, gap_tol) {
+            branches.push(BranchCurve::Line(line));
+        }
+    }
+    if branches.is_empty() {
+        return None;
+    }
+
+    let validate_tol = gap_tol.max(ga.tolerance).max(gb.tolerance);
+    let mut best: Option<(f64, SsiRecoveryPlan)> = None;
+
+    for branch in branches {
+        // Curve param range + point/param evaluation helpers.
+        let (t_lo_domain, t_hi_domain) = match &branch {
+            BranchCurve::Nurbs(n) => nurbs_param_range(n),
+            BranchCurve::Line(_) => (f64::MIN, f64::MAX),
+        };
+        let eval = |t: f64| -> Point3d {
+            match &branch {
+                BranchCurve::Nurbs(n) => Curve3d::Nurbs(n.clone()).point_at(t),
+                BranchCurve::Line(l) => Curve3d::Line(l.clone()).point_at(t),
+            }
+        };
+        let project = |p: &Point3d| -> (f64, Point3d, bool) {
+            match &branch {
+                BranchCurve::Nurbs(n) => nurbs_project(n, p),
+                BranchCurve::Line(l) => {
+                    let d = Vec3d::new(l.direction.x, l.direction.y, l.direction.z);
+                    let dx = p.x - l.origin.x;
+                    let dy = p.y - l.origin.y;
+                    let dz = p.z - l.origin.z;
+                    let t = d.x * dx + d.y * dy + d.z * dz;
+                    (t, l.point_at(t), false) // lines are infinite — never clamped
+                }
+            }
+        };
+
+        // Gate 3: the branch must pass near BOTH midpoints.
+        let (_t_mid_a, p_mid_a, _) = project(&ga.mid);
+        let dist_a = p_mid_a.distance_to(&ga.mid);
+        let (_t_mid_b, p_mid_b, _) = project(&gb.mid);
+        let dist_b = p_mid_b.distance_to(&gb.mid);
+        if dist_a > validate_tol || dist_b > validate_tol {
+            continue;
+        }
+
+        // Gate 4: endpoint projections cover both edges' extents.
+        let (t_a0, _, clamped_a0) = project(&ga.start);
+        let (t_a1, _, clamped_a1) = project(&ga.end);
+        let (t_b0, _, clamped_b0) = project(&gb.start);
+        let (t_b1, _, clamped_b1) = project(&gb.end);
+        // All projections must be inside the curve's finite domain — a
+        // clamped projection means the endpoint lies BEYOND the fitted
+        // branch (e.g. a marching polyline shorter than the gap): the
+        // branch does not span the gap region.
+        if matches!(branch, BranchCurve::Nurbs(_)) {
+            let margin = (t_hi_domain - t_lo_domain) * 1e-9;
+            let spans_gap = [t_a0, t_a1, t_b0, t_b1]
+                .iter()
+                .all(|&t| t >= t_lo_domain - margin && t <= t_hi_domain + margin)
+                && !(clamped_a0 || clamped_a1 || clamped_b0 || clamped_b1);
+            if !spans_gap {
+                continue;
+            }
+        }
+        let mut ts = [t_a0, t_a1, t_b0, t_b1];
+        ts.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        let (t_lo, t_hi) = (ts[0], ts[3]);
+        if !(t_hi > t_lo) {
+            continue; // degenerate zero-length recovery
+        }
+        // The two low-end and two high-end projections must each cluster:
+        // the edges overlap the SAME SSI segment (not different parts of
+        // an infinite intersection curve).
+        if (ts[1] - ts[0]).abs() > (t_hi - t_lo) * 0.5 || (ts[3] - ts[2]).abs() > (t_hi - t_lo) * 0.5 {
+            continue;
+        }
+
+        // Trimmed curve length sanity vs the original edges.
+        let mut trimmed_len = 0.0;
+        {
+            let n = 16;
+            let mut prev = eval(t_lo);
+            for i in 1..=n {
+                let t = t_lo + (t_hi - t_lo) * (i as f64 / n as f64);
+                let p = eval(t);
+                trimmed_len += prev.distance_to(&p);
+                prev = p;
+            }
+        }
+        let ref_len = ga.length.max(gb.length);
+        if trimmed_len < ref_len * 0.25 || trimmed_len > ref_len * 4.0 {
+            continue;
+        }
+
+        // Build the recovered edge: SSI curve trimmed to [t_lo, t_hi],
+        // vertex points = midpoints of the paired endpoint projections.
+        // The low-end pair: the two endpoint projections closest to t_lo.
+        let lo_pair = [(t_a0, ga.start), (t_b0, gb.start)];
+        let hi_pair = [(t_a1, ga.end), (t_b1, gb.end)];
+        // Order each pair so the smaller projection comes first.
+        let (lo_first, lo_second) = if lo_pair[0].0 <= lo_pair[1].0 {
+            (lo_pair[0], lo_pair[1])
+        } else {
+            (lo_pair[1], lo_pair[0])
+        };
+        let (hi_first, hi_second) = if hi_pair[0].0 <= hi_pair[1].0 {
+            (hi_pair[0], hi_pair[1])
+        } else {
+            (hi_pair[1], hi_pair[0])
+        };
+        // The smallest two of all four must be the lo pair, the largest
+        // two the hi pair (edges anti-parallel would swap them).
+        let lo_pts = if lo_first.0 <= hi_first.0 {
+            [lo_first.1, lo_second.1]
+        } else {
+            [hi_first.1, hi_second.1]
+        };
+        let hi_pts = if lo_first.0 <= hi_first.0 {
+            [hi_first.1, hi_second.1]
+        } else {
+            [lo_first.1, lo_second.1]
+        };
+        // Cluster check (geometric): the paired endpoints must be near
+        // each other (they bound the same micro-gap corner).
+        if lo_pts[0].distance_to(&lo_pts[1]) > 2.0 * gap_tol + ga.length * 1e-6 {
+            continue;
+        }
+        if hi_pts[0].distance_to(&hi_pts[1]) > 2.0 * gap_tol + ga.length * 1e-6 {
+            continue;
+        }
+        // Vertex points: average each corner pair, then PROJECT the average
+        // onto the SSI curve — the authoritative endpoints land exactly on
+        // both surfaces (the whole point of §1.4 exact recovery).
+        let lo_avg = Point3d::new(
+            (lo_pts[0].x + lo_pts[1].x) * 0.5,
+            (lo_pts[0].y + lo_pts[1].y) * 0.5,
+            (lo_pts[0].z + lo_pts[1].z) * 0.5,
+        );
+        let hi_avg = Point3d::new(
+            (hi_pts[0].x + hi_pts[1].x) * 0.5,
+            (hi_pts[0].y + hi_pts[1].y) * 0.5,
+            (hi_pts[0].z + hi_pts[1].z) * 0.5,
+        );
+        let (_, new_start, _) = project(&lo_avg);
+        let (_, new_end, _) = project(&hi_avg);
+
+        // The param range must place point_at(t_lo) near new_start.
+        let p_lo = eval(t_lo);
+        let p_hi = eval(t_hi);
+        if p_lo.distance_to(&new_start) > 2.0 * gap_tol || p_hi.distance_to(&new_end) > 2.0 * gap_tol {
+            continue;
+        }
+
+        let recovered_curve = match &branch {
+            BranchCurve::Nurbs(n) => Curve3d::Nurbs(n.clone()),
+            BranchCurve::Line(l) => Curve3d::Line(l.clone()),
+        };
+        let recovered = Edge {
+            id: id_a,
+            curve: Some(recovered_curve),
+            param_range: (t_lo, t_hi),
+            vertex_start: None,
+            vertex_end: None,
+            start_vertex_point: Some(new_start),
+            end_vertex_point: Some(new_end),
+            forward: true,
+            tolerance: gap_tol.max(ga.tolerance).max(gb.tolerance),
+            degenerate: false,
+            step_entity_id: None,
+        };
+
+        let score = dist_a + dist_b;
+        if best.as_ref().map(|(s, _)| score < *s).unwrap_or(true) {
+            best = Some((
+                score,
+                SsiRecoveryPlan {
+                    keep_id: id_a,
+                    drop_id: id_b,
+                    recovered,
+                    drop_start: gb.start,
+                    drop_end: gb.end,
+                },
+            ));
+        }
+    }
+
+    best.map(|(_, plan)| plan)
+}
+
+/// NURBS curve valid parameter range: [knots[degree], knots[len-1-degree]].
+fn nurbs_param_range(n: &NurbsCurve) -> (f64, f64) {
+    let p = n.degree;
+    if n.knots.len() > p {
+        (n.knots[p], n.knots[n.knots.len() - 1 - p])
+    } else {
+        (0.0, 1.0)
+    }
+}
+
+/// Project a point onto a NURBS curve: dense sampling + ternary search
+/// refinement around the best sample. Returns (t, point_at(t), clamped)
+/// where `clamped` is true when the closest point hit the parameter
+/// domain boundary — i.e. the true projection lies BEYOND the fitted
+/// curve's extent (the caller treats this as "outside the domain").
+fn nurbs_project(n: &NurbsCurve, point: &Point3d) -> (f64, Point3d, bool) {
+    let (t0, t1) = nurbs_param_range(n);
+    let curve = Curve3d::Nurbs(n.clone());
+    let n_samples = 96usize;
+    let mut best_t = t0;
+    let mut best_d = f64::MAX;
+    let step = (t1 - t0) / n_samples as f64;
+    for i in 0..=n_samples {
+        let t = t0 + step * i as f64;
+        let p = curve.point_at(t);
+        let d = p.distance_sq_to(point);
+        if d < best_d {
+            best_d = d;
+            best_t = t;
+        }
+    }
+    // Clamped: the unconstrained projection lies beyond the domain —
+    // the sample nearest the query point is a domain boundary sample
+    // AND the boundary point is not already (near-)coincident with the
+    // query (tiny curves legitimately project onto boundaries).
+    let boundary_eps = (t1 - t0) * 1e-9;
+    let clamped = (best_t - t0).abs() <= boundary_eps || (t1 - best_t).abs() <= boundary_eps;
+    // Ternary refinement in [best_t - step, best_t + step].
+    let mut lo = (best_t - step).max(t0);
+    let mut hi = (best_t + step).min(t1);
+    for _ in 0..40 {
+        if hi - lo < 1e-12 * (t1 - t0).abs().max(1e-12) {
+            break;
+        }
+        let m1 = lo + (hi - lo) / 3.0;
+        let m2 = hi - (hi - lo) / 3.0;
+        let d1 = curve.point_at(m1).distance_sq_to(point);
+        let d2 = curve.point_at(m2).distance_sq_to(point);
+        if d1 < d2 {
+            hi = m2;
+        } else {
+            lo = m1;
+        }
+    }
+    let t = (lo + hi) * 0.5;
+    let clamped = clamped && curve.point_at(t).distance_to(point) > 1e-9;
+    (t, curve.point_at(t), clamped)
+}
+
+/// If a polyline is straight within `tol` (max deviation from the chord),
+/// return the exact `Line` through its endpoints.
+fn straight_polyline_line(points: &[Point3d], tol: f64) -> Option<draper_geometry::Line> {
+    if points.len() < 2 {
+        return None;
+    }
+    let a = &points[0];
+    let b = &points[points.len() - 1];
+    let chord = Vec3d::new(b.x - a.x, b.y - a.y, b.z - a.z);
+    let len = chord.length();
+    if len < 1e-12 {
+        return None;
+    }
+    let dir = Direction3d::new(chord.x / len, chord.y / len, chord.z / len)?;
+    for p in points {
+        // Perpendicular distance to the infinite line through a.
+        let v = Vec3d::new(p.x - a.x, p.y - a.y, p.z - a.z);
+        let cross = chord.cross(&v);
+        if cross.length() / len > tol {
+            return None;
+        }
+    }
+    Some(draper_geometry::Line::new(*a, dir))
+}
+
+/// Re-bind coedges referencing `old_id` to `new_id`, correcting each
+/// coedge's `forward` flag so the wire's geometric traversal direction is
+/// preserved on the new edge's curve.
+fn rebind_coedge_with_orientation(
+    faces: &mut [Face],
+    old_id: TopoId,
+    new_id: TopoId,
+    old_start: Point3d,
+    old_end: Point3d,
+    new_start: Point3d,
+    new_end: Point3d,
+    tol: f64,
+) -> usize {
+    let mut count = 0usize;
+    for face in faces.iter_mut() {
+        let rebind_wire = |wire: &mut Wire| -> usize {
+            let mut n = 0usize;
+            for coedge in &mut wire.coedges {
+                if coedge.edge != old_id {
+                    continue;
+                }
+                // Geometric traversal start BEFORE the rebind:
+                // forward=true traverses the old edge start→end.
+                let traversal_start = if coedge.forward { old_start } else { old_end };
+                // The new flag must keep the same geometric direction
+                // along the new edge (start→end or end→start).
+                let d_start = traversal_start.distance_to(&new_start);
+                let d_end = traversal_start.distance_to(&new_end);
+                coedge.forward = d_start <= d_end || d_start <= tol;
+                coedge.edge = new_id;
+                n += 1;
+            }
+            n
+        };
+        if let Some(ref mut wire) = face.outer_wire {
+            count += rebind_wire(wire);
+        }
+        for wire in &mut face.inner_wires {
+            count += rebind_wire(wire);
+        }
+    }
+    count
+}
+
+/// Whether two surfaces are approximately equal (same carrier geometry).
+/// Same-surface pairs have a degenerate SSI (a surface "intersects itself"
+/// everywhere) and must be excluded from edge recovery — their boundary
+/// duplicates belong to `close_gaps`' topological snap.
+fn surfaces_approx_equal(a: &Surface, b: &Surface, tol: f64) -> bool {
+    let pts_close = |p: &Point3d, q: &Point3d| p.distance_to(q) <= tol;
+    let dirs_parallel = |d1: &Direction3d, d2: &Direction3d| {
+        (d1.x * d2.x + d1.y * d2.y + d1.z * d2.z).abs() >= 0.999999
+    };
+    match (a, b) {
+        (Surface::Plane(pa), Surface::Plane(pb)) => {
+            pts_close(&pa.origin, &pb.origin) && dirs_parallel(&pa.normal, &pb.normal)
+        }
+        (Surface::Cylinder(ca), Surface::Cylinder(cb)) => {
+            pts_close(&ca.origin, &cb.origin)
+                && dirs_parallel(&ca.axis, &cb.axis)
+                && (ca.radius - cb.radius).abs() <= tol
+        }
+        (Surface::Cone(ca), Surface::Cone(cb)) => {
+            pts_close(&ca.origin, &cb.origin)
+                && dirs_parallel(&ca.axis, &cb.axis)
+                && (ca.half_angle - cb.half_angle).abs() <= 1e-9
+                && (ca.radius - cb.radius).abs() <= tol
+                && ca.expanding == cb.expanding
+        }
+        (Surface::Sphere(sa), Surface::Sphere(sb)) => {
+            pts_close(&sa.center, &sb.center) && (sa.radius - sb.radius).abs() <= tol
+        }
+        (Surface::Torus(ta), Surface::Torus(tb)) => {
+            pts_close(&ta.center, &tb.center)
+                && dirs_parallel(&ta.axis, &tb.axis)
+                && (ta.major_radius - tb.major_radius).abs() <= tol
+                && (ta.minor_radius - tb.minor_radius).abs() <= tol
+        }
+        (Surface::Offset(oa), Surface::Offset(ob)) => {
+            (oa.distance - ob.distance).abs() <= tol
+                && surfaces_approx_equal(&oa.base, &ob.base, tol)
+        }
+        (Surface::Nurbs(na), Surface::Nurbs(nb)) => {
+            // Structural equality: same degrees, knots, control points.
+            na.u_degree == nb.u_degree
+                && na.v_degree == nb.v_degree
+                && na.u_knots.len() == nb.u_knots.len()
+                && na.v_knots.len() == nb.v_knots.len()
+                && na.control_points.len() == nb.control_points.len()
+                && na.u_knots.iter().zip(&nb.u_knots).all(|(x, y)| (x - y).abs() <= tol)
+                && na.v_knots.iter().zip(&nb.v_knots).all(|(x, y)| (x - y).abs() <= tol)
+                && na.control_points.iter().zip(&nb.control_points).all(|(ra, rb)| {
+                    ra.len() == rb.len()
+                        && ra.iter().zip(rb).all(|(p, q)| p.distance_to(q) <= tol)
+                })
+        }
+        _ => false,
     }
 }
 
@@ -3161,6 +3973,7 @@ fn merge_report(target: &mut HealingReport, source: &HealingReport) {
     target.sliver_triangles_detected += source.sliver_triangles_detected;
     target.faces_merged += source.faces_merged;
     target.tolerances_propagated += source.tolerances_propagated;
+    target.edges_recovered_via_ssi += source.edges_recovered_via_ssi;
     target.messages.extend(source.messages.iter().cloned());
 }
 
@@ -3861,9 +4674,10 @@ mod tests {
             faces_merged: 0,
             tolerances_propagated: 2,
             self_intersections: 0,
+            edges_recovered_via_ssi: 5,
             messages: Vec::new(),
         };
-        assert_eq!(report.total_fixes(), 13);
+        assert_eq!(report.total_fixes(), 18);
     }
 
     /// Test triangle_aspect_ratio for an equilateral triangle.
@@ -4616,5 +5430,280 @@ mod tests {
         );
 
         assert!(report.tolerances_propagated > 0);
+    }
+
+    // ================================================================
+    // Vision 2036 §1.4 — SSI edge recovery
+    // ================================================================
+
+    /// Build a face with `n` straight boundary edges (p0→p1→…→p0) on the
+    /// given surface, plus its working edge list.
+    fn make_patch_face(surface: Surface, corners: &[Point3d]) -> (Face, Vec<Edge>) {
+        let mut edges = Vec::with_capacity(corners.len());
+        let mut coedges = Vec::with_capacity(corners.len());
+        for i in 0..corners.len() {
+            let a = corners[i];
+            let b = corners[(i + 1) % corners.len()];
+            let e = Edge::new_line(a, b);
+            coedges.push(CoEdge::new(e.id, true));
+            edges.push(e);
+        }
+        let face = Face::new(surface, Wire::new(coedges));
+        (face, edges)
+    }
+
+    /// Params for the SSI recovery tests: only the §1.4 phase + gap
+    /// closing, everything else disabled so the reports are attributable.
+    fn ssi_test_params() -> HealingParams {
+        HealingParams {
+            gap_factor: 10.0,
+            max_hole_edges: 0,
+            min_face_area: 0.0,
+            max_aspect_ratio: 1e18,
+            fix_normals: false,
+            stitch_edges: false,
+            merge_faces: false,
+            propagate_tolerances: false,
+            fix_self_intersections: false,
+            remove_inconsistent_normals: false,
+            tolerance_context: None,
+            recover_edges_via_ssi: true,
+            tolerance: 0.02, // gap_tolerance = 0.2
+        }
+    }
+
+    /// Plane (y=0) × cylinder (r=7, axis Z) faces sharing a lost seam edge
+    /// at x=+7: both faces carry slightly-off approximate boundary edges
+    /// near the true intersection line. SSI recovery must rebuild ONE
+    /// shared edge lying exactly on both surfaces.
+    #[test]
+    fn test_ssi_edge_recovery_plane_cylinder() {
+        use draper_geometry::{CylinderSurface, Plane};
+
+        // ── Face A: planar patch on y=0, x ∈ [3, 7.12], z ∈ [0, 10] ──
+        // Its right boundary edge is damaged: 0.12 off the true seam
+        // x=7 (the off-surface cross-check requires ≥ 50% of gap_tol=0.2).
+        let plane = Plane::from_three_points(
+            &Point3d::new(3.0, 0.0, 0.0),
+            &Point3d::new(7.12, 0.0, 0.0),
+            &Point3d::new(7.12, 0.0, 10.0),
+        )
+        .expect("plane corners must not be collinear");
+        let (face_a, edges_a) = make_patch_face(
+            Surface::Plane(plane.clone()),
+            &[
+                Point3d::new(3.0, 0.0, 0.0),
+                Point3d::new(7.12, 0.0, 0.0), // damaged corner
+                Point3d::new(7.12, 0.0, 10.0), // damaged corner
+                Point3d::new(3.0, 0.0, 10.0),
+            ],
+        );
+
+        // ── Face B: half-cylinder patch (u ∈ [0, π], z ∈ [0, 10]) ──
+        // Its u=0 seam edge is damaged: displaced to (7.0, 0.11, z) —
+        // 0.11 off the plane y=0 (≥ 50% of gap_tol), barely on the
+        // cylinder (r = 7.00086 — a plausible cylinder boundary).
+        let cylinder = CylinderSurface::new_z(7.0);
+        let (face_b, edges_b) = make_patch_face(
+            Surface::Cylinder(cylinder.clone()),
+            &[
+                Point3d::new(7.0, 0.11, 0.0),  // damaged seam start
+                Point3d::new(7.0, 0.11, 10.0), // damaged seam end
+                Point3d::new(0.0, 7.0, 10.0),  // u = π/2, z = 10
+                Point3d::new(-7.0, 0.0, 10.0), // u = π, z = 10
+                Point3d::new(-7.0, 0.0, 0.0),  // u = π, z = 0
+                Point3d::new(0.0, 7.0, 0.0),   // u = π/2, z = 0
+            ],
+        );
+
+        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(shell, vec![edges_a, edges_b]);
+
+        let (healed, report) = heal_solid(&solid, &ssi_test_params());
+        assert_eq!(
+            report.edges_recovered_via_ssi, 1,
+            "exactly one boundary pair must be recovered via SSI (messages: {:?})",
+            report.messages
+        );
+
+        // The recovered edge: find the store edge whose midpoint ≈ (7, 0, 5).
+        let shared = healed
+            .edge_store
+            .iter()
+            .find(|e| {
+                let mid = e
+                    .point_at(0.5)
+                    .unwrap_or_else(|| e.start_vertex_point.unwrap_or(Point3d::ORIGIN));
+                (mid.x - 7.0).abs() < 0.2 && mid.y.abs() < 0.2 && (mid.z - 5.0).abs() < 1.0
+            })
+            .expect("the recovered SSI edge must exist in the store");
+
+        // §1.4 exactness: every sample of the recovered edge lies on BOTH
+        // surfaces — y = 0 (plane) and x² + y² = 49 (cylinder) — to Newton
+        // precision, NOT merely within the 0.2 gap tolerance.
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let p = shared.point_at(t).expect("recovered edge must evaluate");
+            assert!(
+                p.y.abs() < 1e-6,
+                "sample t={} must lie on the plane y=0, got y={}",
+                t,
+                p.y
+            );
+            let r_sq = p.x * p.x + p.y * p.y;
+            assert!(
+                (r_sq - 49.0).abs() < 1e-4,
+                "sample t={} must lie on the cylinder r=7, got r²={}",
+                t,
+                r_sq
+            );
+        }
+        // Authoritative vertex points are snapped onto the SSI curve too.
+        if let Some(sp) = shared.start_vertex_point {
+            assert!(sp.y.abs() < 1e-6, "start vertex must sit on the plane, y={}", sp.y);
+            assert!((sp.x - 7.0).abs() < 1e-4, "start vertex must sit at x=7, x={}", sp.x);
+        }
+        if let Some(ep) = shared.end_vertex_point {
+            assert!(ep.y.abs() < 1e-6, "end vertex must sit on the plane, y={}", ep.y);
+            assert!((ep.x - 7.0).abs() < 1e-4, "end vertex must sit at x=7, x={}", ep.x);
+        }
+
+        // Both faces must reference the SAME canonical edge (watertight by
+        // construction: one edge id → one edge-cache discretization).
+        let shell = healed.outer_shell.as_ref().expect("healed shell");
+        let refs_a = shell.faces[0].edge_ids.iter().filter(|&&id| id == shared.id).count();
+        let refs_b = shell.faces[1].edge_ids.iter().filter(|&&id| id == shared.id).count();
+        assert!(
+            refs_a == 1 && refs_b == 1,
+            "both faces must reference the shared SSI edge (a={}, b={})",
+            refs_a,
+            refs_b
+        );
+
+        // Orientation: face B's wire keeps its traversal direction — the
+        // damaged seam coedge (forward, bottom→top) must stay forward on
+        // the recovered edge (whose start is at z=0).
+        for face in &shell.faces {
+            if let Some(ref wire) = face.outer_wire {
+                for coedge in &wire.coedges {
+                    if coedge.edge == shared.id {
+                        let s = shared.start_point().unwrap();
+                        // forward traversal starts at the edge's start
+                        // point — regardless of which face, the geometric
+                        // direction must remain z=0 → z=10.
+                        let (from, to) = if coedge.forward {
+                            (s, shared.end_point().unwrap())
+                        } else {
+                            (shared.end_point().unwrap(), s)
+                        };
+                        assert!(
+                            from.z < to.z,
+                            "traversal must stay bottom→top after the rebind"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Same-surface pairs (two coplanar faces) must NOT enter SSI recovery
+    /// (degenerate self-intersection) — close_gaps handles them instead.
+    #[test]
+    fn test_ssi_recovery_skips_same_surface() {
+        // Two coplanar patches on y=0 sharing (approximately) an edge.
+        let plane = Plane::from_three_points(
+            &Point3d::new(0.0, 0.0, 0.0),
+            &Point3d::new(10.0, 0.0, 0.0),
+            &Point3d::new(10.0, 0.0, 10.0),
+        )
+        .unwrap();
+        let (face_a, edges_a) = make_patch_face(
+            Surface::Plane(plane.clone()),
+            &[
+                Point3d::new(0.0, 0.0, 0.0),
+                Point3d::new(10.0, 0.0, 0.0),
+                Point3d::new(10.0, 0.0, 10.0),
+                Point3d::new(0.0, 0.0, 10.0),
+            ],
+        );
+        // Adjacent patch: z ∈ [10, 20] — its bottom edge coincides (within
+        // a hair) with face A's top edge.
+        let (face_b, edges_b) = make_patch_face(
+            Surface::Plane(plane),
+            &[
+                Point3d::new(0.0, 0.0, 10.0),
+                Point3d::new(10.0, 0.0, 10.0),
+                Point3d::new(10.0, 0.0, 20.0),
+                Point3d::new(0.0, 0.0, 20.0),
+            ],
+        );
+        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(shell, vec![edges_a, edges_b]);
+
+        let (_healed, report) = heal_solid(&solid, &ssi_test_params());
+        assert_eq!(
+            report.edges_recovered_via_ssi, 0,
+            "same-surface pairs must be skipped by SSI recovery"
+        );
+        assert!(
+            report.gaps_closed >= 1,
+            "the coincident pair must fall through to close_gaps"
+        );
+    }
+
+    /// A pair whose surfaces do NOT intersect near the boundary edges must
+    /// be left untouched (validation gate 3 rejects the distant branch).
+    #[test]
+    fn test_ssi_recovery_rejects_distant_intersection() {
+        // Plane y=0 face with a boundary edge at x≈5.2; cylinder r=3 — its
+        // intersection lines sit at x=±3, far from the edge midpoints.
+        let plane = Plane::from_three_points(
+            &Point3d::new(3.0, 0.0, 0.0),
+            &Point3d::new(5.2, 0.0, 0.0),
+            &Point3d::new(5.2, 0.0, 10.0),
+        )
+        .unwrap();
+        let (face_a, edges_a) = make_patch_face(
+            Surface::Plane(plane),
+            &[
+                Point3d::new(3.0, 0.0, 0.0),
+                Point3d::new(5.2, 0.0, 0.0),
+                Point3d::new(5.2, 0.0, 10.0),
+                Point3d::new(3.0, 0.0, 10.0),
+            ],
+        );
+        let cylinder = CylinderSurface::new_z(3.0);
+        let (face_b, edges_b) = make_patch_face(
+            Surface::Cylinder(cylinder),
+            &[
+                Point3d::new(5.0, 0.15, 0.0),
+                Point3d::new(5.0, 0.15, 10.0),
+                Point3d::new(0.0, 3.0, 10.0),
+                Point3d::new(-3.0, 0.0, 10.0),
+                Point3d::new(-3.0, 0.0, 0.0),
+                Point3d::new(0.0, 3.0, 0.0),
+            ],
+        );
+        let shell = Shell::new(vec![face_a, face_b]);
+        let solid = Solid::from_edges_only(shell, vec![edges_a, edges_b]);
+
+        let (_healed, report) = heal_solid(&solid, &ssi_test_params());
+        assert_eq!(
+            report.edges_recovered_via_ssi, 0,
+            "distant SSI branches must be rejected (messages: {:?})",
+            report.messages
+        );
+    }
+
+    /// §1.4 SSI recovery is OPT-IN: no preset may enable it (each SSI
+    /// march costs 50–500ms — presets must not add that to every import).
+    /// Explicit opt-in is covered by `test_ssi_edge_recovery_plane_cylinder`.
+    #[test]
+    fn test_ssi_recovery_preset_flags() {
+        assert!(!HealingParams::default().recover_edges_via_ssi);
+        assert!(!HealingParams::conservative().recover_edges_via_ssi);
+        assert!(!HealingParams::aggressive().recover_edges_via_ssi);
+        // auto_from_brep builds on aggressive — must stay off too.
+        let ctx = ToleranceContext::default();
+        assert!(!HealingParams::auto_from_brep(&ctx, 42).recover_edges_via_ssi);
     }
 }

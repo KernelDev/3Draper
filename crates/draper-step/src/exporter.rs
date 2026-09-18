@@ -1053,11 +1053,27 @@ impl StepWriter {
                 id
             }
             Surface::Nurbs(nurbs) => self.emit_nurbs_surface(nurbs),
-            Surface::Offset(_) | Surface::Ruled(_) => {
-                // Audit item 4.3 (2026-07-19): Offset/Ruled surfaces
-                // are not yet supported in STEP export. Fall back to NURBS
-                // conversion (TODO: implement direct export).
-                log::warn!("Offset/Ruled surface export not yet implemented, skipping");
+            Surface::Offset(offset) => {
+                // Vision 2036 §1.4: native OFFSET_SURFACE round-trip.
+                // ISO 10303-42:
+                //   OFFSET_SURFACE(name, basis_surface, distance, self_intersect)
+                // `self_intersect` is OPTIONAL — emit `*` (unknown) rather
+                // than guessing; the parser accepts any boolean or `*`.
+                let basis_id = self.emit_surface(&offset.base);
+                let id = self.alloc_id();
+                self.push_line(&format!(
+                    "#{} = OFFSET_SURFACE('',#{},{});",
+                    id,
+                    basis_id,
+                    fmt_f64(offset.distance)
+                ));
+                id
+            }
+            Surface::Ruled(_) => {
+                // Ruled surfaces are an internal construction type (audit
+                // item 4.3): STEP AP203/214 has no direct ruled-surface
+                // entity — such faces arrive as B-splines. Keep the warn-skip.
+                log::warn!("Ruled surface export not supported, skipping");
                 self.alloc_id() // Return a dummy ID
             }
         };

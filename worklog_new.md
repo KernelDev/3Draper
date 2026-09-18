@@ -4782,3 +4782,92 @@ https://kerneldev.github.io/3Draper модель test/as1-oc-214.stp выгля�
  полу-arc-сущностей STEP (2-pt LINE vs 48-pt цепочка на одной образующей) —
   кандидат на tolerant-snap швов в merge.
 - Vision 2036: продолжить по PLAN.md.
+
+## Сессия 23 — Vision 2036 §1.4 STEP Parser and Healing (2026-09-18)
+
+## Контекст
+
+Продолжение по плану после 22-й сессии (as1-oc-214). Цель: закрыть
+раздел §1.4 «STEP Parser and Healing» из ROADMAP_VISION_2036.md.
+
+## Проверка песочницы
+
+- git-история соответствовала ожиданиям (HEAD = 377910b, 22-я сессия),
+  рабочий каталог чист, признаков сброса/восстановления из бэкапа нет.
+- НО тулчейн Rust отсутствовал (`~/.cargo` исчез, домашний каталог
+  датирован 17–18 сентября) — песочница пересобиралась, проектный
+  каталог уцелел. Переустановлен rustup stable 1.98.1.
+
+## Реализация
+
+### 1. Нативный OFFSET_SURFACE (парсер + экспортёр)
+
+- `extract_offset_surface` (converter.rs): вместо аппроксимации
+  16×16 NURBS-сеткой возвращается нативный `Surface::Offset` — точное
+  S(u,v) = base + d·n, Steiner-триангуляция §2.3, аналитическая
+  проекция. Удалены мёртвые `approximate_offset_surface` /
+  `surface_param_range_u/v` / `generate_clamped_knots` (124 строки).
+- Экспортёр: `OFFSET_SURFACE('',#basis,distance)` нативно (раньше —
+  warn + dummy id). Полный round-trip parse→export→parse.
+- Тесты: парсинг (+distance/+basis), вложенный offset (offset от
+  offset), цилиндр r=5+2 → точка (7,0,1) точно, плоскость ±d,
+  round-trip через экспортёр.
+
+### 2. SSI-восстановление рёбер + surface extension (healing)
+
+Новая фаза `recover_edges_via_ssi` в heal_staged (№2, до close_gaps):
+- Пары граничных рёбер (1 coedge) с разных граней: midpoint < gap_tol,
+  параллельность хорд (|dot| ≥ 0.9), перекрытие протяжённости ≥ 50%.
+- Кросс-чек off-surface (стоимостной гейт): ребро A должно лежать ВНЕ
+  поверхности B (≥ 50% gap_tol) и наоборот — нормальные швы (рёбра на
+  обеих поверхностях) остаются close_gaps'у, БЕЗ SSI-марша.
+- Кэш SSI по паре поверхностей (порядко-независимый, approx_equal).
+- Валидация ветви: гейт 3 (ветвь в validate_tol от ОБЕИХ середин),
+  гейт 4 (домен + клампинг проекций концов — nurbs_project теперь
+  возвращает clamped-флаг), кластеризация концов, sanity длины.
+  Кандидаты: фитинговые B-сплайны + БЕСКОНЕЧНЫЕ аналитические Line для
+  прямых полилиний (полилиния марша может быть короче зазора).
+- Восстановленное ребро: кривая SSI, param_range по проекциям концов,
+  вершины = средние пар + проекция НА кривую (точно на обеих
+  поверхностях), rebind coedge'ов с коррекцией forward-флага.
+- `HealingParams::recover_edges_via_ssi` — OPT-IN (ни один пресет не
+  включает: каждый SSI-марш 50–500мс; на drill_top ~73 SSI × 0.5с при
+  нуле планов — критерии активации требуют тюнинга по корпусу файлов).
+- `HealingReport::edges_recovered_via_ssi` + merge_report.
+
+### 3. Фикс бага ядра: intersect_plane_cylinder (параллельный случай)
+
+perp_dist считался как расстояние от origin ПЛОСКОСТИ до ОСИ, а не от
+ОСИ до ПЛОСКОСТИ (=|dist|). Для плоскости y=0 × цилиндра r=7 (ось в
+плоскости!) «линии» выходили на x=±6.325=±√40 — ВНУТРИ цилиндра, не на
+поверхностях. Правильно: ±7. Найден через SSI-восстановление.
+
+### 4. Аудит NURBS-защит healing (§1.4 пункт 5)
+
+Все 4 пути удаления защищены: remove_small_features (1917),
+fix_self_intersections (2094–2113), remove_inconsistent_normals (2171),
+merge_faces сохраняет геометрию + are_nurbs_compatible.
+
+## Верификация
+
+- draper-geometry 234 ✓ (вкл. plane_cylinder tangent), draper-topology
+  238 ✓ (4 новых SSI-теста: восстановление plane×cylinder с точностью
+  до Ньютона, same-surface skip, distant-reject, preset-flags),
+  draper-mesh 269 ✓, draper-core 75 ✓.
+- draper-step: 138 lib ✓ (лёгкие 77с; drill 216с = baseline — opt-in
+  стоит ноль; transmission 139с; Zentralstaender 6 ✓);
+  integration: nist 19 ✓, compacted 7 ✓ (320с), integration 5 ✓,
+  seam 3 ✓, tolerance 3 ✓, industrial 2 ✓, determinism ✓, nurbs 2 ✓.
+- ОГРАНИЧЕНИЕ СРЕДЫ: test_all_files_instance_conversion (~600с, 8
+  файлов) не укладывается в 600с-кап инструмента — 6/8 файлов прошли
+  дважды (brick×3, 3.05.078, compressor, drill 5 инстансов/54761 tris),
+  transmission+Zentralstaender валидированы отдельными тестами тем же
+  конвейером. Фоновые (setsid/nohup) процессы убиваются песочницей.
+
+## Осталось
+
+- Активация SSI-восстановления в прод-конвейере: тюнинг критериев
+  (какие «mangled» швы достойны SSI; drill: 73 пары × 0.5с, 0 планов).
+- Микро-щели швов гайки/пластины (смешанная дискретизация, mesh-уровень)
+  — без изменений, кандидат на tolerant-snap.
+- Vision 2036: следующий раздел по PLAN.md (§1 закрыт полностью).

@@ -112,16 +112,33 @@ approximation of the intersection.
 
 **Action Items:**
 
-- [ ] **Extract tolerances from `UNCERTAINTY_MEASURE_WITH_UNIT`** and
-      `LENGTH_MEASURE_WITH_UNIT` (verify existing extraction is complete).
-- [ ] **Implement surface extension algorithms** — extend surfaces to close
-      micro-gaps instead of removing faces.
-- [ ] **Implement surface-surface intersection for edge recovery** —
-      reconstruct lost edges by intersecting adjacent surfaces.
-- [ ] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
-      stop force-approximating them as NURBS.
-- [ ] **Audit healing NURBS guards** — verify all healing steps protect
-      NURBS faces from removal (done in commit `eb46eb1`, verify coverage).
+- [x] **Extract tolerances from `UNCERTAINTY_MEASURE_WITH_UNIT`** and
+      `LENGTH_MEASURE_WITH_UNIT` (verify existing extraction is complete) —
+      verified: `extract_float_from_step_value` unwraps the typed
+      `LENGTH_MEASURE(...)` wrapper recursively; round-trip landed with the
+      §1.1 tolerance milestone.
+- [x] **Implement surface extension algorithms** — extend surfaces to close
+      micro-gaps instead of removing faces — `recover_edges_via_ssi`
+      healing phase (opt-in `HealingParams` flag): mangled seams are
+      re-bound to the exact intersection curve, no face removal.
+- [x] **Implement surface-surface intersection for edge recovery** —
+      reconstruct lost edges by intersecting adjacent surfaces — same
+      phase: both boundary geometries are replaced by the Newton-refined
+      SSI curve (B-spline branch or analytic line for straight seams),
+      with strict validation gates (midpoint proximity, extent coverage,
+      off-surface cross-check ≥ 50% of gap tolerance).
+- [x] **Add dedicated algorithms for `OffsetSurface` and `SweptSurface`** —
+      stop force-approximating them as NURBS — the parser now returns the
+      native `Surface::Offset` (the 16×16 NURBS approximation is deleted),
+      the exporter emits `OFFSET_SURFACE` (full round-trip); SweptSurface
+      was already native (`Extrusion`/`Revolution`). Bonus fix:
+      `intersect_plane_cylinder` parallel-axis case computed the wrong
+      axis-to-plane distance (intersection "lines" inside the cylinder).
+- [x] **Audit healing NURBS guards** — verify all healing steps protect
+      NURBS faces from removal (done in commit `eb46eb1`, verify coverage) —
+      audited: all four removal paths guard NURBS (small features,
+      self-intersections, inconsistent normals; face merge preserves
+      geometry and requires NURBS-NURBS compatibility).
 
 **Priority:** P1
 
@@ -530,6 +547,10 @@ Independent face triangulation with post-facto welding is deprecated.
 | 1 | BREP validation before triangulation | Done | `9244a7b` |
 | 1 | Seam edge topological gluing | Done | `058805c` |
 | 1 | Analytical PCURVE (derive_pcurve) | Done | `830f782` |
+| 1 | §1.4 Native OFFSET_SURFACE (parser + exporter round-trip) | Done | this commit |
+| 1 | §1.4 SSI edge recovery / surface extension (opt-in healing phase) | Done | this commit |
+| 1 | §1.4 NURBS healing guards audit (all removal paths) | Done | this commit |
+| 1 | plane∩cylinder parallel-axis perp_dist fix | Done | this commit |
 | 2 | Periodic 2D PCURVEs for closed branches (lattice C2 seam) | Done | `1039889` |
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Property-based testing (proptest) | Done | `2d74d8c` |

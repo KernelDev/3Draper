@@ -1904,10 +1904,19 @@ pub fn intersect_plane_cylinder(
             return vec![];
         }
 
-        // Perpendicular distance from cylinder axis to plane
-        let perp_dist = ((dx * dx + dy * dy + dz * dz)
-            - (dx * cylinder.axis.x + dy * cylinder.axis.y + dz * cylinder.axis.z).powi(2))
-            .sqrt();
+        // Perpendicular distance from the cylinder AXIS LINE to the plane.
+        //
+        // The axis is parallel to the plane (checked above), so this is the
+        // absolute signed distance of ANY axis point — e.g. `cylinder.origin`
+        // — to the plane. The legacy formula computed the distance from the
+        // PLANE'S ORIGIN to the axis line instead — a different quantity
+        // that broke the plane-contains-axis case: for plane y=0 × cylinder
+        // r=7 (axis Z through the origin) it produced perp_dist=|plane.origin
+        // − axis foot| and intersection "lines" at x=±6.325 that lie INSIDE
+        // the cylinder (x²+y²=40≠49 — on neither surface). The correct
+        // answer is perp_dist=0 (the axis lies IN the plane) and lines at
+        // x=±7 exactly. Found via Vision 2036 §1.4 SSI edge recovery.
+        let perp_dist = dist.abs();
 
         if perp_dist > cylinder.radius + 1e-9 {
             // No intersection
