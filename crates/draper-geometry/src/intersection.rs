@@ -1904,10 +1904,20 @@ pub fn intersect_plane_cylinder(
             return vec![];
         }
 
-        // Perpendicular distance from cylinder axis to plane
-        let perp_dist = ((dx * dx + dy * dy + dz * dz)
-            - (dx * cylinder.axis.x + dy * cylinder.axis.y + dz * cylinder.axis.z).powi(2))
-            .sqrt();
+        // Perpendicular distance from the cylinder AXIS LINE to the plane.
+        //
+        // The axis is parallel to the plane (checked above), so this is the
+        // absolute signed distance of ANY axis point — e.g. `cylinder.origin`
+        // — to the plane. The legacy formula computed the distance from the
+        // PLANE'S ORIGIN to the axis line instead — a different quantity
+        // that broke the plane-contains-axis case: for plane y=0 × cylinder
+        // r=7 (axis Z through the origin) it produced perp_dist=|plane.origin
+        // − axis foot| and intersection "lines" at x=±6.325 that lie INSIDE
+        // the cylinder (x²+y²=40≠49 — on neither surface). The correct
+        // answer is perp_dist=0 (the axis lies IN the plane) and lines at
+        // x=±7 exactly. Found via Vision 2036 §1.4 SSI edge recovery
+        // (session23-local-ssi14-replay-7 delta-port).
+        let perp_dist = dist.abs();
 
         if perp_dist > cylinder.radius + 1e-9 {
             // No intersection
@@ -5910,6 +5920,55 @@ mod parallel_cylinder_tests {
                 }
             }
         }
+    }
+
+    /// Regression (session23-local-ssi14-replay-7 delta-port): a plane
+    /// CONTAINING the cylinder axis intersects the cylinder in two lines
+    /// at ±radius from the axis. The legacy perp_dist formula measured the
+    /// plane-origin-to-axis distance instead of the axis-to-plane distance
+    /// and produced "lines" at ±sqrt(r² − d²) that lie INSIDE the cylinder
+    /// (on neither surface).
+    #[test]
+    fn test_plane_cylinder_axis_in_plane_two_lines() {
+        // Plane y=0 (origin off-axis at (3,0,0) — the legacy trap) through
+        // the axis of cylinder r=7. Intersection: two lines x=±7, y=0.
+        let plane = Plane::from_origin_and_normal(
+            Point3d::new(3.0, 0.0, 0.0),
+            Direction3d::Y,
+        );
+        let cylinder = CylinderSurface::new(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::Z,
+            7.0,
+        );
+        let result = intersect_plane_cylinder(&plane, &cylinder, 1e-6);
+        assert_eq!(result.len(), 2, "axis-in-plane must yield 2 lines, got {}", result.len());
+        for line in &result {
+            assert!(!line.is_empty());
+            for p in line {
+                assert!(p.y.abs() < 1e-9, "line points must lie on the plane y=0, got y={}", p.y);
+                let r_sq = p.x * p.x + p.y * p.y;
+                assert!(
+                    (r_sq - 49.0).abs() < 1e-9,
+                    "line points must lie ON the cylinder (x²+y²=49), got {}",
+                    r_sq
+                );
+            }
+        }
+        // The two lines must sit on opposite sides: one at x≈+7, one at x≈−7.
+        let mid_x: Vec<f64> = result
+            .iter()
+            .map(|line| {
+                let n = line.len().max(1);
+                line.iter().map(|p| p.x).sum::<f64>() / n as f64
+            })
+            .collect();
+        assert!(
+            mid_x.iter().any(|&x| (x - 7.0).abs() < 1e-6)
+                && mid_x.iter().any(|&x| (x + 7.0).abs() < 1e-6),
+            "expected lines at x=+7 and x=−7, got mids {:?}",
+            mid_x
+        );
     }
 }
 
