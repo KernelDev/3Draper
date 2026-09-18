@@ -4580,6 +4580,375 @@ impl<'a> StepConverter<'a> {
         Some(mesh)
     }
 
+    /// Shared per-BREP edge-cache + params setup — the ONE implementation
+    /// used by ALL conversion paths (legacy `triangulate_brep`, detailed
+    /// `triangulate_brep_detailed`, chunked `prepare_brep_session`).
+    ///
+    /// The three paths used to carry manually mirrored copies of this setup
+    /// and had drifted in both ORDER and CONTENT — the root cause of the
+    /// chunked-vs-cached non-determinism (GEAR #16033 on drill_top:
+    /// 2092 tris / 685 bnd / 180 nm cached vs 2086 / 682 / 171 chunked;
+    /// worklog session-29+ «Осталось», the canonical-CDT blocker since
+    /// session-37):
+    ///   * the DETAILED path registered §3.3 seam aliases AFTER the
+    ///     Phase 1/2 heuristic aliasing — the coarse coordinate heuristic
+    ///     (tol = max(aliasing, sewing*2, absolute*10)) re-aliased seam
+    ///     edges and shifted the whole alias graph (GEAR: 216 Phase-2
+    ///     aliases + 234 seam vs 4 + 234);
+    ///   * the CHUNKED path's Phase 1 lacked the «different curve types →
+    ///     merge all» branch (bolt transition-plane class of files);
+    ///   * the CHUNKED path never applied `with_adaptive_lod` per-face
+    ///     budgets (the progressive WASM viewer silently ignored them);
+    ///   * the KS-2 debug circle-consistency check existed only in legacy.
+    ///
+    /// Canonical order (contract, §3.3 «topological gluing BEFORE 3D
+    /// coordinate generation» — exact facts first, heuristics supplement):
+    ///   1. seam aliases            — exact, authoritative
+    ///   2. circle_axis_n           — per-axis tube-ring sample alignment
+    ///   3. NURBS refinement grids  — shared interior Steiner grids
+    ///   4. canonical surface CDTs  — reads the alias map (session-30)
+    ///   5. Phase 1 vertex-pair     — heuristic, same-endpoint grouping
+    ///   6. Phase 2 coordinate      — heuristic, skips already-aliased ids
+    ///   7. KS-2 circle consistency — debug_assertions only
+    ///
+    /// Returns the effective `TriangulationParams` (per-face adaptive LOD
+    /// budgets applied when `adaptive_lod_enabled`) — callers MUST use the
+    /// returned value for all subsequent face triangulation.
+    fn setup_brep_edge_cache(
+        &self,
+        brep_id: i64,
+        face_data_list: &[FaceData],
+        params: &TriangulationParams,
+        tol_ctx: &ToleranceContext,
+        edge_cache: &mut EdgeDiscretizationCache,
+    ) -> TriangulationParams {
+        // ─── Adaptive LOD: compute per-face triangle budget ─────────────
+        // When adaptive_lod_enabled is set in the viewer, compute a per-face
+        // budget from total_budget / face_count so that each face gets a fair
+        // share. This replaces the old approach of triangulating every face
+        // at full quality and then decimating the combined mesh.
+        let mut params = params.clone();
+        if params.adaptive_lod_enabled {
+            params.with_adaptive_lod(face_data_list.len());
+        }
+
+        // Apply LOD-aware chord tolerance so the Quality slider changes
+        // circle/edge sampling density. Without this, the edge cache uses a
+        // fixed tolerance derived from the bounding box, making LOD have no
+        // effect on edge discretization.
+        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+
+        // ── 1. Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
+        // For periodic surfaces (cylinder, sphere, torus, revolution, closed
+        // NURBS), edges at u=0 and u=u_max represent the same geometric
+        // boundary (seam). Register them as aliases BEFORE the Phase 1/2
+        // heuristics and BEFORE triangulation: exact topological gluing must
+        // never be overridden by the coordinate-grid heuristic below (the
+        // old detailed-path order let Phase 2 re-alias seam edges).
+        {
+            let seam_count =
+                self.register_seam_aliases(face_data_list, edge_cache, tol_ctx.sewing_tol);
+            if seam_count > 0 {
+                log::info!(
+                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
+                    brep_id, seam_count
+                );
+            }
+        }
+
+        // ── 2. Pre-compute per-axis-group n for circles ─────────────────
+        // Ensures all circles on the same axis (e.g., bottom+top rings of a
+        // cone tube face) get the SAME n. Critical for watertightness of
+        // multi-radius tube faces. Must run after set_chord_tolerance_override
+        // so the n computation uses the LOD-driven tolerance.
+        {
+            let all_edges: Vec<&TopoEdge> = face_data_list
+                .iter()
+                .flat_map(|fd| fd.edges.iter())
+                .collect();
+            edge_cache.pre_compute_circle_axis_n(all_edges);
+        }
+
+        // ── 3. Pre-compute shared NURBS refinement grids (MS-2) ─────────
+        // For each unique NURBS surface in this BREP, generate a
+        // chord-error-compliant interior UV grid. All faces sharing the same
+        // NURBS surface entity use this grid → identical interior Steiner
+        // points → watertight.
+        for fd in face_data_list {
+            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
+                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
+            }
+        }
+
+        // ── 4. Pre-compute surface-level canonical CDTs ─────────────────
+        // (Vision 2036 Phase 1, session-30): one constrained triangulation
+        // per shared NURBS surface — the safe way to enable interior Steiner
+        // coverage. No-op unless `params.use_surface_canonical_cdt`.
+        self.pre_compute_canonical_surface_cdts(face_data_list, &params, edge_cache);
+
+        // ─── Phase 1 + Phase 2 step_id aliasing ──────────────────────────
+        // In STEP B-Rep, two faces sharing a geometric boundary may use
+        // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
+        // while a NURBS face uses a NURBS curve). They share the same
+        // VERTEX_POINT endpoints. By aliasing all step_ids representing the
+        // same boundary to a single canonical step_id, the edge cache
+        // returns identical 3D points for all of them — watertightness by
+        // construction.
+        //
+        // CRITICAL: The canonical step_id must be the one with the DENSEST
+        // sampling. If a Plane face uses a LINE (2 pts) and a NURBS face
+        // uses a NURBS curve (55 pts) on the same boundary, we MUST use the
+        // NURBS step_id as canonical — otherwise the NURBS face gets only
+        // 2 boundary points, producing a degenerate triangulation.
+        {
+            // Track aliasing statistics for diagnostics (KS-1 from audit plan)
+            let mut alias_stats = draper_mesh::edge_cache::AliasingStatistics::default();
+
+            // Phase 1: STEP entity ID-based aliasing.
+            // Uses VERTEX_POINT entity IDs to match edges sharing the same
+            // geometric boundary.
+            //
+            // CRITICAL FIX: We also check the curve MIDPOINT (5-point shape
+            // sampling) to avoid aliasing two DIFFERENT curves that share
+            // the same endpoints (e.g., two half-circles forming a full
+            // circle). Without this check, the bolt's transition plane gets
+            // its outer boundary collapsed to a single half-circle, breaking
+            // watertightness.
+            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in face_data_list {
+                for &step_id in &face_data.edge_step_ids {
+                    if step_id == 0 { continue; }
+                    alias_stats.total_step_ids += 1;
+                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
+                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
+                    }
+                }
+            }
+            let mut alias_count = 0usize;
+            let mut skipped_different_curves = 0usize;
+            // DETERMINISM: sorted group order — per-group aliasing is
+            // independent, but a stable iteration order keeps regression
+            // log diffs meaningful (HashMap order is per-process random).
+            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
+                vertex_pair_to_step_ids.iter().collect();
+            phase1_sorted.sort_by_key(|(k, _)| **k);
+            for (vp, step_ids) in phase1_sorted {
+                if step_ids.len() < 2 { continue; }
+                alias_stats.phase1_groups += 1;
+
+                // P2: Group by curve SHAPE using 5-point sampling.
+                //
+                // ARCHITECTURAL DECISION (matching OpenCascade behavior):
+                // - SAME curve type: check 5-point shape match to prevent
+                //   aliasing two semicircles going in opposite directions
+                //   (which share endpoints but are different boundaries).
+                // - DIFFERENT curve types (Line vs Circle, Line vs NURBS,
+                //   etc.): ALWAYS alias, using the higher-complexity curve
+                //   as canonical. In STEP BREP files, different curve types
+                //   for the same vertex pair ALWAYS represent the same
+                //   physical boundary — the different types arise from
+                //   different face parameterizations (e.g., a Plane face
+                //   uses a LINE for a boundary that a Cylinder face
+                //   parameterizes as a CIRCLE ARC). Standard STEP export
+                //   behavior from SolidWorks, CATIA, Pro/E, etc.
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
+
+                // If shape_groups has multiple groups with DIFFERENT curve
+                // types, merge ALL groups — they represent the same
+                // physical boundary with different parameterizations.
+                if shape_groups.len() > 1 {
+                    let mut curve_types: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    for (_samples, group_sids) in &shape_groups {
+                        if let Some(&sid) = group_sids.first() {
+                            curve_types.insert(self.edge_curve_type_name(sid));
+                        }
+                    }
+                    if curve_types.len() > 1 {
+                        // Different curve types — merge ALL and alias
+                        let all_sids: Vec<i64> = shape_groups.iter()
+                            .flat_map(|(_, g)| g.iter().copied())
+                            .collect();
+                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
+                            self.edge_curve_complexity_score(sid)
+                        }).unwrap();
+                        for &sid in &all_sids {
+                            if sid != canonical {
+                                edge_cache.register_step_id_alias(sid, canonical);
+                                alias_count += 1;
+                                alias_stats.phase1_aliases += 1;
+                            }
+                        }
+                        log::info!(
+                            "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
+                            brep_id, all_sids.len(), vp, {
+                                let mut ts: Vec<String> = curve_types.iter().cloned().collect();
+                                ts.sort_unstable();
+                                ts
+                            }
+                        );
+                        continue; // Skip normal aliasing — already done
+                    }
+                }
+
+                // Same curve type — alias within each shape group normally
+                for (_samples, group_sids) in &shape_groups {
+                    if group_sids.len() < 2 { continue; }
+                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
+                        self.edge_curve_complexity_score(sid)
+                    }).unwrap();
+                    let canonical_type = self.edge_curve_type_name(canonical);
+                    for &sid in group_sids {
+                        if sid != canonical {
+                            edge_cache.register_step_id_alias(sid, canonical);
+                            alias_count += 1;
+                            alias_stats.phase1_aliases += 1;
+                            let sid_type = self.edge_curve_type_name(sid);
+                            if sid_type != canonical_type {
+                                log::warn!(
+                                    "BREP #{}: aliasing {}({}) → {}({}) — DIFFERENT CURVE TYPES!",
+                                    brep_id, sid, sid_type, canonical, canonical_type
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Count groups with multiple step_ids that were NOT aliased
+                if shape_groups.len() > 1 {
+                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    skipped_different_curves += skipped;
+                    alias_stats.phase1_skipped_different_curves += skipped;
+                    log::warn!(
+                        "BREP #{}: skipped {} step_ids at vertex_pair {:?} — {} shape groups (shape_tol={:.4})",
+                        brep_id, skipped, vp, shape_groups.len(), shape_tol,
+                    );
+                }
+            }
+            if alias_count > 0 || skipped_different_curves > 0 {
+                log::info!(
+                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (skipped {} edges with same endpoints but different curves)",
+                    brep_id, alias_count, skipped_different_curves,
+                );
+            }
+
+            // Phase 2: 3D coordinate-based aliasing (supplementary).
+            // When STEP files use DIFFERENT VERTEX_POINT entities for the
+            // same geometric endpoint, the entity-ID approach misses them.
+            // This phase matches edges by their 3D endpoint coordinates,
+            // catching edges that share the same geometric boundary but
+            // have different STEP entity IDs.
+            //
+            // The resolve-skip excludes ids already aliased by the seam
+            // pass or Phase 1 — exact facts take precedence over this
+            // coarse grid heuristic.
+            //
+            // Use the MAX of:
+            // - aliasing_tolerance() (STEP uncertainty-based, when available)
+            // - sewing_tol * 2 (auto-computed from VERTEX_POINT distribution)
+            // - absolute * 10
+            let coord_tol = tol_ctx.aliasing_tolerance()
+                .max(tol_ctx.sewing_tol * 2.0)
+                .max(tol_ctx.absolute * 10.0);
+            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
+            for face_data in face_data_list {
+                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
+                    if step_id == 0 { continue; }
+                    // Skip if already aliased (seam pass or Phase 1)
+                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
+                        continue;
+                    }
+                    let edge = &face_data.edges[edge_idx];
+                    let start = match edge.start_point() { Some(p) => p, None => continue };
+                    let end = match edge.end_point() { Some(p) => p, None => continue };
+                    let sk = (
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                    );
+                    let sk_rev = (
+                        (end.x / coord_tol).round() as i64,
+                        (end.y / coord_tol).round() as i64,
+                        (end.z / coord_tol).round() as i64,
+                        (start.x / coord_tol).round() as i64,
+                        (start.y / coord_tol).round() as i64,
+                        (start.z / coord_tol).round() as i64,
+                    );
+                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
+                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
+                }
+            }
+            let mut coord_alias_count = 0usize;
+            let mut coord_groups_with_multiple = 0usize;
+            let mut coord_skipped_different_curves = 0usize;
+            // DETERMINISM: sorted group order (see Phase 1 note above).
+            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
+                coord_pair_to_step_ids.iter().collect();
+            phase2_sorted.sort_by_key(|(k, _)| **k);
+            for (_key, step_ids) in phase2_sorted {
+                if step_ids.len() < 2 { continue; }
+                coord_groups_with_multiple += 1;
+                alias_stats.phase2_groups += 1;
+
+                // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
+                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
+                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
+
+                for (_samples, group_sids) in &shape_groups {
+                    if group_sids.len() < 2 { continue; }
+                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
+                        self.edge_curve_complexity_score(sid)
+                    }).unwrap();
+                    for &sid in group_sids {
+                        if sid != canonical {
+                            edge_cache.register_step_id_alias(sid, canonical);
+                            coord_alias_count += 1;
+                            alias_stats.phase2_aliases += 1;
+                        }
+                    }
+                }
+
+                if shape_groups.len() > 1 {
+                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
+                    coord_skipped_different_curves += skipped;
+                    alias_stats.phase2_skipped_different_curves += skipped;
+                }
+            }
+            log::info!(
+                "BREP #{}: Phase 2 alias: {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
+                brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
+            );
+
+            // Log consolidated aliasing statistics (KS-1)
+            alias_stats.log_summary(brep_id);
+        }
+
+        // KS-2: Validate circle consistency in debug builds.
+        // Circles on the same axis must have the same number of points
+        // for watertight tube faces.
+        #[cfg(debug_assertions)]
+        {
+            let inconsistencies = edge_cache.validate_circle_consistency();
+            if !inconsistencies.is_empty() {
+                for inc in &inconsistencies {
+                    log::warn!(
+                        "BREP #{}: circle inconsistency on axis origin=({:.3},{:.3},{:.3}) dir=({:.3},{:.3},{:.3}): {} edges with point counts {:?}",
+                        brep_id,
+                        inc.axis_origin.x, inc.axis_origin.y, inc.axis_origin.z,
+                        inc.axis_dir.x, inc.axis_dir.y, inc.axis_dir.z,
+                        inc.edge_keys.len(),
+                        inc.point_counts,
+                    );
+                }
+            }
+        }
+
+        params
+    }
+
     /// Triangulate a single BREP entity.
     fn triangulate_brep(
         &self,
@@ -4639,313 +5008,13 @@ impl<'a> StepConverter<'a> {
 
         // Create edge discretization cache for this BREP to ensure
         // shared edges produce identical 3D points (watertightness).
+        // The full setup — adaptive LOD budgets, §3.3 seam gluing,
+        // circle/NURBS precomputes, canonical CDTs, Phase 1/2 step_id
+        // aliasing — is SHARED with the detailed and chunked paths
+        // (setup_brep_edge_cache): one implementation, zero drift.
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
-        // Apply LOD-aware chord tolerance so the Quality slider changes
-        // circle/edge sampling density. Without this, the edge cache uses
-        // a fixed tolerance derived from the bounding box, making LOD have
-        // no effect on edge discretization.
-        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+        let params = self.setup_brep_edge_cache(brep_id, &face_data_list, params, &tol_ctx, &mut edge_cache);
 
-        // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
-        // Legacy non-detailed path: register seam aliases BEFORE
-        // discretization so periodic-surface seams yield bit-identical
-        // vertices (parity with triangulate_brep_detailed).
-        {
-            let seam_count =
-                self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
-            if seam_count > 0 {
-                log::info!(
-                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
-                    brep_id, seam_count
-                );
-            }
-        }
-
-        // Pre-compute per-axis-group n for circles — ensures all circles
-        // on the same axis (e.g., bottom+top rings of a cone tube face)
-        // get the SAME n. Critical for watertightness of multi-radius
-        // tube faces. Must be called after set_chord_tolerance_override
-        // so the n computation uses the LOD-driven tolerance.
-        {
-            let all_edges: Vec<&TopoEdge> = face_data_list
-                .iter()
-                .flat_map(|fd| fd.edges.iter())
-                .collect();
-            edge_cache.pre_compute_circle_axis_n(all_edges);
-        }
-
-        // Pre-compute shared NURBS refinement grids (MS-2). For each unique
-        // NURBS surface in this BREP, generate a chord-error-compliant
-        // interior UV grid. All faces sharing the same NURBS surface entity
-        // will use this grid → identical interior Steiner points → watertight.
-        for fd in &face_data_list {
-            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
-                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
-            }
-        }
-
-        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
-        // session-30): one constrained triangulation per shared NURBS
-        // surface — the safe way to enable interior Steiner coverage.
-        // No-op unless `params.use_surface_canonical_cdt`.
-        self.pre_compute_canonical_surface_cdts(&face_data_list, params, &mut edge_cache);
-
-        // ─── Build vertex-pair → canonical step_id aliases ──────────────
-        // In STEP B-Rep, two faces sharing a geometric boundary may use
-        // DIFFERENT EDGE_CURVE entities (e.g., a Plane face uses a LINE
-        // while a NURBS face uses a NURBS curve). They share the same
-        // VERTEX_POINT endpoints. By aliasing all step_ids with the same
-        // vertex pair to a single canonical step_id, we ensure the edge
-        // cache returns identical 3D points for all of them — guaranteeing
-        // watertightness by construction.
-        //
-        // CRITICAL: The canonical step_id must be the one with the DENSEST
-        // sampling. If a Plane face uses a LINE (2 pts) and a NURBS face
-        // uses a NURBS curve (55 pts) on the same boundary, we MUST use
-        // the NURBS step_id as canonical. Otherwise the NURBS face gets
-        // only 2 boundary points, producing a degenerate triangulation.
-        {
-            // Track aliasing statistics for diagnostics (KS-1 from audit plan)
-            let mut alias_stats = draper_mesh::edge_cache::AliasingStatistics::default();
-
-            // Phase 1: STEP entity ID-based aliasing (existing approach)
-            // Uses VERTEX_POINT entity IDs to match edges sharing the same
-            // geometric boundary.
-            //
-            // CRITICAL FIX: We also check the curve MIDPOINT to avoid aliasing
-            // two DIFFERENT curves that share the same endpoints (e.g., two
-            // half-circles forming a full circle). Without this check, the bolt's
-            // transition plane gets its outer boundary collapsed to a single
-            // half-circle, breaking watertightness.
-            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
-            for face_data in &face_data_list {
-                for &step_id in &face_data.edge_step_ids {
-                    if step_id == 0 { continue; }
-                    alias_stats.total_step_ids += 1;
-                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
-                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
-                    }
-                }
-            }
-            let mut alias_count = 0usize;
-            let mut skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order — per-group aliasing is
-            // independent, but a stable iteration order keeps regression
-            // log diffs meaningful (HashMap order is per-process random).
-            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
-                vertex_pair_to_step_ids.iter().collect();
-            phase1_sorted.sort_by_key(|(k, _)| **k);
-            for (vp, step_ids) in phase1_sorted {
-                if step_ids.len() < 2 { continue; }
-                alias_stats.phase1_groups += 1;
-
-                // P2: Group by curve SHAPE using 5-point sampling.
-                //
-                // ARCHITECTURAL DECISION (matching OpenCascade behavior):
-                // When two EDGE_CURVE entities share the same VERTEX_POINT endpoints:
-                // - SAME curve type (both Circle, both Line, etc.): check 5-point
-                //   shape match to prevent aliasing two semicircles going in
-                //   opposite directions (which share endpoints but are different
-                //   boundaries).
-                // - DIFFERENT curve types (Line vs Circle, Line vs NURBS, etc.):
-                //   ALWAYS alias, using the higher-complexity curve as canonical.
-                //   In STEP BREP files, different curve types for the same vertex
-                //   pair ALWAYS represent the same physical boundary — the different
-                //   types arise from different face parameterizations (e.g., a
-                //   Plane face uses a LINE for a boundary that a Cylinder face
-                //   parameterizes as a CIRCLE ARC). This is standard STEP export
-                //   behavior from SolidWorks, CATIA, Pro/E, etc.
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-
-                // If shape_groups has multiple groups, check if they have
-                // different curve types. If so, merge ALL groups — they
-                // represent the same physical boundary with different
-                // parameterizations.
-                if shape_groups.len() > 1 {
-                    // Check curve types for each group
-                    let mut curve_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
-                    for (_samples, group_sids) in &shape_groups {
-                        if let Some(&sid) = group_sids.first() {
-                            if let Some(edge) = self.resolve_edge_curve(sid) {
-                                let ct = match &edge.curve {
-                                    Some(draper_geometry::Curve3d::Line(_)) => "Line",
-                                    Some(draper_geometry::Curve3d::Circle(_)) => "Circle",
-                                    Some(draper_geometry::Curve3d::Nurbs(_)) => "Nurbs",
-                                    Some(draper_geometry::Curve3d::Ellipse(_)) => "Ellipse",
-                                    Some(draper_geometry::Curve3d::Arc(_)) => "Arc",
-                                    _ => "Other",
-                                };
-                                curve_types.insert(ct);
-                            }
-                        }
-                    }
-
-                    if curve_types.len() > 1 {
-                        // Different curve types — merge ALL groups and alias
-                        let all_sids: Vec<i64> = shape_groups.iter()
-                            .flat_map(|(_, g)| g.iter().copied())
-                            .collect();
-                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
-                            self.edge_curve_complexity_score(sid)
-                        }).unwrap();
-                        for &sid in &all_sids {
-                            if sid != canonical {
-                                edge_cache.register_step_id_alias(sid, canonical);
-                                alias_count += 1;
-                                alias_stats.phase1_aliases += 1;
-                            }
-                        }
-                        log::info!(
-                            "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
-                            brep_id, all_sids.len(), vp, {
-                                let mut ts: Vec<&str> = curve_types.iter().copied().collect();
-                                ts.sort_unstable();
-                                ts
-                            }
-                        );
-                        continue; // Skip normal aliasing — already done
-                    }
-                }
-
-                // Same curve type — alias within each shape group normally
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            alias_count += 1;
-                            alias_stats.phase1_aliases += 1;
-                        }
-                    }
-                }
-
-                // Count groups with multiple step_ids that were NOT aliased
-                if shape_groups.len() > 1 {
-                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                    skipped_different_curves += skipped;
-                    alias_stats.phase1_skipped_different_curves += skipped;
-                }
-            }
-
-            // Phase 2: 3D coordinate-based aliasing (supplementary approach)
-            // When STEP files use DIFFERENT VERTEX_POINT entities for the
-            // same geometric endpoint, the entity-ID approach misses them.
-            // This phase matches edges by their 3D endpoint coordinates,
-            // catching edges that share the same geometric boundary but
-            // have different STEP entity IDs.
-            //
-            // Use the MAX of:
-            // - aliasing_tolerance() (STEP uncertainty-based, when available)
-            // - sewing_tol * 2 (auto-computed from VERTEX_POINT distribution)
-            
-            let coord_tol = tol_ctx.aliasing_tolerance()
-                .max(tol_ctx.sewing_tol * 2.0)
-                
-                .max(tol_ctx.absolute * 10.0);
-            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
-            let mut step_id_endpoints: HashMap<i64, (Point3d, Point3d)> = HashMap::new();
-            let mut unaliased_count = 0usize;
-            for face_data in &face_data_list {
-                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
-                    if step_id == 0 { continue; }
-                    // Skip if already aliased (from Phase 1)
-                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
-                        continue;
-                    }
-                    unaliased_count += 1;
-                    let edge = &face_data.edges[edge_idx];
-                    let start = match edge.start_point() {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    let end = match edge.end_point() {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    step_id_endpoints.insert(step_id, (start, end));
-                    let sk = (
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                    );
-                    let sk_rev = (
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                    );
-                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
-                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
-                }
-            }
-            let mut coord_alias_count = 0usize;
-            let mut coord_skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order (see Phase 1 note above).
-            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
-                coord_pair_to_step_ids.iter().collect();
-            phase2_sorted.sort_by_key(|(k, _)| **k);
-            for (_key, step_ids) in phase2_sorted {
-                if step_ids.len() < 2 { continue; }
-                alias_stats.phase2_groups += 1;
-
-                // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            coord_alias_count += 1;
-                            alias_stats.phase2_aliases += 1;
-                        }
-                    }
-                }
-
-                if shape_groups.len() > 1 {
-                    let skipped = step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                    coord_skipped_different_curves += skipped;
-                    alias_stats.phase2_skipped_different_curves += skipped;
-                }
-            }
-
-            // Log consolidated aliasing statistics (KS-1)
-            alias_stats.log_summary(brep_id);
-
-        }
-
-        // KS-2: Validate circle consistency in debug builds.
-        // Circles on the same axis must have the same number of points
-        // for watertight tube faces.
-        #[cfg(debug_assertions)]
-        {
-            let inconsistencies = edge_cache.validate_circle_consistency();
-            if !inconsistencies.is_empty() {
-                for inc in &inconsistencies {
-                    log::warn!(
-                        "BREP #{}: circle inconsistency on axis origin=({:.3},{:.3},{:.3}) dir=({:.3},{:.3},{:.3}): {} edges with point counts {:?}",
-                        brep_id,
-                        inc.axis_origin.x, inc.axis_origin.y, inc.axis_origin.z,
-                        inc.axis_dir.x, inc.axis_dir.y, inc.axis_dir.z,
-                        inc.edge_keys.len(),
-                        inc.point_counts,
-                    );
-                }
-            }
-        }
 
         let mut mesh = TriangleMesh::new();
         // Tolerance-based dedup: catches near-identical vertices from different
@@ -5005,7 +5074,7 @@ impl<'a> StepConverter<'a> {
                 log::debug!("BREP #{} face[{}]: {} outer={} inner={}", brep_id, fi, surface_type, n_outer, n_inner);
             }
 
-            let face_mesh = self.surface_to_mesh_cached(face_data, params, bbox, &mut edge_cache);
+            let face_mesh = self.surface_to_mesh_cached(face_data, &params, bbox, &mut edge_cache);
             let (fbmin, fbmax) = face_mesh.bounding_box();
             log::debug!("  -> v={} t={} bbox=({:.2},{:.2},{:.2})..({:.2},{:.2},{:.2})",
                 face_mesh.vertex_count(), face_mesh.triangle_count(),
@@ -5589,267 +5658,15 @@ impl<'a> StepConverter<'a> {
             face_data_list
         };
 
-        // ─── Adaptive LOD: compute per-face triangle budget ─────────────
-        // When adaptive_lod_enabled is set in the viewer, compute a per-face
-        // budget from total_budget / face_count so that each face gets a fair
-        // share. This replaces the old approach of triangulating every face at
-        // full quality and then decimating the combined mesh.
-        let mut params = params.clone();
-        if params.adaptive_lod_enabled {
-            params.with_adaptive_lod(face_data_list.len());
-        }
-
-        // Create edge discretization cache for this BREP
+        // ─── Edge cache setup ────────────────────────────────────────────
+        // Adaptive LOD budgets, §3.3 seam gluing, circle/NURBS precomputes,
+        // canonical CDTs, Phase 1/2 step_id aliasing — SHARED with the
+        // legacy and chunked paths (setup_brep_edge_cache): one
+        // implementation, zero drift. Returns the effective params (per-face
+        // adaptive budgets applied).
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
-        // Apply LOD-aware chord tolerance so the Quality slider changes
-        // circle/edge sampling density.
-        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
+        let params = self.setup_brep_edge_cache(brep_id, &face_data_list, params, &tol_ctx, &mut edge_cache);
 
-        // Pre-compute per-axis-group n for circles (watertightness for
-        // multi-radius tube faces).
-        {
-            let all_edges: Vec<&TopoEdge> = face_data_list
-                .iter()
-                .flat_map(|fd| fd.edges.iter())
-                .collect();
-            edge_cache.pre_compute_circle_axis_n(all_edges);
-        }
-
-        // Pre-compute shared NURBS refinement grids (MS-2).
-        for fd in &face_data_list {
-            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
-                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
-            }
-        }
-
-        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
-        // session-30) — no-op unless `params.use_surface_canonical_cdt`.
-        self.pre_compute_canonical_surface_cdts(&face_data_list, &params, &mut edge_cache);
-
-        // ─── Build vertex-pair → canonical step_id aliases ──────────────
-        {
-            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
-            for face_data in &face_data_list {
-                for &step_id in &face_data.edge_step_ids {
-                    if step_id == 0 { continue; }
-                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
-                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
-                    }
-                }
-            }
-            let mut alias_count = 0usize;
-            let mut skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order (see Phase 1 note above).
-            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
-                vertex_pair_to_step_ids.iter().collect();
-            phase1_sorted.sort_by_key(|(k, _)| **k);
-            for (vp, step_ids) in phase1_sorted {
-                if step_ids.len() < 2 { continue; }
-
-                // P2: Group by curve SHAPE using 5-point sampling.
-                // ARCHITECTURAL DECISION: Different curve types (Line vs Circle)
-                // sharing the same VERTEX_POINT endpoints ALWAYS represent the
-                // same physical boundary. Always alias them.
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-
-                // If shape_groups has multiple groups with DIFFERENT curve types,
-                // merge ALL groups — they represent the same boundary.
-                if shape_groups.len() > 1 {
-                    let mut curve_types: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    for (_samples, group_sids) in &shape_groups {
-                        if let Some(&sid) = group_sids.first() {
-                            curve_types.insert(self.edge_curve_type_name(sid));
-                        }
-                    }
-                    if curve_types.len() > 1 {
-                        // Different curve types — merge ALL and alias
-                        let all_sids: Vec<i64> = shape_groups.iter()
-                            .flat_map(|(_, g)| g.iter().copied())
-                            .collect();
-                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
-                            self.edge_curve_complexity_score(sid)
-                        }).unwrap();
-                        for &sid in &all_sids {
-                            if sid != canonical {
-                                edge_cache.register_step_id_alias(sid, canonical);
-                                alias_count += 1;
-                            }
-                        }
-                        log::info!(
-                            "BREP #{}: aliased {} step_ids with different curve types at VP {:?} (types: {:?})",
-                            brep_id, all_sids.len(), vp, {
-                                let mut ts: Vec<String> = curve_types.iter().cloned().collect();
-                                ts.sort_unstable();
-                                ts
-                            }
-                        );
-                        continue;
-                    }
-                }
-
-                // Same curve type — alias within each shape group
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-                    
-                    // DIAG: Check if curves with different types are being grouped
-                    let curve_types: Vec<String> = group_sids.iter()
-                        .map(|&sid| self.edge_curve_type_name(sid))
-                        .collect();
-                    let unique_types: std::collections::HashSet<&str> = curve_types.iter()
-                        .map(|s| s.as_str())
-                        .collect();
-                    
-                    if unique_types.len() > 1 {
-                        log::warn!(
-                            "⚠️ BREP #{}: ALIASING CURVES WITH DIFFERENT TYPES! vertex_pair {:?} types={:?} step_ids={:?}",
-                            brep_id, vp, curve_types, group_sids
-                        );
-                    }
-                    
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    let canonical_type = self.edge_curve_type_name(canonical);
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            alias_count += 1;
-                            let sid_type = self.edge_curve_type_name(sid);
-                            if sid_type != canonical_type {
-                                log::warn!(
-                                    "⚠️ BREP #{}: aliasing {}({}) → {}({}) — DIFFERENT CURVE TYPES!",
-                                    brep_id, sid, sid_type, canonical, canonical_type
-                                );
-                            }
-                        }
-                    }
-                    log::debug!(
-                        "BREP #{}: vertex pair {:?} → canonical step_id={}, aliases={:?} (detailed path)",
-                        brep_id, vp, canonical, group_sids.iter().filter(|&&s| s != canonical).collect::<Vec<_>>()
-                    );
-                }
-
-                if shape_groups.len() > 1 {
-                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                    // Log details about skipped curves for diagnosis
-                    log::warn!(
-                        "BREP #{}: skipped {} step_ids at vertex_pair {:?} — {} shape groups (shape_tol={:.4})",
-                        brep_id,
-                        step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>(),
-                        vp,
-                        shape_groups.len(),
-                        shape_tol,
-                    );
-                    for (i, (samples, group_sids)) in shape_groups.iter().enumerate() {
-                        let mid = samples.get(samples.len() / 2).copied().unwrap_or(Point3d::new(f64::NAN, f64::NAN, f64::NAN));
-                        log::warn!(
-                            "  group {}: mid=({:.4},{:.4},{:.4}) step_ids={:?}",
-                            i, mid.x, mid.y, mid.z, group_sids,
-                        );
-                    }
-                }
-            }
-            if alias_count > 0 || skipped_different_curves > 0 {
-                log::info!(
-                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (detailed path, skipped {} edges with same endpoints but different curves)",
-                    brep_id, alias_count, skipped_different_curves,
-                );
-            }
-
-
-            // Phase 2: 3D coordinate-based aliasing (supplementary)
-            // Same logic as in triangulate_brep() — see comments there.
-            // Also applies midpoint check to avoid aliasing different curves.
-            //
-            // Use the MAX of aliasing_tolerance() and sewing_tol * 2.
-            let coord_tol = tol_ctx.aliasing_tolerance()
-                .max(tol_ctx.sewing_tol * 2.0)
-                
-                .max(tol_ctx.absolute * 10.0);
-            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
-            for face_data in &face_data_list {
-                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
-                    if step_id == 0 { continue; }
-                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
-                        continue;
-                    }
-                    let edge = &face_data.edges[edge_idx];
-                    let start = match edge.start_point() { Some(p) => p, None => continue };
-                    let end = match edge.end_point() { Some(p) => p, None => continue };
-                    let sk = (
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                    );
-                    let sk_rev = (
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                    );
-                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
-                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
-                }
-            }
-            let mut coord_alias_count = 0usize;
-            let mut coord_groups_with_multiple = 0usize;
-            let mut coord_skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order (see Phase 1 note above).
-            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
-                coord_pair_to_step_ids.iter().collect();
-            phase2_sorted.sort_by_key(|(k, _)| **k);
-            for (_key, step_ids) in phase2_sorted {
-                if step_ids.len() < 2 { continue; }
-                coord_groups_with_multiple += 1;
-
-                // P2: Apply shape-based grouping (5-point sampling) — same as Phase 1
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            coord_alias_count += 1;
-                        }
-                    }
-                }
-
-                if shape_groups.len() > 1 {
-                    coord_skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                }
-            }
-            log::info!(
-                "BREP #{}: Phase 2 alias: {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
-                brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
-            );
-
-
-            // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
-            // For periodic surfaces (cylinder, sphere, torus, revolution, closed NURBS),
-            // edges at u=0 and u=u_max represent the same geometric boundary (seam).
-            // We detect these and register them as aliases BEFORE triangulation,
-            // so the edge cache produces bit-identical 3D points for both sides.
-            let seam_count = self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
-            if seam_count > 0 {
-                log::info!(
-                    "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
-                    brep_id, seam_count
-                );
-            }
-
-        }
 
         // Time guard: limit per-BREP triangulation time.
         // WASM uses a moderate limit to avoid browser freezes; native has
@@ -6699,172 +6516,26 @@ impl<'a> StepConverter<'a> {
             }
         }
 
-        // Create edge discretization cache for this BREP
+        // Create edge discretization cache for this BREP.
+        // The full setup — adaptive LOD budgets, §3.3 seam gluing,
+        // circle/NURBS precomputes, canonical CDTs, Phase 1/2 step_id
+        // aliasing — is SHARED with the legacy and detailed paths
+        // (setup_brep_edge_cache): one implementation, zero drift.
+        // Returns the effective params (per-face adaptive budgets applied —
+        // the chunked path previously never applied them).
         let mut edge_cache = EdgeDiscretizationCache::with_tolerance(tol_ctx.clone(), 256);
-        // Apply LOD-aware chord tolerance so the Quality slider changes
-        // circle/edge sampling density.
-        edge_cache.set_chord_tolerance_override(Some(params.max_deviation));
-
-        // ── Seam edge topological gluing (ROADMAP_VISION_2036 §3.3) ──
-        // Chunked/progressive path previously MISSED seam aliasing: periodic
-        // surfaces (cylinders, spheres, tori) could get non-identical vertices
-        // on the two sides of a seam, producing boundary edges on the web.
-        {
-            let seam_count =
-                self.register_seam_aliases(&face_data_list, &mut edge_cache, tol_ctx.sewing_tol);
-            if seam_count > 0 {
-                log::info!(
-                    "BREP #{}: registered {} seam edge aliases (chunked path, topological gluing before triangulation)",
-                    brep_id, seam_count
-                );
-            }
-        }
-
-        // Pre-compute per-axis-group n for circles (watertightness for
-        // multi-radius tube faces).
-        {
-            let all_edges: Vec<&TopoEdge> = face_data_list
-                .iter()
-                .flat_map(|fd| fd.edges.iter())
-                .collect();
-            edge_cache.pre_compute_circle_axis_n(all_edges);
-        }
-
-        // Pre-compute shared NURBS refinement grids (MS-2).
-        for fd in &face_data_list {
-            if let draper_geometry::Surface::Nurbs(nurbs) = &fd.surface {
-                edge_cache.pre_compute_nurbs_refinement_grid(nurbs, 3);
-            }
-        }
-
-        // Pre-compute surface-level canonical CDTs (Vision 2036 Phase 1,
-        // session-30) — no-op unless `params.use_surface_canonical_cdt`.
-        self.pre_compute_canonical_surface_cdts(&face_data_list, params, &mut edge_cache);
-
-        // ─── Build vertex-pair → canonical step_id aliases ──────────────
-        // (Same logic as triangulate_brep_detailed — see comments there.)
-        {
-            let mut vertex_pair_to_step_ids: HashMap<(i64, i64), Vec<i64>> = HashMap::new();
-            for face_data in &face_data_list {
-                for &step_id in &face_data.edge_step_ids {
-                    if step_id == 0 { continue; }
-                    if let Some(vp) = self.get_edge_curve_vertex_pair(step_id) {
-                        vertex_pair_to_step_ids.entry(vp).or_default().push(step_id);
-                    }
-                }
-            }
-            let mut alias_count = 0usize;
-            let mut skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order (see the detailed-path Phase 1).
-            let mut phase1_sorted: Vec<(&(i64, i64), &Vec<i64>)> =
-                vertex_pair_to_step_ids.iter().collect();
-            phase1_sorted.sort_by_key(|(k, _)| **k);
-            for (_vp, step_ids) in phase1_sorted {
-                if step_ids.len() < 2 { continue; }
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            alias_count += 1;
-                        }
-                    }
-                }
-                if shape_groups.len() > 1 {
-                    skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                }
-            }
-            if alias_count > 0 || skipped_different_curves > 0 {
-                log::info!(
-                    "BREP #{}: registered {} step_id aliases from vertex-pair matching (chunked, skipped {} edges with same endpoints but different curves)",
-                    brep_id, alias_count, skipped_different_curves,
-                );
-            }
-
-            // Phase 2: 3D coordinate-based aliasing (supplementary)
-            // Use the MAX of aliasing_tolerance() and sewing_tol * 2.
-            let coord_tol = tol_ctx.aliasing_tolerance()
-                .max(tol_ctx.sewing_tol * 2.0)
-                
-                .max(tol_ctx.absolute * 10.0);
-            let mut coord_pair_to_step_ids: HashMap<(i64, i64, i64, i64, i64, i64), Vec<i64>> = HashMap::new();
-            for face_data in &face_data_list {
-                for (edge_idx, &step_id) in face_data.edge_step_ids.iter().enumerate() {
-                    if step_id == 0 { continue; }
-                    if edge_cache.resolve_canonical_step_id(step_id) != step_id {
-                        continue;
-                    }
-                    let edge = &face_data.edges[edge_idx];
-                    let start = match edge.start_point() { Some(p) => p, None => continue };
-                    let end = match edge.end_point() { Some(p) => p, None => continue };
-                    let sk = (
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                    );
-                    let sk_rev = (
-                        (end.x / coord_tol).round() as i64,
-                        (end.y / coord_tol).round() as i64,
-                        (end.z / coord_tol).round() as i64,
-                        (start.x / coord_tol).round() as i64,
-                        (start.y / coord_tol).round() as i64,
-                        (start.z / coord_tol).round() as i64,
-                    );
-                    let canonical_key = if sk <= sk_rev { sk } else { sk_rev };
-                    coord_pair_to_step_ids.entry(canonical_key).or_default().push(step_id);
-                }
-            }
-            let mut coord_alias_count = 0usize;
-            let mut coord_groups_with_multiple = 0usize;
-            let mut coord_skipped_different_curves = 0usize;
-            // DETERMINISM: sorted group order (see Phase 1 note above).
-            let mut phase2_sorted: Vec<(&(i64, i64, i64, i64, i64, i64), &Vec<i64>)> =
-                coord_pair_to_step_ids.iter().collect();
-            phase2_sorted.sort_by_key(|(k, _)| **k);
-            for (_key, step_ids) in phase2_sorted {
-                if step_ids.len() < 2 { continue; }
-                coord_groups_with_multiple += 1;
-                let shape_tol = tol_ctx.aliasing_tolerance().max(1e-6);
-                let shape_groups = self.group_step_ids_by_curve_shape(step_ids, shape_tol);
-                for (_samples, group_sids) in &shape_groups {
-                    if group_sids.len() < 2 { continue; }
-                    let canonical = *group_sids.iter().max_by_key(|&&sid| {
-                        self.edge_curve_complexity_score(sid)
-                    }).unwrap();
-                    for &sid in group_sids {
-                        if sid != canonical {
-                            edge_cache.register_step_id_alias(sid, canonical);
-                            coord_alias_count += 1;
-                        }
-                    }
-                }
-                if shape_groups.len() > 1 {
-                    coord_skipped_different_curves += step_ids.len() - shape_groups.iter().map(|(_, g)| g.len().min(1)).sum::<usize>();
-                }
-            }
-            log::info!(
-                "BREP #{}: Phase 2 alias (chunked): {} coord groups, {} with multiple step_ids, {} aliases registered, {} skipped different curves (tol={:.2e})",
-                brep_id, coord_pair_to_step_ids.len(), coord_groups_with_multiple, coord_alias_count, coord_skipped_different_curves, coord_tol,
-            );
-        }
+        let effective_params =
+            self.setup_brep_edge_cache(brep_id, &face_data_list, params, &tol_ctx, &mut edge_cache);
 
         // Time guard: limit per-BREP triangulation time.
         // Use override from TriangulationParams if provided, otherwise use
         // platform-specific defaults (30s WASM / unlimited native —
         // see `default_brep_time_limit` for the determinism rationale).
-        let brep_time_limit = params
+        let brep_time_limit = effective_params
             .brep_time_limit_override
             .unwrap_or_else(default_brep_time_limit);
 
-        let face_time_limit = params
+        let face_time_limit = effective_params
             .face_time_limit_override
             .unwrap_or_else(default_face_time_limit);
 
@@ -6887,7 +6558,7 @@ impl<'a> StepConverter<'a> {
             brep_start: StdInstant::now(),
             brep_time_limit,
             face_time_limit,
-            params: params.clone(),
+            params: effective_params,
             bbox: bbox.clone(),
         })
     }
