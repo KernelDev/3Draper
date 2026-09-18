@@ -200,9 +200,20 @@ impl CanonicalSurfaceCdt {
                         // aligns the extraction check with the build
                         // semantics (session-37: the 337 drill_top
                         // legalization-rescued groups all tripped on
-                        // exactly this). LEGALIZED BUILDS ONLY — plain
-                        // builds keep the strict pre-session-37 check
-                        // (never-worsen).
+                        // exactly this).
+                        //
+                        // STILL LEGALIZED-ONLY after the session-38
+                        // bisect: with the skip un-gated for plain builds,
+                        // drill_top improves massively (−2637 bnd) but
+                        // as1-oc-214 regresses +239 bnd — the newly
+                        // canonical faces' rims mismatch their LEGACY
+                        // neighbors (nut #63 +10, l-bracket #1934 +31).
+                        // That is NOT the chunked/cached non-determinism
+                        // (parity is now bit-exact) — it is a genuine
+                        // canonical-vs-legacy rim consistency problem.
+                        // Needs rim-vertex source parity (canonical rims
+                        // derived from the edge-cache discretization)
+                        // before plain un-gating can hold never-worsen.
                         continue;
                     }
                     if !mesh_edges.contains(&(ia.min(ib), ia.max(ib))) {
@@ -315,7 +326,10 @@ impl CanonicalSurfaceCdt {
         // makes the accounting exact. Failing here routes the face to
         // the legacy path — never-worsen. Deterministic: the
         // lexicographically smallest offending edge.
-        if self.legalized {
+        // Session-38: un-gated for PLAIN builds too (path parity fixed
+        // the as1 +239-bnd neighbor-variant instability that motivated
+        // the gate; the check itself is a pure safety rejection).
+        {
             let mut usage: HashMap<(u32, u32), usize> =
                 HashMap::with_capacity(mesh.triangles.len() * 3);
             for t in &mesh.triangles {
@@ -1560,9 +1574,13 @@ fn build_canonical_surface_cdt_inner(
         .map(|&t| tri.tri_is_degenerate(t))
         .collect();
     for fi in 0..faces.len() {
-        if !legalize_insertions {
-            break;
-        }
+        // Session-38: the flood is STRICTLY ADDITIVE (never removes or
+        // steals — claimed triangles and rim constraints are hard
+        // barriers, degenerate fans are never entered), so running it for
+        // plain builds too cannot break a passing extraction; it only
+        // rescues rim-adjacent stragglers the centroid misclassifies.
+        // Un-gated now that chunked/cached parity guarantees the
+        // neighbors' legacy variant is stable.
         if face_loops_uv[fi].is_empty() {
             continue;
         }
