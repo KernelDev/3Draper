@@ -12876,9 +12876,30 @@ impl<'a> StepConverter<'a> {
         // Steiner coverage WITHOUT cross-face boundary regressions.
         // `extract_face_mesh` returns None on loop mismatch → legacy path
         // (never-worsen, face by face).
+        if let Surface::Nurbs(nurbs) = &face_data.surface {
+            if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                let got_cdt = edge_cache.get_canonical_surface_cdt(nurbs);
+                eprintln!(
+                    "BRANCH-DIAG: face {} flag={} cdt={}",
+                    face_data.step_face_id,
+                    params.use_surface_canonical_cdt,
+                    got_cdt.is_some()
+                );
+                if params.use_surface_canonical_cdt && got_cdt.is_some() {
+                    eprintln!(
+                        "CALL-SITE2: face {} would extract HERE",
+                        face_data.step_face_id
+                    );
+                }
+            }
+        }
         if params.use_surface_canonical_cdt {
             if let Surface::Nurbs(nurbs) = &face_data.surface {
                 if let Some(cdt) = edge_cache.get_canonical_surface_cdt(nurbs) {
+                    // session-39 diag
+                    if std::env::var("DRAPER_CANON_TRACE_ALL").is_ok() {
+                        eprintln!("CALL-SITE: face {} CDT found, extracting", face_data.step_face_id);
+                    }
                     if let Some(mesh) = cdt.extract_face_mesh(
                         nurbs,
                         &boundary_points,

@@ -57,6 +57,11 @@ use crate::mesh::TriangleMesh;
 /// semantics; kept local so this module never drifts from it).
 const EPS: f64 = 1e-10;
 
+/// Build-identity tag (session-39 discipline): printed by diag tools to
+/// prove which mesh-crate revision a binary embeds after incremental-build
+/// poisoning incidents in this sandbox.
+pub const CANON_BUILD_TAG: &str = "final-patch-v2";
+
 /// A triangle whose UV vertices are collinear within this orient2d
 /// magnitude covers zero area: its predicates are meaningless (every
 /// point off the line reads as "strictly inside" — all three orient
@@ -133,7 +138,46 @@ impl CanonicalSurfaceCdt {
         holes_uvs: &[Vec<Point2d>],
         forward: bool,
     ) -> Option<TriangleMesh> {
+        if std::env::var("DRAPER_CANON_TRACE_ALL").is_ok() {
+            eprintln!(
+                "EX-TRY: cdt faces={:?} legal={} caller_loop={}",
+                self.faces.iter().map(|f| f.step_face_id).collect::<Vec<_>>(),
+                self.legalized,
+                boundary_3d.len()
+            );
+        }
         let face_idx = self.match_face(boundary_3d, holes_3d)?;
+        let trace_face = std::env::var("DRAPER_CANON_TRACE_FACE")
+            .ok()
+            .map(|v| v == self.faces[face_idx].step_face_id.to_string())
+            .unwrap_or(false);
+        if trace_face {
+            eprintln!(
+                "TRACE[{}]: extract enter legal={} loop_pts={}",
+                self.faces[face_idx].step_face_id,
+                self.legalized,
+                boundary_3d.len()
+            );
+        }
+        // Session-39 diagnostics: full caller-loop dump for one face.
+        if let Ok(target) = std::env::var("DRAPPER_CANON_DUMP_LOOP") {
+            if self.faces[face_idx].step_face_id.to_string() == target {
+                eprintln!(
+                    "LOOP-DUMP: face {} outer {} pts, {} holes",
+                    target,
+                    boundary_3d.len(),
+                    holes_3d.len()
+                );
+                for (k, (p, q)) in
+                    boundary_3d.iter().zip(boundary_uvs.iter()).enumerate()
+                {
+                    eprintln!(
+                        "  [{}] 3d=({:.5},{:.5},{:.5}) uv=({:.6e},{:.6e})",
+                        k, p.x, p.y, p.z, q.u, q.v
+                    );
+                }
+            }
+        }
         let tri_idxs = &self.face_tris[face_idx];
 
         // ── Rim-contract validation (never-worsen) ──
@@ -191,7 +235,7 @@ impl CanonicalSurfaceCdt {
                         }
                         return false; // rim vertex missing from the extraction
                     };
-                    if ia == ib && self.legalized {
+                    if ia == ib {
                         // Zero-length rim segment: consecutive duplicate
                         // 3D position in the caller's loop (closed-circle
                         // seam vertex / seam pinch). The build's intern
@@ -202,18 +246,24 @@ impl CanonicalSurfaceCdt {
                         // legalization-rescued groups all tripped on
                         // exactly this).
                         //
-                        // STILL LEGALIZED-ONLY after the session-38
-                        // bisect: with the skip un-gated for plain builds,
-                        // drill_top improves massively (−2637 bnd) but
-                        // as1-oc-214 regresses +239 bnd — the newly
-                        // canonical faces' rims mismatch their LEGACY
-                        // neighbors (nut #63 +10, l-bracket #1934 +31).
-                        // That is NOT the chunked/cached non-determinism
-                        // (parity is now bit-exact) — it is a genuine
-                        // canonical-vs-legacy rim consistency problem.
-                        // Needs rim-vertex source parity (canonical rims
-                        // derived from the edge-cache discretization)
-                        // before plain un-gating can hold never-worsen.
+                        // Session-39: UN-GATED for plain builds. The
+                        // session-38 bisect regression (+239 bnd on
+                        // as1-oc-214: nut #63 +10, l-bracket #1934 +31,
+                        // plate #3813 +55 ...) was root-caused to
+                        // DISCONNECTED extractions, not to the skip
+                        // itself: the unlocked degenerate-corner strips
+                        // (two loop curves meeting at one 3D point) emit
+                        // two edge-disconnected disk components — every
+                        // loop chord is present in SOME component and
+                        // each component is internally manifold, so the
+                        // rim contract and the manifold check both pass,
+                        // but the inter-component gap leaves each
+                        // component's outer edges unmatched against the
+                        // legacy neighbors. The session-39 connectivity
+                        // contract below rejects exactly those — they
+                        // take the legacy path (their pre-unlock
+                        // behavior), restoring never-worsen while
+                        // keeping the drill_top gain (−2637 bnd).
                         continue;
                     }
                     if !mesh_edges.contains(&(ia.min(ib), ia.max(ib))) {
@@ -310,6 +360,136 @@ impl CanonicalSurfaceCdt {
         }
         let _ = (boundary_uvs, holes_uvs);
 
+        // ── Connectivity contract over the EMITTED mesh (session-39) ──
+        // A face is a topological disk (with holes): its emitted
+        // triangulation must be a SINGLE edge-connected component. The
+        // zero-length-skip unlock (session-39) exposed degenerate-corner
+        // strips (two boundary curves meeting at one 3D point — e.g. the
+        // as1-oc-214 nut chamfers) whose centroid classification splits
+        // the extraction into two disconnected disks: all loop chords
+        // present (rim contract passes), each disk internally manifold
+        // (manifold check passes), but the gap between the disks leaves
+        // their outer edges unmatched against the legacy neighbors —
+        // the +239-bnd regression of the session-38 bisect, at its root.
+        // Edge-connectivity (NOT vertex-connectivity): the two disks may
+        // touch at the pinched corner vertex. Deterministic rejection;
+        // failing faces take the legacy path — never-worsen.
+        {
+            use std::collections::VecDeque;
+            let n_tris = mesh.triangles.len();
+            // edge (min,max) of emitted vertex ids → triangle indices
+            let mut edge_tris: HashMap<(u32, u32), Vec<usize>> =
+                HashMap::with_capacity(n_tris * 3);
+            for (ti, t) in mesh.triangles.iter().enumerate() {
+                for i in 0..3 {
+                    let a = t[i].min(t[(i + 1) % 3]);
+                    let b = t[i].max(t[(i + 1) % 3]);
+                    edge_tris.entry((a, b)).or_default().push(ti);
+                }
+            }
+            let mut seen = vec![false; n_tris];
+            let mut components = 0usize;
+            for seed in 0..n_tris {
+                if seen[seed] {
+                    continue;
+                }
+                components += 1;
+                if trace_face {
+                    eprintln!("TRACE[comp]: component {} found", components);
+                }
+                if components > 1 {
+                    log::debug!(
+                        "canonical CDT: emitted face mesh disconnected \
+                         (>{} components) — legacy fallback",
+                        components
+                    );
+                    if debug_enabled() {
+                        eprintln!(
+                            "CANON-DEBUG: connectivity check FAILED \
+                             ({} tris, >1 edge-connected component)",
+                            n_tris
+                        );
+                    }
+                    return None;
+                }
+                seen[seed] = true;
+                let mut queue: VecDeque<usize> = VecDeque::new();
+                queue.push_back(seed);
+                while let Some(ti) = queue.pop_front() {
+                    let t = &mesh.triangles[ti];
+                    for i in 0..3 {
+                        let a = t[i].min(t[(i + 1) % 3]);
+                        let b = t[i].max(t[(i + 1) % 3]);
+                            if let Some(neigh) = edge_tris.get(&(a, b)) {
+                            for &nt in neigh {
+                                if nt != ti && !seen[nt] {
+                                    seen[nt] = true;
+                                    queue.push_back(nt);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if trace_face {
+            eprintln!("TRACE[conn]: PASS (single component)");
+            // Dump the emission's face-local boundary edges + loop-chord
+            // classification (LOCAL coordinates, pre-transform).
+            let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
+            for t in &mesh.triangles {
+                for i in 0..3 {
+                    let a = t[i].min(t[(i + 1) % 3]);
+                    let b = t[i].max(t[(i + 1) % 3]);
+                    *usage.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+            let mut loop_pairs: std::collections::HashSet<(u32, u32)> =
+                std::collections::HashSet::new();
+            let mut collect_pairs = |l3: &[Point3d]| {
+                let n = l3.len();
+                for i in 0..n {
+                    let j = (i + 1) % n;
+                    let (Some(ia), Some(ib)) = (
+                        mesh.vertices.iter().position(|p| bits3(p) == bits3(&l3[i])),
+                        mesh.vertices.iter().position(|p| bits3(p) == bits3(&l3[j])),
+                    ) else {
+                        continue;
+                    };
+                    if ia != ib {
+                        let (x, y) = (ia.min(ib) as u32, ia.max(ib) as u32);
+                        loop_pairs.insert((x, y));
+                    }
+                }
+            };
+            collect_pairs(boundary_3d);
+            for h in holes_3d {
+                collect_pairs(h);
+            }
+            let mut bnd_edges: Vec<(u32, u32)> = usage
+                .iter()
+                .filter(|(_, &c)| c == 1)
+                .map(|(&(a, b), _)| (a, b))
+                .collect();
+            bnd_edges.sort_unstable();
+            eprintln!(
+                "TRACE[emit]: {} tris, {} local bnd edges, {} loop chords",
+                mesh.triangles.len(),
+                bnd_edges.len(),
+                loop_pairs.len()
+            );
+            for &(a, b) in bnd_edges.iter().take(24) {
+                let pa = mesh.vertices[a as usize];
+                let pb = mesh.vertices[b as usize];
+                let chord = if loop_pairs.contains(&(a, b)) { "CHORD" } else { "NON-CHORD" };
+                eprintln!(
+                    "  BND({}) ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4})",
+                    chord, pa.x, pa.y, pa.z, pb.x, pb.y, pb.z
+                );
+            }
+        }
+
         // ── Manifold check over the EMITTED mesh (session-37,
         //    LEGALIZED BUILDS ONLY) ──
         // Every edge that is NOT a segment of the face's rim polyline
@@ -370,6 +550,9 @@ impl CanonicalSurfaceCdt {
                 .filter(|(&(a, b), &n)| n != 2 && !rim_edges.contains(&(a, b)))
                 .collect();
             offending.sort_unstable();
+            if trace_face && offending.is_empty() {
+                eprintln!("TRACE[mani]: PASS");
+            }
             if let Some((&(a, b), &n)) = offending.first() {
                 log::debug!(
                     "canonical CDT: emitted face mesh non-manifold at edge ({}, {}) \
@@ -388,10 +571,16 @@ impl CanonicalSurfaceCdt {
                         rim_edges.contains(&(a, b))
                     );
                 }
+                if trace_face {
+                    eprintln!("TRACE[mani]: FAIL edge ({},{})", a, b);
+                }
                 return None;
             }
         }
 
+        if trace_face {
+            eprintln!("TRACE[done]: Some(mesh)");
+        }
         Some(mesh)
     }
 
@@ -3984,6 +4173,104 @@ mod tests {
         assert!(
             usage.values().all(|&n| n <= 2),
             "extracted face mesh must stay manifold"
+        );
+    }
+
+    /// Session-39 connectivity contract: a face whose emitted mesh is a
+    /// single disk passes; a PINCHED face (two lobes meeting at one 3D
+    /// point, the as1-oc-214 nut-chamfer topology) whose loop carries a
+    /// consecutive duplicate pair at the pinch and whose triangles form
+    /// two edge-disconnected disks must be REJECTED — every loop chord is
+    /// present in some lobe (rim contract passes), all edges are rim
+    /// chords (manifold check passes), but the lobes only touch at the
+    /// pinched vertex: the neighbors of each lobe's outer edges see no
+    /// counterpart, which was the +239-bnd regression of the session-38
+    /// bisect. Also covers the session-39 un-gating of the zero-length
+    /// rim-segment skip (the pinch pair must be skipped, not reject the
+    /// face before the connectivity check can run).
+    #[test]
+    fn canonical_cdt_pinched_face_two_lobes_rejected() {
+        let nurbs = bilinear_patch(0.0, 2.0, 0.0, 2.0);
+
+        // Loop: (0,0) → (2,0) → (1,1)* → (2,2) → (0,2) → (1,1)* → close.
+        // The pinch vertex (1,1) appears twice (consecutive duplicate at
+        // positions 2 and 5 when the loop wraps).
+        let lp = |u: f64, v: f64| (Point3d::new(u, v, 0.0), Point2d::new(u, v));
+        let (p00, u00) = lp(0.0, 0.0);
+        let (p20, u20) = lp(2.0, 0.0);
+        let (p11, u11) = lp(1.0, 1.0);
+        let (p22, u22) = lp(2.0, 2.0);
+        let (p02, u02) = lp(0.0, 2.0);
+        let outer_3d = vec![p00, p20, p11, p22, p02, p11];
+        let outer_uv = vec![u00, u20, u11, u22, u02, u11];
+
+        let cdt = CanonicalSurfaceCdt {
+            // 6 canonical vertices: the pinch keeps TWO entries (ids 2
+            // and 5) exactly as the caller's loop does.
+            uv: vec![[0.0, 0.0], [2.0, 0.0], [1.0, 1.0], [2.0, 2.0], [0.0, 2.0], [1.0, 1.0]],
+            p3d: outer_3d.clone(),
+            // Two lobes, edge-disconnected (they share only the pinch
+            // vertex, which the emission position-dedups to one id).
+            tris: vec![[0, 1, 2], [3, 4, 5]],
+            face_tris: vec![vec![0, 1]],
+            faces: vec![CanonicalFaceLoops {
+                step_face_id: 1,
+                forward: true,
+                outer_3d: outer_3d.clone(),
+                outer_uv: outer_uv.clone(),
+                holes_3d: vec![],
+                holes_uv: vec![],
+            }],
+            legalized: false,
+        };
+
+        // Every rim chord is present in some lobe; the pinch pair is a
+        // zero-length segment (skipped since session-39). The extraction
+        // must fail ONLY at the connectivity contract.
+        let out = cdt.extract_face_mesh(
+            &nurbs,
+            &outer_3d,
+            &outer_uv,
+            &[],
+            &[],
+            true,
+        );
+        assert!(
+            out.is_none(),
+            "pinched two-lobe emission must be rejected (connectivity contract)"
+        );
+    }
+
+    /// Session-39 control: a plain connected single-disk emission (fan
+    /// triangulation of a rectangle, every boundary edge a rim chord)
+    /// must pass the connectivity contract — the contract rejects
+    /// disconnection, not healthy faces.
+    #[test]
+    fn canonical_cdt_connected_disk_accepted() {
+        let nurbs = bilinear_patch(0.0, 2.0, 0.0, 2.0);
+        let (r3d, ruv) = rect_loop(0.0, 2.0, 0.0, 2.0, 0);
+        let n = r3d.len();
+        let cdt2 = CanonicalSurfaceCdt {
+            uv: ruv.iter().map(|q| [q.u, q.v]).collect(),
+            p3d: r3d.clone(),
+            // Fan from vertex 0: edge-connected by construction, every
+            // boundary edge a rim chord.
+            tris: (1..n as u32 - 1).map(|k| [0, k, k + 1]).collect(),
+            face_tris: vec![(0..n as u32 - 2).map(|k| k as usize).collect()],
+            faces: vec![CanonicalFaceLoops {
+                step_face_id: 2,
+                forward: true,
+                outer_3d: r3d.clone(),
+                outer_uv: ruv.clone(),
+                holes_3d: vec![],
+                holes_uv: vec![],
+            }],
+            legalized: false,
+        };
+        let out = cdt2.extract_face_mesh(&nurbs, &r3d, &ruv, &[], &[], true);
+        assert!(
+            out.is_some(),
+            "connected single-disk emission must pass the connectivity contract"
         );
     }
 }
