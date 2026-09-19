@@ -12790,6 +12790,9 @@ impl<'a> StepConverter<'a> {
         bbox: &Option<(Point3d, Point3d)>,
         edge_cache: &mut EdgeDiscretizationCache,
     ) -> TriangleMesh {
+        if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+            eprintln!("PROBE-TOP: face {} flag={}", face_data.step_face_id, params.use_surface_canonical_cdt);
+        }
         let surface_type = match &face_data.surface {
             Surface::Plane(_) => "Plane",
             Surface::Cylinder(_) => "Cylinder",
@@ -12891,13 +12894,33 @@ impl<'a> StepConverter<'a> {
                         face_data.step_face_id
                     );
                 }
+                let (ph, pl, pa) = edge_cache.canonical_cdt_probe(nurbs);
+                eprintln!(
+                    "PROBE-A2: face {} hash={} len={} addr={:x}",
+                    face_data.step_face_id, ph, pl, pa
+                );
             }
         }
         if params.use_surface_canonical_cdt {
+            if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                eprintln!("PROBE-B: flag-if entered, face {}", face_data.step_face_id);
+            }
             if let Surface::Nurbs(nurbs) = &face_data.surface {
-                if let Some(cdt) = edge_cache.get_canonical_surface_cdt(nurbs) {
+                if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                    eprintln!("PROBE-C: nurbs matched, face {}", face_data.step_face_id);
+                }
+                let (rh, rl, ra) = edge_cache.canonical_cdt_probe(nurbs);
+                eprintln!(
+                    "PROBE-D: face {} hash={} len={} addr={:x}",
+                    face_data.step_face_id, rh, rl, ra
+                );
+                let cdt_opt = edge_cache.get_canonical_surface_cdt(nurbs);
+                if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                    eprintln!("PROBE-E: face {} got={}", face_data.step_face_id, cdt_opt.is_some());
+                }
+                if let Some(cdt) = cdt_opt {
                     // session-39 diag
-                    if std::env::var("DRAPER_CANON_TRACE_ALL").is_ok() {
+                    if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
                         eprintln!("CALL-SITE: face {} CDT found, extracting", face_data.step_face_id);
                     }
                     if let Some(mesh) = cdt.extract_face_mesh(

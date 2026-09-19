@@ -37,3 +37,4 @@ target/
 tool-results/
 dist-wasm/
 gh-pages-worktree/
+trace_*.log

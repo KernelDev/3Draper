@@ -138,7 +138,7 @@ impl CanonicalSurfaceCdt {
         holes_uvs: &[Vec<Point2d>],
         forward: bool,
     ) -> Option<TriangleMesh> {
-        if std::env::var("DRAPER_CANON_TRACE_ALL").is_ok() {
+        if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
             eprintln!(
                 "EX-TRY: cdt faces={:?} legal={} caller_loop={}",
                 self.faces.iter().map(|f| f.step_face_id).collect::<Vec<_>>(),
@@ -147,7 +147,7 @@ impl CanonicalSurfaceCdt {
             );
         }
         let face_idx = self.match_face(boundary_3d, holes_3d)?;
-        let trace_face = std::env::var("DRAPER_CANON_TRACE_FACE")
+        let trace_face = std::env::var("DRAPPER_CANON_TRACE_FACE")
             .ok()
             .map(|v| v == self.faces[face_idx].step_face_id.to_string())
             .unwrap_or(false);
@@ -1584,7 +1584,7 @@ fn build_canonical_surface_cdt_inner(
                     DebugCause::ConstraintUnenforced,
                 );
             }
-            if !legalize_insertions && std::env::var("DRAPER_CANON_DUMP_FACES").is_ok() {
+            if !legalize_insertions && std::env::var("DRAPPER_CANON_DUMP_FACES").is_ok() {
                 dump_face_literals(faces, steiner_uv, 0);
             }
             return Err(CanonicalBuildFailure {
@@ -1674,7 +1674,7 @@ fn build_canonical_surface_cdt_inner(
                     DebugCause::EdgeOverused,
                 );
             }
-            if !legalize_insertions && std::env::var("DRAPER_CANON_DUMP_FACES").is_ok() {
+            if !legalize_insertions && std::env::var("DRAPPER_CANON_DUMP_FACES").is_ok() {
                 dump_face_literals(faces, steiner_uv, 0);
             }
             // Attribute to a face whose loops own the duplicated edge:
@@ -2007,7 +2007,7 @@ pub fn build_canonical_surface_cdt_resilient(
                                     live.len(),
                                     failure.cause
                                 );
-                                if std::env::var("DRAPER_CANON_DUMP_RESCUED").is_ok() {
+                                if std::env::var("DRAPPER_CANON_DUMP_RESCUED").is_ok() {
                                     dump_face_literals(&attempt_faces, steiner_uv, 1);
                                 }
                                 dropped.sort_unstable();
@@ -2590,7 +2590,7 @@ fn edge_from_containing(tri: &Triangulation, a: u32, b: u32) -> Option<u32> {
 
 fn debug_enabled() -> bool {
     // Cached via std::env (cheap enough per build; builds are per-surface).
-    std::env::var("DRAPER_CANON_DEBUG").is_ok()
+    std::env::var("DRAPPER_CANON_DEBUG").is_ok()
 }
 
 /// Fine-grained per-triangle tracing (DRAPER_CANON_TRACE=1): duplicate
@@ -2598,7 +2598,7 @@ fn debug_enabled() -> bool {
 /// checked on EVERY add_tri/replace_tri call.
 fn trace_enabled() -> bool {
     static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *TRACE.get_or_init(|| std::env::var("DRAPER_CANON_TRACE").is_ok())
+    *TRACE.get_or_init(|| std::env::var("DRAPPER_CANON_TRACE").is_ok())
 }
 
 #[derive(Clone, Copy, Debug)]
