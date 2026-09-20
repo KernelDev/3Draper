@@ -1324,6 +1324,16 @@ impl EdgeDiscretizationCache {
         self.canonical_surface_cdts.get(&hash)
     }
 
+    /// session-40 surgical probe: (content hash, cdt-map len, cache address)
+    /// — distinguishes hash-drift vs map-clear vs different-object.
+    pub fn canonical_cdt_probe(
+        &self,
+        nurbs: &draper_geometry::NurbsSurface,
+    ) -> (u64, usize, usize) {
+        let hash = nurbs_surface_hash(nurbs);
+        (hash, self.canonical_surface_cdts.len(), self as *const _ as usize)
+    }
+
     /// Adaptively discretize an edge based on curve curvature.
     ///
     /// Starts with uniformly-spaced points based on the hint, then recursively

@@ -873,7 +873,35 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
             }
         }
 
-        let mut to_remove: HashSet<usize> = HashSet::new();
+        // ── session-41 never-worsen guard ──
+        // A removal may only proceed when it CANNOT open an interior
+        // edge. Removing triangle T decrements the usage of each of T's
+        // edges: usage≥3 → ≥2 (still interior — the July non-manifold
+        // flap clusters this step was built for), usage==1 → 0 (a
+        // spurious flap edge vanishes entirely), but usage==2 → 1 — a
+        // NEW boundary edge, i.e. a HOLE. The as1-oc-214 nut regression
+        // (+10 bnd per instance, sessions 38–40): the canonical
+        // hole-wall NURBS strips are TANGENT to the hex flats (the hole
+        // circle touches the flat line), so the emission's corner
+        // slivers have noisy anti-parallel normals, trip the >170°
+        // test, and are nevertheless REQUIRED for coverage — the mesh
+        // is watertight before this step. Guarding by live edge usage
+        // keeps the July de-flapping (Zentralstaender angle stats)
+        // while making it structurally impossible to open a hole.
+        let mut edge_usage: HashMap<(u32, u32), usize> = edge_to_tris
+            .iter()
+            .map(|(e, tris)| (*e, tris.len()))
+            .collect();
+        let edges_of = |t: [u32; 3]| -> [(u32, u32); 3] {
+            let [a, b, c] = t;
+            [
+                if a < b { (a, b) } else { (b, a) },
+                if b < c { (b, c) } else { (c, b) },
+                if c < a { (c, a) } else { (a, c) },
+            ]
+        };
+
+        let mut candidates: Vec<((u32, u32), usize)> = Vec::new();
         for (_edge, tris) in &edge_to_tris {
             if tris.len() != 2 { continue; }
             let fid0 = face_ids.get(tris[0]).copied().unwrap_or(0);
@@ -899,7 +927,35 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
                 let area0 = tri_area(&mesh.vertices, &tri0);
                 let area1 = tri_area(&mesh.vertices, &tri1);
                 let remove_idx = if area0 < area1 { tris[0] } else { tris[1] };
-                to_remove.insert(remove_idx);
+                candidates.push((*_edge, remove_idx));
+            }
+        }
+        // Deterministic application order (HashMap iteration is
+        // randomized): sort by (edge, triangle index) so the sequential
+        // live-usage checks below are reproducible run-to-run.
+        candidates.sort_unstable();
+        candidates.dedup();
+        let mut to_remove: HashSet<usize> = HashSet::new();
+        for (_edge, remove_idx) in candidates {
+            if to_remove.contains(&remove_idx) {
+                continue; // already accepted via another 170° pair
+            }
+            let tri = mesh.triangles[remove_idx];
+            // Refuse when ANY edge sits at usage 2 — removing this
+            // triangle would open it into a boundary edge. Usages are
+            // live: earlier accepted removals have already decremented
+            // their edges (3→2 blocks further removals there).
+            let opens_hole = edges_of(tri)
+                .iter()
+                .any(|e| edge_usage.get(e).copied().unwrap_or(0) == 2);
+            if opens_hole {
+                continue;
+            }
+            to_remove.insert(remove_idx);
+            for e in edges_of(tri) {
+                if let Some(u) = edge_usage.get_mut(&e) {
+                    *u = u.saturating_sub(1);
+                }
             }
         }
 
@@ -3837,5 +3893,72 @@ mod tests {
     fn test_fill_empty_mesh() {
         let mut mesh = TriangleMesh::new();
         assert_eq!(fill_boundary_gaps(&mut mesh, 32), 0);
+    }
+
+    /// session-41: a same-face 170°+ pair inside a CLOSED mesh (every
+    /// edge usage 2) must NOT be removed — the tangency-sliver scenario
+    /// of the as1-oc-214 nut canonical strips (cylinder wall tangent to
+    /// the hex flat → noisy anti-parallel sliver normals, but the
+    /// slivers are required for coverage of a watertight mesh).
+    #[test]
+    fn winding_overlap_removal_never_opens_closed_mesh() {
+        let mut mesh = TriangleMesh::new();
+        // Squashed tetrahedron: C and D nearly coincide, face (B,A,D)
+        // wound INVERTED so the (A,B,C)/(B,A,D) pair sharing edge A-B
+        // has ~180° anti-parallel normals — exactly the tangency-sliver
+        // signature. All edges have usage 2 (closed surface).
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0 = A
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 1 = B
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0)); // 2 = C
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.001)); // 3 = D
+        mesh.add_triangle(0, 1, 2); // (A,B,C) — normal +Z
+        mesh.add_triangle(1, 0, 3); // (B,A,D) — inverted → normal −Z-ish
+        mesh.add_triangle(0, 3, 2); // (A,D,C)
+        mesh.add_triangle(1, 2, 3); // (B,C,D)
+        mesh.triangle_face_ids = Some(vec![7u64; 4]);
+
+        let before = mesh.triangle_count();
+        assert_eq!(before, 4);
+        let _ = fix_inconsistent_winding(&mut mesh);
+        assert_eq!(
+            mesh.triangle_count(),
+            4,
+            "closed-mesh 170° pair must be kept — removal would open a hole"
+        );
+    }
+
+    /// session-41: a July-style overlapping flap whose shared edge is
+    /// INTERIOR (usage 2) is now KEPT — the deliberate never-worsen
+    /// trade. The pre-session-41 Step 1 removed such flaps, which always
+    /// opened the shared edge (usage 2 → 1) and, on an otherwise
+    /// watertight mesh (the as1-oc-214 nut canonical strips), created
+    /// the +239-bnd regression. Topological never-worsen outranks the
+    /// angle cosmetics the July removal bought (Zentralstaender flap
+    /// de-duplication); the proper fix for fold-over flaps is at the
+    /// tolerance-weld/emission level, not post-hoc removal.
+    #[test]
+    fn winding_overlap_removal_blocked_when_shared_edge_interior() {
+        let mut mesh = TriangleMesh::new();
+        // Base triangle T0=(A,B,C) in the z=0 plane (+Z normal), plus a
+        // flap T2=(C,B,D) folded over T0's edge B-C: D sits inside T0's
+        // footprint slightly above the plane, making T2's normal
+        // anti-parallel to T0's (~179° pair). Edge B-C usage 2 (exactly
+        // T0+T2 — the pair the Step-1 scan sees); T2's own edges
+        // (C-D, D-B) usage 1.
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0 = A
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 1 = B
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0)); // 2 = C
+        mesh.add_vertex(Point3d::new(0.25, 0.5, 0.01)); // 3 = D (flap tip)
+        mesh.add_triangle(0, 1, 2); // T0 base (+Z)
+        mesh.add_triangle(2, 1, 3); // T2 flap (−Z-ish, folded over B-C)
+        mesh.triangle_face_ids = Some(vec![7u64; 2]);
+
+        let _ = fix_inconsistent_winding(&mut mesh);
+        assert_eq!(
+            mesh.triangle_count(),
+            2,
+            "flap on an interior (usage-2) shared edge must be KEPT — \
+             removal would open the shared edge (never-worsen, session-41)"
+        );
     }
 }

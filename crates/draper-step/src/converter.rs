@@ -2293,7 +2293,13 @@ impl BrepSession {
 
         // Recompute triangle_range after remove_duplicate_triangles (same fix as
         // the non-chunked path — see comment there for rationale).
-        if dup_removed > 0 {
+        // session-41: UNCONDITIONAL — fix_inconsistent_winding (line above)
+        // can also remove triangles (same-face 170° flap de-duplication),
+        // which shifts indices even when remove_duplicate_triangles itself
+        // removed nothing. A conditional recompute shipped stale ranges
+        // (observed as misattributed face ownership in the as1-oc-214 nut
+        // dump — session-40/41 diagnostics).
+        {
             if let Some(ref fids) = self.mesh.triangle_face_ids {
                 let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
                 for (ti, &fid) in fids.iter().enumerate() {
@@ -12790,6 +12796,9 @@ impl<'a> StepConverter<'a> {
         bbox: &Option<(Point3d, Point3d)>,
         edge_cache: &mut EdgeDiscretizationCache,
     ) -> TriangleMesh {
+        if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+            eprintln!("PROBE-TOP: face {} flag={}", face_data.step_face_id, params.use_surface_canonical_cdt);
+        }
         let surface_type = match &face_data.surface {
             Surface::Plane(_) => "Plane",
             Surface::Cylinder(_) => "Cylinder",
@@ -12876,9 +12885,50 @@ impl<'a> StepConverter<'a> {
         // Steiner coverage WITHOUT cross-face boundary regressions.
         // `extract_face_mesh` returns None on loop mismatch → legacy path
         // (never-worsen, face by face).
+        if let Surface::Nurbs(nurbs) = &face_data.surface {
+            if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                let got_cdt = edge_cache.get_canonical_surface_cdt(nurbs);
+                eprintln!(
+                    "BRANCH-DIAG: face {} flag={} cdt={}",
+                    face_data.step_face_id,
+                    params.use_surface_canonical_cdt,
+                    got_cdt.is_some()
+                );
+                if params.use_surface_canonical_cdt && got_cdt.is_some() {
+                    eprintln!(
+                        "CALL-SITE2: face {} would extract HERE",
+                        face_data.step_face_id
+                    );
+                }
+                let (ph, pl, pa) = edge_cache.canonical_cdt_probe(nurbs);
+                eprintln!(
+                    "PROBE-A2: face {} hash={} len={} addr={:x}",
+                    face_data.step_face_id, ph, pl, pa
+                );
+            }
+        }
         if params.use_surface_canonical_cdt {
+            if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                eprintln!("PROBE-B: flag-if entered, face {}", face_data.step_face_id);
+            }
             if let Surface::Nurbs(nurbs) = &face_data.surface {
-                if let Some(cdt) = edge_cache.get_canonical_surface_cdt(nurbs) {
+                if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                    eprintln!("PROBE-C: nurbs matched, face {}", face_data.step_face_id);
+                }
+                let (rh, rl, ra) = edge_cache.canonical_cdt_probe(nurbs);
+                eprintln!(
+                    "PROBE-D: face {} hash={} len={} addr={:x}",
+                    face_data.step_face_id, rh, rl, ra
+                );
+                let cdt_opt = edge_cache.get_canonical_surface_cdt(nurbs);
+                if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                    eprintln!("PROBE-E: face {} got={}", face_data.step_face_id, cdt_opt.is_some());
+                }
+                if let Some(cdt) = cdt_opt {
+                    // session-39 diag
+                    if std::env::var("DRAPPER_CANON_TRACE_ALL").is_ok() {
+                        eprintln!("CALL-SITE: face {} CDT found, extracting", face_data.step_face_id);
+                    }
                     if let Some(mesh) = cdt.extract_face_mesh(
                         nurbs,
                         &boundary_points,
