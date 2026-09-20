@@ -2293,7 +2293,13 @@ impl BrepSession {
 
         // Recompute triangle_range after remove_duplicate_triangles (same fix as
         // the non-chunked path — see comment there for rationale).
-        if dup_removed > 0 {
+        // session-41: UNCONDITIONAL — fix_inconsistent_winding (line above)
+        // can also remove triangles (same-face 170° flap de-duplication),
+        // which shifts indices even when remove_duplicate_triangles itself
+        // removed nothing. A conditional recompute shipped stale ranges
+        // (observed as misattributed face ownership in the as1-oc-214 nut
+        // dump — session-40/41 diagnostics).
+        {
             if let Some(ref fids) = self.mesh.triangle_face_ids {
                 let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> = std::collections::HashMap::new();
                 for (ti, &fid) in fids.iter().enumerate() {
