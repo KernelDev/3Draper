@@ -2544,6 +2544,52 @@ fn triangulate_planar_face(face: &StagedFace, plane: &Plane, _params: &Triangula
         // supports holes without bridge-edge tricks. The bridge-edge approach
         // fails for circular bolt holes because ear-clipping can produce
         // triangles that span across the thin bridge-edge passage.
+        // TEMPORARY DIAGNOSTIC (session-42): dump hole geometry stats
+        if std::env::var("DRAPPER_DUMP_PLANAR").is_ok() {
+            let ring_area = |pts: &[Point2d]| -> f64 {
+                let mut a = 0.0;
+                for i in 0..pts.len() {
+                    let j = (i + 1) % pts.len();
+                    a += pts[i].u * pts[j].v - pts[j].u * pts[i].v;
+                }
+                a.abs() * 0.5
+            };
+            let outer_area = ring_area(&points_2d);
+            eprintln!(
+                "PLANARHOLES: outer={} pts area={:.6}",
+                points_2d.len(),
+                outer_area
+            );
+            for (hi, h) in holes_3d.iter().enumerate() {
+                let h2: Vec<Point2d> = h.iter().map(|p| project(p)).collect();
+                eprintln!(
+                    "PLANARHOLES: hole[{}]={} pts area={:.6}",
+                    hi,
+                    h2.len(),
+                    ring_area(&h2)
+                );
+                // coincidence check: min distance from each hole point to outer ring
+                if !points_2d.is_empty() && !h2.is_empty() {
+                    let mut max_min_d = 0.0f64;
+                    for hp in &h2 {
+                        let mut mind = f64::MAX;
+                        for op in &points_2d {
+                            let d = ((hp.u - op.u).powi(2) + (hp.v - op.v).powi(2)).sqrt();
+                            if d < mind {
+                                mind = d;
+                            }
+                        }
+                        if mind > max_min_d {
+                            max_min_d = mind;
+                        }
+                    }
+                    eprintln!(
+                        "PLANARHOLES: hole[{}] max-of-min dist to outer ring = {:.6}",
+                        hi, max_min_d
+                    );
+                }
+            }
+        }
         let holes_2d: Vec<Vec<Point2d>> = holes_3d.iter()
             .map(|h| h.iter().map(|p| project(p)).collect())
             .collect();
@@ -5502,6 +5548,34 @@ fn try_strip_triangulation_ruled_nurbs(
     let rail_a = &edges[rail_a_idx];
     let rail_b = &edges[rail_b_idx];
 
+    // TEMPORARY DIAGNOSTIC (session-42): full strip dump
+    let dump_strip = std::env::var("DRAPER_DUMP_STRIP").is_ok();
+    if dump_strip {
+        eprintln!(
+            "STRIPDUMP: bnd={} u_ruled={} corners={:?} rail_a(edge#{})={} rail_b(edge#{})={} side_a(edge#{})={} side_b(edge#{})={}",
+            boundary_points.len(), is_u_ruled, corner_indices,
+            rail_a_idx, rail_a.len(), rail_b_idx, rail_b.len(),
+            side_a_idx, edges[side_a_idx].len(), side_b_idx, edges[side_b_idx].len()
+        );
+        for (i, (p, uv)) in boundary_points.iter().zip(boundary_uvs.iter()).enumerate() {
+            let tag = if rail_a.contains(&i) {
+                "RAIL_A"
+            } else if rail_b.contains(&i) {
+                "RAIL_B"
+            } else if edges[side_a_idx].contains(&i) {
+                "SIDE_A"
+            } else if edges[side_b_idx].contains(&i) {
+                "SIDE_B"
+            } else {
+                "??"
+            };
+            eprintln!(
+                "STRIPDUMP: pt[{}] {} ({:.5},{:.5},{:.5}) uv=({:.5},{:.5})",
+                i, tag, p.x, p.y, p.z, uv.u, uv.v
+            );
+        }
+    }
+
     // ─── ZIPPER STITCHING OF THE TWO RAILS ────────────────────────────
     //
     // Stitch rail_a and rail_b (reversed to run in the same direction as
@@ -5656,9 +5730,19 @@ fn try_strip_triangulation_ruled_nurbs(
     }
 
     // Emit a triangle with winding flipped for reversed faces.
+    let dump_emit = dump_strip;
     let emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
         if x == y || y == z || x == z {
             return; // degenerate — skip
+        }
+        if dump_emit {
+            let px = mesh.vertices[x as usize];
+            let py = mesh.vertices[y as usize];
+            let pz = mesh.vertices[z as usize];
+            eprintln!(
+                "STRIPEMIT: ({:.5},{:.5},{:.5}) ({:.5},{:.5},{:.5}) ({:.5},{:.5},{:.5})",
+                px.x, px.y, px.z, py.x, py.y, py.z, pz.x, pz.y, pz.z
+            );
         }
         if forward {
             mesh.add_triangle(x, y, z);

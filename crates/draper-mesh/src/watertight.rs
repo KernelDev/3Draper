@@ -826,6 +826,120 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 // Vertex compaction — remove unused vertices after mesh surgery
 // ============================================================
 
+/// TEMPORARY DIAGNOSTIC (session-42): scan a mesh for same-face fold-over
+/// pairs (shared usage-2 edge, dihedral > 170°, apexes on the same side)
+/// and log them with a stage tag. Env-gated via DRAPPER_SCAN_STAGES.
+pub fn scan_fold_pairs_stage(mesh: &TriangleMesh, stage: &str) -> usize {
+    if std::env::var("DRAPPER_SCAN_STAGES").is_err() {
+        return 0;
+    }
+    use std::collections::HashMap;
+    eprintln!(
+        "STAGEFOLD[{}]: scan ran, tris={}",
+        stage,
+        mesh.triangles.len()
+    );
+    let mut edge_use: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        for k in 0..3 {
+            let a = tri[k].min(tri[(k + 1) % 3]);
+            let b = tri[k].max(tri[(k + 1) % 3]);
+            edge_use.entry((a, b)).or_default().push(ti);
+        }
+    }
+    let mut total = 0usize;
+    let mut items: Vec<(&(u32, u32), &Vec<usize>)> = edge_use.iter().collect();
+    items.sort_by_key(|(e, _)| **e);
+    for ((_ea, _eb), owners) in items {
+        if owners.len() < 2 {
+            continue;
+        }
+        // check every pair of owners (usage can exceed 2 pre-dedup)
+        for oi in 0..owners.len() {
+            for oj in (oi + 1)..owners.len() {
+                total += scan_pair(mesh, owners[oi], owners[oj], stage, total);
+            }
+        }
+    }
+    if total > 0 {
+        eprintln!("STAGEFOLD[{}]: TOTAL fold pairs = {}", stage, total);
+    }
+    total
+}
+
+/// Check one triangle pair for the fold-over signature (shared edge,
+/// anti-parallel normals, apexes on the same side). Prints when found.
+fn scan_pair(mesh: &TriangleMesh, t0: usize, t1: usize, stage: &str, so_far: usize) -> usize {
+    let tri0 = mesh.triangles[t0];
+    let tri1 = mesh.triangles[t1];
+        let mut shared: Vec<u32> = Vec::new();
+        for &v in &tri0 {
+            if tri1.contains(&v) {
+                shared.push(v);
+            }
+        }
+        if shared.len() != 2 {
+            return 0;
+        }
+        let (a, b) = (shared[0], shared[1]);
+        let apex_of = |t: &[u32; 3]| -> u32 {
+            for &v in t {
+                if v != a && v != b {
+                    return v;
+                }
+            }
+            u32::MAX
+        };
+        let (ap0, ap1) = (apex_of(&tri0), apex_of(&tri1));
+        if ap0 == u32::MAX || ap1 == u32::MAX {
+            return 0;
+        }
+        let p = |vi: u32| mesh.vertices[vi as usize];
+        let (pa, pb, p0, p1) = (p(a), p(b), p(ap0), p(ap1));
+        let nrm = |x: &draper_geometry::Point3d,
+                   y: &draper_geometry::Point3d,
+                   z: &draper_geometry::Point3d| {
+            let e1 = (y.x - x.x, y.y - x.y, y.z - x.z);
+            let e2 = (z.x - x.x, z.y - x.y, z.z - x.z);
+            let n = (e1.1 * e2.2 - e1.2 * e2.1, e1.2 * e2.0 - e1.0 * e2.2, e1.0 * e2.1 - e1.1 * e2.0);
+            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            if l > 1e-15 { Some((n.0 / l, n.1 / l, n.2 / l)) } else { None }
+        };
+        let (n0, n1) = (nrm(&pa, &pb, &p0), nrm(&pa, &pb, &p1));
+        if let (Some(n0), Some(n1)) = (n0, n1) {
+            let cos = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+            let ang = cos.clamp(-1.0, 1.0).acos().to_degrees();
+            let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+            let side = |q: &draper_geometry::Point3d| {
+                let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+                (e.1 * d.2 - e.2 * d.1, e.2 * d.0 - e.0 * d.2, e.0 * d.1 - e.1 * d.0)
+            };
+            let s0 = side(&p0);
+            let s1 = side(&p1);
+            let sdot = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2;
+            let same_side = sdot > 0.0;
+            if ang > 170.0 {
+                let fid_of = |ti: usize| {
+                    mesh.triangle_face_ids
+                        .as_ref()
+                        .and_then(|ids| ids.get(ti).copied())
+                        .unwrap_or(u64::MAX)
+                };
+                if so_far < 6 {
+                    eprintln!(
+                        "STAGEFOLD[{}]: tris[{}]/[{}] face=({},{}) ang={:.1} {} edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4})",
+                        stage, t0, t1, fid_of(t0), fid_of(t1), ang,
+                        if same_side { "FOLD-OVER" } else { "INVERTED" },
+                        pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
+                        p0.x, p0.y, p0.z, p1.x, p1.y, p1.z
+                    );
+                }
+                return 1;
+            }
+        }
+    0
+}
+
 /// Fix inconsistent winding between adjacent triangles.
 ///
 /// For each interior edge (shared by exactly 2 triangles), compute the
@@ -902,6 +1016,10 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
         };
 
         let mut candidates: Vec<((u32, u32), usize)> = Vec::new();
+        // session-42: (edge, t0, t1) pairs eligible for the quad-flip repair
+        // (disabled by default — see the measurement note below).
+        let quad_flip_enabled = std::env::var("DRAPPER_QUAD_FLIP").is_ok();
+        let mut flip_candidates: Vec<((u32, u32), usize, usize)> = Vec::new();
         for (_edge, tris) in &edge_to_tris {
             if tris.len() != 2 { continue; }
             let fid0 = face_ids.get(tris[0]).copied().unwrap_or(0);
@@ -923,6 +1041,39 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
             let angle_deg = cos_angle.acos().to_degrees();
 
             if angle_deg > 170.0 {
+                // session-42 quad-flip eligibility: apexes must be on
+                // OPPOSITE sides of the shared edge (an inverted-winding
+                // pair over a simple quad). Same-side apexes are overlap
+                // flaps — a diagonal swap there mirrors the flap onto the
+                // new diagonal instead of fixing it — so they stay on the
+                // (guarded) removal path.
+                let (ea, eb) = *_edge;
+                let apex_of = |t: [u32; 3]| -> u32 {
+                    for &v in &t {
+                        if v != ea && v != eb { return v; }
+                    }
+                    u32::MAX
+                };
+                let p0 = apex_of(tri0);
+                let p1 = apex_of(tri1);
+                if p0 != u32::MAX && p1 != u32::MAX && p0 != p1 {
+                    let pa = mesh.vertices[ea as usize];
+                    let pb = mesh.vertices[eb as usize];
+                    let q0 = mesh.vertices[p0 as usize];
+                    let q1 = mesh.vertices[p1 as usize];
+                    let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                    let side = |q: &draper_geometry::Point3d| {
+                        let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+                        (e.1 * d.2 - e.2 * d.1, e.2 * d.0 - e.0 * d.2, e.0 * d.1 - e.1 * d.0)
+                    };
+                    let s0 = side(&q0);
+                    let s1 = side(&q1);
+                    let opposite_sides = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2 < 0.0;
+                    if opposite_sides && quad_flip_enabled {
+                        flip_candidates.push((*_edge, tris[0], tris[1]));
+                        continue;
+                    }
+                }
                 // Overlapping triangles — remove the smaller one
                 let area0 = tri_area(&mesh.vertices, &tri0);
                 let area1 = tri_area(&mesh.vertices, &tri1);
@@ -935,6 +1086,133 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
         // live-usage checks below are reproducible run-to-run.
         candidates.sort_unstable();
         candidates.dedup();
+        flip_candidates.sort_unstable();
+        flip_candidates.dedup();
+
+        // ── session-42: quad-flip repair for inverted-winding pairs ──
+        //
+        // Re-triangulate the pair's rim quad along the OTHER diagonal
+        // (p0, p1): T0' = (a, p0, p1), T1' = (p0, b, p1), both oriented to
+        // the pair's dominant (larger-area) old normal. Every rim edge
+        // keeps its triangle, so no boundary structure changes — the
+        // repair cannot open a hole (never-worsen by construction) and
+        // removes neither coverage nor triangles. Guards: area
+        // preservation (a simple quad gives |A0+A1 − A0'−A1'| ≈ 0;
+        // self-intersecting/dart quads fail) and orientation (both new
+        // normals must align with the dominant old normal).
+        //
+        // ⚠️ DISABLED by default (session-42 measurement): on drill_top
+        // SHAFT_SLEEVE the flips interact with the downstream
+        // remove_duplicate_triangles/BFS (OFF −26 tris, ON +2 bnd — a
+        // never-worsen violation), and the measured angle-gate effect on
+        // as1/bolt/rod/Zentralstaender is ZERO (the surviving usage-2
+        // 180° pairs are same-side flaps; the opposite-side ones are
+        // already fixed by the BFS below). Retained behind
+        // DRAPPER_QUAD_FLIP=1 for the next session's emission-level work.
+        let mut flipped_count_step1 = 0usize;
+        if std::env::var("DRAPPER_QUAD_FLIP").is_ok() {
+        {
+            let mut touched: HashSet<usize> = HashSet::new();
+            for &(edge, t0, t1) in &flip_candidates {
+                if touched.contains(&t0) || touched.contains(&t1) {
+                    continue;
+                }
+                let tri0 = mesh.triangles[t0];
+                let tri1 = mesh.triangles[t1];
+                let (a, b) = (edge.0, edge.1);
+                let apex_of = |t: [u32; 3]| -> u32 {
+                    for &v in &t {
+                        if v != a && v != b {
+                            return v;
+                        }
+                    }
+                    u32::MAX
+                };
+                let p0 = apex_of(tri0);
+                let p1 = apex_of(tri1);
+                if p0 == u32::MAX || p1 == u32::MAX || p0 == p1 {
+                    continue;
+                }
+                // Dominant normal (larger-area triangle), normalized.
+                let a0 = tri_area(&mesh.vertices, &tri0);
+                let a1 = tri_area(&mesh.vertices, &tri1);
+                let n_dom = if a0 >= a1 {
+                    compute_tri_normal(&mesh.vertices, &tri0)
+                } else {
+                    compute_tri_normal(&mesh.vertices, &tri1)
+                };
+                let n_dom = match n_dom {
+                    Some(n) => {
+                        let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                        if l < 1e-15 {
+                            continue;
+                        }
+                        (n.0 / l, n.1 / l, n.2 / l)
+                    }
+                    None => continue,
+                };
+                // Build a new triangle with a winding whose normal aligns
+                // with the dominant orientation. Returns (tri, area).
+                let mk = |x: u32, y: u32, z: u32| -> Option<([u32; 3], f64)> {
+                    let t = [x, y, z];
+                    let n = compute_tri_normal(&mesh.vertices, &t)?;
+                    let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                    if l < 1e-15 {
+                        return None;
+                    }
+                    let d = (n.0 * n_dom.0 + n.1 * n_dom.1 + n.2 * n_dom.2) / l;
+                    if d <= 0.0 {
+                        return None;
+                    }
+                    Some((t, 0.5 * l))
+                };
+                // Two winding orders for each new triangle; pick the valid one.
+                let new0 = mk(a, p0, p1).or_else(|| mk(a, p1, p0));
+                let new1 = mk(p0, b, p1).or_else(|| mk(p1, b, p0));
+                let (t0n, a0n) = match new0 {
+                    Some(v) => v,
+                    None => continue,
+                };
+                let (t1n, a1n) = match new1 {
+                    Some(v) => v,
+                    None => continue,
+                };
+                // Area preservation (simple-quad test, tight tolerance).
+                let sum_old = a0 + a1;
+                let sum_new = a0n + a1n;
+                if sum_old <= 0.0 {
+                    continue;
+                }
+                if (sum_old - sum_new).abs() > 1e-6 * sum_old {
+                    continue;
+                }
+                // Non-degeneracy: both new triangles must be significant
+                // relative to the pair scale.
+                if a0n < sum_old * 1e-7 || a1n < sum_old * 1e-7 {
+                    continue;
+                }
+                // Apply the flip.
+                mesh.triangles[t0] = t0n;
+                mesh.triangles[t1] = t1n;
+                // Live usage update: shared edge (a, b) loses both users,
+                // new diagonal (p0, p1) gains both.
+                if let Some(u) = edge_usage.get_mut(&edge) {
+                    *u = u.saturating_sub(2);
+                }
+                let pk = if p0 < p1 { (p0, p1) } else { (p1, p0) };
+                *edge_usage.entry(pk).or_insert(0) += 2;
+                touched.insert(t0);
+                touched.insert(t1);
+                flipped_count_step1 += 1;
+            }
+        }
+        if flipped_count_step1 > 0 {
+            log::info!(
+                "fix_inconsistent_winding: re-triangulated {} same-face inverted pairs (quad flip, no removal)",
+                flipped_count_step1,
+            );
+        }
+        }
         let mut to_remove: HashSet<usize> = HashSet::new();
         for (_edge, remove_idx) in candidates {
             if to_remove.contains(&remove_idx) {
@@ -1768,6 +2046,16 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             let root_v1 = find(&mut parent, *v1);
             let root_target = find(&mut parent, target);
             if root_v1 != root_target {
+                // TEMPORARY DIAGNOSTIC (session-42)
+                if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                    let pv = mesh.vertices[root_v1 as usize];
+                    let pt = mesh.vertices[root_target as usize];
+                    let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();
+                    eprintln!(
+                        "WELD[P1] {}->{} d={:.6} p=({:.5},{:.5},{:.5}) q=({:.5},{:.5},{:.5})",
+                        root_v1, root_target, d, pv.x, pv.y, pv.z, pt.x, pt.y, pt.z
+                    );
+                }
                 parent[root_v1 as usize] = root_target;
                 weld_count += 1;
             }
@@ -1882,6 +2170,16 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             let root_v1 = find(&mut parent, v1);
             let root_target = find(&mut parent, target);
             if root_v1 != root_target {
+                // TEMPORARY DIAGNOSTIC (session-42)
+                if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                    let pv = mesh.vertices[root_v1 as usize];
+                    let pt = mesh.vertices[root_target as usize];
+                    let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();
+                    eprintln!(
+                        "WELD[P2] {}->{} d={:.6} p=({:.5},{:.5},{:.5}) q=({:.5},{:.5},{:.5})",
+                        root_v1, root_target, d, pv.x, pv.y, pv.z, pt.x, pt.y, pt.z
+                    );
+                }
                 parent[root_v1 as usize] = root_target;
                 weld_count += 1;
                 pass2_count += 1;
@@ -1999,6 +2297,16 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                 let root_v1 = find(&mut parent, v1);
                 let root_target = find(&mut parent, target);
                 if root_v1 != root_target {
+                    // TEMPORARY DIAGNOSTIC (session-42)
+                    if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                        let pv = mesh.vertices[root_v1 as usize];
+                        let pt = mesh.vertices[root_target as usize];
+                        let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();
+                        eprintln!(
+                            "WELD[P3] {}->{} d={:.6} p=({:.5},{:.5},{:.5}) q=({:.5},{:.5},{:.5})",
+                            root_v1, root_target, d, pv.x, pv.y, pv.z, pt.x, pt.y, pt.z
+                        );
+                    }
                     parent[root_v1 as usize] = root_target;
                     weld_count += 1;
                     pass3_count += 1;

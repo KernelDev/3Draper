@@ -5142,6 +5142,7 @@ impl<'a> StepConverter<'a> {
         // face-aware weld guard prevents over-merging within a single face
         // (e.g., thin annulus rings).
         {
+            draper_mesh::scan_fold_pairs_stage(&mesh, "after-merge");
             // Always run weld if there are boundary edges — even a few
             // boundary edges indicate non-aliased shared edges that need
             // tolerance-based welding to close.
@@ -5182,6 +5183,7 @@ impl<'a> StepConverter<'a> {
             }
 
             // Remove duplicate triangles BEFORE T-junction repair.
+            draper_mesh::scan_fold_pairs_stage(&mesh, "after-weld");
             let pre_dedup = mesh.triangle_count();
             let dup_removed = mesh.remove_duplicate_triangles();
             if dup_removed > 0 {
@@ -5212,6 +5214,7 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
+            draper_mesh::scan_fold_pairs_stage(&mesh, "after-tj");
 
             // Gap filling: fill missing triangles for boundary edge loops.
             // SAFETY GUARD: Only fill when boundary_edge_count is SMALL (< 50).
@@ -5225,6 +5228,7 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
+            draper_mesh::scan_fold_pairs_stage(&mesh, "after-gapfill");
         }
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
@@ -5234,7 +5238,7 @@ impl<'a> StepConverter<'a> {
         // function uses BFS flood-fill to propagate consistent winding
         // from a reference triangle to all connected triangles.
         draper_mesh::fix_inconsistent_winding(&mut mesh);
-
+        draper_mesh::scan_fold_pairs_stage(&mesh, "after-winding");
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
         // uses NURBS curve), bit-exact dedup can't merge the boundary
@@ -5964,6 +5968,7 @@ impl<'a> StepConverter<'a> {
         // (3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm).
         // See the non-detailed path above for the full philosophy comment.
         {
+            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-merge");
             // Check watertightness BEFORE welding — if the mesh is already
             // watertight via edge cache + merge_deduplicating, skip welding
             // to avoid creating degenerate triangles.
@@ -6038,6 +6043,7 @@ impl<'a> StepConverter<'a> {
             // disconnected components (wrong Euler characteristic).
             // Removing duplicates first ensures T-junction repair only
             // sees REAL T-junctions, not artifacts of duplicate geometry.
+            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-weld");
             let pre_dedup = mesh.triangle_count();
             let dup_removed = mesh.remove_duplicate_triangles();
             if dup_removed > 0 {
@@ -6076,6 +6082,7 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
+            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-tj");
 
             // Gap filling: fill missing triangles for boundary edge loops.
             // This catches small holes where a face's triangulation didn't
@@ -6096,10 +6103,12 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
+            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-gapfill");
         }
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
         draper_mesh::fix_inconsistent_winding(&mut mesh);
+        draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-winding");
 
         // Remove duplicate triangles (same 3 vertex indices). These arise when
         // two STEP faces overlap geometrically and share the same edges — common
@@ -6218,6 +6227,7 @@ impl<'a> StepConverter<'a> {
                     // Splits can produce degenerate/duplicate triangles — clean up.
                     filter_degenerate_triangles(&mut mesh, 1e-10);
                     mesh.remove_duplicate_triangles();
+                    draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-finaltj");
                     // Rebuild triangle ranges (index shifts from removals).
                     if let Some(ref fids) = mesh.triangle_face_ids {
                         let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> =
@@ -13371,6 +13381,67 @@ impl<'a> StepConverter<'a> {
             // because ear-clipping could produce triangles that span across the thin
             // bridge-edge passage. earcutr uses a different strategy that connects
             // holes to the outer boundary using optimal Z-order curves.
+            // TEMPORARY DIAGNOSTIC (session-42): dump ring stats
+            if std::env::var("DRAPPER_DUMP_PLANAR").is_ok() {
+                let ring_area = |pts: &[Point2d]| -> f64 {
+                    let mut a = 0.0;
+                    for i in 0..pts.len() {
+                        let j = (i + 1) % pts.len();
+                        a += pts[i].u * pts[j].v - pts[j].u * pts[i].v;
+                    }
+                    a.abs() * 0.5
+                };
+                eprintln!(
+                    "CONVPLANAR: outer={} pts area={:.6}",
+                    outer_2d.len(),
+                    ring_area(&outer_2d)
+                );
+                // near-duplicate detection: for each point, count other
+                // points within 1e-3 (doubled ring signature)
+                {
+                    let mut dup_pairs = 0usize;
+                    let mut min_nonzero = f64::MAX;
+                    for i in 0..outer_2d.len() {
+                        for j in (i + 1)..outer_2d.len() {
+                            let d = ((outer_2d[i].u - outer_2d[j].u).powi(2)
+                                + (outer_2d[i].v - outer_2d[j].v).powi(2))
+                                .sqrt();
+                            if d < 1e-3 {
+                                dup_pairs += 1;
+                            }
+                            if d > 1e-9 && d < min_nonzero {
+                                min_nonzero = d;
+                            }
+                        }
+                    }
+                    eprintln!(
+                        "CONVPLANAR: outer near-dup pairs(<1e-3)={} min-nonzero-dist={:.3e}",
+                        dup_pairs, min_nonzero
+                    );
+                }
+                for (hi, h2) in hole_points_2d.iter().enumerate() {
+                    let mut max_min_d = 0.0f64;
+                    for hp in h2 {
+                        let mut mind = f64::MAX;
+                        for op in &outer_2d {
+                            let d = ((hp.u - op.u).powi(2) + (hp.v - op.v).powi(2)).sqrt();
+                            if d < mind {
+                                mind = d;
+                            }
+                        }
+                        if mind > max_min_d {
+                            max_min_d = mind;
+                        }
+                    }
+                    eprintln!(
+                        "CONVPLANAR: hole[{}]={} pts area={:.6} max-of-min dist to outer={:.6}",
+                        hi,
+                        h2.len(),
+                        ring_area(h2),
+                        max_min_d
+                    );
+                }
+            }
             if let Some(m) = earcutr_triangulate_planar_converter(
                 &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
             ) {

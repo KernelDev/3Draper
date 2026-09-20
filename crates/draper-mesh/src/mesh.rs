@@ -68,6 +68,9 @@ pub struct VertexDedupMap {
     tolerance_hits: Cell<usize>,
     /// Number of new vertex insertions.
     misses: Cell<usize>,
+    /// True when the last `get()` returned via the tolerance path
+    /// (diagnostic: distinguishes bit-exact reuse from near-miss welds).
+    last_tol_hit: Cell<bool>,
     /// Incremental triangle-duplicate index (C5 follow-up #1, industrial
     /// perf): sorted vertex triple → face id of the first triangle with
     /// that key. Maintained by [`TriangleMesh::merge_deduplicating`]
@@ -114,6 +117,7 @@ impl VertexDedupMap {
             exact_hits: Cell::new(0),
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
+            last_tol_hit: Cell::new(false),
             tri_keys: HashMap::new(),
             tri_keys_sync_len: 0,
         }
@@ -135,15 +139,24 @@ impl VertexDedupMap {
             exact_hits: Cell::new(0),
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
+            last_tol_hit: Cell::new(false),
             tri_keys: HashMap::new(),
             tri_keys_sync_len: 0,
         }
+    }
+
+    /// Whether the most recent `get()` call returned through the
+    /// tolerance path (a near-miss weld) rather than a bit-exact match.
+    #[inline]
+    pub fn last_get_was_tolerance(&self) -> bool {
+        self.last_tol_hit.get()
     }
 
     /// Look up a vertex. Returns Some(index) if found, None otherwise.
     /// First tries bit-exact match, then tolerance-based spatial lookup.
     /// Tracks hit statistics: exact_hits (bit-identical), tolerance_hits (near-miss).
     pub fn get(&self, p: &Point3d) -> Option<u32> {
+        self.last_tol_hit.set(false);
         // Fast path: bit-exact match
         let key = VertexKey::from_point(p);
         if let Some(&idx) = self.exact.get(&key) {
@@ -162,6 +175,7 @@ impl VertexDedupMap {
                     let dz = p.z - vp.z;
                     if dx * dx + dy * dy + dz * dz <= tol_sq {
                         self.tolerance_hits.set(self.tolerance_hits.get() + 1);
+                        self.last_tol_hit.set(true);
                         return Some(idx);
                     }
                 }
@@ -183,6 +197,7 @@ impl VertexDedupMap {
                                 let ddz = p.z - vp.z;
                                 if ddx * ddx + ddy * ddy + ddz * ddz <= tol_sq {
                                     self.tolerance_hits.set(self.tolerance_hits.get() + 1);
+                                    self.last_tol_hit.set(true);
                                     return Some(idx);
                                 }
                             }
@@ -855,6 +870,97 @@ impl TriangleMesh {
     /// With deduplication, shared vertices get the same index, making the
     /// mesh watertight **by construction** — no post-hoc repair needed.
     pub fn merge_deduplicating(&mut self, other: &TriangleMesh, dedup_map: &mut VertexDedupMap) {
+        // TEMPORARY DIAGNOSTIC (session-42): scan the incoming per-face
+        // mesh for same-face fold-over pairs (shared usage-2 edge, dihedral
+        // > 170°, apexes on the same side) BEFORE any merge effects. This
+        // attributes folds to the face triangulation path that created them.
+        if std::env::var("DRAPPER_SCAN_FACE_FOLDS").is_ok() && other.triangles.len() > 1 {
+            let fid = other
+                .triangle_face_ids
+                .as_ref()
+                .and_then(|ids| ids.first().copied())
+                .unwrap_or(u64::MAX);
+            let mut edge_use: std::collections::HashMap<(u32, u32), usize> =
+                std::collections::HashMap::new();
+            for tri in &other.triangles {
+                for k in 0..3 {
+                    let a = tri[k].min(tri[(k + 1) % 3]);
+                    let b = tri[k].max(tri[(k + 1) % 3]);
+                    *edge_use.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+            let mut folds = 0usize;
+            let mut first: Option<String> = None;
+            for ((&(a, b), &u)) in edge_use.iter() {
+                if u != 2 {
+                    continue;
+                }
+                // find the two triangles and their apexes
+                let mut owners: Vec<(usize, u32)> = Vec::new();
+                for (ti, tri) in other.triangles.iter().enumerate() {
+                    let mut has_a = false;
+                    let mut has_b = false;
+                    let mut apex = u32::MAX;
+                    for &v in tri {
+                        if v == a { has_a = true } else if v == b { has_b = true } else { apex = v; }
+                    }
+                    if has_a && has_b {
+                        owners.push((ti, apex));
+                        if owners.len() == 2 { break; }
+                    }
+                }
+                if owners.len() != 2 { continue; }
+                let (t0, ap0) = owners[0];
+                let (t1, ap1) = owners[1];
+                let p = |vi: u32| other.vertices[vi as usize];
+                let (pa, pb, p0, p1) = (p(a), p(b), p(ap0), p(ap1));
+                let nrm = |x: &draper_geometry::Point3d,
+                           y: &draper_geometry::Point3d,
+                           z: &draper_geometry::Point3d| {
+                    let e1 = (y.x - x.x, y.y - x.y, y.z - x.z);
+                    let e2 = (z.x - x.x, z.y - x.y, z.z - x.z);
+                    let n = (e1.1 * e2.2 - e1.2 * e2.1, e1.2 * e2.0 - e1.0 * e2.2, e1.0 * e2.1 - e1.1 * e2.0);
+                    let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                    if l > 1e-15 { Some((n.0 / l, n.1 / l, n.2 / l)) } else { None }
+                };
+                let (n0, n1) = (nrm(&pa, &pb, &p0), nrm(&pa, &pb, &p1));
+                if let (Some(n0), Some(n1)) = (n0, n1) {
+                    let cos = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+                    let ang = cos.clamp(-1.0, 1.0).acos().to_degrees();
+                    // apex same-side test against the shared edge line
+                    let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                    let side = |q: &draper_geometry::Point3d| {
+                        let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+                        (e.1 * d.2 - e.2 * d.1, e.2 * d.0 - e.0 * d.2, e.0 * d.1 - e.1 * d.0)
+                    };
+                    let s0 = side(&p0);
+                    let s1 = side(&p1);
+                    let sdot = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2;
+                    let same_side = sdot > 0.0;
+                    if ang > 170.0 {
+                        folds += 1;
+                        if first.is_none() {
+                            first = Some(format!(
+                                "{}: edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4}) ang={:.1}",
+                                if same_side { "FOLD-OVER" } else { "INVERTED" },
+                                pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
+                                p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, ang
+                            ));
+                        }
+                    }
+                }
+            }
+            if folds > 0 {
+                eprintln!(
+                    "FACEFOLD: face_id={} tris={} folds={} | {}",
+                    fid,
+                    other.triangles.len(),
+                    folds,
+                    first.unwrap_or_default()
+                );
+            }
+        }
+
         // Save pre-merge counts for correct normals/triangle-attribute sizing
         let old_vertex_count = self.vertices.len();
         let _old_triangle_count = self.triangles.len();
@@ -864,8 +970,23 @@ impl TriangleMesh {
         let mut reuse_count = 0usize;
         let mut new_count = 0usize;
 
+        // TEMPORARY DIAGNOSTIC (session-42): dump tolerance welds (env
+        // checked ONCE per merge call — the per-vertex loop stays clean).
+        let dump_tol_welds = std::env::var("DRAPPER_DUMP_WELDS").is_ok();
         for vertex in &other.vertices {
             if let Some(existing_idx) = dedup_map.get(vertex) {
+                // TEMPORARY DIAGNOSTIC (session-42): dump tolerance welds
+                if dump_tol_welds && dedup_map.last_get_was_tolerance() {
+                    let q = self.vertices[existing_idx as usize];
+                    let d = ((vertex.x - q.x).powi(2)
+                        + (vertex.y - q.y).powi(2)
+                        + (vertex.z - q.z).powi(2))
+                    .sqrt();
+                    eprintln!(
+                        "TOLWELD[merge] ->{} d={:.6} p=({:.5},{:.5},{:.5}) q=({:.5},{:.5},{:.5})",
+                        existing_idx, d, vertex.x, vertex.y, vertex.z, q.x, q.y, q.z
+                    );
+                }
                 // Vertex already exists — reuse its index
                 index_map.push(existing_idx);
                 reuse_count += 1;
@@ -1222,6 +1343,104 @@ impl TriangleMesh {
                 }
             }
             _ => {}
+        }
+
+        // TEMPORARY DIAGNOSTIC (session-42): after the merge call, scan the
+        // accumulated mesh for fold pairs that involve at least one triangle
+        // from THIS call, reporting whether the partner came from the same
+        // per-face piece (SAME-PIECE) or an earlier piece (CROSS-PIECE).
+        if std::env::var("DRAPPER_SCAN_MERGED_FOLDS").is_ok() {
+            let base = _old_triangle_count;
+            let mut edge_use: std::collections::HashMap<(u32, u32), Vec<usize>> =
+                std::collections::HashMap::new();
+            for (ti, tri) in self.triangles.iter().enumerate() {
+                for k in 0..3 {
+                    let a = tri[k].min(tri[(k + 1) % 3]);
+                    let b = tri[k].max(tri[(k + 1) % 3]);
+                    edge_use.entry((a, b)).or_default().push(ti);
+                }
+            }
+            let mut reported = 0usize;
+            let mut items: Vec<(&(u32, u32), &Vec<usize>)> = edge_use.iter().collect();
+            items.sort_by_key(|(e, _)| **e);
+            for ((_ea, _eb), owners) in items {
+                if owners.len() != 2 {
+                    continue;
+                }
+                let (t0, t1) = (owners[0], owners[1]);
+                if t0 < base && t1 < base {
+                    continue;
+                }
+                let tri0 = self.triangles[t0];
+                let tri1 = self.triangles[t1];
+                let mut shared: Vec<u32> = Vec::new();
+                for &v in &tri0 {
+                    if tri1.contains(&v) {
+                        shared.push(v);
+                    }
+                }
+                if shared.len() != 2 {
+                    continue;
+                }
+                let (a, b) = (shared[0], shared[1]);
+                let apex_of = |t: &[u32; 3]| -> u32 {
+                    for &v in t {
+                        if v != a && v != b {
+                            return v;
+                        }
+                    }
+                    u32::MAX
+                };
+                let (ap0, ap1) = (apex_of(&tri0), apex_of(&tri1));
+                if ap0 == u32::MAX || ap1 == u32::MAX {
+                    continue;
+                }
+                let p = |vi: u32| self.vertices[vi as usize];
+                let (pa, pb, p0, p1) = (p(a), p(b), p(ap0), p(ap1));
+                let nrm = |x: &draper_geometry::Point3d,
+                           y: &draper_geometry::Point3d,
+                           z: &draper_geometry::Point3d| {
+                    let e1 = (y.x - x.x, y.y - x.y, y.z - x.z);
+                    let e2 = (z.x - x.x, z.y - x.y, z.z - x.z);
+                    let n = (e1.1 * e2.2 - e1.2 * e2.1, e1.2 * e2.0 - e1.0 * e2.2, e1.0 * e2.1 - e1.1 * e2.0);
+                    let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                    if l > 1e-15 { Some((n.0 / l, n.1 / l, n.2 / l)) } else { None }
+                };
+                let (n0, n1) = (nrm(&pa, &pb, &p0), nrm(&pa, &pb, &p1));
+                if let (Some(n0), Some(n1)) = (n0, n1) {
+                    let cos = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+                    let ang = cos.clamp(-1.0, 1.0).acos().to_degrees();
+                    let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                    let side = |q: &draper_geometry::Point3d| {
+                        let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+                        (e.1 * d.2 - e.2 * d.1, e.2 * d.0 - e.0 * d.2, e.0 * d.1 - e.1 * d.0)
+                    };
+                    let s0 = side(&p0);
+                    let s1 = side(&p1);
+                    let same_side = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2 > 0.0;
+                    if ang > 170.0 && same_side {
+                        let same_piece = t0 >= base && t1 >= base;
+                        let fid_of = |ti: usize| {
+                            self.triangle_face_ids
+                                .as_ref()
+                                .and_then(|ids| ids.get(ti).copied())
+                                .unwrap_or(u64::MAX)
+                        };
+                        eprintln!(
+                            "MERGEDFOLD: tris[{}]/[{}] face=({},{}) {} ang={:.1} edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4})",
+                            t0, t1, fid_of(t0), fid_of(t1),
+                            if same_piece { "SAME-PIECE" } else { "CROSS-PIECE" },
+                            ang,
+                            pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
+                            p0.x, p0.y, p0.z, p1.x, p1.y, p1.z
+                        );
+                        reported += 1;
+                        if reported > 12 {
+                            break;
+                        }
+                    }
+                }
+            }
         }
     }
 
