@@ -273,6 +273,7 @@ fn main() {
 
         let mut brep_pairs = 0usize;
         let mut hist: HashMap<String, usize> = HashMap::new();
+        let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
         for (edge, tris) in &edge_to_tris {
             if tris.len() != 2 {
@@ -335,6 +336,8 @@ fn main() {
 
             let fid0 = fids.and_then(|ids| ids.get(t0).copied()).unwrap_or(0);
             let fid1 = fids.and_then(|ids| ids.get(t1).copied()).unwrap_or(0);
+            involved_fids.insert(fid0);
+            involved_fids.insert(fid1);
             let st0 = face_type(fid0);
             let st1 = face_type(fid1);
 
@@ -544,6 +547,44 @@ fn main() {
         }
 
         if brep_pairs > 0 {
+            // session-44 v3 follow-up: dump boundary-wire statistics for the
+            // faces involved in fold pairs — do their wires dip off-surface
+            // (e.g., into the end-cap plane)?
+            if std::env::var("DRAPPER_DUMP_WIRES").is_ok() {
+                use std::collections::BTreeSet;
+                let involved: BTreeSet<u64> =
+                    involved_fids.iter().copied().collect();
+                for &fid in &involved {
+                    let Some(f) = face_by_id.get(&fid) else { continue };
+                    // Wire polylines and FaceInfo.surface are BOTH in
+                    // BREP-local space — compare against the LOCAL surface.
+                    let surf = f.surface.clone();
+                    let mut n_off = 0usize;
+                    let mut n_tot = 0usize;
+                    let mut max_off = 0.0f64;
+                    for poly in f.outer_boundary.iter().chain(f.inner_boundaries.iter()) {
+                        for p in poly {
+                            n_tot += 1;
+                            if let Some(d) = surface_distance(&surf, p) {
+                                if d > 1e-4 {
+                                    n_off += 1;
+                                    max_off = max_off.max(d);
+                                }
+                            }
+                        }
+                    }
+                    println!(
+                        "WIRE face={} {} step={} polys={} pts={} off_surface={} max_off={:.3}",
+                        fid,
+                        f.surface_type,
+                        f.step_face_id,
+                        f.outer_boundary.len() + f.inner_boundaries.len(),
+                        n_tot,
+                        n_off,
+                        max_off
+                    );
+                }
+            }
             println!(
                 "--- brep_idx={} {} BREP#{}: {} pairs >170°",
                 i, inst.name, inst.brep_id, brep_pairs
