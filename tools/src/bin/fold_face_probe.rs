@@ -40,8 +40,9 @@ fn tri_area(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
     0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
 }
 
-/// Distance from a point to a surface (plane/cylinder/cone analytic;
-/// ~0 for everything else — treated as "on surface").
+/// Distance from a point to a surface (plane/cylinder/cone/torus analytic;
+/// None for everything else). The surface must ALREADY be in the same
+/// space as the point (world).
 fn surface_distance(surf: &draper_geometry::Surface, p: &Point3d) -> Option<f64> {
     use draper_geometry::Surface;
     match surf {
@@ -79,7 +80,80 @@ fn surface_distance(surf: &draper_geometry::Surface, p: &Point3d) -> Option<f64>
             let expect = if co.expanding { co.radius + t * tan } else { co.radius - t * tan };
             Some((r - expect).abs())
         }
+        Surface::Torus(to) => {
+            // Torus: center, axis, major (ring) radius, minor radius.
+            // Surface distance: |dist(P, ring circle) − minor_radius|.
+            let d = [p.x - to.center.x, p.y - to.center.y, p.z - to.center.z];
+            let a = [to.axis.x, to.axis.y, to.axis.z];
+            let h = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+            let q = [d[0] - h * a[0], d[1] - h * a[1], d[2] - h * a[2]];
+            let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            if ql < 1e-12 {
+                return Some(to.minor_radius.abs());
+            }
+            let ring_dist = ((ql - to.major_radius).powi(2) + h * h).sqrt();
+            Some((ring_dist - to.minor_radius).abs())
+        }
         _ => None,
+    }
+}
+
+/// Transform a surface from BREP-local space into world space by a 4×4
+/// (assumed rigid: rotation + translation) matrix.
+fn transform_surface(
+    surf: &draper_geometry::Surface,
+    m: &[[f64; 4]; 4],
+) -> draper_geometry::Surface {
+    use draper_geometry::Surface;
+    let tp = |p: &Point3d| -> Point3d {
+        Point3d::new(
+            m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
+            m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
+            m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
+        )
+    };
+    let norm_dir = |d: &draper_geometry::Direction3d| -> draper_geometry::Direction3d {
+        let v = (
+            m[0][0] * d.x + m[0][1] * d.y + m[0][2] * d.z,
+            m[1][0] * d.x + m[1][1] * d.y + m[1][2] * d.z,
+            m[2][0] * d.x + m[2][1] * d.y + m[2][2] * d.z,
+        );
+        let l = (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).sqrt();
+        if l < 1e-15 {
+            return *d;
+        }
+        draper_geometry::Direction3d::new(v.0 / l, v.1 / l, v.2 / l)
+            .unwrap_or(*d)
+    };
+    match surf {
+        Surface::Plane(pl) => Surface::Plane(draper_geometry::Plane {
+            origin: tp(&pl.origin),
+            u_dir: norm_dir(&pl.u_dir),
+            v_dir: norm_dir(&pl.v_dir),
+            normal: norm_dir(&pl.normal),
+        }),
+        Surface::Cylinder(cy) => Surface::Cylinder(draper_geometry::CylinderSurface {
+            origin: tp(&cy.origin),
+            axis: norm_dir(&cy.axis),
+            radius: cy.radius,
+            x_dir: norm_dir(&cy.x_dir),
+        }),
+        Surface::Cone(co) => Surface::Cone(draper_geometry::ConeSurface {
+            origin: tp(&co.origin),
+            axis: norm_dir(&co.axis),
+            half_angle: co.half_angle,
+            radius: co.radius,
+            x_dir: norm_dir(&co.x_dir),
+            expanding: co.expanding,
+        }),
+        Surface::Torus(to) => Surface::Torus(draper_geometry::TorusSurface {
+            center: tp(&to.center),
+            axis: norm_dir(&to.axis),
+            major_radius: to.major_radius,
+            minor_radius: to.minor_radius,
+            x_dir: norm_dir(&to.x_dir),
+        }),
+        other => other.clone(),
     }
 }
 
@@ -150,8 +224,16 @@ fn main() {
         let face_step_id = |fid: u64| -> i64 {
             face_by_id.get(&fid).map(|f| f.step_face_id).unwrap_or(-1)
         };
+        // World-space surface lookup: FaceInfo.surface is in BREP-LOCAL
+        // coordinates while the mesh is transformed to world space. Apply
+        // the instance transform before any geometric comparison.
+        let xform: Option<[[f64; 4]; 4]> = inst.transform;
         let face_surface = |fid: u64| -> Option<draper_geometry::Surface> {
-            face_by_id.get(&fid).map(|f| f.surface.clone())
+            let s = face_by_id.get(&fid).map(|f| f.surface.clone())?;
+            Some(match xform {
+                Some(m) => transform_surface(&s, &m),
+                None => s,
+            })
         };
         let fids = mesh.triangle_face_ids.as_ref();
 
@@ -320,6 +402,40 @@ fn main() {
             let surf1 = face_surface(fid1);
             let d01 = surf1.as_ref().and_then(|s| surface_distance(s, &g0));
             let d10 = surf0.as_ref().and_then(|s| surface_distance(s, &g1));
+            // Self-distances: sanity check (each triangle's centroid must be
+            // near its OWN surface — chord sagitta level).
+            let d00 = surf0.as_ref().and_then(|s| surface_distance(s, &g0));
+            let d11 = surf1.as_ref().and_then(|s| surface_distance(s, &g1));
+            // Env-gated: dump the two surfaces' analytic parameters.
+            let surf_params = |fid: u64| -> String {
+                use draper_geometry::Surface;
+                match face_surface(fid) {
+                    Some(Surface::Cylinder(cy)) => format!(
+                        "cyl(o=({:.2},{:.2},{:.2}),ax=({:.3},{:.3},{:.3}),r={:.3})",
+                        cy.origin.x, cy.origin.y, cy.origin.z, cy.axis.x, cy.axis.y, cy.axis.z, cy.radius
+                    ),
+                    Some(Surface::Torus(to)) => format!(
+                        "tor(o=({:.2},{:.2},{:.2}),ax=({:.3},{:.3},{:.3}),R={:.3},r={:.3})",
+                        to.center.x, to.center.y, to.center.z, to.axis.x, to.axis.y, to.axis.z,
+                        to.major_radius, to.minor_radius
+                    ),
+                    Some(Surface::Plane(pl)) => format!(
+                        "pln(o=({:.2},{:.2},{:.2}),n=({:.3},{:.3},{:.3}))",
+                        pl.origin.x, pl.origin.y, pl.origin.z, pl.normal.x, pl.normal.y, pl.normal.z
+                    ),
+                    Some(Surface::Cone(co)) => format!(
+                        "con(o=({:.2},{:.2},{:.2}),ax=({:.3},{:.3},{:.3}),ha={:.4},r={:.3})",
+                        co.origin.x, co.origin.y, co.origin.z, co.axis.x, co.axis.y, co.axis.z,
+                        co.half_angle, co.radius
+                    ),
+                    _ => String::new(),
+                }
+            };
+            let params_note = if std::env::var("DRAPPER_DUMP_SURF_PARAMS").is_ok() {
+                format!(" [{}] [{}]", surf_params(fid0), surf_params(fid1))
+            } else {
+                String::new()
+            };
             let coincide = match (d01, d10) {
                 (Some(a), Some(b)) => a < 1e-6 && b < 1e-6,
                 _ => false,
@@ -329,7 +445,13 @@ fn main() {
                     if coincide {
                         "COINCIDENT".to_string()
                     } else {
-                        format!("d01={:.2e} d10={:.2e}", a, b)
+                        format!(
+                            "d01={:.2e} d10={:.2e} self=({:.2e},{:.2e})",
+                            a,
+                            b,
+                            d00.unwrap_or(f64::NAN),
+                            d11.unwrap_or(f64::NAN)
+                        )
                     }
                 }
                 _ => "n/a".to_string(),
@@ -365,7 +487,7 @@ fn main() {
             };
 
             println!(
-                "[{}{}] brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}] brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 i,
@@ -386,6 +508,7 @@ fn main() {
                 h1,
                 coincident_str,
                 owner_note,
+                params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
                 (a.z + b.z) / 2.0,
