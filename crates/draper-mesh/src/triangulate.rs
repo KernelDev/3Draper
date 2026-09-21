@@ -5549,7 +5549,9 @@ fn try_strip_triangulation_ruled_nurbs(
     let rail_b = &edges[rail_b_idx];
 
     // TEMPORARY DIAGNOSTIC (session-42): full strip dump
-    let dump_strip = std::env::var("DRAPER_DUMP_STRIP").is_ok();
+    // session-43: was "DRAPER_DUMP_STRIP" (single-P typo, session-40 family)
+    // — the gate was SILENT since session-42; canonical name restored.
+    let dump_strip = std::env::var("DRAPPER_DUMP_STRIP").is_ok();
     if dump_strip {
         eprintln!(
             "STRIPDUMP: bnd={} u_ruled={} corners={:?} rail_a(edge#{})={} rail_b(edge#{})={} side_a(edge#{})={} side_b(edge#{})={}",

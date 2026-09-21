@@ -12659,6 +12659,67 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // ── session-43: bit-exact consecutive junction dedup ────────────
+        //
+        // The per-edge polylines above include both endpoints, so every
+        // edge junction contributes the shared vertex twice (nut #340/#370:
+        // pt[55]==pt[56], pt[111]==pt[112], pt[167]==pt[168], pt[223]==pt[0]).
+        // Those zero-length loop segments birth the session-42 fold families
+        // (zipper rail-end needles; canonical-CDT/earcutr duplicate corners).
+        // Bit-exact removal is safe where the July-9 tolerance dedup was not:
+        // a removed point is bit-identical to its retained neighbour, so the
+        // vertex stays in the loop and welds at merge in every sharing face.
+        // See `dedup_consecutive_junctions_bit_exact` for the full argument.
+        {
+            let pre_dedup = boundary_points.len();
+            let (deduped_pts, deduped_uvs) =
+                dedup_consecutive_junctions_bit_exact(&boundary_points, &boundary_uvs);
+            if deduped_pts.len() != pre_dedup {
+                let surface_kind = match &face_data.surface {
+                    Surface::Plane(_) => "Plane",
+                    Surface::Cylinder(_) => "Cylinder",
+                    Surface::Cone(_) => "Cone",
+                    Surface::Sphere(_) => "Sphere",
+                    Surface::Torus(_) => "Torus",
+                    Surface::Revolution(_) => "Revolution",
+                    Surface::Extrusion(_) => "Extrusion",
+                    Surface::Nurbs(_) => "Nurbs",
+                    _ => "Other",
+                };
+                log::info!(
+                    "LOOP_JUNCTION_DEDUP: face #{} surface={} outer {} → {} pts (−{})",
+                    face_data.step_face_id,
+                    surface_kind,
+                    pre_dedup,
+                    deduped_pts.len(),
+                    pre_dedup - deduped_pts.len(),
+                );
+            }
+            boundary_points = deduped_pts;
+            boundary_uvs = deduped_uvs;
+        }
+        for (hi, (hole_pts, hole_uvs)) in inner_boundary_points
+            .iter_mut()
+            .zip(inner_boundary_uvs.iter_mut())
+            .enumerate()
+        {
+            let pre_dedup = hole_pts.len();
+            let (deduped_pts, deduped_uvs) =
+                dedup_consecutive_junctions_bit_exact(hole_pts, hole_uvs);
+            if deduped_pts.len() != pre_dedup {
+                log::info!(
+                    "LOOP_JUNCTION_DEDUP: face #{} hole {} {} → {} pts (−{})",
+                    face_data.step_face_id,
+                    hi,
+                    pre_dedup,
+                    deduped_pts.len(),
+                    pre_dedup - deduped_pts.len(),
+                );
+            }
+            *hole_pts = deduped_pts;
+            *hole_uvs = deduped_uvs;
+        }
+
         FaceBoundaryLoops {
             boundary_3d: boundary_points,
             boundary_uvs,
@@ -13442,6 +13503,26 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
+            // ── session-43: radial zipper for clean concentric annuli ──
+            //
+            // earcutr's hole-bridge produces ~108 needle triangles on the
+            // bolt's washer faces (concentric 110+110-pt rings). A direct
+            // angular zipper between the rings emits a clean radial
+            // staircase using ONLY original edge-cache points (watertight
+            // by construction). Non-annulus inputs return None and fall
+            // through to earcutr unchanged.
+            if hole_points_2d.len() == 1 && hole_points_3d[0].len() == hole_points_2d[0].len() {
+                if let Some(m) = try_radial_zipper_annulus(
+                    &outer_2d,
+                    &outer_points_3d,
+                    &hole_points_2d[0],
+                    &hole_points_3d[0],
+                    forward,
+                    plane,
+                ) {
+                    return m;
+                }
+            }
             if let Some(m) = earcutr_triangulate_planar_converter(
                 &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
             ) {
@@ -14183,6 +14264,398 @@ fn project_point_on_line(line: &Line, point: &Point3d) -> f64 {
 /// Deduplicate a list of 3D points by removing consecutive points that are within
 /// the given tolerance. Also removes the last point if it coincides with the first
 /// (closing a loop).
+
+/// Radial-zipper annulus triangulation (session-43, emission-level fix).
+///
+/// earcutr's hole-bridge strategy on CONCENTRIC CIRCLE RINGS (bolt washer
+/// faces: outer 110 pts r=7.5 + hole 110 pts r=5) produces ~108 needle
+/// triangles instead of a radial staircase — the session-42 INVERTED
+/// annulus family and a real contributor to the bolt's 187 >90° gate.
+/// This function detects the clean concentric-annulus case and stitches
+/// it directly: a two-pointer angular zipper between the rings (the same
+/// walk structure as the rehabilitated ruled-NURBS zipper, parameterized
+/// by polar angle instead of arc length). Every quad between angularly
+/// adjacent ring points becomes two well-shaped triangles.
+///
+/// SAFETY: uses ONLY the original ring points (edge-cache polylines) —
+/// no resampling, no interpolation — so the emitted boundary edges are
+/// bit-identical to what adjacent faces triangulate (watertight by
+/// construction, the same guarantee as the NURBS strip zipper).
+///
+/// Returns `None` when the rings are NOT a clean concentric annulus —
+/// the caller falls through to earcutr unchanged (never-worsen).
+fn try_radial_zipper_annulus(
+    outer_2d: &[Point2d],
+    outer_3d: &[Point3d],
+    hole_2d: &[Point2d],
+    hole_3d: &[Point3d],
+    forward: bool,
+    plane: &Plane,
+) -> Option<TriangleMesh> {
+    // ── Detection: clean concentric circle rings ─────────────────────
+    if outer_2d.len() < 8 || hole_2d.len() < 8 {
+        return None;
+    }
+    if outer_2d.len() != outer_3d.len() || hole_2d.len() != hole_3d.len() {
+        return None;
+    }
+
+    // Area-weighted ring centroid (robust vs. uneven sampling; the plain
+    // vertex average drifts when one arc is sampled 5x denser).
+    let ring_centroid = |pts: &[Point2d]| -> (f64, f64) {
+        let n = pts.len();
+        let mut a6 = 0.0_f64; // 6 * signed area
+        let mut cx6 = 0.0_f64;
+        let mut cy6 = 0.0_f64;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let cross = pts[i].u * pts[j].v - pts[j].u * pts[i].v;
+            a6 += cross;
+            cx6 += (pts[i].u + pts[j].u) * cross;
+            cy6 += (pts[i].v + pts[j].v) * cross;
+        }
+        if a6.abs() < 1e-15 {
+            let s = pts.iter().fold((0.0, 0.0), |acc, p| (acc.0 + p.u, acc.1 + p.v));
+            (s.0 / n as f64, s.1 / n as f64)
+        } else {
+            (cx6 / (3.0 * a6), cy6 / (3.0 * a6))
+        }
+    };
+
+    let ring_signed_area = |pts: &[Point2d]| -> f64 {
+        let mut a = 0.0_f64;
+        for i in 0..pts.len() {
+            let j = (i + 1) % pts.len();
+            a += pts[i].u * pts[j].v - pts[j].u * pts[i].v;
+        }
+        a * 0.5
+    };
+
+    // Both rings must be simple closed loops traversed monotonically
+    // around their centroid: every consecutive angular step must be
+    // small (< 90°) and the total winding exactly one turn.
+    let ring_stats = |pts: &[Point2d]| -> Option<((f64, f64), f64, f64)> {
+        let (cx, cy) = ring_centroid(pts);
+        let n = pts.len();
+        let mut r_sum = 0.0_f64;
+        let mut r_min = f64::MAX;
+        let mut r_max = 0.0_f64;
+        let mut prev_ang: Option<f64> = None;
+        let mut first_ang: Option<f64> = None;
+        let mut total_turn = 0.0_f64;
+        for p in pts {
+            let dx = p.u - cx;
+            let dy = p.v - cy;
+            let r = (dx * dx + dy * dy).sqrt();
+            if r < 1e-12 {
+                return None; // point at the centroid — not a ring
+            }
+            r_sum += r;
+            r_min = r_min.min(r);
+            r_max = r_max.max(r);
+            let ang = dy.atan2(dx);
+            if let Some(pa) = prev_ang {
+                let mut step = ang - pa;
+                while step > std::f64::consts::PI {
+                    step -= 2.0 * std::f64::consts::PI;
+                }
+                while step < -std::f64::consts::PI {
+                    step += 2.0 * std::f64::consts::PI;
+                }
+                if step.abs() > std::f64::consts::FRAC_PI_2 {
+                    return None; // gap or back-tracking — not a monotone ring
+                }
+                total_turn += step;
+            } else {
+                first_ang = Some(ang);
+            }
+            prev_ang = Some(ang);
+        }
+        // Closing step (last → first)
+        if let (Some(pa), Some(fa)) = (prev_ang, first_ang) {
+            let mut step = fa - pa;
+            while step > std::f64::consts::PI {
+                step -= 2.0 * std::f64::consts::PI;
+            }
+            while step < -std::f64::consts::PI {
+                step += 2.0 * std::f64::consts::PI;
+            }
+            if step.abs() > std::f64::consts::FRAC_PI_2 {
+                return None;
+            }
+            total_turn += step;
+        }
+        // Exactly one full turn (either direction) — a simple ring.
+        if (total_turn - 2.0 * std::f64::consts::PI).abs() > 1e-6
+            && (total_turn + 2.0 * std::f64::consts::PI).abs() > 1e-6
+        {
+            return None;
+        }
+        let r_mean = r_sum / n as f64;
+        Some(((cx, cy), r_mean, (r_max - r_min) / r_mean))
+    };
+
+    let ((ox, oy), r_out, dev_out) = ring_stats(outer_2d)?;
+    let ((hx, hy), r_hole, dev_hole) = ring_stats(hole_2d)?;
+
+    // Pinch-safety (session-43, transmission regression): a ring whose
+    // polyline self-touches (a full-circle edge [P, …, P] leaves P at two
+    // positions) is NOT a clean annulus — the stitch would emit a
+    // self-overlapping mesh whose ring edges fail to weld (transmission:
+    // +5835 boundary edges before this guard). Reject any ring with a
+    // repeated 2D vertex; those faces keep today's earcutr path.
+    {
+        let has_repeated_vertex = |pts: &[Point2d]| -> bool {
+            let mut seen = std::collections::HashSet::with_capacity(pts.len());
+            pts.iter().any(|p| {
+                let key = (p.u.to_bits(), p.v.to_bits());
+                !seen.insert(key)
+            })
+        };
+        if has_repeated_vertex(outer_2d) || has_repeated_vertex(hole_2d) {
+            log::debug!(
+                "ANNULUS_ZIPPER: rejected — ring has a repeated vertex (pinched rim)"
+            );
+            return None;
+        }
+    }
+
+    // Circle-ness: radial deviation < 2% of mean radius.
+    if dev_out > 0.02 || dev_hole > 0.02 {
+        return None;
+    }
+    // Concentric: centroids within 2% of the outer radius.
+    let center_dist = ((ox - hx).powi(2) + (oy - hy).powi(2)).sqrt();
+    if center_dist > 0.02 * r_out {
+        return None;
+    }
+    // Hole strictly inside, positive annulus width.
+    if r_hole >= r_out * 0.98 {
+        return None;
+    }
+
+    // ── Orientation normalization (same convention as the earcutr path):
+    // outer CCW, hole CCW for angle math; the stitch traverses the hole
+    // in reverse (CW) inside each quad. Each ring is reversed
+    // INDEPENDENTLY based on its own signed area.
+    let rev_outer = ring_signed_area(outer_2d) < 0.0;
+    let rev_hole = ring_signed_area(hole_2d) < 0.0;
+    let outer_2d_norm: Vec<Point2d> = if rev_outer {
+        outer_2d.iter().rev().copied().collect()
+    } else {
+        outer_2d.to_vec()
+    };
+    let outer_3d_norm: Vec<Point3d> = if rev_outer {
+        outer_3d.iter().rev().copied().collect()
+    } else {
+        outer_3d.to_vec()
+    };
+    let hole_2d_norm: Vec<Point2d> = if rev_hole {
+        hole_2d.iter().rev().copied().collect()
+    } else {
+        hole_2d.to_vec()
+    };
+    let hole_3d_norm: Vec<Point3d> = if rev_hole {
+        hole_3d.iter().rev().copied().collect()
+    } else {
+        hole_3d.to_vec()
+    };
+    let outer_2d: &[Point2d] = &outer_2d_norm;
+    let outer_3d: &[Point3d] = &outer_3d_norm;
+    let hole_2d: &[Point2d] = &hole_2d_norm;
+    let hole_3d: &[Point3d] = &hole_3d_norm;
+
+    // ── Angular zipper (two-pointer walk by polar angle fraction) ────
+    let (cx, cy) = (ox, oy); // common center (outer centroid; concentric within 2%)
+    let angle_of = |pts: &[Point2d], i: usize| -> f64 {
+        (pts[i].v - cy).atan2(pts[i].u - cx)
+    };
+    let n_out = outer_2d.len();
+    let n_hole = hole_2d.len();
+    let ang_out: Vec<f64> = (0..n_out).map(|i| angle_of(outer_2d, i)).collect();
+    let ang_hole: Vec<f64> = (0..n_hole).map(|j| angle_of(hole_2d, j)).collect();
+
+    // Rotate both walks to start at the smallest angle ≥ the other ring's
+    // first angle (keeps the two-pointer fractions comparable).
+    let start_out = (0..n_out)
+        .min_by(|&a, &b| ang_out[a].partial_cmp(&ang_out[b]).unwrap())
+        .unwrap();
+    let start_hole = (0..n_hole)
+        .min_by(|&a, &b| ang_hole[a].partial_cmp(&ang_hole[b]).unwrap())
+        .unwrap();
+    let out_idx: Vec<usize> = (0..n_out).map(|k| (start_out + k) % n_out).collect();
+    let hole_idx: Vec<usize> = (0..n_hole).map(|k| (start_hole + k) % n_hole).collect();
+
+    // Fraction of the full turn at each ring point (monotone in k by
+    // construction — both walks start at their minimum angle).
+    let frac_out: Vec<f64> = {
+        let mut f = Vec::with_capacity(n_out);
+        let mut prev = ang_out[out_idx[0]];
+        let mut acc = 0.0_f64;
+        f.push(0.0);
+        for k in 1..n_out {
+            let a = ang_out[out_idx[k]];
+            let mut step = a - prev;
+            if step < 0.0 {
+                step += 2.0 * std::f64::consts::PI;
+            }
+            acc += step;
+            f.push(acc / (2.0 * std::f64::consts::PI));
+            prev = a;
+        }
+        f
+    };
+    let frac_hole: Vec<f64> = {
+        let mut f = Vec::with_capacity(n_hole);
+        let mut prev = ang_hole[hole_idx[0]];
+        let mut acc = 0.0_f64;
+        f.push(0.0);
+        for k in 1..n_hole {
+            let a = ang_hole[hole_idx[k]];
+            let mut step = a - prev;
+            if step < 0.0 {
+                step += 2.0 * std::f64::consts::PI;
+            }
+            acc += step;
+            f.push(acc / (2.0 * std::f64::consts::PI));
+            prev = a;
+        }
+        f
+    };
+
+    let mut mesh = TriangleMesh::new();
+    // Vertices: outer ring first, then hole ring — projected to the plane
+    // (same coplanarity treatment as the earcutr path).
+    let plane_origin = plane.origin;
+    let plane_normal = plane.normal;
+    let project_to_plane = |p: &Point3d| -> Point3d {
+        let dx = p.x - plane_origin.x;
+        let dy = p.y - plane_origin.y;
+        let dz = p.z - plane_origin.z;
+        let dist = dx * plane_normal.x + dy * plane_normal.y + dz * plane_normal.z;
+        Point3d::new(
+            p.x - dist * plane_normal.x,
+            p.y - dist * plane_normal.y,
+            p.z - dist * plane_normal.z,
+        )
+    };
+    let mut vertex_of_out = vec![u32::MAX; n_out];
+    let mut vertex_of_hole = vec![u32::MAX; n_hole];
+    for (k, &oi) in out_idx.iter().enumerate() {
+        vertex_of_out[k] = mesh.add_vertex(project_to_plane(&outer_3d[oi]));
+    }
+    for (k, &hj) in hole_idx.iter().enumerate() {
+        vertex_of_hole[k] = mesh.add_vertex(project_to_plane(&hole_3d[hj]));
+    }
+
+    // Modular vertex access: the walk wraps past the last ring point back
+    // to index 0, closing the circle (k = n is the wrap column).
+    let o_id = |k: usize| vertex_of_out[k % n_out];
+    let h_id = |k: usize| vertex_of_hole[k % n_hole];
+    // Wrap-aware fraction access: f(n) = 1.0 (the full turn is closed).
+    let f_out = |k: usize| -> f64 {
+        if k >= n_out {
+            1.0
+        } else {
+            frac_out[k]
+        }
+    };
+    let f_hole = |k: usize| -> f64 {
+        if k >= n_hole {
+            1.0
+        } else {
+            frac_hole[k]
+        }
+    };
+
+    let emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
+        if x == y || y == z || x == z {
+            return;
+        }
+        if forward {
+            mesh.add_triangle(x, y, z);
+        } else {
+            mesh.add_triangle(x, z, y);
+        }
+    };
+
+    // Two-pointer angular zipper over the FULL circle (including the wrap
+    // column back to index 0). Invariant: column (i, j) closed on the left
+    // by (o_i, h_j); advance by comparing next fractions:
+    //   |f_out[i+1] − f_hole[j+1]| ≤ eps → quad (o_i, o_{i+1}, h_{j+1}, h_j)
+    //   f_out[i+1] ahead → tri (o_i, o_{i+1}, h_j)
+    //   f_hole[j+1] ahead → tri (o_i, h_{j+1}, h_j)
+    // The walk ends at i == n_out && j == n_hole — every ring edge is
+    // covered exactly once, so the annulus closes with NO wedge gap.
+    // eps scaled to sampling density (same policy as the NURBS zipper).
+    let eps = 0.25 / (n_out.max(n_hole)) as f64;
+    let mut i = 0usize;
+    let mut j = 0usize;
+    let mut quads = 0usize;
+    let mut tris_a = 0usize;
+    let mut tris_b = 0usize;
+    while i < n_out || j < n_hole {
+        let next_a = i + 1 <= n_out;
+        let next_b = j + 1 <= n_hole;
+        let (adv_a, adv_b) = match (next_a, next_b) {
+            (true, true) => {
+                let da = f_out(i + 1);
+                let db = f_hole(j + 1);
+                if (da - db).abs() <= eps {
+                    (true, true)
+                } else if da < db {
+                    (true, false)
+                } else {
+                    (false, true)
+                }
+            }
+            (true, false) => (true, false),
+            (false, true) => (false, true),
+            (false, false) => break,
+        };
+
+        if adv_a && adv_b {
+            // Quad (o_i, o_{i+1}, h_{j+1}, h_j), CCW for CCW outer.
+            let o0 = o_id(i);
+            let o1 = o_id(i + 1);
+            let h0 = h_id(j);
+            let h1 = h_id(j + 1);
+            emit(&mut mesh, o0, o1, h1);
+            emit(&mut mesh, o0, h1, h0);
+            quads += 1;
+            i += 1;
+            j += 1;
+        } else if adv_a {
+            // Triangle (o_i, o_{i+1}, h_j).
+            emit(&mut mesh, o_id(i), o_id(i + 1), h_id(j));
+            tris_a += 1;
+            i += 1;
+        } else {
+            // Triangle (o_i, h_{j+1}, h_j).
+            emit(&mut mesh, o_id(i), h_id(j + 1), h_id(j));
+            tris_b += 1;
+            j += 1;
+        }
+    }
+
+    if mesh.triangles.is_empty() {
+        return None;
+    }
+
+    log::info!(
+        "ANNULUS_ZIPPER: concentric rings stitched radially (outer {} + hole {} pts → {} quads + {} + {} single tris = {} tris, forward={})",
+        n_out, n_hole, quads, tris_a, tris_b, mesh.triangle_count(), forward,
+    );
+
+    let normal = if forward {
+        plane.normal
+    } else {
+        Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
+    };
+    mesh.face_normals = Some(vec![[normal.x, normal.y, normal.z]; mesh.triangles.len()]);
+
+    Some(mesh)
+}
 
 /// Triangulate a planar face with holes using the earcutr (mapbox/earcut) algorithm.
 ///
@@ -14990,6 +15463,142 @@ fn deduplicate_points_3d_with_uv(points: &[Point3d], uvs: &[Point2d], _tolerance
     // The consecutive dedup above is sufficient for normal cases. True bowtie
     // detection should be handled at the UV polygon level (in parametric_domain)
     // using proper geometric self-intersection tests, not vertex key matching.
+
+    (unique_pts, unique_uvs)
+}
+
+/// Bit-exact consecutive junction dedup for cached boundary loops (session-43).
+///
+/// `collect_face_boundary_loops_cached` concatenates per-edge polylines from
+/// the edge cache; every polyline includes BOTH endpoints, so consecutive
+/// edges contribute the shared vertex TWICE (e.g. nut faces STEP #340/#370:
+/// 224 pts = 4 edges × 56 pts with pt[55]==pt[56], pt[111]==pt[112],
+/// pt[167]==pt[168], pt[223]==pt[0]). These zero-length loop segments are the
+/// session-42 fold families' root cause:
+/// - zipper strip path: rail ends carry the duplicate corner → needle
+///   triangles (INVERTED zigzag pairs, 162 folds on the nut OFF pass);
+/// - canonical CDT / earcutr path: the duplicated corner is emitted twice →
+///   near-duplicate triangles on long corner diagonals (FOLD-OVER pairs,
+///   209 folds on the nut ON pass).
+///
+/// SAFETY versus the July-9 T-junction regression (commit 7e516ee) that
+/// banned tolerance-based loop dedup: comparison here is BIT-EXACT on 3D
+/// (`VertexKey` over the edge cache's deterministically-rounded f64s) AND
+/// UV-identical within 1e-10 of the loop's UV span. A removed point is
+/// bit-identical to its retained neighbour, so the vertex remains present
+/// in the loop exactly once and welds at merge in EVERY face sharing these
+/// edges (each face keeps one of the bit-identical copies). Points that are
+/// merely CLOSE (FP drift between different EDGE_CURVEs) are NOT removed —
+/// identical to today's behaviour. Same-3D-different-UV points (periodic
+/// seams, degenerate NURBS boundaries) are preserved, matching
+/// `deduplicate_points_3d_with_uv` semantics.
+fn dedup_consecutive_junctions_bit_exact(
+    points: &[Point3d],
+    uvs: &[Point2d],
+) -> (Vec<Point3d>, Vec<Point2d>) {
+    use draper_mesh::mesh::VertexKey;
+
+    if points.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    // Length mismatch is a caller bug — keep everything (defensive, matches
+    // deduplicate_points_3d_with_uv's fallback policy).
+    if uvs.len() != points.len() {
+        return (points.to_vec(), uvs.to_vec());
+    }
+    if points.len() < 2 {
+        return (points.to_vec(), uvs.to_vec());
+    }
+
+    // Relative UV tolerance: same policy as deduplicate_points_3d_with_uv.
+    let u_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+    let u_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+    let v_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+    let v_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+    let u_span = (u_max - u_min).max(1e-10);
+    let v_span = (v_max - v_min).max(1e-10);
+    let uv_rel_tol = 1e-10;
+
+    let uv_close = |a: &Point2d, b: &Point2d| -> bool {
+        (a.u - b.u).abs() / u_span <= uv_rel_tol && (a.v - b.v).abs() / v_span <= uv_rel_tol
+    };
+
+    let mut unique_pts = Vec::with_capacity(points.len());
+    let mut unique_uvs = Vec::with_capacity(uvs.len());
+    let mut unique_keys: Vec<VertexKey> = Vec::with_capacity(points.len());
+
+    unique_pts.push(points[0]);
+    unique_uvs.push(uvs[0]);
+    unique_keys.push(VertexKey::from_point(&points[0]));
+
+    for i in 1..points.len() {
+        let key = VertexKey::from_point(&points[i]);
+        let last_key = *unique_keys.last().unwrap();
+        if key == last_key && uv_close(&uvs[i], unique_uvs.last().unwrap()) {
+            // Bit-identical junction duplicate — drop it.
+            continue;
+        }
+        unique_pts.push(points[i]);
+        unique_uvs.push(uvs[i]);
+        unique_keys.push(key);
+    }
+
+    // Closed-loop check: last vs first (bit-exact + UV-aware).
+    if unique_keys.len() > 1 {
+        let first_key = unique_keys[0];
+        let last_key = *unique_keys.last().unwrap();
+        if first_key == last_key && uv_close(&unique_uvs[0], unique_uvs.last().unwrap()) {
+            unique_pts.pop();
+            unique_uvs.pop();
+            unique_keys.pop();
+        }
+    }
+
+    // ── Pinch-safety guard (session-43, transmission regression) ────
+    //
+    // A loop that contains a CLOSED edge (a full circle: polyline
+    // [P, …, P]) followed by another edge starting at P concatenates as
+    // […, P, P, …]. Removing that consecutive pair would leave P at TWO
+    // non-adjacent positions — a PINCHED polygon that triangulates far
+    // worse than the original zero-length-edge form (transmission_top:
+    // +2753 boundary edges before this guard). Rule: if the dedup
+    // CREATED any new non-consecutive duplicate pair, revert to the
+    // input loop unchanged (never-worsen by construction).
+    {
+        let count_nonadjacent_dups = |keys: &[VertexKey]| -> usize {
+            let mut seen = std::collections::HashSet::with_capacity(keys.len());
+            let mut dups = 0usize;
+            for (i, k) in keys.iter().enumerate() {
+                let prev = if i == 0 { keys.len() - 1 } else { i - 1 };
+                let next = if i + 1 == keys.len() { 0 } else { i + 1 };
+                if keys[prev] == *k || keys[next] == *k {
+                    continue; // consecutive (or the closed pair) — not a pinch
+                }
+                if !seen.insert(k) {
+                    dups += 1;
+                }
+            }
+            dups
+        };
+        let mut input_keys: Vec<VertexKey> =
+            points.iter().map(VertexKey::from_point).collect();
+        // The input's own closing pair (last == first) is not a pinch —
+        // normalize it away the same way the dedup does.
+        if input_keys.len() > 1 && input_keys[0] == *input_keys.last().unwrap() {
+            input_keys.pop();
+        }
+        let dups_before = count_nonadjacent_dups(&input_keys);
+        let dups_after = count_nonadjacent_dups(&unique_keys);
+        if dups_after > dups_before {
+            log::debug!(
+                "LOOP_JUNCTION_DEDUP: reverted — dedup would create a pinch \
+                 (non-adjacent duplicate pairs {} → {}); keeping raw loop",
+                dups_before,
+                dups_after
+            );
+            return (points.to_vec(), uvs.to_vec());
+        }
+    }
 
     (unique_pts, unique_uvs)
 }
@@ -18334,5 +18943,261 @@ mod manifold_gate_tests {
                 brep_id, report.errors
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod session43_junction_dedup_tests {
+    use crate::converter::dedup_consecutive_junctions_bit_exact;
+    use draper_geometry::{Point2d, Point3d};
+
+    #[test]
+    fn removes_bit_identical_junction_duplicates() {
+        // Two edges sharing a vertex: [A..B, B..C] concatenated keeps B twice.
+        let pts = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0), // junction duplicate
+            Point3d::new(1.0, 1.0, 0.0),
+        ];
+        let uvs = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 0.0), // same UV as previous
+            Point2d::new(1.0, 1.0),
+        ];
+        let (dp, du) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 3, "junction duplicate must be removed");
+        assert_eq!(du.len(), 3);
+        assert_eq!(dp[1], Point3d::new(1.0, 0.0, 0.0));
+        assert_eq!(dp[2], Point3d::new(1.0, 1.0, 0.0));
+    }
+
+    #[test]
+    fn keeps_fp_drift_points_untouched() {
+        // July-9 safety: near-but-NOT-bit-identical points (FP drift between
+        // different EDGE_CURVEs) must be preserved — no tolerance dedup.
+        let pts = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(1.0 + 1e-13, 0.0, 0.0), // FP drift, NOT bit-identical
+            Point3d::new(1.0, 1.0, 0.0),
+        ];
+        let uvs = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(1.0, 1.0),
+        ];
+        let (dp, _) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 4, "FP-drift points must NOT be removed");
+    }
+
+    #[test]
+    fn keeps_same_3d_different_uv_seam_points() {
+        // Periodic seam: same 3D point at u=0 vs u=2π — different UV ⇒ keep.
+        let pts = vec![
+            Point3d::new(0.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0),
+            Point3d::new(1.0, 0.0, 0.0), // same 3D…
+            Point3d::new(1.0, 1.0, 0.0),
+        ];
+        let uvs = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(7.0, 0.0), // …but a DIFFERENT UV (seam): span 0..7
+            Point2d::new(1.0, 1.0),
+        ];
+        let (dp, du) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 4, "seam points (same 3D, different UV) must be kept");
+        assert_eq!(du.len(), 4);
+    }
+
+    #[test]
+    fn drops_closing_duplicate_on_closed_loop() {
+        // Loop [A, B, C, A]: the trailing A duplicates the head — dropped.
+        let a = Point3d::new(0.0, 0.0, 0.0);
+        let b = Point3d::new(1.0, 0.0, 0.0);
+        let c = Point3d::new(0.0, 1.0, 0.0);
+        let pts = vec![a, b, c, a];
+        let uvs = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(0.0, 1.0),
+            Point2d::new(0.0, 0.0),
+        ];
+        let (dp, _) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 3, "closing duplicate must be dropped");
+    }
+
+    #[test]
+    fn pinch_creating_dedup_is_reverted() {
+        // A CLOSED edge (full circle [P, A, B, P]) followed by an edge
+        // starting at P concatenates as [P, A, B, P, P, C]. Removing the
+        // consecutive P,P would pinch the loop (P at two non-adjacent
+        // positions) — the transmission regression mechanism. The dedup
+        // must REVERT (return the input unchanged).
+        let a = Point3d::new(1.0, 0.0, 0.0);
+        let b = Point3d::new(0.0, 1.0, 0.0);
+        let p = Point3d::new(0.0, 0.0, 0.0);
+        let c = Point3d::new(5.0, 0.0, 0.0);
+        let pts = vec![p, a, b, p, p, c];
+        let uvs = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(1.0, 0.0),
+            Point2d::new(0.0, 1.0),
+            Point2d::new(0.0, 0.0),
+            Point2d::new(0.0, 0.0),
+            Point2d::new(5.0, 0.0),
+        ];
+        let (dp, du) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 6, "pinch-creating dedup must revert to input");
+        assert_eq!(du.len(), 6);
+    }
+
+    #[test]
+    fn length_mismatch_is_passthrough() {
+        let pts = vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0)];
+        let uvs = vec![Point2d::new(0.0, 0.0)];
+        let (dp, du) = dedup_consecutive_junctions_bit_exact(&pts, &uvs);
+        assert_eq!(dp.len(), 2);
+        assert_eq!(du.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod session43_annulus_zipper_tests {
+    use crate::converter::try_radial_zipper_annulus;
+    use draper_geometry::{Direction3d, Plane, Point2d, Point3d};
+    use draper_mesh::check_manifold;
+    use std::f64::consts::PI;
+
+    fn plane_z0() -> Plane {
+        Plane {
+            origin: Point3d::new(0.0, 0.0, 0.0),
+            normal: Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            u_dir: Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            v_dir: Direction3d::new(0.0, 1.0, 0.0).unwrap(),
+        }
+    }
+
+    fn ring(n: usize, radius: f64, z: f64, phase: f64) -> (Vec<Point2d>, Vec<Point3d>) {
+        let mut pts2 = Vec::with_capacity(n);
+        let mut pts3 = Vec::with_capacity(n);
+        for k in 0..n {
+            let ang = phase + 2.0 * PI * k as f64 / n as f64;
+            let (s, c) = ang.sin_cos();
+            pts2.push(Point2d::new(radius * c, radius * s));
+            pts3.push(Point3d::new(radius * c, radius * s, z));
+        }
+        (pts2, pts3)
+    }
+
+    #[test]
+    fn concentric_rings_stitch_watertight() {
+        let (o2, o3) = ring(110, 7.5, 0.0, 0.0);
+        let (h2, h3) = ring(110, 5.0, 0.0, 0.0);
+        let mesh = try_radial_zipper_annulus(&o2, &o3, &h2, &h3, true, &plane_z0())
+            .expect("concentric rings must take the zipper");
+        // 110 matched columns → 110 quads → 220 triangles.
+        assert_eq!(mesh.triangle_count(), 220);
+        // A single face's mesh is watertight iff its ONLY boundary edges are
+        // the ring edges themselves (they weld with adjacent faces at the
+        // BREP merge — see the bolt's unchanged 56-bnd baseline).
+        let report = check_manifold(&mesh);
+        assert_eq!(
+            report.boundary_edge_count, 220,
+            "boundary must be exactly the 110+110 ring edges (no wedge gap)"
+        );
+        assert_eq!(report.non_manifold_edge_count, 0, "no non-manifold edges");
+    }
+
+    #[test]
+    fn angular_offset_rings_still_close() {
+        // Same counts but the hole ring is rotated by half a step — the
+        // two-pointer walk must still cover the full circle.
+        let (o2, o3) = ring(64, 7.5, 0.0, 0.0);
+        let (h2, h3) = ring(64, 5.0, 0.0, PI / 64.0);
+        let mesh = try_radial_zipper_annulus(&o2, &o3, &h2, &h3, true, &plane_z0())
+            .expect("offset rings must still stitch");
+        let report = check_manifold(&mesh);
+        assert_eq!(
+            report.boundary_edge_count, 128,
+            "boundary must be exactly the 64+64 ring edges"
+        );
+        assert_eq!(report.non_manifold_edge_count, 0);
+    }
+
+    #[test]
+    fn different_point_counts_stitch_watertight() {
+        // Outer 90 pts vs hole 70 pts — the zipper emits mixed quads and
+        // single triangles, but every ring edge must still be covered.
+        let (o2, o3) = ring(90, 7.5, 0.0, 0.0);
+        let (h2, h3) = ring(70, 5.0, 0.0, 0.13);
+        let mesh = try_radial_zipper_annulus(&o2, &o3, &h2, &h3, false, &plane_z0())
+            .expect("uneven rings must stitch");
+        let report = check_manifold(&mesh);
+        assert_eq!(
+            report.boundary_edge_count, 160,
+            "boundary must be exactly the 90+70 ring edges"
+        );
+        assert_eq!(report.non_manifold_edge_count, 0);
+    }
+
+    #[test]
+    fn reversed_ring_orientation_is_normalized() {
+        // CW outer ring (reversed) must produce the same watertight result.
+        let (o2, o3) = ring(48, 7.5, 0.0, 0.0);
+        let (h2, h3) = ring(48, 5.0, 0.0, 0.0);
+        let (ro2, ro3): (Vec<Point2d>, Vec<Point3d>) =
+            o2.iter().rev().copied().zip(o3.iter().rev().copied()).collect();
+        let mesh = try_radial_zipper_annulus(&ro2, &ro3, &h2, &h3, true, &plane_z0())
+            .expect("reversed outer must still stitch");
+        let report = check_manifold(&mesh);
+        assert_eq!(
+            report.boundary_edge_count, 96,
+            "boundary must be exactly the 48+48 ring edges"
+        );
+        assert_eq!(report.non_manifold_edge_count, 0);
+    }
+
+    #[test]
+    fn non_concentric_rings_rejected() {
+        // Hole centre offset by 1.0 (> 2% of 7.5) — must fall through to
+        // earcutr (None), never-worsen for arbitrary geometry.
+        let (o2, o3) = ring(40, 7.5, 0.0, 0.0);
+        let (h2, h3) = ring(40, 5.0, 0.0, 0.0);
+        let off2: Vec<Point2d> = h2.iter().map(|p| Point2d::new(p.u + 1.0, p.v)).collect();
+        assert!(try_radial_zipper_annulus(&o2, &o3, &off2, &h3, true, &plane_z0()).is_none());
+    }
+
+    #[test]
+    fn elliptical_rings_rejected() {
+        // Radial deviation 20% ≫ 2% — not a circle, must be rejected.
+        let n = 40;
+        let o2: Vec<Point2d> = (0..n)
+            .map(|k| {
+                let a = 2.0 * PI * k as f64 / n as f64;
+                Point2d::new(7.5 * a.cos() * 1.2, 7.5 * a.sin())
+            })
+            .collect();
+        let o3: Vec<Point3d> = o2.iter().map(|p| Point3d::new(p.u, p.v, 0.0)).collect();
+        let (h2, h3) = ring(n, 5.0, 0.0, 0.0);
+        assert!(try_radial_zipper_annulus(&o2, &o3, &h2, &h3, true, &plane_z0()).is_none());
+    }
+
+    #[test]
+    fn small_rings_rejected() {
+        // Outer below the 8-point floor (a rectangle-with-hole face like the
+        // nut's slot) must never take the zipper.
+        let o2 = vec![
+            Point2d::new(0.0, 0.0),
+            Point2d::new(10.0, 0.0),
+            Point2d::new(10.0, 10.0),
+            Point2d::new(0.0, 10.0),
+        ];
+        let o3: Vec<Point3d> = o2.iter().map(|p| Point3d::new(p.u, p.v, 0.0)).collect();
+        let (h2, h3) = ring(40, 2.0, 0.0, 0.0);
+        assert!(try_radial_zipper_annulus(&o2, &o3, &h2, &h3, true, &plane_z0()).is_none());
     }
 }

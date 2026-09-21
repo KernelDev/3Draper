@@ -2047,7 +2047,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             let root_target = find(&mut parent, target);
             if root_v1 != root_target {
                 // TEMPORARY DIAGNOSTIC (session-42)
-                if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                if std::env::var("DRAPPER_DUMP_WELDS").is_ok() {
                     let pv = mesh.vertices[root_v1 as usize];
                     let pt = mesh.vertices[root_target as usize];
                     let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();
@@ -2171,7 +2171,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
             let root_target = find(&mut parent, target);
             if root_v1 != root_target {
                 // TEMPORARY DIAGNOSTIC (session-42)
-                if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                if std::env::var("DRAPPER_DUMP_WELDS").is_ok() {
                     let pv = mesh.vertices[root_v1 as usize];
                     let pt = mesh.vertices[root_target as usize];
                     let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();
@@ -2298,7 +2298,7 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                 let root_target = find(&mut parent, target);
                 if root_v1 != root_target {
                     // TEMPORARY DIAGNOSTIC (session-42)
-                    if std::env::var("DRAPER_DUMP_WELDS").is_ok() {
+                    if std::env::var("DRAPPER_DUMP_WELDS").is_ok() {
                         let pv = mesh.vertices[root_v1 as usize];
                         let pt = mesh.vertices[root_target as usize];
                         let d = ((pv.x - pt.x).powi(2) + (pv.y - pt.y).powi(2) + (pv.z - pt.z).powi(2)).sqrt();

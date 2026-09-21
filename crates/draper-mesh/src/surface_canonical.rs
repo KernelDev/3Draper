@@ -60,7 +60,10 @@ const EPS: f64 = 1e-10;
 /// Build-identity tag (session-39 discipline): printed by diag tools to
 /// prove which mesh-crate revision a binary embeds after incremental-build
 /// poisoning incidents in this sandbox.
-pub const CANON_BUILD_TAG: &str = "final-patch-v2";
+/// session-43: loop collection now bit-exact-dedups edge junctions
+/// (rim loops shrink, e.g. nut 224→220 pts) — canonical CDT inputs
+/// changed, so the tag must distinguish pre/post session-43 binaries.
+pub const CANON_BUILD_TAG: &str = "session-43-junction-dedup";
 
 /// A triangle whose UV vertices are collinear within this orient2d
 /// magnitude covers zero area: its predicates are meaningless (every
@@ -787,7 +790,7 @@ impl Triangulation {
         self.index_tri(idx, new);
     }
 
-    /// Trace helper (DRAPER_CANON_TRACE=1): fire when a triangle with
+    /// Trace helper (DRAPPER_CANON_TRACE=1): fire when a triangle with
     /// the same vertex set as `tri` already exists — the duplication
     /// mechanism behind the >2-adjacency failures (session-35).
     fn trace_duplicate(&self, label: &str, tri: [u32; 3]) {
@@ -1804,7 +1807,7 @@ fn build_canonical_surface_cdt_inner(
         }
     }
 
-    // Session-37 diagnostic (DRAPER_CANON_DEBUG=1): compare the flood
+    // Session-37 diagnostic (DRAPPER_CANON_DEBUG=1): compare the flood
     // classification against the pure-centroid one — any symmetric
     // difference on previously-working files is a red flag for
     // cross-face theft through barrier gaps (pinch vertices).
@@ -2585,7 +2588,7 @@ fn edge_from_containing(tri: &Triangulation, a: u32, b: u32) -> Option<u32> {
 }
 
 // ============================================================
-// Build diagnostics (env-gated: DRAPER_CANON_DEBUG=1)
+// Build diagnostics (env-gated: DRAPPER_CANON_DEBUG=1)
 // ============================================================
 
 fn debug_enabled() -> bool {
@@ -2593,7 +2596,7 @@ fn debug_enabled() -> bool {
     std::env::var("DRAPPER_CANON_DEBUG").is_ok()
 }
 
-/// Fine-grained per-triangle tracing (DRAPER_CANON_TRACE=1): duplicate
+/// Fine-grained per-triangle tracing (DRAPPER_CANON_TRACE=1): duplicate
 /// and degenerate triangle creation with backtraces. OnceLock-cached —
 /// checked on EVERY add_tri/replace_tri call.
 fn trace_enabled() -> bool {
@@ -2706,7 +2709,7 @@ fn dump_build_debug(
     let _ = faces;
 }
 
-/// DRAPER_CANON_DUMP_FACES=1 / DRAPER_CANON_DUMP_RESCUED=1: dump the
+/// DRAPPER_CANON_DUMP_FACES=1 / DRAPPER_CANON_DUMP_RESCUED=1: dump the
 /// group's face loops (3D + UV) and Steiner points as Rust literals —
 /// for building regression tests from real production data
 /// (session-37 drill_top capture). DUMP_FACES fires on the PLAIN
@@ -3663,7 +3666,7 @@ mod tests {
     }
 
     // Session-37 e2e regression: a REAL drill_top cone face (STEP face
-    // #39037, captured via DRAPER_CANON_DUMP_FACES). The rim is a
+    // #39037, captured via DRAPPER_CANON_DUMP_FACES). The rim is a
     // triangle-like domain with two iso-parametric chains: the right
     // u~0.833 seam chain (wiggle ~1e-5) and the bottom v~1e-14 chain
     // (wiggle ~1e-15), plus a seam pinch (the closing point repeats the
