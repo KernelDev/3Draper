@@ -196,6 +196,18 @@ fn main() {
         let Some(inst) = ctx.triangulate_pending(p) else {
             continue;
         };
+        if std::env::var("DRAPPER_DUMP_SURF_PARAMS").is_ok() {
+            match inst.transform {
+                Some(m) => println!(
+                    "INST brep_idx={} {} transform=[{:.4} {:.4} {:.4} {:.4}; {:.4} {:.4} {:.4} {:.4}; {:.4} {:.4} {:.4} {:.4}]",
+                    i, inst.name,
+                    m[0][0], m[0][1], m[0][2], m[0][3],
+                    m[1][0], m[1][1], m[1][2], m[1][3],
+                    m[2][0], m[2][1], m[2][2], m[2][3]
+                ),
+                None => println!("INST brep_idx={} {} transform=identity", i, inst.name),
+            }
+        }
         let mesh = &inst.mesh;
         let faces = &inst.faces;
         // face_id → FaceInfo (face ids are NOT guaranteed dense; the vec is
@@ -326,27 +338,28 @@ fn main() {
             let st0 = face_type(fid0);
             let st1 = face_type(fid1);
 
-            // For unknown face ids: report the owning face via triangle_range
-            // (which face's [start,end) contains this triangle index), so we
-            // can tell whether the id is corrupted or the triangle was
-            // appended by post-merge repair steps.
+            // Range-owner check for EVERY pair (not just "?"): which face's
+            // triangle_range contains each triangle. Reveals misattribution
+            // and double-attribution (two faces' ranges covering the same
+            // triangle index).
             let owner_of = |ti: usize| -> String {
+                let mut owners = Vec::new();
                 for f in faces {
                     if ti >= f.triangle_range.0 && ti < f.triangle_range.1 {
-                        return format!("range{}", f.face_id);
+                        owners.push(format!("{}({})", f.face_id, f.surface_type));
                     }
                 }
-                "post-repair".to_string()
+                if owners.is_empty() {
+                    "post-repair".to_string()
+                } else {
+                    owners.join("+")
+                }
             };
-            let owner_note = if st0.starts_with('?') || st1.starts_with('?') {
-                format!(
-                    " owners=({},{})",
-                    owner_of(t0),
-                    owner_of(t1)
-                )
-            } else {
-                String::new()
-            };
+            let owner_note = format!(
+                " owners=({},{})",
+                owner_of(t0),
+                owner_of(t1)
+            );
 
             // Env-gated: dump full vertex coordinates of both triangles.
             if std::env::var("DRAPPER_DUMP_PAIR_VERTS").is_ok() {
