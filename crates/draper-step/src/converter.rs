@@ -1885,7 +1885,13 @@ impl OwnedStepConversionContext {
         // removed, creating small gaps. fill_boundary_gaps closes them.
         let report = validate_watertight(mesh, false);
         if report.boundary_edge_count > 0 && report.boundary_edge_count < 50 {
-            draper_mesh::fill_boundary_gaps(mesh, 32);
+            let n_filled = draper_mesh::fill_boundary_gaps(mesh, 32);
+            if std::env::var("DRAPPER_DUMP_FILL_LOOPS").is_ok() {
+                eprintln!(
+                    "FILLSITE: post_decimation_cleanup brep={} boundary={} filled={}",
+                    brep_id, report.boundary_edge_count, n_filled
+                );
+            }
         }
 
         // Step 3: Remove duplicates after gap fill
@@ -2270,6 +2276,12 @@ impl BrepSession {
             let report_after_tj = validate_watertight(&self.mesh, false);
             if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut self.mesh, 32);
+                if std::env::var("DRAPPER_DUMP_FILL_LOOPS").is_ok() {
+                    eprintln!(
+                        "FILLSITE: finalize-chunked brep={} boundary={} filled={}",
+                        brep_id, report_after_tj.boundary_edge_count, n_filled
+                    );
+                }
                 if n_filled > 0 {
                     log::info!(
                         "BREP #{} detailed (chunked): filled {} gap triangles (was {} boundary edges)",
@@ -5221,6 +5233,12 @@ impl<'a> StepConverter<'a> {
             let report_after_tj = validate_watertight(&mesh, false);
             if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
+                if std::env::var("DRAPPER_DUMP_FILL_LOOPS").is_ok() {
+                    eprintln!(
+                        "FILLSITE: triangulate_brep brep={} boundary={} filled={}",
+                        brep_id, report_after_tj.boundary_edge_count, n_filled
+                    );
+                }
                 if n_filled > 0 {
                     log::info!(
                         "BREP #{}: filled {} gap triangles (was {} boundary edges)",
@@ -5808,6 +5826,27 @@ impl<'a> StepConverter<'a> {
             let mut face_mesh_with_ids = face_mesh.clone();
             face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
 
+            // session-45 diagnostics (DRAPPER_DUMP_FACE_OBJS=<dir>): dump
+            // each face's OWN per-face mesh (pre-merge, pre-repair) to an
+            // OBJ file. Used to attribute the July-family planar fans
+            // (apex deep off-surface, ring at the G1 tangency circle) to
+            // the exact face/path that emits them.
+            if let Ok(dir) = std::env::var("DRAPPER_DUMP_FACE_OBJS") {
+                let _ = std::fs::create_dir_all(&dir);
+                let path = format!(
+                    "{}/brep{}_f{}_s{}_{}.obj",
+                    dir, brep_id, face_id, step_face_id, surface_type
+                );
+                let mut obj = String::with_capacity(4096);
+                for v in &face_mesh_with_ids.vertices {
+                    obj.push_str(&format!("v {:.6} {:.6} {:.6}\n", v.x, v.y, v.z));
+                }
+                for t in &face_mesh_with_ids.triangles {
+                    obj.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+                }
+                let _ = std::fs::write(&path, obj);
+            }
+
             let pre_merge_tri_count = mesh.triangle_count();
             mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
             let post_merge_tri_count = mesh.triangle_count();
@@ -6096,6 +6135,12 @@ impl<'a> StepConverter<'a> {
             let report_after_tj = validate_watertight(&mesh, false);
             if report_after_tj.boundary_edge_count > 0 && report_after_tj.boundary_edge_count < 50 {
                 let n_filled = draper_mesh::fill_boundary_gaps(&mut mesh, 32);
+                if std::env::var("DRAPPER_DUMP_FILL_LOOPS").is_ok() {
+                    eprintln!(
+                        "FILLSITE: triangulate_brep_detailed brep={} boundary={} filled={}",
+                        brep_id, report_after_tj.boundary_edge_count, n_filled
+                    );
+                }
                 if n_filled > 0 {
                     log::info!(
                         "BREP #{} detailed: filled {} gap triangles (was {} boundary edges)",

@@ -3075,6 +3075,13 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
         return 0;
     }
 
+    // session-45 diagnostics (read-only): per-loop dump gate. When set,
+    // every iteration prints its boundary-edge count and every filled
+    // loop prints attribution/planarity/radius/angular-walk stats — the
+    // July family (session-44) attributed 565 FAT fold-over pairs to
+    // cross-face ear-fans emitted here.
+    let dump_loops = std::env::var("DRAPPER_DUMP_FILL_LOOPS").is_ok();
+
     let mut total_filled = 0usize;
     let max_iterations = 5;
 
@@ -3172,6 +3179,16 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
             }
         }
 
+        if dump_loops {
+            eprintln!(
+                "FILLITER: iter={} boundary_edges={} loops_found={} max_loop_size={}",
+                _iter,
+                boundary_undirected.len(),
+                loops.len(),
+                max_loop_size
+            );
+        }
+
         if loops.is_empty() {
             log::debug!(
                 "fill_boundary_gaps: {} boundary edges but 0 loops found (inconsistent winding or open chains)",
@@ -3185,7 +3202,7 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
         let mut new_face_ids: Vec<u64> = Vec::new();
         let face_ids = mesh.triangle_face_ids.as_ref();
 
-        for loop_verts in &loops {
+        for (li, loop_verts) in loops.iter().enumerate() {
             let n = loop_verts.len();
             if n < 3 {
                 continue;
@@ -3207,6 +3224,144 @@ pub fn fill_boundary_gaps(mesh: &mut TriangleMesh, max_loop_size: usize) -> usiz
 
             let tri = mesh.triangles[tri_idx];
             let fid = face_ids.and_then(|ids| ids.get(tri_idx).copied()).unwrap_or(u64::MAX);
+
+            // session-45 diagnostics (DRAPPER_DUMP_FILL_LOOPS): per-loop
+            // stats — fid histogram over ALL loop boundary edges (the
+            // cross-face mix signature), Newell plane (normal, centroid,
+            // max deviation → planarity), radius quartiles around the
+            // centroid (bimodal radii = interleaved two-ring loop, the
+            // session-42/44 annulus signature), and the angular walk
+            // (total turn / max step / direction reversals → star-shaped
+            // test; an interleaved two-ring loop zig-zags: turn ~0°,
+            // massive reversals).
+            if dump_loops {
+                let mut fid_hist: HashMap<u64, usize> = HashMap::new();
+                for w in 0..n {
+                    let a = loop_verts[w];
+                    let b = loop_verts[(w + 1) % n];
+                    let ek = (a.min(b), a.max(b));
+                    if let Some(&(ti, _)) = boundary_tris.get(&ek) {
+                        let f = face_ids
+                            .and_then(|ids| ids.get(ti).copied())
+                            .unwrap_or(u64::MAX);
+                        *fid_hist.entry(f).or_insert(0) += 1;
+                    }
+                }
+                let hist: Vec<String> = {
+                    let mut v: Vec<(u64, usize)> = fid_hist.into_iter().collect();
+                    v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+                    v.iter().map(|(f, c)| format!("{}:{}", f, c)).collect()
+                };
+                let mut nwx = 0.0f64;
+                let mut nwy = 0.0f64;
+                let mut nwz = 0.0f64;
+                let (mut cx, mut cy, mut cz) = (0.0f64, 0.0f64, 0.0f64);
+                for w in 0..n {
+                    let p = &mesh.vertices[loop_verts[w] as usize];
+                    let q = &mesh.vertices[loop_verts[(w + 1) % n] as usize];
+                    nwx += (p.y - q.y) * (p.z + q.z);
+                    nwy += (p.z - q.z) * (p.x + q.x);
+                    nwz += (p.x - q.x) * (p.y + q.y);
+                    cx += p.x;
+                    cy += p.y;
+                    cz += p.z;
+                }
+                cx /= n as f64;
+                cy /= n as f64;
+                cz /= n as f64;
+                let nl = (nwx * nwx + nwy * nwy + nwz * nwz).sqrt();
+                let (ux, uy, uz) = if nl > 1e-15 {
+                    (nwx / nl, nwy / nl, nwz / nl)
+                } else {
+                    (0.0, 0.0, 1.0)
+                };
+                let ex = if ux.abs() < 0.9 {
+                    (1.0, 0.0, 0.0)
+                } else {
+                    (0.0, 1.0, 0.0)
+                };
+                let d = ex.0 * ux + ex.1 * uy + ex.2 * uz;
+                let (mut e1x, mut e1y, mut e1z) =
+                    (ex.0 - d * ux, ex.1 - d * uy, ex.2 - d * uz);
+                let el = (e1x * e1x + e1y * e1y + e1z * e1z).sqrt();
+                e1x /= el;
+                e1y /= el;
+                e1z /= el;
+                let (e2x, e2y, e2z) = (
+                    uy * e1z - uz * e1y,
+                    uz * e1x - ux * e1z,
+                    ux * e1y - uy * e1x,
+                );
+                let mut max_dev = 0.0f64;
+                let mut radii: Vec<f64> = Vec::with_capacity(n);
+                let mut angs: Vec<f64> = Vec::with_capacity(n);
+                for &v in loop_verts.iter() {
+                    let p = &mesh.vertices[v as usize];
+                    let (dx, dy, dz) = (p.x - cx, p.y - cy, p.z - cz);
+                    max_dev = max_dev.max((dx * ux + dy * uy + dz * uz).abs());
+                    radii.push((dx * dx + dy * dy + dz * dz).sqrt());
+                    angs.push((dx * e2x + dy * e2y + dz * e2z)
+                        .atan2(dx * e1x + dy * e1y + dz * e1z));
+                }
+                radii.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let rq = |k: usize| radii[k.min(n - 1)];
+                let mut total_turn = 0.0f64;
+                let mut max_step = 0.0f64;
+                let mut reversals = 0usize;
+                let mut prev_step = 0.0f64;
+                for w in 1..n {
+                    let mut step = angs[w] - angs[w - 1];
+                    while step > std::f64::consts::PI {
+                        step -= 2.0 * std::f64::consts::PI;
+                    }
+                    while step < -std::f64::consts::PI {
+                        step += 2.0 * std::f64::consts::PI;
+                    }
+                    total_turn += step;
+                    max_step = max_step.max(step.abs());
+                    if prev_step != 0.0 && step * prev_step < 0.0 {
+                        reversals += 1;
+                    }
+                    prev_step = step;
+                }
+                {
+                    let mut step = angs[0] - angs[n - 1];
+                    while step > std::f64::consts::PI {
+                        step -= 2.0 * std::f64::consts::PI;
+                    }
+                    while step < -std::f64::consts::PI {
+                        step += 2.0 * std::f64::consts::PI;
+                    }
+                    total_turn += step;
+                    max_step = max_step.max(step.abs());
+                    if prev_step != 0.0 && step * prev_step < 0.0 {
+                        reversals += 1;
+                    }
+                }
+                eprintln!(
+                    "FILLLOOP: iter={} loop#{} n={} fid={} fidhist=[{}] c=({:.2},{:.2},{:.2}) nrm=({:.2},{:.2},{:.2}) maxdev={:.4} r[q0/25/50/75/100]={:.2}/{:.2}/{:.2}/{:.2}/{:.2} turn={:.0}deg maxstep={:.0}deg rev={}",
+                    _iter,
+                    li,
+                    n,
+                    fid,
+                    hist.join(","),
+                    cx,
+                    cy,
+                    cz,
+                    ux,
+                    uy,
+                    uz,
+                    max_dev,
+                    rq(0),
+                    rq(n / 4),
+                    rq(n / 2),
+                    rq(3 * n / 4),
+                    rq(n - 1),
+                    total_turn.to_degrees(),
+                    max_step.to_degrees(),
+                    reversals
+                );
+            }
 
             // Check if existing triangle has edge (v0, v1) or (v1, v0) in its winding
             let (a, b, c) = (tri[0], tri[1], tri[2]);

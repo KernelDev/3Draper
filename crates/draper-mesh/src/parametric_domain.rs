@@ -4281,6 +4281,48 @@ pub fn triangulate_surface_consistent(
     };
 
     // ============================================================
+    // Step 1.3 (session-45): degenerate constant-v outer ring —
+    // band stitch or empty mesh (July family root cause)
+    //
+    // A closed loop lying entirely at constant v on a u-periodic
+    // surface (the exact-G1-tangency circles where a cylinder and a
+    // torus fillet share a self-loop EDGE_CURVE) has a ZERO-AREA UV
+    // polygon. The old pipeline fell through to seam-split (dropping
+    // the holes) and then the constant-v fan fallback, emitting a FLAT
+    // centroid fan per arc — off-surface geometry duplicating the
+    // neighbouring face's identical fan across the shared circle
+    // (565 FAT fold-over pairs on 16 BREPs; sessions 42–45).
+    //
+    //   • With a u-wrapping hole: the face is a BAND between the two
+    //     loops — stitch them with on-surface intermediate rows
+    //     (`try_band_stitch_degenerate_outer`).
+    //   • Without holes on a non-v-periodic surface (cylinder/cone):
+    //     the face is a zero-extent degenerate sliver — emit nothing
+    //     (the flat disk fan would duplicate the neighbour's coverage).
+    //   • Everything else: unchanged behaviour (fall through).
+    // ============================================================
+    if crate::band_stitch::is_degenerate_v_ring(&outer_uv) && surface.is_u_periodic() {
+        if let Some(mesh) = crate::band_stitch::try_band_stitch_degenerate_outer(
+            surface,
+            &outer_uv,
+            boundary_points_3d,
+            hole_polylines_3d,
+            &normalized_holes_uv,
+            forward,
+            params,
+        ) {
+            return mesh;
+        }
+        if hole_polylines_3d.is_empty() && !surface.is_v_periodic() {
+            log::info!(
+                "triangulate_surface_consistent: degenerate zero-extent face (constant-v ring, {} pts, no holes) — emitting empty mesh instead of a flat fan",
+                outer_uv.len()
+            );
+            return TriangleMesh::new();
+        }
+    }
+
+    // ============================================================
     // Step 1.55: Proactive seam-split for periodic surfaces (5.1.2)
     //
     // For periodic surfaces whose UV polygon spans more than 90% of the
@@ -4542,6 +4584,42 @@ pub fn triangulate_surface_consistent(
             if u_degenerate { "constant-u" } else { "constant-v" },
             outer_uv.len()
         );
+        // session-45 diagnostics (DRAPPER_DUMP_DEGEN_FANS): this fallback
+        // emits a FLAT fan over the 3D boundary loop — the July family
+        // (565 FAT pairs) was traced to exactly this path firing on the
+        // G1-tangency faces (cylinder/torus both trimmed by the tangency
+        // circle at constant v → two overlapping disk fans).
+        if std::env::var("DRAPPER_DUMP_DEGEN_FANS").is_ok() {
+            let stype = match surface {
+                Surface::Plane(_) => "Plane",
+                Surface::Cylinder(_) => "Cylinder",
+                Surface::Cone(_) => "Cone",
+                Surface::Sphere(_) => "Sphere",
+                Surface::Torus(_) => "Torus",
+                Surface::Revolution(_) => "Revolution",
+                Surface::Extrusion(_) => "Extrusion",
+                Surface::Nurbs(_) => "Nurbs",
+                Surface::Offset(_) => "Offset",
+                Surface::Ruled(_) => "Ruled",
+            };
+            let n = boundary_points_3d.len();
+            let (mut bx, mut by, mut bz) = (f64::MAX, f64::MAX, f64::MAX);
+            let (mut BX, mut BY, mut BZ) = (f64::MIN, f64::MIN, f64::MIN);
+            for p in boundary_points_3d {
+                bx = bx.min(p.x); by = by.min(p.y); bz = bz.min(p.z);
+                BX = BX.max(p.x); BY = BY.max(p.y); BZ = BZ.max(p.z);
+            }
+            eprintln!(
+                "DEGENFAN: surface={} kind={} n_bnd={} n_holes={} uv=[{:.6},{:.6}]x[{:.6},{:.6}] forward={} bbox=({:.3}..{:.3}, {:.3}..{:.3}, {:.3}..{:.3})",
+                stype,
+                if u_degenerate { "constant-u" } else { "constant-v" },
+                n,
+                hole_polylines_3d.len(),
+                u_min, u_max, v_min, v_max,
+                forward,
+                bx, BX, by, BY, bz, BZ
+            );
+        }
         let mut mesh = TriangleMesh::new();
         let n = boundary_points_3d.len();
         if n < 3 {
