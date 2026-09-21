@@ -7547,3 +7547,13 @@ slivers, coincident-грани) — ВСЕ фальсифицированы; н�
    пара = перекрытие эмиссии. Тест «сторона апексов» обязателен в
    любом угловом диагностическом скане (голый acos(dot(n0,n1)) не
    отличает фолд от winding-flip).
+
+## Приложение: per-BREP FOLD-OVER+FAT baseline (для измерения фикса сессии 45)
+
+brep_idx: FAT-пар — 26/30/31/33 (TRANSPORTROLLE ×4): 65 каждая;
+16: 58; 19: 56; 11: 51; 17: 48; 18: 48; 22: 16; 25: 11; 12: 6; 24: 4;
+23: 3; 21: 2; 20: 2. Сумма 565; ровно эти 16 BREPs фейлят angle gate.
+Регенерация дампа: ./target/release/fold_face_probe test/Zentralstaender.stp
+(формат строк: [КЛАСС+SLIVER/FAT] brep_idx name BREP# ang faces types
+step tris areas h COINCIDENT/d-дистанции mid; локальная копия сессии:
+tool-results/session44_fold_face_probe_zentralstaender.txt — вне git).
