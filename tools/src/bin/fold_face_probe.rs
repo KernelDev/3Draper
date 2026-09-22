@@ -159,6 +159,28 @@ fn main() {
             }
         }
         let mesh = &inst.mesh;
+        // session-47 diagnostics: dump the FINAL (post-repair) instance
+        // mesh as OBJ + per-triangle face ids, for offline reconstruction
+        // of fold-pair provenance at merged level.
+        if let Ok(dir) = std::env::var("DRAPPER_DUMP_FINAL_OBJS") {
+            let _ = std::fs::create_dir_all(&dir);
+            let path = format!("{}/brep{}_{}.obj", dir, i, inst.name);
+            let mut obj = String::with_capacity(1 << 16);
+            for v in &mesh.vertices {
+                obj.push_str(&format!("v {:.9} {:.9} {:.9}\n", v.x, v.y, v.z));
+            }
+            for t in &mesh.triangles {
+                obj.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+            let _ = std::fs::write(&path, obj);
+            let fids = mesh.triangle_face_ids.as_ref();
+            let mut fmap = String::new();
+            for (ti, t) in mesh.triangles.iter().enumerate() {
+                let fid = fids.map(|f| f[ti]).unwrap_or(u64::MAX);
+                fmap.push_str(&format!("t {} {}\n", ti, fid));
+            }
+            let _ = std::fs::write(&path.replace(".obj", ".fmap"), fmap);
+        }
         let faces = &inst.faces;
         // face_id → FaceInfo (face ids are NOT guaranteed dense; the vec is
         // positional while ids may skip values).
