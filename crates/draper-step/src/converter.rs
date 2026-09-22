@@ -8744,6 +8744,41 @@ impl<'a> StepConverter<'a> {
                     edge.end_vertex_point = Some(deterministic_round_point(*p2));
                     edge.step_entity_id = Some(edge_curve_id);
                     edge
+                } else if let Curve3d::Ellipse(ref ellipse) = curve {
+                    // Session-46: ELLIPSE edges must be trimmed to the arc
+                    // between their two vertices, NOT the full (0, 2π)
+                    // default param_range. Root cause of the TRANSPORTROLLE
+                    // Plane|Plane COINCIDENT fold family (24 pairs / 4 BREP
+                    // instances): the 19.47° tangency-arc EDGE_CURVE #5751
+                    // (ELLIPSE #457 = cylinder r=3 ∩ plane, shared by planar
+                    // faces f20/f21 and axle-cylinder faces f29/f32) was
+                    // sampled over the FULL ellipse; discretize_step_edge
+                    // then glued the true endpoint vertices onto the ends of
+                    // the full-ellipse polyline, injecting ~30 spurious
+                    // points that self-intersect the planar face polygon and
+                    // fan-triangulate into overlapping coplanar triangles.
+                    // Mirrors the Circle branch semantics exactly: positive
+                    // (CCW) direction from t1 to t2, full period when
+                    // p1 ≈ p2 (self-loop full-ellipse edges).
+                    let (t1, t2) = project_points_on_ellipse(ellipse, p1, p2);
+                    log::debug!("    EDGE_CURVE #{}: {} p1=({:.4},{:.4},{:.4}) p2=({:.4},{:.4},{:.4}) param=({:.6},{:.6}) center=({:.4},{:.4},{:.4}) semi=({:.4},{:.4})",
+                        edge_curve_id, curve_type_name, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z, t1, t2,
+                        ellipse.center.x, ellipse.center.y, ellipse.center.z,
+                        ellipse.semi_major, ellipse.semi_minor);
+                    let mut edge = if t1.is_finite() && t2.is_finite() && t2 > t1 {
+                        TopoEdge::new(curve, (t1, t2))
+                    } else {
+                        // Degenerate semi-axis (NaN projection) — keep the
+                        // legacy full-period behaviour.
+                        let legacy_range = curve.param_range();
+                        TopoEdge::new(curve, legacy_range)
+                    };
+                    edge.vertex_start = Some(draper_topology::TopoId::new());
+                    edge.vertex_end = Some(draper_topology::TopoId::new());
+                    edge.start_vertex_point = Some(deterministic_round_point(*p1));
+                    edge.end_vertex_point = Some(deterministic_round_point(*p2));
+                    edge.step_entity_id = Some(edge_curve_id);
+                    edge
                 } else {
                     // For other curves, use the default param range
                     let param_range = curve.param_range();
@@ -15721,6 +15756,73 @@ fn project_points_on_circle(circle: &Circle, p1: &Point3d, p2: &Point3d) -> (f64
     (t1, t2)
 }
 
+/// Project two 3D points onto an ellipse and return the angular parameter
+/// range (t1, t2) of the arc between them.
+///
+/// The angles are computed in the ellipse's local frame: local_x along
+/// `x_axis` (semi-major `a`), local_y along `y_axis = normal × x_axis`
+/// (semi-minor `b`). The curve's parametrization is
+/// `P(t) = center + a·cos(t)·x_axis + b·sin(t)·y_axis`, so the parameter of
+/// a point is `t = atan2(local_y / b, local_x / a)`.
+///
+/// Semantics mirror `project_points_on_circle` exactly:
+///   - the arc goes from t1 to t2 in the positive (CCW) direction;
+///   - for full ellipses (p1 ≈ p2, e.g. self-loop EDGE_CURVEs) a full 2π
+///     range starting from t1 is returned;
+///   - returns (NaN, NaN) when a semi-axis is degenerate (the caller keeps
+///     the legacy full-period range in that case).
+///
+/// Session-46 context: ELLIPSE edges previously fell into the generic
+/// `param_range()` branch = (0, 2π) — the FULL ellipse — regardless of
+/// where their vertices sit. `discretize_step_edge` then overrode the two
+/// polyline endpoints with the true VERTEX_POINT coordinates, producing a
+/// wire segment that sweeps the whole ellipse between two nearly-coincident
+/// vertices (TRANSPORTROLLE tangency arc #5751: 19.47° true arc, ~30
+/// spurious full-ellipse points) and self-intersecting face polygons.
+fn project_points_on_ellipse(
+    ellipse: &draper_geometry::Ellipse,
+    p1: &Point3d,
+    p2: &Point3d,
+) -> (f64, f64) {
+    if ellipse.semi_major.abs() < 1e-12 || ellipse.semi_minor.abs() < 1e-12 {
+        return (f64::NAN, f64::NAN);
+    }
+    let y_axis = ellipse.normal.cross(&ellipse.x_axis);
+
+    let local_angle = |p: &Point3d| -> f64 {
+        let dx = p.x - ellipse.center.x;
+        let dy = p.y - ellipse.center.y;
+        let dz = p.z - ellipse.center.z;
+        let local_x = dx * ellipse.x_axis.x + dy * ellipse.x_axis.y + dz * ellipse.x_axis.z;
+        let local_y = dx * y_axis.x + dy * y_axis.y + dz * y_axis.z;
+        (local_y / ellipse.semi_minor).atan2(local_x / ellipse.semi_major)
+    };
+
+    let t1 = local_angle(p1);
+
+    // Check if p1 and p2 are approximately the same point (full ellipse)
+    let dist_sq = (p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2) + (p2.z - p1.z).powi(2);
+    if dist_sq < 1e-10 {
+        // Full ellipse — use the full 2π range starting from t1
+        return (t1, t1 + 2.0 * std::f64::consts::PI);
+    }
+
+    let t2 = local_angle(p2);
+
+    // Ensure t2 > t1 (positive direction arc from t1 to t2)
+    let mut t2 = t2;
+    let mut guard = 0;
+    while t2 <= t1 {
+        guard += 1;
+        if guard > 1000 {
+            break; // Safety: prevent infinite loop with NaN/Inf
+        }
+        t2 += 2.0 * std::f64::consts::PI;
+    }
+
+    (t1, t2)
+}
+
 /// Multiply two 4x4 matrices (row-major storage).
 fn mat4_mul(a: &[[f64; 4]; 4], b: &[[f64; 4]; 4]) -> [[f64; 4]; 4] {
     let mut r = [[0.0f64; 4]; 4];
@@ -19244,5 +19346,118 @@ mod session43_annulus_zipper_tests {
         let o3: Vec<Point3d> = o2.iter().map(|p| Point3d::new(p.u, p.v, 0.0)).collect();
         let (h2, h3) = ring(40, 2.0, 0.0, 0.0);
         assert!(try_radial_zipper_annulus(&o2, &o3, &h2, &h3, true, &plane_z0()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod session46_ellipse_edge_tests {
+    use super::*;
+
+    // ── Exact TRANSPORTROLLE geometry (Zentralstaender.stp) ─────────────
+    //
+    // ELLIPSE #457: placement #7424 = center (-17,25,42),
+    // normal (0,-√2/2,√2/2) [plane z-y=17], ref_direction (0,-√2/2,-√2/2),
+    // semi-major 3√2 (along x_axis), semi-minor 3 (along y_axis = (1,0,0)).
+    // EDGE_CURVE #5751: vertices #4943 (-17,28,45) [t=π] and
+    // #4980 (-18, 27.8284271247462, 44.8284271247462) [t=π+atan(1/(3√2)·3)]
+    // — a 19.47° arc.
+    fn trolley_ellipse() -> draper_geometry::Ellipse {
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        draper_geometry::Ellipse {
+            center: Point3d::new(-17.0, 25.0, 42.0),
+            normal: Direction3d::new(0.0, -s, s).unwrap(),
+            semi_major: 3.0 * std::f64::consts::SQRT_2,
+            semi_minor: 3.0,
+            x_axis: Direction3d::new(0.0, -s, -s).unwrap(),
+        }
+    }
+
+    // Mirror ELLIPSE #458 (edge #5753): center (17,25,42),
+    // x_axis (0,√2/2,√2/2), same normal/semi-axes.
+    fn trolley_ellipse_mirror() -> draper_geometry::Ellipse {
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        draper_geometry::Ellipse {
+            center: Point3d::new(17.0, 25.0, 42.0),
+            normal: Direction3d::new(0.0, -s, s).unwrap(),
+            semi_major: 3.0 * std::f64::consts::SQRT_2,
+            semi_minor: 3.0,
+            x_axis: Direction3d::new(0.0, s, s).unwrap(),
+        }
+    }
+
+    #[test]
+    fn trolley_arc_short_not_full_ellipse() {
+        let e = trolley_ellipse();
+        let p1 = Point3d::new(-17.0, 28.0, 45.0);
+        let p2 = Point3d::new(-18.0, 27.8284271247462, 44.8284271247462);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        // Start vertex sits at t=π exactly.
+        assert!((t1 - std::f64::consts::PI).abs() < 1e-9, "t1={t1}");
+        // The arc must be the SHORT way: 19.47° ≈ 0.3398 rad, NOT ~2π.
+        let sweep = t2 - t1;
+        assert!(sweep > 0.30 && sweep < 0.38, "sweep={sweep}");
+    }
+
+    #[test]
+    fn trolley_arc_endpoints_round_trip() {
+        // The arc endpoints that the sampler produces must reproduce the
+        // true vertex positions (the wire endpoints rely on this).
+        let e = trolley_ellipse();
+        let p1 = Point3d::new(-17.0, 28.0, 45.0);
+        let p2 = Point3d::new(-18.0, 27.8284271247462, 44.8284271247462);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        let q1 = e.point_at(t1);
+        let q2 = e.point_at(t2);
+        assert!(q1.distance_to(&p1) < 1e-9, "q1={q1:?} vs {p1:?}");
+        assert!(q2.distance_to(&p2) < 1e-9, "q2={q2:?} vs {p2:?}");
+    }
+
+    #[test]
+    fn trolley_mirror_arc() {
+        // The mirror-image edge (#5753, .T. from (18,27.828…) to (17,28,45))
+        // must ALSO resolve to the short arc with the same convention.
+        let e = trolley_ellipse_mirror();
+        let p1 = Point3d::new(18.0, 27.8284271247462, 44.8284271247462);
+        let p2 = Point3d::new(17.0, 28.0, 45.0);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        let sweep = t2 - t1;
+        assert!(sweep > 0.30 && sweep < 0.38, "sweep={sweep}");
+        assert!(e.point_at(t1).distance_to(&p1) < 1e-9);
+        assert!(e.point_at(t2).distance_to(&p2) < 1e-9);
+    }
+
+    #[test]
+    fn full_ellipse_self_loop() {
+        // p1 ≈ p2 (self-loop EDGE_CURVE): full 2π period from t1.
+        let e = trolley_ellipse();
+        let p1 = Point3d::new(-17.0, 28.0, 45.0);
+        let p2 = Point3d::new(-17.0, 28.0, 45.0);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        assert!((t2 - t1 - 2.0 * std::f64::consts::PI).abs() < 1e-12);
+    }
+
+    #[test]
+    fn long_way_around_when_ccw_requires_it() {
+        // Vertices swapped relative to trolley_arc_short: the CCW arc from
+        // p(199.47°) to p(180°) is the complement (340.5°) — the convention
+        // must return that, not the short arc (matching the circle helper's
+        // positive-direction semantics).
+        let e = trolley_ellipse();
+        let p1 = Point3d::new(-18.0, 27.8284271247462, 44.8284271247462);
+        let p2 = Point3d::new(-17.0, 28.0, 45.0);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        let sweep = t2 - t1;
+        assert!(sweep > 2.0 * std::f64::consts::PI - 0.38 && sweep < 2.0 * std::f64::consts::PI - 0.30,
+            "sweep={sweep}");
+    }
+
+    #[test]
+    fn degenerate_semi_axis_returns_nan() {
+        let mut e = trolley_ellipse();
+        e.semi_minor = 0.0;
+        let p1 = Point3d::new(-17.0, 28.0, 45.0);
+        let p2 = Point3d::new(-18.0, 27.8284271247462, 44.8284271247462);
+        let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
+        assert!(t1.is_nan() && t2.is_nan());
     }
 }
