@@ -372,6 +372,20 @@ pub fn try_band_stitch_degenerate_outer(
     }
 
     // ── Strips between consecutive columns (cyclic). ─────────────────
+    // session-46: PER-TRIANGLE orientation against the surface normal.
+    // The (P_l, Q_l, Q_{l+1})/(P_l, Q_{l+1}, P_{l+1}) patterns assume
+    // every strip quad has the same UV orientation — true for normal
+    // bands, FALSE at hole-meander vertical jumps: there the two columns
+    // share the outer vertex and their holes sit at the same u, shearing
+    // the quad past vertical so its UV signed area flips sign. The
+    // emitted triangles then have MIXED winding (measured: jump-strip
+    // triangle +radial, adjacent deep-strip triangle −radial on BNO
+    // face 2), and the single global flip below cannot fix both classes
+    // — the result is back-to-back fold pairs at ~179.6° along the
+    // lower half of each jump column (88 intra-face Cyl|Cyl pairs on
+    // Zentralstaender). Orienting every triangle individually makes the
+    // winding consistent everywhere; for all-normal bands the outcome
+    // is bit-identical to the previous uniform global flip.
     let emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
         if x == y || y == z || x == z {
             return;
@@ -387,10 +401,25 @@ pub fn try_band_stitch_degenerate_outer(
             e1.2 * e2.0 - e1.0 * e2.2,
             e1.0 * e2.1 - e1.1 * e2.0,
         );
-        if n.0 * n.0 + n.1 * n.1 + n.2 * n.2 < 1e-20 {
+        let n2 = n.0 * n.0 + n.1 * n.1 + n.2 * n.2;
+        if n2 < 1e-20 {
             return;
         }
-        mesh.add_triangle(x, y, z);
+        // Surface normal at the triangle's UV centroid.
+        let (u0, v0) = (uvs[x as usize].u, uvs[x as usize].v);
+        let (u1, v1) = (uvs[y as usize].u, uvs[y as usize].v);
+        let (u2, v2) = (uvs[z as usize].u, uvs[z as usize].v);
+        let (mu, mv) = ((u0 + u1 + u2) / 3.0, (v0 + v1 + v2) / 3.0);
+        let sn = surface.normal_at(mu, mv);
+        let mut dot = n.0 * sn.x + n.1 * sn.y + n.2 * sn.z;
+        if !forward {
+            dot = -dot;
+        }
+        if dot < 0.0 {
+            mesh.add_triangle(x, z, y);
+        } else {
+            mesh.add_triangle(x, y, z);
+        }
     };
 
     let ncols = cols.len();
@@ -463,6 +492,63 @@ pub fn try_band_stitch_degenerate_outer(
         mesh.triangle_count(),
         forward
     );
+
+    // session-46 diagnostics (read-only, env-gated): meander shape of the
+    // stitching hole (v-jumps between consecutive hole vertices are the
+    // wedge-fold driver) and the band parameters.
+    if std::env::var("DRAPPER_DUMP_BAND").is_ok() {
+        eprintln!(
+            "BAND: outer={} hole={} cols={} k_rows={} tris={} v_outer={:.4}",
+            n_out,
+            n_hole,
+            ncols,
+            k_rows,
+            mesh.triangle_count(),
+            v_outer
+        );
+        let mut hv = String::new();
+        for p in h_uv.iter() {
+            hv.push_str(&format!("({:.4},{:.4})", p.u, p.v));
+        }
+        eprintln!("BANDHOLE: {}", hv);
+        let mut max_jump = 0.0f64;
+        for k in 0..n_hole {
+            let a = h_uv[k];
+            let b = h_uv[(k + 1) % n_hole];
+            let mut du = b.u - a.u;
+            if du > PI {
+                du -= 2.0 * PI;
+            } else if du < -PI {
+                du += 2.0 * PI;
+            }
+            let jump = (du * du + (b.v - a.v) * (b.v - a.v)).sqrt();
+            max_jump = max_jump.max(jump);
+        }
+        eprintln!("BANDHOLEMAXJUMP: {:.4}", max_jump);
+    }
+    // session-46 diagnostics (read-only, env-gated): full band topology —
+    // vertices (with uv), columns (outer/hole idx + turn positions) and
+    // emitted triangles (band-local indices), for offline reconstruction
+    // of wedge-fold provenance at hole-meander corners.
+    if std::env::var("DRAPPER_DUMP_BAND2").is_ok() {
+        eprintln!("BANDBEGIN: outer={} hole={} k_rows={}", n_out, n_hole, k_rows);
+        for (vi, p) in mesh.vertices.iter().enumerate() {
+            eprintln!(
+                "BANDVERT: {} ({:.6},{:.6},{:.6}) uv=({:.6},{:.6})",
+                vi, p.x, p.y, p.z, uvs[vi].u, uvs[vi].v
+            );
+        }
+        for (ci, &(oi, hj, uo, uh)) in cols.iter().enumerate() {
+            let vp = &column_pts[ci];
+            eprintln!(
+                "BANDCOL: {} outer={} hole={} uo={:.6} uh={:.6} pts={:?}",
+                ci, oi, hj, uo, uh, vp
+            );
+        }
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            eprintln!("BANDTRI: {} {},{},{}", ti, t[0], t[1], t[2]);
+        }
+    }
 
     Some(mesh)
 }
