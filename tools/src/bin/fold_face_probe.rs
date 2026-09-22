@@ -14,6 +14,11 @@ use draper_step::{parse_step, step_structure_lazy, StepConversionContext};
 use draper_geometry::Point3d;
 use std::collections::HashMap;
 
+// Shared surface-justified dihedral exemption logic (also used by the
+// angle_check release gate — single source of truth).
+#[path = "../surf_exempt.rs"]
+mod surf_exempt;
+
 fn tri_normal(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> Option<Point3d> {
     let e1 = [v1.x - v0.x, v1.y - v0.y, v1.z - v0.z];
     let e2 = [v2.x - v0.x, v2.y - v0.y, v2.z - v0.z];
@@ -40,63 +45,8 @@ fn tri_area(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
     0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
 }
 
-/// Distance from a point to a surface (plane/cylinder/cone/torus analytic;
-/// None for everything else). The surface must ALREADY be in the same
-/// space as the point (world).
-fn surface_distance(surf: &draper_geometry::Surface, p: &Point3d) -> Option<f64> {
-    use draper_geometry::Surface;
-    match surf {
-        Surface::Plane(pl) => {
-            let d = [
-                p.x - pl.origin.x,
-                p.y - pl.origin.y,
-                p.z - pl.origin.z,
-            ];
-            Some((d[0] * pl.normal.x + d[1] * pl.normal.y + d[2] * pl.normal.z).abs())
-        }
-        Surface::Cylinder(cy) => {
-            // axis: origin + t*axis; distance to axis minus radius
-            let d = [p.x - cy.origin.x, p.y - cy.origin.y, p.z - cy.origin.z];
-            let a = [cy.axis.x, cy.axis.y, cy.axis.z];
-            let t = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
-            let perp = [
-                d[0] - t * a[0],
-                d[1] - t * a[1],
-                d[2] - t * a[2],
-            ];
-            Some(((perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt() - cy.radius).abs())
-        }
-        Surface::Cone(co) => {
-            let d = [p.x - co.origin.x, p.y - co.origin.y, p.z - co.origin.z];
-            let a = [co.axis.x, co.axis.y, co.axis.z];
-            let t = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
-            let perp = [
-                d[0] - t * a[0],
-                d[1] - t * a[1],
-                d[2] - t * a[2],
-            ];
-            let r = (perp[0] * perp[0] + perp[1] * perp[1] + perp[2] * perp[2]).sqrt();
-            let tan = co.half_angle.tan();
-            let expect = if co.expanding { co.radius + t * tan } else { co.radius - t * tan };
-            Some((r - expect).abs())
-        }
-        Surface::Torus(to) => {
-            // Torus: center, axis, major (ring) radius, minor radius.
-            // Surface distance: |dist(P, ring circle) − minor_radius|.
-            let d = [p.x - to.center.x, p.y - to.center.y, p.z - to.center.z];
-            let a = [to.axis.x, to.axis.y, to.axis.z];
-            let h = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
-            let q = [d[0] - h * a[0], d[1] - h * a[1], d[2] - h * a[2]];
-            let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
-            if ql < 1e-12 {
-                return Some(to.minor_radius.abs());
-            }
-            let ring_dist = ((ql - to.major_radius).powi(2) + h * h).sqrt();
-            Some((ring_dist - to.minor_radius).abs())
-        }
-        _ => None,
-    }
-}
+// surface_distance / surface_unit_normal / same_analytic_surface and the
+// pair-level exemption live in the shared `surf_exempt` module.
 
 /// Transform a surface from BREP-local space into world space by a 4×4
 /// (assumed rigid: rotation + translation) matrix.
@@ -272,6 +222,7 @@ fn main() {
             .collect();
 
         let mut brep_pairs = 0usize;
+        let mut brep_exempt = 0usize;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -416,12 +367,12 @@ fn main() {
             let g1 = centroid(t1);
             let surf0 = face_surface(fid0);
             let surf1 = face_surface(fid1);
-            let d01 = surf1.as_ref().and_then(|s| surface_distance(s, &g0));
-            let d10 = surf0.as_ref().and_then(|s| surface_distance(s, &g1));
+            let d01 = surf1.as_ref().and_then(|s| surf_exempt::surface_distance(s, &g0));
+            let d10 = surf0.as_ref().and_then(|s| surf_exempt::surface_distance(s, &g1));
             // Self-distances: sanity check (each triangle's centroid must be
             // near its OWN surface — chord sagitta level).
-            let d00 = surf0.as_ref().and_then(|s| surface_distance(s, &g0));
-            let d11 = surf1.as_ref().and_then(|s| surface_distance(s, &g1));
+            let d00 = surf0.as_ref().and_then(|s| surf_exempt::surface_distance(s, &g0));
+            let d11 = surf1.as_ref().and_then(|s| surf_exempt::surface_distance(s, &g1));
             // Env-gated: dump the two surfaces' analytic parameters.
             let surf_params = |fid: u64| -> String {
                 use draper_geometry::Surface;
@@ -502,10 +453,37 @@ fn main() {
                 "FAT"
             };
 
+            // ---- surface-justified dihedral exemption (session-46,
+            // direction (c) of session-44, generalized) — see
+            // surf_exempt.rs for the criterion and its guards. The
+            // analytic surface normals are evaluated at the shared-edge
+            // ENDPOINTS (bit-exact rim points) because the midpoint of a
+            // chord of the tangency circle sits inside the circle and the
+            // projected torus/cone normal there picks up a chord-sagitta
+            // tilt (measured 3.8° on B_WELLE), masking exact tangency.
+            let verdict = surf_exempt::evaluate(
+                &mesh.vertices,
+                &mesh.triangles[t0],
+                &mesh.triangles[t1],
+                ang,
+                fid0,
+                fid1,
+                surf0.as_ref(),
+                surf1.as_ref(),
+            );
+            let tangent_exempt = verdict.exempt;
+
+            let sn_str = match (verdict.sn_rim, verdict.sn_mid) {
+                (Some(a), Some(m)) => format!("snAng={:.3}/mid={:.3}", a, m),
+                (Some(a), None) => format!("snAng={:.3}", a),
+                (None, _) => "snAng=n/a".to_string(),
+            };
+            let exempt_str = if tangent_exempt { " TANGENT-EXEMPT" } else { "" };
             println!(
-                "[{}{}] brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
+                exempt_str,
                 i,
                 inst.name,
                 inst.brep_id,
@@ -522,6 +500,7 @@ fn main() {
                 area1,
                 h0,
                 h1,
+                sn_str,
                 coincident_str,
                 owner_note,
                 params_note,
@@ -531,12 +510,18 @@ fn main() {
             );
 
             *hist
-                .entry(format!("{} | {}", sliver_class, st0))
+                .entry(format!(
+                    "{}{} | {} | {}",
+                    if tangent_exempt { "EXEMPT+" } else { "" },
+                    sliver_class,
+                    st0,
+                    st1
+                ))
                 .or_insert(0) += 1;
-            *hist.entry(format!("{} | {}", st0, st1)).or_insert(0) += 1;
             *grand
                 .entry(format!(
-                    "{}{}+{} | {} | {}",
+                    "{}{}{}+{} | {} | {}",
+                    if tangent_exempt { "TANGENT-EXEMPT " } else { "" },
                     class,
                     if coincide { "+COIN" } else { "" },
                     sliver_class,
@@ -544,6 +529,9 @@ fn main() {
                     st1
                 ))
                 .or_insert(0) += 1;
+            if tangent_exempt {
+                brep_exempt += 1;
+            }
         }
 
         if brep_pairs > 0 {
@@ -565,7 +553,7 @@ fn main() {
                     for poly in f.outer_boundary.iter().chain(f.inner_boundaries.iter()) {
                         for p in poly {
                             n_tot += 1;
-                            if let Some(d) = surface_distance(&surf, p) {
+                            if let Some(d) = surf_exempt::surface_distance(&surf, p) {
                                 if d > 1e-4 {
                                     n_off += 1;
                                     max_off = max_off.max(d);
@@ -586,8 +574,8 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170°",
-                i, inst.name, inst.brep_id, brep_pairs
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} real)",
+                i, inst.name, inst.brep_id, brep_pairs, brep_exempt, brep_pairs - brep_exempt
             );
             let mut keys: Vec<_> = hist.iter().collect();
             keys.sort_by(|a, b| b.1.cmp(a.1));
