@@ -283,7 +283,32 @@ pub fn try_band_stitch_degenerate_outer(
     while i < n_out || j < n_hole {
         let (adv_a, adv_b) = if i < n_out && j < n_hole {
             let (da, db) = (f_out(i + 1), f_hole(j + 1));
-            if (da - db).abs() <= eps {
+            // session-47: hole JUMP TWIN — the next hole vertex sits at
+            // the SAME turn position as the current one (a vertical slit
+            // edge of a meander/castellation hole: du = 0, dv > 0).
+            // Pairing BOTH twins with the same outer vertex (the old
+            // hole-alone advance, chosen whenever da > db) crosses the
+            // two column chords — the ray to the slit end that lies
+            // closer to the outer ring falls INSIDE the fan sector of
+            // the opposite run, the slit region gets covered TWICE and
+            // the overlap folds back at 172-180° (measured on the final
+            // mesh: TRANSP face-26 slit 174.06/175.21/176.47/179.84°,
+            // BNO face-2 castellation 172.75/174.87/180.00°). Pair the
+            // second twin with the NEXT outer vertex instead: the chords
+            // (outer_i → slit end A) and (outer_{i+1} → slit end B)
+            // preserve the u-order at every level once the next outer is
+            // at/beyond the slit meridian (da ≥ db) — exactly the case
+            // where the old rule advanced the hole alone. When the next
+            // outer is still before the slit (da < db), the plain
+            // outer-alone advance already defers the twin correctly
+            // (same-hole fan columns), so only the (false, true) branch
+            // changes.
+            let jump_twin = j + 1 < n_hole
+                && (f_hole(j + 1) - f_hole(j)).abs() <= 1e-12
+                && (h_uv[j + 1].v - h_uv[j].v).abs() > 1e-9;
+            if jump_twin && da >= db - eps {
+                (true, true)
+            } else if (da - db).abs() <= eps {
                 (true, true)
             } else if da < db {
                 (true, false)
@@ -386,6 +411,38 @@ pub fn try_band_stitch_degenerate_outer(
     // Zentralstaender). Orienting every triangle individually makes the
     // winding consistent everywhere; for all-normal bands the outcome
     // is bit-identical to the previous uniform global flip.
+    // session-47: SEAM-AWARE UV centroid. The wrap strip (last column
+    // → first column, cyclic) stores the first column's vertices at
+    // their raw turn-0 u while the last column's sit at turn ≈1 (u+2π−δ):
+    // the RAW mean of such a triangle's u lands ~π away, on the opposite
+    // meridian, where `normal_at` returns a normal unrelated to the
+    // triangle's true location — the winding decision then flips
+    // incorrectly and the whole wrap strip comes out inverted. Measured:
+    // 171-177° WINDING-FLIP fold pairs along the first and last columns
+    // of EVERY band-stitched face (the remaining 28 Cyl|Cyl intra-face
+    // pairs: TRANSP 16 + BNO 12). Unwrapping each vertex's u onto the
+    // branch continuous with the first vertex (single ±2π step — band
+    // steps are ≪ π) puts the centroid back inside the strip. For every
+    // non-wrap triangle the unwrap is the identity → bit-identical
+    // winding decisions, unchanged meshes everywhere else.
+    let centroid_uv = |x: u32, y: u32, z: u32| -> (f64, f64) {
+        let p0 = uvs[x as usize];
+        let p1 = uvs[y as usize];
+        let p2 = uvs[z as usize];
+        let unwrap = |u: f64| -> f64 {
+            let mut d = u - p0.u;
+            if d > PI {
+                d -= 2.0 * PI;
+            } else if d < -PI {
+                d += 2.0 * PI;
+            }
+            p0.u + d
+        };
+        let u1 = unwrap(p1.u);
+        let u2 = unwrap(p2.u);
+        ((p0.u + u1 + u2) / 3.0, (p0.v + p1.v + p2.v) / 3.0)
+    };
+
     let emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
         if x == y || y == z || x == z {
             return;
@@ -405,11 +462,8 @@ pub fn try_band_stitch_degenerate_outer(
         if n2 < 1e-20 {
             return;
         }
-        // Surface normal at the triangle's UV centroid.
-        let (u0, v0) = (uvs[x as usize].u, uvs[x as usize].v);
-        let (u1, v1) = (uvs[y as usize].u, uvs[y as usize].v);
-        let (u2, v2) = (uvs[z as usize].u, uvs[z as usize].v);
-        let (mu, mv) = ((u0 + u1 + u2) / 3.0, (v0 + v1 + v2) / 3.0);
+        // Surface normal at the triangle's (seam-aware) UV centroid.
+        let (mu, mv) = centroid_uv(x, y, z);
         let sn = surface.normal_at(mu, mv);
         let mut dot = n.0 * sn.x + n.1 * sn.y + n.2 * sn.z;
         if !forward {
@@ -423,12 +477,58 @@ pub fn try_band_stitch_degenerate_outer(
     };
 
     let ncols = cols.len();
+    // session-47: slit-strip triangulation. Two emission modes:
+    //
+    // • Level-tied strips (both columns end on the same hole run —
+    //   v_hole identical): the CLASSIC fixed pattern
+    //   (P_l, Q_l, Q_{l+1}) / (P_l, Q_{l+1}, P_{l+1}) — bit-identical
+    //   to the session-45 emission for every normal band.
+    //
+    // • Slit strips (the columns end at the two ends of a vertical
+    //   slit edge — v_hole differs, e.g. the spread strips): the old
+    //   fixed pattern emits sheared/bowtie quads whose winding flips
+    //   against the neighbours (172-180° folds, TRANSP/BNO). The
+    //   correct triangulation of the two-chain region (outer edge on
+    //   top, the two column chords on the sides, the vertical slit at
+    //   the bottom) is the TWO-FAN decomposition:
+    //     (1) fan from the DEEP column's TOP (its outer vertex) over
+    //         the SHALLOW column's polyline, and
+    //     (2) fan from the SHALLOW column's BOTTOM (the near slit
+    //         twin) over the DEEP column's polyline,
+    //   split by the single internal diagonal deep_top→shallow_bottom.
+    //   Validity: the deep-top diagonals to the shallow chain stay
+    //   inside (the deep top lies beyond the shallow chord's top in u,
+    //   and two straight lines from it can only meet the shallow chord
+    //   at their shared endpoint); the near-twin diagonals to the deep
+    //   chain stay inside (they never cross to the far side of the
+    //   slit or the deep chord). Both fans are provably inside for
+    //   both slit orientations (P-deep and Q-deep). Long diagonals
+    //   from the SHALLOW top to the deep chain — the fold driver
+    //   (172-180°, measured) — are never emitted.
     for c in 0..ncols {
         let p = &column_pts[c];
         let q = &column_pts[(c + 1) % ncols];
-        for l in 0..k_rows {
-            emit(&mut mesh, p[l], q[l], q[l + 1]);
-            emit(&mut mesh, p[l], q[l + 1], p[l + 1]);
+        let v_end_p = uvs[p[p.len() - 1] as usize].v;
+        let v_end_q = uvs[q[q.len() - 1] as usize].v;
+        if (v_end_p - v_end_q).abs() <= 1e-12 {
+            for l in 0..k_rows {
+                emit(&mut mesh, p[l], q[l], q[l + 1]);
+                emit(&mut mesh, p[l], q[l + 1], p[l + 1]);
+            }
+        } else {
+            // slit strip: pick the deep column (hole end farther from
+            // the outer ring)
+            let dp = (v_end_p - v_outer).abs();
+            let dq = (v_end_q - v_outer).abs();
+            let (deep, shallow) = if dp >= dq { (p, q) } else { (q, p) };
+            let dtop = deep[0];
+            let sbot = shallow[shallow.len() - 1];
+            for i in 0..shallow.len() - 1 {
+                emit(&mut mesh, dtop, shallow[i], shallow[i + 1]);
+            }
+            for i in 0..deep.len() - 1 {
+                emit(&mut mesh, sbot, deep[i], deep[i + 1]);
+            }
         }
     }
 
@@ -464,13 +564,11 @@ pub fn try_band_stitch_degenerate_outer(
             e1.2 * e2.0 - e1.0 * e2.2,
             e1.0 * e2.1 - e1.1 * e2.0,
         );
-        let uv0 = uvs[t0[0] as usize];
-        let uv1 = uvs[t0[1] as usize];
-        let uv2 = uvs[t0[2] as usize];
-        let (mu, mv) = (
-            (uv0.u + uv1.u + uv2.u) / 3.0,
-            (uv0.v + uv1.v + uv2.v) / 3.0,
-        );
+        // session-47: seam-aware centroid here too (t0 is normally a
+        // strip-0 triangle where the unwrap is the identity; kept for
+        // robustness so this safety flip can never misfire on a wrap
+        // triangle if emission order ever changes).
+        let (mu, mv) = centroid_uv(t0[0], t0[1], t0[2]);
         let sn = surface.normal_at(mu, mv);
         let mut dot = n.0 * sn.x + n.1 * sn.y + n.2 * sn.z;
         if !forward {
@@ -651,6 +749,182 @@ mod tests {
     }
 
     #[test]
+    fn test_band_stitch_seam_wrap_consistency() {
+        // session-47 regression: the wrap strip (last column → first
+        // column) has triangles whose RAW u values straddle the 2π turn
+        // (last column at u0+2π−δ, first at u0). With the raw UV
+        // centroid the surface normal is sampled on the opposite
+        // meridian, the winding decision flips, and the seam columns
+        // come out inverted (171-177° WINDING-FLIP folds). Verify:
+        // (a) every interior edge traversed in OPPOSITE directions by
+        //     its two triangles (topological winding consistency),
+        // (b) no interior-edge dihedral above 170° (no folds).
+        let s = Surface::Cylinder(CylinderSurface::new_z(5.0));
+        let (o3, ouv) = cyl_ring(&s, 5.0, 32, 0.0);
+        // Phase-offset hole with a different sampling count (the exact
+        // conditions of the TRANSPORTROLLE/BNO seam folds).
+        let (h3, huv) = cyl_ring(&s, 1.0, 24, 0.3);
+        let mesh = try_band_stitch_degenerate_outer(
+            &s, &ouv, &o3, &[h3.clone()], &[huv.clone()], true, &params(),
+        )
+        .expect("band must stitch");
+        assert!(mesh.triangles.len() >= 2 * 32);
+
+        use std::collections::HashMap;
+        let mut edges: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                edges.entry(key).or_default().push((ti, a, b));
+            }
+        }
+        let tri_normal = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
+            let a = mesh.vertices[t[0] as usize];
+            let b = mesh.vertices[t[1] as usize];
+            let c = mesh.vertices[t[2] as usize];
+            let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+            let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+            let n = (
+                e1.1 * e2.2 - e1.2 * e2.1,
+                e1.2 * e2.0 - e1.0 * e2.2,
+                e1.0 * e2.1 - e1.1 * e2.0,
+            );
+            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            if l < 1e-12 {
+                None
+            } else {
+                Some((n.0 / l, n.1 / l, n.2 / l))
+            }
+        };
+        let mut interior = 0usize;
+        for (_e, ts) in &edges {
+            if ts.len() != 2 {
+                continue;
+            }
+            interior += 1;
+            let (t0, a0, b0) = ts[0];
+            let (t1, a1, b1) = ts[1];
+            assert!(
+                a0 == b1 && b0 == a1,
+                "winding-flip on interior edge ({a0},{b0}): tris {t0} and {t1} traverse it in the same direction"
+            );
+            let (Some(n0), Some(n1)) = (tri_normal(&mesh.triangles[t0]), tri_normal(&mesh.triangles[t1]))
+            else {
+                continue;
+            };
+            let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+            let ang = dot.clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(
+                ang <= 170.0,
+                "fold {ang:.2}° on interior edge ({a0},{b0}) between tris {t0} and {t1}"
+            );
+        }
+        // A stitched band of 32 columns must be mostly interior —
+        // sanity that the edge map is not degenerate.
+        assert!(interior > 100, "interior edge count {interior} too small");
+    }
+
+    #[test]
+    fn test_band_stitch_castellation_high_slits() {
+        // session-47: BNO face-2 proportions — the outer ring sits CLOSE
+        // to the near run and FAR from the deep run (band height 0.2 vs
+        // 4.1), with several slit edges in sequence (castellation teeth).
+        // The spread + internal-diagonal emission must keep the winding
+        // topologically consistent and fold-free through every tooth.
+        let s = Surface::Cylinder(CylinderSurface::new_z(5.0));
+        let (o3, ouv) = cyl_ring(&s, 5.0, 32, 0.0);
+        let (v_near, v_deep) = (4.8, 0.9);
+        let mut h3 = Vec::new();
+        let mut huv = Vec::new();
+        let mut push = |u: f64, v: f64| {
+            h3.push(s.point_at(u, v));
+            huv.push(Point2d::new(u, v));
+        };
+        // Comb: deep teeth with short near bridges over the gaps; the
+        // slit edges are EXACTLY vertical (du = 0 — as measured on the
+        // BNO castellation: BANDHOLEMAXJUMP=4.1 at du=0); the deep
+        // background wraps around and closes the loop.
+        //   deep [0.4, 1.6] | up@1.6 (twin) | near (1.8, 2.0) |
+        //   down@2.0 (twin) | deep [2.2, 3.2] | up@3.2 (twin) |
+        //   near (3.4, 3.6) | down@3.6 (twin) | deep [3.725, 6.6]
+        let n_arc = 6usize;
+        for k in 0..=n_arc {
+            push(0.4 + 1.2 * k as f64 / n_arc as f64, v_deep);
+        }
+        push(1.6, v_near); // vertical slit up (twin of (1.6, deep))
+        push(1.8, v_near);
+        push(2.0, v_near);
+        push(2.0, v_deep); // vertical slit down (twin of (2.0, near))
+        for k in 1..=n_arc {
+            push(2.0 + 1.2 * k as f64 / n_arc as f64, v_deep);
+        }
+        push(3.2, v_near); // vertical slit up
+        push(3.4, v_near);
+        push(3.6, v_near);
+        push(3.6, v_deep); // vertical slit down
+        for k in 1..=24 {
+            push(3.6 + 3.0 * k as f64 / 24.0, v_deep);
+        }
+        let mesh = try_band_stitch_degenerate_outer(
+            &s, &ouv, &o3, &[h3.clone()], &[huv.clone()], true, &params(),
+        )
+        .expect("castellation band must stitch");
+        assert!(!mesh.triangles.is_empty());
+        // consistency + fold checks (same as the meander test)
+        use std::collections::HashMap;
+        let mut edges: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+        for (ti, t) in mesh.triangles.iter().enumerate() {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                edges.entry(key).or_default().push((ti, a, b));
+            }
+        }
+        let tri_normal = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
+            let a = mesh.vertices[t[0] as usize];
+            let b = mesh.vertices[t[1] as usize];
+            let c = mesh.vertices[t[2] as usize];
+            let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+            let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+            let n = (
+                e1.1 * e2.2 - e1.2 * e2.1,
+                e1.2 * e2.0 - e1.0 * e2.2,
+                e1.0 * e2.1 - e1.1 * e2.0,
+            );
+            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            if l < 1e-12 {
+                None
+            } else {
+                Some((n.0 / l, n.1 / l, n.2 / l))
+            }
+        };
+        let mut interior = 0usize;
+        for (_e, ts) in &edges {
+            if ts.len() != 2 {
+                continue;
+            }
+            interior += 1;
+            let (t0, a0, b0) = ts[0];
+            let (t1, a1, b1) = ts[1];
+            assert!(
+                a0 == b1 && b0 == a1,
+                "castellation winding-flip on interior edge ({a0},{b0}): tris {t0}/{t1}"
+            );
+            let (Some(n0), Some(n1)) =
+                (tri_normal(&mesh.triangles[t0]), tri_normal(&mesh.triangles[t1]))
+            else {
+                continue;
+            };
+            let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+            let ang = dot.clamp(-1.0, 1.0).acos().to_degrees();
+            assert!(
+                ang <= 170.0,
+                "castellation fold {ang:.2}° on interior edge ({a0},{b0}): tris {t0}/{t1}"
+            );
+        }
+        assert!(interior > 100, "interior edge count {interior} too small");
+    }
+
+    #[test]
     fn test_band_stitch_meander_hole() {
         // Hole wraps with a square-wave v profile plus two vertical
         // jumps (the TRANSPORTROLLE cuff window topology).
@@ -683,6 +957,63 @@ mod tests {
         }
         for p in o3.iter() {
             assert!(contains(&mesh, p), "outer point missing: {p:?}");
+        }
+        // session-47: with the jump-twin spread the vertical slit edges
+        // (du = 0, dv > 0) must no longer double-cover the slit region:
+        // winding stays topologically consistent and no interior edge
+        // folds past 170°.
+        {
+            use std::collections::HashMap;
+            let mut edges: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+            for (ti, t) in mesh.triangles.iter().enumerate() {
+                for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    edges.entry(key).or_default().push((ti, a, b));
+                }
+            }
+            let tri_normal = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
+                let a = mesh.vertices[t[0] as usize];
+                let b = mesh.vertices[t[1] as usize];
+                let c = mesh.vertices[t[2] as usize];
+                let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+                let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+                let n = (
+                    e1.1 * e2.2 - e1.2 * e2.1,
+                    e1.2 * e2.0 - e1.0 * e2.2,
+                    e1.0 * e2.1 - e1.1 * e2.0,
+                );
+                let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                if l < 1e-12 {
+                    None
+                } else {
+                    Some((n.0 / l, n.1 / l, n.2 / l))
+                }
+            };
+            let mut interior = 0usize;
+            for (_e, ts) in &edges {
+                if ts.len() != 2 {
+                    continue;
+                }
+                interior += 1;
+                let (t0, a0, b0) = ts[0];
+                let (t1, a1, b1) = ts[1];
+                assert!(
+                    a0 == b1 && b0 == a1,
+                    "meander winding-flip on interior edge ({a0},{b0}): tris {t0}/{t1}"
+                );
+                let (Some(n0), Some(n1)) =
+                    (tri_normal(&mesh.triangles[t0]), tri_normal(&mesh.triangles[t1]))
+                else {
+                    continue;
+                };
+                let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+                let ang = dot.clamp(-1.0, 1.0).acos().to_degrees();
+                assert!(
+                    ang <= 170.0,
+                    "meander fold {ang:.2}° on interior edge ({a0},{b0}): tris {t0}/{t1}"
+                );
+            }
+            assert!(interior > 100, "interior edge count {interior} too small");
         }
     }
 
