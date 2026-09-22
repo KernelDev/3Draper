@@ -890,6 +890,7 @@ Independent face triangulation with post-facto welding is deprecated.
 | 2 | Periodic 2D PCURVEs for closed branches (lattice C2 seam) | Done | `1039889` |
 | 1 | Exact B-spline SSI (fit_b_spline) | Done | `e03d758` |
 | 1 | Session-45 band stitch: degenerate constant-v rings (G1-tangency circles) on periodic surfaces stitched as on-surface bands instead of flat centroid fans — July FAT fold-over family 565→194 pairs, 16→10 BREPs | Done | session 45 (2026-09-21) |
+| 1 | Session-47 band-stitch seam + slit folds: seam-aware UV centroid (wrap-strip winding) + jump-twin spread (uncrossed chords) + two-fan slit-strip triangulation — Cyl|Cyl fold family 28→0, angle gate 10→3 FAIL BREPs, Zentralstaender 98→70 pairs | Done | session 47 (2026-09-22) |
 | 1 | Property-based testing (proptest) | Done | `2d74d8c` |
 | 1 | Fuzz testing setup (quickcheck) | Done | `e7ee121` |
 | 1 | Determinism CI gate (probe ×N runs, digest diff) | Done | `c3d8de9` |
