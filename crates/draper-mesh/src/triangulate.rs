@@ -2468,6 +2468,135 @@ fn collect_face_holes_with_uv_from_cache(
 }
 
 // ============================================================
+// Session-48: inner-wire-first planar faces — role reclassification
+// ============================================================
+
+/// Signed area of a 2D ring (shoelace). Positive = CCW.
+fn planar_ring_signed_area(ring: &[Point2d]) -> f64 {
+    let mut a = 0.0;
+    for i in 0..ring.len() {
+        let j = (i + 1) % ring.len();
+        a += ring[i].u * ring[j].v - ring[j].u * ring[i].v;
+    }
+    a * 0.5
+}
+
+/// Point-in-polygon test that also accepts points ON the boundary
+/// (within a small epsilon). Crossing test for strict interior plus an
+/// explicit on-segment distance check.
+fn point_in_polygon_inclusive(pt: &Point2d, poly: &[Point2d]) -> bool {
+    let n = poly.len();
+    if n < 3 {
+        return false;
+    }
+    let eps = 1e-7_f64;
+    let eps2 = eps * eps;
+    for i in 0..n {
+        let a = &poly[i];
+        let b = &poly[(i + 1) % n];
+        if pt.u < a.u.min(b.u) - eps
+            || pt.u > a.u.max(b.u) + eps
+            || pt.v < a.v.min(b.v) - eps
+            || pt.v > a.v.max(b.v) + eps
+        {
+            continue;
+        }
+        let abu = b.u - a.u;
+        let abv = b.v - a.v;
+        let apu = pt.u - a.u;
+        let apv = pt.v - a.v;
+        let len2 = abu * abu + abv * abv;
+        if len2 < 1e-30 {
+            if apu * apu + apv * apv <= eps2 {
+                return true;
+            }
+            continue;
+        }
+        let cross = abu * apv - abv * apu;
+        if cross * cross / len2 <= eps2 {
+            let t = (apu * abu + apv * abv) / len2;
+            if t >= -eps && t <= 1.0 + eps {
+                return true;
+            }
+        }
+    }
+    point_in_polygon_check(pt, poly)
+}
+
+/// Whether every vertex of `inner` lies inside-or-on `outer`.
+fn planar_ring_contains(outer: &[Point2d], inner: &[Point2d]) -> bool {
+    if outer.len() < 3 || inner.is_empty() {
+        return false;
+    }
+    inner.iter().all(|p| point_in_polygon_inclusive(p, outer))
+}
+
+/// Project a 3D ring onto the plane's (u, v) basis.
+fn project_ring_onto_plane(ring: &[Point3d], plane: &Plane) -> Vec<Point2d> {
+    ring.iter()
+        .map(|p| {
+            let dx = p.x - plane.origin.x;
+            let dy = p.y - plane.origin.y;
+            let dz = p.z - plane.origin.z;
+            Point2d::new(
+                dx * plane.u_dir.x + dy * plane.u_dir.y + dz * plane.u_dir.z,
+                dx * plane.v_dir.x + dy * plane.v_dir.y + dz * plane.v_dir.z,
+            )
+        })
+        .collect()
+}
+
+/// Detect an inner-wire-first planar face: the parsed outer ring lies
+/// strictly inside one of the parsed hole rings (which then must have a
+/// strictly larger absolute area). Returns the index of the largest
+/// containing hole ring, or `None` for healthy faces (holes inside the
+/// outer boundary ⇒ smaller area ⇒ never detected).
+///
+/// Trigger evidence (Zentralstaender, session-48): faces #1722/#1749
+/// (6-arc circle r≈2.887/4.041 listed FIRST + concentric self-loop
+/// r=5.7/7.0 listed second), #1723 (circle r=4.4 first + r=6.5 second),
+/// B_WELLE #1591 (circle r=6.5 first + hexagon second) — exported with
+/// no FACE_OUTER_BOUND anywhere, inner wire listed first.
+///
+/// Public: shared with the draper-step converter's planar path
+/// (`triangulate_planar_face_with_holes_cached`), which is the
+/// production path for STEP planar faces.
+pub fn find_inverted_outer_ring(
+    boundary_3d: &[Point3d],
+    holes_3d: &[Vec<Point3d>],
+    plane: &Plane,
+) -> Option<usize> {
+    let outer_2d = project_ring_onto_plane(boundary_3d, plane);
+    if outer_2d.len() < 3 {
+        return None;
+    }
+    let outer_area = planar_ring_signed_area(&outer_2d).abs();
+    if outer_area <= 1e-12 {
+        return None;
+    }
+    let mut best: Option<(usize, f64)> = None;
+    for (hi, hole_3d) in holes_3d.iter().enumerate() {
+        if hole_3d.len() < 3 {
+            continue;
+        }
+        let hole_2d = project_ring_onto_plane(hole_3d, plane);
+        let hole_area = planar_ring_signed_area(&hole_2d).abs();
+        // The containing ring must be strictly larger — this also rejects
+        // identical/mutually-containing ring pathologies and guarantees
+        // healthy faces never trigger.
+        if hole_area <= outer_area {
+            continue;
+        }
+        if planar_ring_contains(&hole_2d, &outer_2d) {
+            if best.map_or(true, |(_, ba)| hole_area > ba) {
+                best = Some((hi, hole_area));
+            }
+        }
+    }
+    best.map(|(hi, _)| hi)
+}
+
+// ============================================================
 // Planar face triangulation — minimum triangle count
 // ============================================================
 
@@ -2480,12 +2609,46 @@ fn triangulate_planar_face(face: &StagedFace, plane: &Plane, _params: &Triangula
 
     // Use cached boundary collection for watertight meshes
     let surface = Surface::Plane(plane.clone());
-    let boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
+    let mut boundary_3d = collect_face_boundary_from_cache(face, cache, &surface);
     if boundary_3d.is_empty() {
         return mesh;
     }
 
-    let holes_3d = collect_face_holes_from_cache(face, cache, &surface);
+    let mut holes_3d = collect_face_holes_from_cache(face, cache, &surface);
+
+    // ── Session-48: inner-wire-first reclassification ─────────────
+    // Some exporters list the INNER wire first among the ADVANCED_FACE
+    // bounds (the file has no FACE_OUTER_BOUND at all). The STEP reader
+    // then takes the true hole as the outer boundary and the true outer
+    // boundary as a hole (extract_face_bounds_separated_with_step_ids:
+    // first FACE_BOUND = outer). earcut receives an "outer" ring that
+    // lies INSIDE a "hole" ring and emits garbage: needle bridges across
+    // the gap plus double coverage of the annulus — observed as the 180°
+    // fold-over families Plane|Cone (002402/002407) and Plane|Plane COIN
+    // (B_WELLE / 002402 / 002407) on Zentralstaender.
+    //
+    // Healthy faces (holes strictly inside the outer, smaller area)
+    // never trigger the swap → bit-identical output. Winding after the
+    // swap is handled by the CCW normalization inside
+    // earcutr_triangulate_planar.
+    if !holes_3d.is_empty() {
+        if let Some(hi) = find_inverted_outer_ring(&boundary_3d, &holes_3d, plane) {
+            let new_outer = holes_3d.remove(hi);
+            let old_outer = std::mem::replace(&mut boundary_3d, new_outer);
+            holes_3d.push(old_outer);
+            log::info!(
+                "planar face {}: wire roles reclassified — parsed outer ring was inside hole ring #{} (exporter listed inner wire first)",
+                face.id, hi
+            );
+            if std::env::var("DRAPPER_DUMP_PLANAR").is_ok() {
+                eprintln!(
+                    "PLANARSWAP: face {} — parsed outer inside hole[{}]; outer/hole roles swapped",
+                    face.id, hi
+                );
+            }
+        }
+    }
+
     let forward = face.forward;
 
     // NOTE: We intentionally do NOT snap boundary points to the plane here.
@@ -9798,6 +9961,152 @@ mod ring_surface_tests {
         let mesh = triangulate_face(&face, &params);
         // Plane with no boundary points produces empty mesh — this is expected
         assert_eq!(mesh.triangles.len(), 0, "Plane with no boundary should produce no triangles");
+    }
+
+    // ── Session-48: inner-wire-first planar faces ──────────────────
+
+    /// Unit test for the inversion classifier itself: concentric-circle
+    /// (002402 #1722 / 002407 #1749 / #1723 analogs) and circle-inside-
+    /// hexagon (B_WELLE #1591 analog) configurations.
+    #[test]
+    fn test_find_inverted_outer_ring_detection() {
+        let plane = Plane::xy();
+        let circle_ring = |r: f64| -> Vec<Point3d> {
+            (0..24usize)
+                .map(|i| {
+                    let t = i as f64 / 24.0 * 2.0 * std::f64::consts::PI;
+                    Point3d::new(r * t.cos(), r * t.sin(), 0.0)
+                })
+                .collect()
+        };
+        let small = circle_ring(2.88675134594813); // 5/√3 — face #1722
+        let big = circle_ring(5.7); // face #1722 self-loop
+
+        // Inverted (inner wire listed first): hole ring contains the outer.
+        let idx = find_inverted_outer_ring(&small, &[big.clone()], &plane);
+        assert_eq!(idx, Some(0), "inner-wire-first face must be detected");
+
+        // Healthy (outer big, hole small): no swap.
+        let idx2 = find_inverted_outer_ring(&big, &[small.clone()], &plane);
+        assert_eq!(idx2, None, "healthy face must not trigger");
+
+        // Identical rings: area guard rejects mutual containment.
+        let idx3 = find_inverted_outer_ring(&small, &[small.clone()], &plane);
+        assert_eq!(idx3, None, "identical rings must not trigger");
+
+        // B_WELLE #1591 analog: parsed outer = circle r=6.5, hole =
+        // hexagon with inradius 11 / circumradius 12.7.
+        let hex: Vec<Point3d> = (0..6usize)
+            .map(|i| {
+                let t = i as f64 / 6.0 * 2.0 * std::f64::consts::PI;
+                Point3d::new(12.7 * t.cos(), 12.7 * t.sin(), 0.0)
+            })
+            .collect();
+        let circle65 = circle_ring(6.5);
+        let idx4 = find_inverted_outer_ring(&circle65, &[hex], &plane);
+        assert_eq!(idx4, Some(0), "circle-inside-hexagon inversion must be detected");
+    }
+
+    /// End-to-end regression: a planar face whose wires are staged
+    /// INNER-FIRST (the reader's view of the Zentralstaender
+    /// 002402/002407/B_WELLE faces) must triangulate as a clean annulus:
+    /// coverage only between the two rings, no needle triangles,
+    /// consistent normals.
+    #[test]
+    fn test_planar_face_inner_wire_first_annulus() {
+        use draper_topology::{CoEdge, Edge as TopoEdge, Wire};
+        use draper_geometry::Curve3d;
+
+        let plane = Plane::xy();
+        let r_inner = 2.88675134594813_f64;
+        let r_outer = 5.7_f64;
+
+        // Two full-circle edges (the 6-arc chain of #1722 is the same
+        // circle split into arcs; a single full circle reproduces the
+        // ring geometry).
+        let edge_inner = TopoEdge::new(
+            Curve3d::Circle(draper_geometry::Circle::new_xy(Point3d::ORIGIN, r_inner)),
+            (0.0, 2.0 * std::f64::consts::PI),
+        );
+        let edge_outer = TopoEdge::new(
+            Curve3d::Circle(draper_geometry::Circle::new_xy(Point3d::ORIGIN, r_outer)),
+            (0.0, 2.0 * std::f64::consts::PI),
+        );
+
+        // Stage INNER-WIRE-FIRST: the small circle as the outer wire,
+        // the big circle as a hole — exactly what the STEP reader
+        // produces for the inner-first ADVANCED_FACE bounds.
+        let wire_inner = Wire::new(vec![CoEdge::new(edge_inner.id, true)]);
+        let wire_outer = Wire::new(vec![CoEdge::new(edge_outer.id, true)]);
+        let mut face = draper_topology::Face::new(Surface::Plane(plane.clone()), wire_inner);
+        face.add_hole(wire_outer);
+        face.forward = true;
+
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face_with_edges(&face, &[&edge_inner, &edge_outer], &params);
+
+        assert!(!mesh.triangles.is_empty(), "annulus face must produce triangles");
+
+        // Coverage: every triangle centroid must lie strictly between
+        // the two rings (annulus only — the old code filled the inner
+        // disk and bridged out with needles).
+        for tri in &mesh.triangles {
+            let (a, b, c) = (
+                &mesh.vertices[tri[0] as usize],
+                &mesh.vertices[tri[1] as usize],
+                &mesh.vertices[tri[2] as usize],
+            );
+            let cx = (a.x + b.x + c.x) / 3.0;
+            let cy = (a.y + b.y + c.y) / 3.0;
+            let r = (cx * cx + cy * cy).sqrt();
+            assert!(
+                r > r_inner * 0.98 && r < r_outer * 1.02,
+                "triangle centroid radius {} outside annulus [{}, {}]",
+                r, r_inner, r_outer
+            );
+        }
+
+        // No needles: every triangle must have a healthy area.
+        let mut min_area = f64::MAX;
+        for tri in &mesh.triangles {
+            let (a, b, c) = (
+                &mesh.vertices[tri[0] as usize],
+                &mesh.vertices[tri[1] as usize],
+                &mesh.vertices[tri[2] as usize],
+            );
+            let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+            let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+            let n = (
+                e1.1 * e2.2 - e1.2 * e2.1,
+                e1.2 * e2.0 - e1.0 * e2.2,
+                e1.0 * e2.1 - e1.1 * e2.0,
+            );
+            let area = 0.5 * (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            min_area = min_area.min(area);
+        }
+        assert!(
+            min_area > 0.005,
+            "needle triangle detected (min area {:.6})",
+            min_area
+        );
+
+        // Normals: forward face on the XY plane ⇒ all normals +Z.
+        for tri in &mesh.triangles {
+            let (a, b, c) = (
+                &mesh.vertices[tri[0] as usize],
+                &mesh.vertices[tri[1] as usize],
+                &mesh.vertices[tri[2] as usize],
+            );
+            let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+            let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+            let n = (
+                e1.1 * e2.2 - e1.2 * e2.1,
+                e1.2 * e2.0 - e1.0 * e2.2,
+                e1.0 * e2.1 - e1.1 * e2.0,
+            );
+            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+            assert!(n.2 / l > 0.99, "triangle normal not +Z for forward face");
+        }
     }
 
     #[test]

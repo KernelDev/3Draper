@@ -85,6 +85,16 @@ pub fn try_band_stitch_degenerate_outer(
     //    side of the outer ring in v (the band boundary). If several
     //    qualify, bail — multi-band topologies are out of scope.
     let mut picked: Option<usize> = None;
+    let mut picked_v_unwrapped: Option<Vec<f64>> = None;
+    let wrap_to_pi = |x: f64| -> f64 {
+        let mut d = x % (2.0 * PI);
+        if d < -PI {
+            d += 2.0 * PI;
+        } else if d > PI {
+            d -= 2.0 * PI;
+        }
+        d
+    };
     for (hi, huv) in holes_uv.iter().enumerate() {
         let h3d = holes_3d.get(hi)?;
         if huv.len() < 8 || h3d.len() != huv.len() {
@@ -97,21 +107,58 @@ pub fn try_band_stitch_degenerate_outer(
         if hu_max - hu_min <= PI {
             continue; // does not wrap
         }
-        // Strictly on one side in v.
+        // Strictly on one side in v (raw prefilter).
         if !(hv_max < v_outer - 1e-9 || hv_min > v_outer + 1e-9) {
             continue;
         }
-        // Short way only for angular v (v-periodic surfaces): a band
-        // spanning more than half the v-period would be the "long way"
-        // around the tube — reject and keep the old behaviour.
-        if surface.is_v_periodic() && (hv_max - v_outer).abs().max((hv_min - v_outer).abs()) > PI
-        {
-            continue;
+        // ── session-48: WRAP-AWARE short-way test for angular v ──────
+        // The old raw-value comparison rejected the quarter-tube
+        // fillet bands: Zentralstaender 002402 torus #1729 has its
+        // outer wire on the exact-tangency circle (v=3π/2) and its
+        // hole on the outer-equator circle (v=0) — a π/2 band THROUGH
+        // the 2π seam, measured as 3π/2 raw. The rejected face fell
+        // through to the proactive seam-split (which DROPS holes) and
+        // then the 3D ear-clip fallback, which flattened the whole
+        // band onto the tangent plane (the hole ring r=6.5 emitted at
+        // y=5.0 instead of y=4.2 — 0.8 off-surface) with inverted
+        // winding against the neighbouring plane annulus (31
+        // same-direction shared edges → downstream BFS flipped the
+        // annulus triangles → the last WINDING-FLIP+COIN pairs).
+        //
+        // Fix: unwrap every hole v onto the branch within π of
+        // v_outer — the band then always takes the SHORT arc. Guards
+        // after unwrapping: the hole must stay strictly on one side
+        // of v_outer (a crossing unwrap means the hole spirals around
+        // the tube — out of scope) and its own unwrapped v-extent
+        // must stay within half a turn. For every previously-accepted
+        // hole (raw v already within π of v_outer) the unwrap is the
+        // identity → bit-identical behaviour.
+        if surface.is_v_periodic() {
+            let v_unwrapped: Vec<f64> = huv
+                .iter()
+                .map(|p| v_outer + wrap_to_pi(p.v - v_outer))
+                .collect();
+            let uv_min = v_unwrapped.iter().cloned().fold(f64::MAX, f64::min);
+            let uv_max = v_unwrapped.iter().cloned().fold(f64::MIN, f64::max);
+            if !(uv_max < v_outer - 1e-9 || uv_min > v_outer + 1e-9) {
+                continue; // unwrapped range crosses the outer ring — not a band
+            }
+            if uv_max - uv_min > PI {
+                continue; // hole spirals more than half a turn in v
+            }
+            if picked.is_some() {
+                return None; // multiple wrapping holes — out of scope
+            }
+            picked = Some(hi);
+            picked_v_unwrapped = Some(v_unwrapped);
+        } else {
+            // Non-periodic v (cylinder/cone bands): unchanged behaviour.
+            if picked.is_some() {
+                return None; // multiple wrapping holes — out of scope
+            }
+            picked = Some(hi);
+            picked_v_unwrapped = None;
         }
-        if picked.is_some() {
-            return None; // multiple wrapping holes — out of scope
-        }
-        picked = Some(hi);
     }
 
     // ── Orient both rings u-increasing (net u trend around the loop). ──
@@ -143,7 +190,19 @@ pub fn try_band_stitch_degenerate_outer(
 
     let (o_uv, o_3d) = orient_u_inc(outer_uv, outer_3d);
     let hi = picked?;
-    let (h_uv, h_3d) = orient_u_inc(&holes_uv[hi], &holes_3d[hi]);
+    // session-48: substitute the picked hole's v values with the
+    // unwrapped (short-arc) branch computed during picking — identity
+    // for every previously-accepted band, the near branch through the
+    // 2π seam for the newly-accepted quarter-tube fillets.
+    let h_uv_source: Vec<Point2d> = match &picked_v_unwrapped {
+        Some(v_unwrapped) => holes_uv[hi]
+            .iter()
+            .zip(v_unwrapped.iter())
+            .map(|(p, &v)| Point2d::new(p.u, v))
+            .collect(),
+        None => holes_uv[hi].clone(),
+    };
+    let (h_uv, h_3d) = orient_u_inc(&h_uv_source, &holes_3d[hi]);
     let n_hole = h_uv.len();
     if n_hole < 3 {
         return None;
@@ -1051,6 +1110,70 @@ mod tests {
             assert!(
                 d.abs() < 1e-9,
                 "vertex off the torus by {d:.3e}: {p:?}"
+            );
+        }
+    }
+
+    /// session-48 regression: Zentralstaender 002402 torus #1729 — the
+    /// outer wire on the exact-tangency circle (v=3π/2) and the hole on
+    /// the outer-equator circle (v=0). The RAW short-way guard measured
+    /// |0 − 3π/2| = 3π/2 > π and REJECTED the band (a π/2 band through
+    /// the 2π seam); the face fell through to the proactive seam-split
+    /// (which drops the holes) and the 3D ear-clip fallback, flattening
+    /// the whole quarter-tube onto the tangent plane (the hole ring
+    /// emitted 0.8 off-surface with inverted winding). The wrap-aware
+    /// guard must accept the band and stitch the SHORT quarter arc.
+    #[test]
+    fn test_band_stitch_torus_quarter_tube_wrap() {
+        let t = Surface::Torus(TorusSurface {
+            center: Point3d::ORIGIN,
+            axis: Direction3d::Z,
+            major_radius: 5.7,
+            minor_radius: 0.8,
+            x_dir: Direction3d::X,
+        });
+        let ring = |v: f64, n: usize, u0: f64| -> (Vec<Point3d>, Vec<Point2d>) {
+            let mut pts = Vec::with_capacity(n);
+            let mut uvs = Vec::with_capacity(n);
+            for k in 0..n {
+                let u = u0 + 2.0 * PI * k as f64 / n as f64;
+                pts.push(t.point_at(u, v));
+                uvs.push(Point2d::new(u, v));
+            }
+            (pts, uvs)
+        };
+        // Outer: tangency circle at v=3π/2 (tube bottom, radius 5.7).
+        let (o3, ouv) = ring(3.0 * PI / 2.0, 24, 0.0);
+        // Hole: outer-equator circle at v=0 (radius 6.5), phase-offset
+        // like the real pcurve.
+        let (h3, huv) = ring(0.0, 24, 0.3);
+        let mesh = try_band_stitch_degenerate_outer(
+            &t, &ouv, &o3, &[h3], &[huv], true, &params(),
+        )
+        .expect("quarter-tube band (hole v=0, outer v=3π/2) must be accepted via the wrap-aware short way");
+        assert!(!mesh.triangles.is_empty());
+        // Every vertex ON the torus tube: distance to the tube circle = 0.8.
+        for p in &mesh.vertices {
+            let r_xy = (p.x * p.x + p.y * p.y).sqrt();
+            let d = ((r_xy - 5.7).powi(2) + p.z * p.z).sqrt() - 0.8;
+            assert!(
+                d.abs() < 1e-9,
+                "vertex off the torus by {d:.3e}: {p:?}"
+            );
+        }
+        // The band must span the QUARTER arc: z from −0.8 (tangency
+        // circle) to 0 (equator) — and never beyond (the long way
+        // through v=π would reach z=+0.8 at the inner equator).
+        let zmin = mesh.vertices.iter().map(|p| p.z).fold(f64::MAX, f64::min);
+        let zmax = mesh.vertices.iter().map(|p| p.z).fold(f64::MIN, f64::max);
+        assert!((zmin + 0.8).abs() < 1e-9, "band must reach the tangency circle z=-0.8, got zmin={zmin:.6}");
+        assert!(zmax.abs() < 1e-9, "band must stop at the equator z=0, got zmax={zmax:.6} (long-way band!)");
+        // Radii within the quarter: [5.7, 6.5].
+        for p in &mesh.vertices {
+            let r_xy = (p.x * p.x + p.y * p.y).sqrt();
+            assert!(
+                r_xy >= 5.7 - 1e-9 && r_xy <= 6.5 + 1e-9,
+                "vertex radius {r_xy:.6} outside the quarter band [5.7, 6.5]"
             );
         }
     }

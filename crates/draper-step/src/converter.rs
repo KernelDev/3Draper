@@ -13437,7 +13437,7 @@ impl<'a> StepConverter<'a> {
             )
         };
 
-        let outer_2d: Vec<Point2d> = outer_points_3d.iter().map(|p| project(p)).collect();
+        let mut outer_2d: Vec<Point2d> = outer_points_3d.iter().map(|p| project(p)).collect();
 
         // Sample inner loop (hole) points using the cache
         let mut hole_points_3d: Vec<Vec<Point3d>> = Vec::new();
@@ -13466,6 +13466,48 @@ impl<'a> StepConverter<'a> {
                 );
                 hole_points_3d.push(hp3d);
                 hole_points_2d.push(hp2d);
+            }
+        }
+
+        // ── Session-48: inner-wire-first reclassification ─────────────
+        // Some exporters list the INNER wire first among the ADVANCED_FACE
+        // bounds (the file has no FACE_OUTER_BOUND at all). The STEP reader
+        // then takes the true hole as the outer boundary and the true outer
+        // boundary as a hole (extract_face_bounds_separated_with_step_ids:
+        // first FACE_BOUND = outer). earcut receives an "outer" ring that
+        // lies INSIDE a "hole" ring and emits garbage: the disk inside the
+        // small ring plus needle bridges / double coverage — observed as
+        // the 180° fold-over families Plane|Cone (002402 #1722/#1749 ×
+        // Cone #1730/#1757/#1761) and Plane|Plane COIN (B_WELLE #1591,
+        // 002402 #1723, 002407 #1750) on Zentralstaender.
+        //
+        // Healthy faces (holes strictly inside the outer, smaller area)
+        // never trigger the swap → bit-identical output. Winding after
+        // the swap is handled by the CCW normalization in
+        // earcutr_triangulate_planar_converter. Classifier shared with
+        // the draper-mesh planar path (single source of truth).
+        if !hole_points_2d.is_empty() {
+            if let Some(hi) = draper_mesh::find_inverted_outer_ring(
+                &outer_points_3d,
+                &hole_points_3d,
+                plane,
+            ) {
+                let new_outer_3d = hole_points_3d.remove(hi);
+                let new_outer_2d = hole_points_2d.remove(hi);
+                let old_outer_3d = std::mem::replace(&mut outer_points_3d, new_outer_3d);
+                let old_outer_2d = std::mem::replace(&mut outer_2d, new_outer_2d);
+                hole_points_3d.push(old_outer_3d);
+                hole_points_2d.push(old_outer_2d);
+                log::info!(
+                    "planar_face_with_holes: wire roles reclassified — parsed outer ring was inside hole ring #{} (exporter listed inner wire first)",
+                    hi
+                );
+                if std::env::var("DRAPPER_DUMP_PLANAR").is_ok() {
+                    eprintln!(
+                        "CONVPLANARSWAP: parsed outer inside hole[{}]; outer/hole roles swapped",
+                        hi
+                    );
+                }
             }
         }
 
