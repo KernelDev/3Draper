@@ -109,7 +109,8 @@ fn transform_surface(
 
 fn main() {
     env_logger::builder()
-        .filter_level(log::LevelFilter::Warn)
+        // Honor RUST_LOG if set (session-49 diagnostics); default Warn.
+        .filter(Some("RUST_LOG"), log::LevelFilter::Warn)
         .init();
 
     let args: Vec<String> = std::env::args().collect();

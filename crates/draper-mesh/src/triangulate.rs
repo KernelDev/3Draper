@@ -3459,7 +3459,9 @@ fn triangulate_cylinder_face(face: &StagedFace, cyl: &CylinderSurface, params: &
                 &boundary_3d, &cyl.origin, &cyl.axis, &cyl.x_dir,
                 v_min_pw, v_max_pw, dedup_tol,
             );
-            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3
+                && !has_intermediate_v_ring(&boundary_3d, &cyl.origin, &cyl.axis, v_min_pw, v_max_pw)
+            {
                 log::info!(
                     "Cylinder face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
                     face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
@@ -3908,6 +3910,73 @@ fn split_boundary_into_rings_with_u(
     }
 
     (bottom, top, is_full_wrap)
+}
+
+/// Session-49: detect an INTERMEDIATE v-ring in the boundary of a
+/// would-be "partial tube" face.
+///
+/// A genuine partial-tube face (2 arcs at v_min/v_max + 2 ruling lines)
+/// has NO boundary points at intermediate v — the ruling lines are
+/// straight and discretize to their 2 endpoints, which lie ON the rings.
+/// But a stepped/L-shaped band (e.g. a fillet cylinder cut by a
+/// chamfer-step: quarter-arc at v_max, ELLIPSE at v_min, a SECOND
+/// quarter-arc at an intermediate v, and three ruling lines) ALSO
+/// satisfies "bottom_ring ≥ 3 && top_ring ≥ 3" — the ring splitter
+/// keeps only the points within v_tol of v_min/v_max and the tube-grid
+/// triangulation silently DROPS the rest (observed at Zentralstaender
+/// TRANSPORTROLLE #1092 faces #1831/#1834: 96 bnd pts → mesh covered
+/// only the [~72°,90°] sector, 208 boundary edges at merged level).
+///
+/// Detection: cluster boundary points whose v is strictly between
+/// v_min+v_tol and v_max−v_tol; if any v_tol-wide window holds ≥3
+/// points, there is an intermediate ring (an arc at constant v) and the
+/// face is NOT a simple tube → the caller must fall through to the
+/// earcutr/consistent path which honours every boundary point.
+///
+/// Stray intermediate points from a curved seam edge (each at a distinct
+/// v) do NOT trigger this: they never cluster 3-deep inside one window.
+fn has_intermediate_v_ring(
+    boundary_3d: &[draper_geometry::Point3d],
+    origin: &draper_geometry::Point3d,
+    axis: &draper_geometry::Direction3d,
+    v_min: f64,
+    v_max: f64,
+) -> bool {
+    // Same tolerance as split_boundary_into_rings_with_u (5% of v range).
+    let v_tol = (v_max - v_min).abs() * 0.05 + 1e-9;
+    let lo = v_min + v_tol;
+    let hi = v_max - v_tol;
+    if lo >= hi {
+        return false;
+    }
+    let mut mids: Vec<f64> = Vec::new();
+    for p in boundary_3d {
+        let dx = p.x - origin.x;
+        let dy = p.y - origin.y;
+        let dz = p.z - origin.z;
+        let v = dx * axis.x + dy * axis.y + dz * axis.z;
+        if v > lo && v < hi {
+            mids.push(v);
+        }
+    }
+    if mids.len() < 3 {
+        return false;
+    }
+    mids.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // Sliding window of width v_tol: any 3+ points inside one window
+    // means a constant-v arc lives at an intermediate height.
+    let mut count = 1;
+    for i in 1..mids.len() {
+        if mids[i] - mids[i - count] <= v_tol {
+            count += 1;
+            if count >= 3 {
+                return true;
+            }
+        } else {
+            count = 1;
+        }
+    }
+    false
 }
 
 /// Analytic fallback: triangulate a full cylinder between v_min and v_max
@@ -4592,7 +4661,9 @@ fn triangulate_cone_face(face: &StagedFace, cone: &ConeSurface, params: &Triangu
                 &boundary_3d, &cone.origin, &cone.axis, &cone.x_dir,
                 v_min_pw, v_max_pw, dedup_tol,
             );
-            if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+            if bottom_ring.len() >= 3 && top_ring.len() >= 3
+                && !has_intermediate_v_ring(&boundary_3d, &cone.origin, &cone.axis, v_min_pw, v_max_pw)
+            {
                 log::info!(
                     "Cone face #{}: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
                     face.id, bottom_ring.len(), top_ring.len(), boundary_3d.len()
@@ -6746,7 +6817,9 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                         boundary_points, &cyl.origin, &cyl.axis, &cyl.x_dir,
                         v_min_pw, v_max_pw, dedup_tol,
                     );
-                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3
+                        && !has_intermediate_v_ring(boundary_points, &cyl.origin, &cyl.axis, v_min_pw, v_max_pw)
+                    {
                         log::info!(
                             "Cylinder face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
                             bottom_ring.len(), top_ring.len(), boundary_points.len()
@@ -6801,7 +6874,9 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
                         boundary_points, &cone.origin, &cone.axis, &cone.x_dir,
                         v_min_pw, v_max_pw, dedup_tol,
                     );
-                    if bottom_ring.len() >= 3 && top_ring.len() >= 3 {
+                    if bottom_ring.len() >= 3 && top_ring.len() >= 3
+                        && !has_intermediate_v_ring(boundary_points, &cone.origin, &cone.axis, v_min_pw, v_max_pw)
+                    {
                         log::info!(
                             "Cone face: PARTIAL tube face detected ({} bottom + {} top ring points, {} bnd pts) — using tube grid triangulation",
                             bottom_ring.len(), top_ring.len(), boundary_points.len()
@@ -9878,6 +9953,140 @@ pub fn filter_degenerate_triangles(mesh: &mut TriangleMesh, tolerance: f64) {
             if let Some(&col) = colors.get(i) {
                 mesh.triangle_colors.get_or_insert_with(Vec::new).push(col);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod intermediate_v_ring_tests {
+    use super::*;
+    use draper_geometry::{Point3d, Direction3d, CylinderSurface, Point2d};
+
+    /// Genuine partial tube: quarter-cylinder r=3, axis +z, v ∈ [0,12]:
+    /// bottom arc (z=0) + top arc (z=12) + 2 ruling lines (endpoint-only).
+    /// Must NOT report an intermediate ring.
+    #[test]
+    fn test_genuine_partial_tube_no_intermediate_ring() {
+        let origin = Point3d::ORIGIN;
+        let axis = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let mut bnd = Vec::new();
+        // bottom arc z=0, u 0..90°
+        for i in 0..8 {
+            let a = (i as f64) / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 0.0));
+        }
+        // ruling line at u=90°: endpoints only
+        bnd.push(Point3d::new(0.0, 3.0, 12.0));
+        // top arc z=12, u 90..0°
+        for i in 0..8 {
+            let a = (7 - i) as f64 / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 12.0));
+        }
+        // ruling line at u=0°: endpoints only (bottom point closes loop)
+        bnd.push(Point3d::new(3.0, 0.0, 0.0));
+        assert!(!has_intermediate_v_ring(&bnd, &origin, &axis, 0.0, 12.0),
+            "genuine partial tube must not report an intermediate v-ring");
+    }
+
+    /// Stepped/L-shaped band (Zentralstaender TRANSPORTROLLE #1831 family):
+    /// same tube PLUS an intermediate arc at z=6 (constant-v ring) — the
+    /// tube-grid path would silently drop everything between the rings.
+    #[test]
+    fn test_stepped_band_has_intermediate_ring() {
+        let origin = Point3d::ORIGIN;
+        let axis = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let mut bnd = Vec::new();
+        for i in 0..8 {
+            let a = (i as f64) / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 0.0));
+        }
+        bnd.push(Point3d::new(0.0, 3.0, 12.0));
+        for i in 0..8 {
+            let a = (7 - i) as f64 / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 12.0));
+        }
+        bnd.push(Point3d::new(3.0, 0.0, 0.0));
+        // intermediate constant-v arc at z=6 (u 0..90°, 8 points)
+        for i in 0..8 {
+            let a = (i as f64) / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 6.0));
+        }
+        assert!(has_intermediate_v_ring(&bnd, &origin, &axis, 0.0, 12.0),
+            "stepped band with intermediate arc must be reported as NOT a tube");
+    }
+
+    /// Stray intermediate points at DISTINCT v (curved seam edge samples)
+    /// must NOT reject the tube path — only a 3+ cluster inside one
+    /// v_tol window (a constant-v arc) does.
+    #[test]
+    fn test_scattered_seam_points_no_ring() {
+        let origin = Point3d::ORIGIN;
+        let axis = Direction3d::new(0.0, 0.0, 1.0).unwrap();
+        let mut bnd = Vec::new();
+        for i in 0..8 {
+            let a = (i as f64) / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 0.0));
+        }
+        bnd.push(Point3d::new(0.0, 3.0, 12.0));
+        for i in 0..8 {
+            let a = (7 - i) as f64 / 7.0 * std::f64::consts::FRAC_PI_2;
+            bnd.push(Point3d::new(3.0 * a.cos(), 3.0 * a.sin(), 12.0));
+        }
+        bnd.push(Point3d::new(3.0, 0.0, 0.0));
+        // 4 scattered seam samples, each far apart in v (>= 3 v_tol apart)
+        bnd.push(Point3d::new(3.0, 0.0, 3.0));
+        bnd.push(Point3d::new(3.0, 0.0, 6.0));
+        bnd.push(Point3d::new(3.0, 0.0, 9.0));
+        assert!(!has_intermediate_v_ring(&bnd, &origin, &axis, 0.0, 12.0),
+            "scattered seam points at distinct v must not reject the tube path");
+    }
+
+    /// End-to-end: an L-shaped cylinder band (intermediate arc at z=6)
+    /// must triangulate with FULL boundary coverage — every boundary
+    /// vertex of the intermediate arc appears in the final mesh.
+    /// Regression for TRANSPORTROLLE #1092 (208 boundary edges).
+    #[test]
+    fn test_stepped_band_full_coverage_end_to_end() {
+        let cyl = CylinderSurface::new_z(3.0);
+        let surface = Surface::Cylinder(cyl.clone());
+        let mut bnd3d = Vec::new();
+        let mut bnduv = Vec::new();
+        let mut push = |bnd3d: &mut Vec<Point3d>, bnduv: &mut Vec<Point2d>, u: f64, v: f64| {
+            bnd3d.push(Point3d::new(3.0 * u.cos(), 3.0 * u.sin(), v));
+            bnduv.push(Point2d::new(u, v));
+        };
+        // bottom arc (z=0): u 0→π/2
+        for i in 0..8 {
+            let a = (i as f64) / 8.0 * std::f64::consts::FRAC_PI_2;
+            push(&mut bnd3d, &mut bnduv, a, 0.0);
+        }
+        // ruling at u=π/2: z 0→6
+        push(&mut bnd3d, &mut bnduv, std::f64::consts::FRAC_PI_2, 6.0);
+        // intermediate arc (z=6): u π/2→π/4
+        for i in 0..6 {
+            let a = std::f64::consts::FRAC_PI_2 - (i as f64) / 5.0 * std::f64::consts::FRAC_PI_4;
+            push(&mut bnd3d, &mut bnduv, a, 6.0);
+        }
+        // ruling at u=π/4: z 6→12
+        push(&mut bnd3d, &mut bnduv, std::f64::consts::FRAC_PI_4, 12.0);
+        // top arc (z=12): u π/4→0
+        for i in 0..6 {
+            let a = std::f64::consts::FRAC_PI_4 - (i as f64) / 5.0 * std::f64::consts::FRAC_PI_4;
+            push(&mut bnd3d, &mut bnduv, a, 12.0);
+        }
+        // ruling at u=0: z 12→0 (closes the loop)
+        push(&mut bnd3d, &mut bnduv, 0.0, 0.0);
+
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face_with_boundary_and_holes_uv(
+            &surface, &bnd3d, &bnduv, &[], &[], true, &params,
+        );
+        assert!(mesh.triangles.len() >= 20, "L-shaped band must produce a real mesh, got {} tris", mesh.triangles.len());
+        // FULL coverage: every boundary 3D point must appear in the mesh
+        // (the old tube-grid path dropped the intermediate arc + step region).
+        for p in &bnd3d {
+            let found = mesh.vertices.iter().any(|v| v.distance_to(p) < 1e-9);
+            assert!(found, "boundary point {:?} missing from mesh — coverage dropped", p);
         }
     }
 }
