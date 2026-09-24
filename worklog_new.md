@@ -8478,3 +8478,139 @@ v_min+v_tol и v_max−v_tol кластеризуются скользящим �
 4. RUST_LOG-фильтр в диагностических утилитах должен чтить env (filter
    (Some("RUST_LOG"), default)), иначе вся info-диагностика конвейера
    недоступна без пересборки.
+
+## Сессия 50 — drill >170°: КОРЕНЬ НАЙДЕН И УСТРАНЁН — no-op guard в
+## PASS 3 seam-weld склеивал решётку грани в 477-треугольный фан;
+## real-area фолды HOUSING_MIRROR −55% (2026-09-24)
+
+Контекст: план сессии-50 (из worklog-49): drill_top 5 BREP >170° (outl
+35) — «известный класс s40-44» с атрибуцией s43 «pinched rims (57/97
+HOUSING) + sliver-UV». Пятнадцатый сброс песочницы: тулчейн 1.98.1
+переустановлен; pull обнаружил УЖЕ ЗАПУШЕННЫЕ коммиты 9009af0 (s48) и
+065eaea (s49) — sandbox восстановлен из бэкапа СТАРЕЕ удалёнки.
+
+### 1. Атрибуция: 365/459 «настоящих» (обе площади ≥0.001) фолд-пар
+HOUSING_MIRROR — same-face, и 90 из 94 вершинных слотов — ОДНА вершина A
+
+Baseline probe drill_top: SHAFT 80 / GEAR 74 / SLEEVE 296 / HOUSING 2807
+/ HOUSING_MIRROR 2900 пар >170°. У HM: 2441/2900 пар с вырожденным
+треугольником (<0.001 мм²), но 459 с ОБЕИМИ реальными площадями —
+настоящая геометрическая порча. Из 459: 365 same-face; лидер fid=140
+(Cylinder STEP#57883, o=(-0.25,2.25,-0.34) r=0.25, четверть-цилиндр
+u∈[0,π/2]) — 46 пар. Midpoint'ы фолдов f140 выстроены в вертикальную
+линию (x≈-0.43, y≈2.42): в final-меше вершина A=(-0.3606,2.4742,-0.1581)
+(idx 13521) имеет 477 треугольников (все fid=140) и 332 соседей в 13
+угловых колонках [97.5°..153.7°] — ГИГАНТСКИЙ ЗИГЗАГ-ФАН.
+
+### 2. Стадийная изоляция (новый DRAPPER_DUMP_STAGE_OBJS): фан создаёт
+стадия WELD (37→477 треугольников у A за один вызов)
+
+scan_fold_pairs_stage расширен env-гейтом DRAPPER_DUMP_STAGE_OBJS=<dir>
+(дамп OBJ+fmap на каждой стадии; счётчик проходов p0/p1 разделяет
+gated-retry проходы). Победил проход p0 (первый, 35507 tris — §1.2 retry
+rejected). Эволюция фана у A (локальные коорд. lx=wz-2.325, ly=wx,
+lz=wy-5.4, инстанс-трансформ [0 1 0 0;0 0 1 5.4;1 0 0 2.325]):
+
+  d-after-merge: 16 вершин у A (r<0.05), 37 треугольников — фана НЕТ
+                 (per-face дампы: «копии A» есть ТОЛЬКО в f140, степ ≤5)
+  d-after-weld : 6 вершин, ЦЕНТР v13521 (точная позиция A) = 477 тр.!
+  d-after-tj/gapfill/winding: без изменений (477)
+
+Фан НЕ существует ни в одном per-face дампе (168 граней проверены
+координатно): weld ПЕРЕИНДЕКСИРОВАЛ треугольники решётки на корень A.
+Параллельное открытие: «16 копий A» — НЕ дубликаты, а СОСЕДНИЕ УЗЛЫ
+Шага решётки (3.75° × ~0.024; шаги 0.0081/0.0244 = два interleaved
+v-семейства) — то есть weld_tol (0.030642) СРАВНИМ С ШАГОМ РЕШЁТКИ.
+
+### 3. Корень: face-aware guard в PASS 3 (seam-specific weld) — NO-OP
+
+watertight.rs, weld_boundary_edge_vertices_with_pass2_frac, PASS 3:
+
+  let mut best_dist_sq = pass3_tol_sq;            // порог поиска
+  if dist_sq >= best_dist_sq { continue; }        // проходят только < tol
+  ...
+  if shares_face_flat(...) && dist_sq > pass3_tol_sq { continue; } // ←
+                                                    НИКОГДА НЕ ИСТИНА
+
+Guard «не варить вершины одной грани» (CRITICAL #2, документирован в
+PASS 1 с полной рационализацией: annulus width < weld_tol → коллапс)
+был ОТКЛЮЧЁН: условие dist_sq > pass3_tol_sq недостижимо после фильтра
+dist_sq < best_dist_sq ≤ pass3_tol_sq. Комментарий «the distance
+exemption is automatic» зафиксировал это как намеренное — но PASS 3
+варил ЛЮБЫЕ same-face boundary-вершины в радиусе ПОЛНОГО weld_tol.
+Union-find транзитивно сцеплял цепочки соседних узлов (шаг ≤ tol) в
+ОДИН корень → все треугольники любого члена кластера переиндексируются
+на корень → фан. PASS 1 (guard с pass2-порогом, 216796 same-face
+отказов) и PASS 2 (радиус = pass2_tol, same-face допустим — FP-drift)
+работали как задумано; сломан был только PASS 3.
+
+МЕХАНИКА s43-атрибуции «pinched rims»: «зажатые ободы» = решётка
+Steiner'а, соседи которой попадают в weld_tol (глобальный model_scale
+0.32% = 0.0306 против локального шага мелкой грани 0.008–0.033 —
+radius 0.25 мм при LOD-рефайне 3.75°). Решётка ф140 легитимна; порча
+наступала только на стадии weld.
+
+### 4. Фикс: pass2-порог (FP-drift) как same-face exemption в PASS 3
+
+`dist_sq > pass3_tol_sq` → `dist_sq > pass2_tol_sq_for_pass1`
+(идентично PASS 1). Истинные периодические швы (u=0 vs u=2π) —
+бит-идентичны/FP-drift → по-прежнему варятся; cross-face швы — полный
+pass3-допуск (случай LINE-vs-CIRCLE дискретизации — cross-face по
+определению, не затронут).
+
+### 5. Верификация
+
+- Zentralstaender: БИТ-ИДЕНТИЧЕН baseline (diff вывода probe = 0 строк;
+  его PASS 3 ничего не варит — «WELD: no vertices welded», толеранс
+  0.0004). Ложная тревога «регрессии» снята сравнением.
+- drill_top: real-area фолд-пары (обе ≥0.001) HOUSING_MIRROR 459→208
+  (−55%), фан у A устранён (f140 выпал из топа фолдов). Микрослайверы
+  (<0.001 мм², h~0.0001–0.03) больше не уничтожаются weld-коллапсом:
+  пары HM 2900→4105, interior edges 100478→159344 (+59% связности
+  сохранено; baseline уничтожал 31905+3632 треугольников). Gate
+  unchanged: 35 outliers, 5 BREP FAIL (как в baseline).
+- Защищённый набор: as1-oc-214 PASS, bolt PASS, cube_with_void PASS,
+  3.05.078 PASS, brick_thin/hole PASS; brick_thin_round (32 outl) и
+  compressor (2 BREP) FAIL — НО идентичны baseline (pre-existing).
+- Сьюты: mesh 309 ✓, step 162 ✓ (613с), geometry 259 ✓, topology ✓.
+
+### 6. Отклонённый эксперимент: CDT-Steiner для цилиндров — РЕГРЕССИЯ
+
+triangulate_surface_consistent с use_cdt_steiner=true в cylinder-ветке
+(earcutr rim + Bowyer-Watson Steiner вместо legacy spike-chain):
+HOUSING 4080→5664, HM 4105→5398 — Delaunay на near-duplicate решётке
+у диагонального B_SPLINE-обода даёт БОЛЬШЕ слайверов. Откачено
+(git checkout). Урок: чинить надо ВХОД (решётку near-boundary), а не
+алгоритм триангуляции.
+
+### Осталось (сессия 51)
+
+1. drill HOUSING/MIRROR микрослайверы (3356 пар <0.001 мм² у HM):
+   near-boundary Steiner skip/thinning — не генерировать узлы решётки
+   ближе local-edge-length к цепочкам обода (диагональный B_SPLINE
+   56pt vs решётка 3.75°). Это же закроет spike-chain дыры (57% bnd
+   edges HOUSING #47598 — комментарий в parametric_domain Step 4).
+2. bnd edges drill 8355→31425 (после фикса): вскрытые spike-chain дыры
+   + gap-fill длинные рёбра («MISSING boundary edge: mesh_idx 569→2
+   dist=1.299» у f140) — легитимные цели следующего фикса.
+3. SHAFT 80 / GEAR 74 / SLEEVE 296 — отдельные классы, не исследованы.
+4. brick_thin_round (32 outl) и compressor (2 BREP) — pre-existing.
+
+### Уроки
+
+1. Guard-условие вида `if A && x > threshold` после фильтра
+   `if x >= threshold { continue }` — всегда no-op: проверяй
+   достижимость ветки ДО комментария «exemption is automatic».
+2. Weld-толеранс от ГЛОБАЛЬНОГО model_scale не видит ЛОКАЛЬНУЮ плотность
+   мелких граней (r=0.25 мм при 3.75° шаге): same-face сварка на
+   масштабе решётки = коллапс решётки. Face-aware guard — не опция,
+   а единственная защита.
+3. «Кластер почти-дубрикатов» и «соседние узлы решётки» — одно и то же,
+   если шаг решётки < толеранса: сначала посчитай шаг решётки, потом
+   называй кластер аномалией.
+4. Stage-дампы (OBJ на каждой стадии repair-цепочки) окупаются сразу:
+   одна env-переменная заменила три гипотезы (merge/TJ/gapfill) одним
+   фактом (weld).
+5. Снижение счётчика фолдов за счёт УНИЧТОЖЕНИЯ 30k треугольников
+   (weld-коллапс) — ложный прогресс: сравнивай interior edges и
+   реальные площади, а не только пары >170°.
