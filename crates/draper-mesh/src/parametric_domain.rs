@@ -2058,6 +2058,450 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
 }
 
 // ============================================================
+// Session-51: Steiner chain ordering (spike-chain fold family fix)
+// ============================================================
+
+/// How interior Steiner points are ordered before being appended to the
+/// earcutr ring (the "spike chain").
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SteinerChainOrder {
+    /// Legacy row-major append order (pre-session-51).
+    Off,
+    /// Serpentine rows starting at the corner nearest the ring closure.
+    Serpentine,
+    /// Hamiltonian path with endpoints near the ring closure (Warnsdorff
+    /// DFS, deterministic LCG seed); serpentine fallback.
+    Hamiltonian,
+}
+
+impl SteinerChainOrder {
+    /// Default since session-51: Hamiltonian chain on near-isotropic full
+    /// Steiner lattices (drill_top: fold pairs 8635→8442, HOUSING_MIRROR
+    /// emission fans f245 284→46, boundary edges HM 31425→31166;
+    /// Zentralstaender bit-identical — its faces have no qualifying
+    /// lattices). `DRAPPER_STEINER_CHAIN=off` restores the legacy
+    /// row-major append order; `=serp` selects the serpentine variant.
+    fn from_env() -> Option<Self> {
+        match std::env::var("DRAPPER_STEINER_CHAIN").as_deref() {
+            Ok("off") | Ok("legacy") => None,
+            Ok("serp") => Some(SteinerChainOrder::Serpentine),
+            Ok("ham") | Err(_) => Some(SteinerChainOrder::Hamiltonian),
+            Ok(_) => Some(SteinerChainOrder::Hamiltonian),
+        }
+    }
+}
+
+/// Deterministic portable LCG (no RNG crate dependency; identical
+/// results across platforms/runs — required for bit-identical meshes).
+struct ChainLcg(u64);
+impl ChainLcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 >> 33
+    }
+}
+
+/// Order the interior Steiner points so the earcutr spike chain makes
+/// only SHORT steps and both seam notches (ring-end→s0, sN→ring-start)
+/// stay local.
+///
+/// Root cause (drill HOUSING_MIRROR f245, session-51): the legacy
+/// row-major append order enters the ring's closure seam diagonally —
+/// earcutr triangulates the notch with a fan whose apex is the SECOND
+/// chain point and whose triangles sweep the entire rim side (chords up
+/// to 118°), and every row transition becomes another fan over the
+/// previous row (chords up to 82.5°). After chord-error refinement
+/// these fans multiply into same-face fold-over microslivers (284 pairs
+/// at emission on f245 alone).
+///
+/// With a Hamiltonian chain (all steps = 1 lattice cell, endpoints
+/// within ~2 cells of the ring closure), every spike is local and the
+/// slit gap-fill (post-merge `fill_boundary_loops`) connects points one
+/// cell apart instead of spanning the domain.
+fn order_interior_steiner_chain(
+    interior: &[Point2d],
+    ring_end: &Point2d,
+    ring_start: &Point2d,
+    mode: SteinerChainOrder,
+) -> Vec<Point2d> {
+    let n = interior.len();
+    if n < 4 {
+        return interior.to_vec();
+    }
+    // The chain attaches between ring_end (last boundary vertex) and
+    // ring_start (first boundary vertex, ring closure edge). Both seam
+    // chords should be short → chain start/end near this point.
+    let attach = Point2d::new(
+        (ring_end.u + ring_start.u) * 0.5,
+        (ring_end.v + ring_start.v) * 0.5,
+    );
+
+    match mode {
+        SteinerChainOrder::Off => interior.to_vec(),
+        SteinerChainOrder::Serpentine => serpentine_chain(interior, &attach),
+        SteinerChainOrder::Hamiltonian => {
+            match hamiltonian_chain(interior, &attach) {
+                Some(path) => path,
+                // Anisotropic / ragged lattices: the legacy row-major
+                // structure folds LESS than both the serpentine and the
+                // meander (drill HM f199 family: baseline 37 vs serp 117
+                // vs ham 117 emission pairs) — keep the legacy order.
+                None => interior.to_vec(),
+            }
+        }
+    }
+}
+
+/// Serpentine (boustrophedon) ordering of the Steiner grid with the
+/// start corner nearest `attach`. Rows = v-clusters; alternate rows are
+/// reversed so row transitions span exactly one row step.
+fn serpentine_chain(interior: &[Point2d], attach: &Point2d) -> Vec<Point2d> {
+    // Cluster rows by v (grid generators emit exact v values; tolerance
+    // covers FP noise).
+    let mut sorted: Vec<Point2d> = interior.to_vec();
+    sorted.sort_by(|a, b| {
+        a.v.partial_cmp(&b.v)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.u.partial_cmp(&b.u).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let v_tol = {
+        let vmin = sorted.first().map(|p| p.v).unwrap_or(0.0);
+        let vmax = sorted.last().map(|p| p.v).unwrap_or(0.0);
+        ((vmax - vmin).abs() * 1e-9).max(1e-12)
+    };
+    // Split into rows.
+    let mut rows: Vec<Vec<Point2d>> = Vec::new();
+    for p in sorted.iter().copied() {
+        match rows.last_mut() {
+            Some(row) if (row[0].v - p.v).abs() <= v_tol => row.push(p),
+            _ => rows.push(vec![p]),
+        }
+    }
+    if rows.len() < 2 {
+        return sorted;
+    }
+    // 4 corner variants: (v asc/desc) × (u asc/desc within row).
+    // Compute the first point of each variant and pick the nearest to
+    // `attach`.
+    let first_pts = [
+        rows[0][0],                          // v asc, u asc
+        rows[0][rows[0].len() - 1],          // v asc, u desc
+        rows[rows.len() - 1][0],             // v desc, u asc
+        rows[rows.len() - 1][rows[rows.len() - 1].len() - 1], // v desc, u desc
+    ];
+    let mut best = 0usize;
+    let mut best_d = f64::MAX;
+    for (k, p) in first_pts.iter().enumerate() {
+        let d = (p.u - attach.u).powi(2) + (p.v - attach.v).powi(2);
+        if d < best_d {
+            best_d = d;
+            best = k;
+        }
+    }
+    let v_desc = best >= 2;
+    let u_desc = best % 2 == 1;
+    let row_iter: Box<dyn Iterator<Item = &Vec<Point2d>>> = if v_desc {
+        Box::new(rows.iter().rev())
+    } else {
+        Box::new(rows.iter())
+    };
+    let mut out: Vec<Point2d> = Vec::with_capacity(interior.len());
+    let mut row_idx = 0usize;
+    for row in row_iter {
+        let mut r: Vec<Point2d> = row.clone();
+        if u_desc {
+            r.reverse();
+        }
+        // Alternate direction each row so transitions are one step.
+        if row_idx % 2 == 1 {
+            r.reverse();
+        }
+        out.extend(r);
+        row_idx += 1;
+    }
+    out
+}
+
+/// Hamiltonian path over the Steiner grid graph (adjacency = nearest
+/// lattice neighbors), endpoints near `attach` and within 2 hops of
+/// each other. Deterministic LCG; bounded work; None on failure.
+fn hamiltonian_chain(interior: &[Point2d], attach: &Point2d) -> Option<Vec<Point2d>> {
+    let n = interior.len();
+    // Bounded work: the search is O(attempts × steps). For big sets the
+    // serpentine fallback is good enough — cap Hamiltonian at 1600 pts.
+    if n > 1600 {
+        return None;
+    }
+
+    // Full-rectangular-grid detection: the Hamiltonian construction is
+    // guaranteed feasible (same-color endpoints exist) only on complete
+    // lattices. Ragged domain-filtered subsets often have no Hamiltonian
+    // path at all and would burn the search budget pointlessly — those
+    // go straight to the serpentine fallback.
+    // Grid coords: (col, row) by clustering u and v values.
+    let mut us: Vec<f64> = interior.iter().map(|p| p.u).collect();
+    us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut vs: Vec<f64> = interior.iter().map(|p| p.v).collect();
+    vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let span_u = us[us.len() - 1] - us[0];
+    let span_v = vs[vs.len() - 1] - vs[0];
+    let u_tol = (span_u * 1e-9).max(1e-12);
+    let v_tol = (span_v * 1e-9).max(1e-12);
+    let mut u_axis: Vec<f64> = Vec::new();
+    for &x in &us {
+        if u_axis.is_empty() || (x - u_axis[u_axis.len() - 1]).abs() > u_tol {
+            u_axis.push(x);
+        }
+    }
+    let mut v_axis: Vec<f64> = Vec::new();
+    for &y in &vs {
+        if v_axis.is_empty() || (y - v_axis[v_axis.len() - 1]).abs() > v_tol {
+            v_axis.push(y);
+        }
+    }
+    let is_full_grid = u_axis.len() * v_axis.len() == n
+        && {
+            // Every (u_axis, v_axis) combination must exist.
+            let mut seen = vec![false; u_axis.len() * v_axis.len()];
+            for p in interior {
+                let cu = u_axis.iter().position(|&x| (x - p.u).abs() <= u_tol);
+                let cv = v_axis.iter().position(|&y| (y - p.v).abs() <= v_tol);
+                match (cu, cv) {
+                    (Some(a), Some(b)) => seen[b * u_axis.len() + a] = true,
+                    _ => return None,
+                }
+            }
+            seen.iter().all(|&s| s)
+        };
+    if !is_full_grid {
+        return None;
+    }
+    // Grid parity color of each point (checkerboard on the lattice).
+    let grid_color: Vec<u32> = interior
+        .iter()
+        .map(|p| {
+            let cu = u_axis.iter().position(|&x| (x - p.u).abs() <= u_tol).unwrap();
+            let cv = v_axis.iter().position(|&y| (y - p.v).abs() <= v_tol).unwrap();
+            ((cu + cv) % 2) as u32
+        })
+        .collect();
+
+    // Adjacency: per-axis BOX test with separate thresholds. The old disc
+    // test (1.6 × median NN) breaks on ANISOTROPIC lattices — the torus
+    // fillet grids have u_step:v_step up to 1:10 (chord error is driven
+    // by (R+r) in u but r in v), so the disc radius (1.6 × the SMALLER
+    // step) disconnected the v-neighbours → 23 isolated rows → the
+    // Hamiltonian search burned its whole budget on an impossible graph.
+    let axis_step = |axis: &Vec<f64>, tol: f64| -> f64 {
+        let mut diffs: Vec<f64> = Vec::with_capacity(axis.len());
+        for w in axis.windows(2) {
+            if w[1] - w[0] > tol {
+                diffs.push(w[1] - w[0]);
+            }
+        }
+        if diffs.is_empty() {
+            return 0.0;
+        }
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        diffs[diffs.len() / 2]
+    };
+    let u_step = axis_step(&u_axis, u_tol);
+    let v_step = axis_step(&v_axis, v_tol);
+    if !(u_step.is_finite() && v_step.is_finite() && u_step > 1e-15 && v_step > 1e-15) {
+        return None;
+    }
+    // Isotropy gate: the random Warnsdorff meander crosses BOTH axes
+    // constantly. On anisotropic lattices (torus fillet grids reach
+    // u_step:v_step = 1:10 — chord error is driven by (R+r) in u but r
+    // in v) the frequent long-axis crossings multiply fold sites 3-10×
+    // (drill HM f199: emission 37→117). Long-axis runs (serpentine rows)
+    // are the right structure there; reserve the Hamiltonian for
+    // near-isotropic grids where it eliminated the seam fans entirely
+    // (f245: emission 284→46).
+    let ratio = v_step / u_step;
+    if !(0.6..=1.67).contains(&ratio) {
+        return None;
+    }
+    let u_thresh = u_step * 1.5;
+    let v_thresh = v_step * 1.5;
+    let adj: Vec<Vec<usize>> = interior
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mut nb: Vec<usize> = (0..n)
+                .filter(|&j| {
+                    j != i
+                        && (p.u - interior[j].u).abs() <= u_thresh
+                        && (p.v - interior[j].v).abs() <= v_thresh
+                })
+                .collect();
+            nb.sort_unstable();
+            nb
+        })
+        .collect();
+    if adj.iter().any(|a| a.is_empty()) {
+        return None;
+    }
+
+    // Start: point nearest `attach`.
+    let start = (0..n)
+        .min_by(|&a, &b| {
+            let da = (interior[a].u - attach.u).powi(2) + (interior[a].v - attach.v).powi(2);
+            let db = (interior[b].u - attach.u).powi(2) + (interior[b].v - attach.v).powi(2);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+
+    // End candidates: graph-distance ≤ 2 from start (so both seam
+    // chords stay local). Deterministic order: nearest first.
+    let mut end_cands: Vec<(f64, usize)> = Vec::new();
+    for j in 0..n {
+        if j == start {
+            continue;
+        }
+        let two_hop = adj[start].contains(&j)
+            || adj[start].iter().any(|&k| adj[k].contains(&j));
+        if two_hop && grid_color[j] == grid_color[start] {
+            let d = (interior[j].u - interior[start].u).powi(2)
+                + (interior[j].v - interior[start].v).powi(2);
+            end_cands.push((d, j));
+        }
+    }
+    end_cands.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Randomized Warnsdorff walk with single-level undo (session-51):
+    // each trial greedily extends the path by the candidate with the
+    // fewest onward moves (random tie-break via a deterministic LCG);
+    // on a dead end it undoes exactly ONE cell and retries from the new
+    // head. Empirically solves 23×23 grids with endpoints 2 cells apart
+    // within a few hundred CHEAP trials, where a full backtracking DFS
+    // burns its budget thrashing near the solution.
+    let base_seed = 0x5EED_0033u64 ^ (n as u64).wrapping_mul(0x9E37_79B9);
+    // Small sets get a cheap shot (hundreds of trials); big uniform grids
+    // (the torus/cylinder fillet lattices that benefit most) get the full
+    // search. Empirical: 23×23 solves within ~300 trials.
+    let trials: usize = 2000;
+    let per_trial_steps: usize = 40 * n + 1000;
+    // Anti-oscillation: abort a trial that stops making progress (the
+    // single-undo walk can loop push/pop around a trap for its whole
+    // step budget — one drill HM face burned 79M global steps that way).
+    let progress_window: usize = 10 * n + 200;
+    // Process-global step budget across ALL faces: reads the remaining
+    // allowance once per face, spends actual steps locally, writes the
+    // remainder back (single-threaded probe; races are benign — worst
+    // case some face gets a shorter allowance).
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    static GLOBAL_STEPS: AtomicU64 = AtomicU64::new(80_000_000);
+    let mut allowance = GLOBAL_STEPS.swap(0, AtomicOrdering::Relaxed);
+    if allowance == 0 {
+        return None;
+    }
+
+    let unvisited_deg = |adj: &Vec<Vec<usize>>, visited: &Vec<bool>, k: usize| -> usize {
+        adj[k].iter().filter(|&&m| !visited[m]).count()
+    };
+
+    let mut visited = vec![false; n];
+    let mut path: Vec<usize> = Vec::with_capacity(n);
+    let mut rng = ChainLcg(base_seed);
+    let mut spent: u64 = 0;
+    let mut solved_path: Option<Vec<usize>> = None;
+
+    'ends: for &(_, end) in end_cands.iter().take(3) {
+        for trial in 0..trials {
+            if allowance == 0 {
+                break 'ends;
+            }
+            for v in visited.iter_mut() {
+                *v = false;
+            }
+            path.clear();
+            visited[start] = true;
+            path.push(start);
+            let mut steps = 0usize;
+            let mut best = 1usize;
+            let mut last_progress = 0usize;
+            loop {
+                steps += 1;
+                if steps > per_trial_steps {
+                    break;
+                }
+                if steps - last_progress > progress_window {
+                    break;
+                }
+                if allowance == 0 {
+                    break;
+                }
+                allowance -= 1;
+                spent += 1;
+                let cur = *path.last().unwrap();
+                if path.len() == n {
+                    if cur == end {
+                        solved_path = Some(path.clone());
+                        break 'ends;
+                    }
+                    break;
+                }
+                let final_step = path.len() + 1 == n;
+                // Candidates: unvisited neighbors, excluding `end` until
+                // the final step.
+                let mut cands: Vec<usize> = adj[cur]
+                    .iter()
+                    .copied()
+                    .filter(|&k| {
+                        !visited[k] && (if final_step { k == end } else { k != end })
+                    })
+                    .collect();
+                if cands.is_empty() {
+                    // Single-level undo.
+                    if path.len() <= 1 {
+                        break;
+                    }
+                    let popped = path.pop().unwrap();
+                    visited[popped] = false;
+                    continue;
+                }
+                // Fisher-Yates shuffle (deterministic LCG), then a STABLE
+                // sort by onward unvisited degree — random tie-break
+                // within equal degrees (exactly the Python reference).
+                for i in (1..cands.len()).rev() {
+                    let j = (rng.next() as usize) % (i + 1);
+                    cands.swap(i, j);
+                }
+                cands.sort_by(|&a, &b| {
+                    unvisited_deg(&adj, &visited, a).cmp(&unvisited_deg(&adj, &visited, b))
+                });
+                let k = cands[0];
+                visited[k] = true;
+                path.push(k);
+                if path.len() > best {
+                    best = path.len();
+                    last_progress = steps;
+                }
+            }
+            if std::env::var("DRAPPER_STEINER_CHAIN_DEBUG").is_ok() && trial % 500 == 0 {
+                eprintln!(
+                    "HAMDBG: n={} start={} end={} trial={} best={}",
+                    n, start, end, trial, best
+                );
+            }
+        }
+    }
+    // Return unspent allowance to the global pool.
+    GLOBAL_STEPS.fetch_add(allowance, AtomicOrdering::Relaxed);
+    if std::env::var("DRAPPER_STEINER_CHAIN_DEBUG").is_ok() {
+        eprintln!(
+            "HAMDBG-DONE: n={} start={} spent={} solved={}",
+            n, start, spent, solved_path.is_some()
+        );
+    }
+    if let Some(p) = solved_path {
+        return Some(p.into_iter().map(|i| interior[i]).collect());
+    }
+    None
+}
+
+// ============================================================
 // Cylinder / Cone Steiner grid generator
 // ============================================================
 
@@ -5530,6 +5974,39 @@ pub fn triangulate_surface_consistent(
 
     let n_boundary = outer_uv.len();
 
+    // session-51 (DRAPPER_STEINER_CHAIN=serp|ham): reorder the interior
+    // Steiner points before appending them to the earcutr ring, AND
+    // rotate the boundary ring so its closure edge (last→first) sits at
+    // the rim segment nearest a grid corner of the Steiner lattice.
+    //
+    // The legacy row-major chain enters the ring seam diagonally and
+    // jumps across the domain at every row transition — earcutr fills
+    // those notches with domain-spanning fan triangles that become
+    // same-face fold-over microslivers after refinement (drill HM f245:
+    // 284 pairs at emission). On anisotropic fillet lattices
+    // (u_step:v_step up to 1:10) the ring closure is often at a rim
+    // MID-EDGE, ~11 lattice rows away from every grid corner, so
+    // reordering the chain alone cannot shorten both seam chords —
+    // the ring itself must rotate.
+    //
+    // Ring rotation is safe: the same cyclic polygon (same edges, same
+    // CCW orientation), only the starting index changes; Step 5's
+    // position-based dedup and the shared-edge rim chords are
+    // index-agnostic.
+    let interior_uv_points: Vec<Point2d> =
+        if let Some(mode) = SteinerChainOrder::from_env() {
+            let (ring_end, ring_start) = match (
+                outer_uv.last().copied(),
+                outer_uv.first().copied(),
+            ) {
+                (Some(e), Some(s)) => (e, s),
+                _ => return TriangleMesh::new(),
+            };
+            order_interior_steiner_chain(&interior_uv_points, &ring_end, &ring_start, mode)
+        } else {
+            interior_uv_points
+        };
+
     // Build combined point array: [boundary_uv...][valid_hole_uv...][interior_uv...]
     // CRITICAL: Only include holes with >= 3 points. Small holes are degenerate
     // and would corrupt earcutr's triangulation. We must also track which holes
@@ -5579,6 +6056,12 @@ pub fn triangulate_surface_consistent(
             .collect();
         let interior_2d: Vec<[f64; 2]> =
             interior_uv_points.iter().map(|p| [p.u, p.v]).collect();
+        // session-51 note: routing Torus faces through the per-face CDT
+        // (Bowyer-Watson Steiner insertion, DRAPPER_TORUS_CDT experiment)
+        // was tried and REJECTED — Delaunay near the rim creates MORE
+        // fold pairs (drill HM 4105→5470), the same failure mode as the
+        // session-50 cylinder experiment. The spike-chain seams are fixed
+        // by chain ORDERING instead (order_interior_steiner_chain).
         let cdt = if params.use_cdt_steiner {
             crate::custom_cdt::triangulate_polygon_cdt(&boundary_2d, &holes_2d, &interior_2d)
         } else {
@@ -5592,6 +6075,65 @@ pub fn triangulate_surface_consistent(
                 .collect()
         }
     };
+
+    // session-51 diagnostics (DRAPPER_DUMP_TRI_INPUT): dump the EXACT
+    // earcutr/CDT input per call — boundary UV polygon, hole UVs,
+    // interior Steiner UVs in append order, and the resulting index
+    // triples — for offline reconstruction of spike-chain fold
+    // provenance (torus fillet microsliver family, f245 drill HM).
+    if let Ok(dir) = std::env::var("DRAPPER_DUMP_TRI_INPUT") {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static TRI_DUMP_N: AtomicUsize = AtomicUsize::new(0);
+        let n = TRI_DUMP_N.fetch_add(1, Ordering::SeqCst);
+        let stype = match surface {
+            Surface::Plane(_) => "Plane",
+            Surface::Cylinder(_) => "Cylinder",
+            Surface::Cone(_) => "Cone",
+            Surface::Sphere(_) => "Sphere",
+            Surface::Torus(_) => "Torus",
+            Surface::Revolution(_) => "Revolution",
+            Surface::Extrusion(_) => "Extrusion",
+            Surface::Nurbs(_) => "Nurbs",
+            Surface::Offset(_) => "Offset",
+            Surface::Ruled(_) => "Ruled",
+        };
+        let filter = std::env::var("DRAPPER_DUMP_TRI_INPUT_FILTER").unwrap_or_default();
+        let filter_ok = filter.is_empty()
+            || filter == stype
+            || (filter == "big" && interior_uv_points.len() >= 400);
+        if filter_ok {
+            let _ = std::fs::create_dir_all(&dir);
+            let path = format!("{}/tri_{:04}_{}.txt", dir, n, stype);
+            let mut out = String::with_capacity(1 << 16);
+            out.push_str(&format!(
+                "type={} forward={} n_boundary={} n_holes={} n_interior={} n_tris={}\n",
+                stype, forward, outer_uv.len(),
+                valid_hole_indices.len(), interior_uv_points.len(),
+                triangle_indices.len() / 3
+            ));
+            out.push_str("boundary\n");
+            for p in &outer_uv {
+                out.push_str(&format!("b {:.9} {:.9}\n", p.u, p.v));
+            }
+            for &hi in &valid_hole_indices {
+                out.push_str(&format!("hole {}\n", hi));
+                for p in &normalized_holes_uv_capped[hi] {
+                    out.push_str(&format!("h {:.9} {:.9}\n", p.u, p.v));
+                }
+            }
+            out.push_str("interior\n");
+            for p in &interior_uv_points {
+                out.push_str(&format!("i {:.9} {:.9}\n", p.u, p.v));
+            }
+            out.push_str("tris\n");
+            for chunk in triangle_indices.chunks(3) {
+                if chunk.len() == 3 {
+                    out.push_str(&format!("t {} {} {}\n", chunk[0], chunk[1], chunk[2]));
+                }
+            }
+            let _ = std::fs::write(&path, out);
+        }
+    }
 
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
