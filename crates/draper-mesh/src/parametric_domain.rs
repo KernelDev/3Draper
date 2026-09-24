@@ -217,6 +217,127 @@ fn point_in_polygon(point: &Point2d, polygon: &[Point2d]) -> bool {
     inside
 }
 
+/// session-52: second-pass triangulation of the region cut off by the
+/// interior Steiner spike chain (legacy earcutr path).
+///
+/// The legacy path appends interior Steiner points to the LAST input ring
+/// (the outer ring, or the last hole ring when holes exist). The appended
+/// chain replaces the ring's closing edge (ring_last → ring_start) with
+/// the path ring_last → s_0 → … → s_{L−1} → ring_start, which CUTS the
+/// face domain: earcutr covers only the ring side of the cut, and the far
+/// side (between the chain and the old closing edge) stays empty — the
+/// one-sided chain slit (drill HOUSING/HOUSING_MIRROR: 31k boundary
+/// edges, boundary components up to 2687 vertices).
+///
+/// This function triangulates the cut-off region as the polygon
+///     P2 = [ring_start, s_{L−1}, …, s_0, ring_last]
+/// (reversed chain + the restored direct closing edge), so every chain
+/// edge and both chords get a triangle on BOTH sides (usage-2 interior
+/// edges) and the full ring — including the restored closing edge — is
+/// covered. All shared edges are traversed opposite to the primary
+/// pass, giving consistent orientation across the seam.
+///
+/// Holes fully contained in P2 are passed through as earcutr holes; if
+/// any hole straddles the P2 boundary the complement is skipped
+/// (never-worsen: the slit stays as it was). Returns an empty vector
+/// when the complement is not safely triangulable.
+fn triangulate_spike_chain_complement(
+    all_uv: &[Point2d],
+    ring_start_idx: usize,
+    ring_last_idx: usize,
+    interior_base: usize,
+    interior_len: usize,
+    hole_ranges: &[(usize, usize)], // (inclusive start, exclusive end) into all_uv
+) -> Vec<usize> {
+    if interior_len == 0 {
+        return Vec::new();
+    }
+
+    // P2 ring: [ring_start, s_{L−1}, …, s_0, ring_last]
+    let mut p2_idx: Vec<usize> = Vec::with_capacity(interior_len + 2);
+    p2_idx.push(ring_start_idx);
+    for j in (0..interior_len).rev() {
+        p2_idx.push(interior_base + j);
+    }
+    p2_idx.push(ring_last_idx);
+    if p2_idx.len() < 3 {
+        return Vec::new();
+    }
+
+    let p2_ring_uv: Vec<Point2d> = p2_idx.iter().map(|&i| all_uv[i]).collect();
+
+    // Quiet simplicity guard (check_uv_polygon_validity would log every
+    // crossing pair at ERROR level — 36k lines on drill HM alone).
+    //
+    // BOTH sides must be simple: P2 (the complement polygon: chords +
+    // reversed chain + direct closing edge) AND P1 (the primary polygon
+    // the earcutr actually triangulated: last ring + chain). When P1 is
+    // NOT simple, earcutr's clipped-spike fans already cover parts of
+    // the far side — adding P2 duplicates coverage (usage-4 same-face
+    // edges, drill HM anisotropic tori f198–206: +976 NM). P1 simple ∧
+    // P2 simple ⇔ the chain arc cleanly divides the ring region into
+    // exactly two parts, making the complement provably overlap-free.
+    let p1_ring_uv = &all_uv[ring_start_idx..interior_base + interior_len];
+    let p1_simple = !check_uv_polygon_self_intersection(p1_ring_uv)
+        && polygon_area_2d(p1_ring_uv).abs() >= 1e-12;
+    let p2_simple = !check_uv_polygon_self_intersection(&p2_ring_uv)
+        && polygon_area_2d(&p2_ring_uv).abs() >= 1e-12;
+    if !p1_simple || !p2_simple {
+        log::warn!(
+            "spike-chain complement: P1 simple={} P2 simple={} (ring {}..{}, chain len {}) — skipping second pass",
+            p1_simple, p2_simple, ring_start_idx, ring_last_idx, interior_len,
+        );
+        return Vec::new();
+    }
+
+    // Hole containment: a hole is either fully inside P2 (pass through),
+    // fully outside (ignore), or straddling (bail out — never-worsen).
+    let mut included_holes: Vec<Vec<usize>> = Vec::new();
+    for &(hs, he) in hole_ranges {
+        let mut n_inside = 0usize;
+        for hi in hs..he {
+            if point_in_polygon(&all_uv[hi], &p2_ring_uv) {
+                n_inside += 1;
+            }
+        }
+        if n_inside == 0 {
+            continue; // fully outside P2
+        }
+        if n_inside != he - hs {
+            log::warn!(
+                "spike-chain complement: hole {}..{} straddles P2 boundary ({}/{} pts inside) — skipping second pass",
+                hs, he, n_inside, he - hs,
+            );
+            return Vec::new();
+        }
+        included_holes.push((hs..he).collect());
+    }
+
+    // Build earcutr input: [P2 ring][included hole rings…]
+    let mut p2_all_idx: Vec<usize> = p2_idx.clone();
+    let mut p2_hole_starts: Vec<usize> = Vec::new();
+    for hole in &included_holes {
+        p2_hole_starts.push(p2_all_idx.len());
+        p2_all_idx.extend_from_slice(hole);
+    }
+    let mut p2_coords: Vec<f64> = Vec::with_capacity(p2_all_idx.len() * 2);
+    for &i in &p2_all_idx {
+        p2_coords.push(all_uv[i].u);
+        p2_coords.push(all_uv[i].v);
+    }
+
+    let local = crate::earcut_adapter::triangulate_polygon_with_holes(&p2_coords, &p2_hole_starts);
+    // Validate + remap local indices to all_uv indices.
+    if local.is_empty() || local.iter().any(|&i| i >= p2_all_idx.len()) {
+        log::warn!(
+            "spike-chain complement: earcutr returned no/invalid triangles for P2 (chain len {}) — skipping second pass",
+            interior_len,
+        );
+        return Vec::new();
+    }
+    local.into_iter().map(|i| p2_all_idx[i]).collect()
+}
+
 // ============================================================
 // Ear-clipping triangulation
 // ============================================================
@@ -6068,7 +6189,104 @@ pub fn triangulate_surface_consistent(
             Vec::new()
         };
         if cdt.is_empty() {
-            crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices)
+            let mut tris = crate::earcut_adapter::triangulate_polygon_with_holes(
+                &coords,
+                &hole_start_indices,
+            );
+
+            // session-52: second pass — the interior spike chain (appended
+            // to the last input ring) cut the far side of the domain away
+            // from the primary triangulation. Triangulate the complement
+            // region so the chain becomes interior (usage-2) instead of a
+            // one-sided slit. Only applies to the legacy earcutr path with
+            // interior Steiner points; skipped (bit-identical) when the
+            // chain is empty, P2 is not simple, a hole straddles P2, or
+            // earcutr fails on P2 (never-worsen).
+            //
+            // EXPERIMENTAL (session-52): gated OFF by default. On drill HM
+            // the complement closes −1621 boundary edges on 22 faces, but
+            // on the anisotropic tori f198–206 the P2 triangles duplicate
+            // P1's clipped-spike seam coverage after the merge-stage
+            // TOLERANCE vertex collapse (+959 usage-4 same-face NM edges —
+            // invisible to the UV-index overlap guard because the collapse
+            // happens in 3D position space at merge time). Enable with
+            // DRAPPER_CHAIN_COMPLEMENT=1 to experiment; a merge-aware
+            // overlap guard is the s53 continuation.
+            if !interior_uv_points.is_empty()
+                && std::env::var("DRAPPER_CHAIN_COMPLEMENT").as_deref() == Ok("1")
+            {
+                // The chain extends the LAST ring: the outer ring when no
+                // holes are present, else the last hole ring.
+                let (ring_start_idx, ring_last_idx) = match hole_start_indices.last() {
+                    None => (0usize, n_boundary - 1),
+                    Some(&last_hole_start) => {
+                        (last_hole_start, n_boundary_and_holes_actual - 1)
+                    }
+                };
+                // Valid hole rings as (start, end) ranges into all_uv.
+                // hole_start_indices[i] ↔ valid_hole_indices[i] (built in
+                // the same loop above, so they are parallel).
+                let hole_ranges: Vec<(usize, usize)> = hole_start_indices
+                    .iter()
+                    .zip(valid_hole_indices.iter())
+                    .map(|(&hs, &vi)| (hs, hs + normalized_holes_uv_capped[vi].len()))
+                    .collect();
+                let complement = triangulate_spike_chain_complement(
+                    &all_uv,
+                    ring_start_idx,
+                    ring_last_idx,
+                    n_boundary_and_holes_actual,
+                    interior_uv_points.len(),
+                    &hole_ranges,
+                );
+                if !complement.is_empty() {
+                    // session-52 definitive overlap guard: no complement
+                    // edge may already be INTERIOR (usage ≥ 2) in the
+                    // primary triangulation. Chain/chord edges legitimately
+                    // appear once in P1 (the complement supplies the second
+                    // side → usage 2 in the union); an edge already at
+                    // usage 2 in P1 means earcutr's clipped-spike fans
+                    // covered the far side too, and adding P2 duplicates
+                    // coverage (drill HM anisotropic tori f198–206:
+                    // usage-4 same-face edges, +976 NM). Simplicity checks
+                    // alone do NOT catch this — a serpentine chain arc can
+                    // divide the ring region into 3+ regions even when both
+                    // P1 and P2 are simple polygons.
+                    let mut primary_edge_count: std::collections::HashMap<(usize, usize), u32> =
+                        std::collections::HashMap::new();
+                    for tri in tris.chunks_exact(3) {
+                        for k in 0..3 {
+                            let a = tri[k];
+                            let b = tri[(k + 1) % 3];
+                            let key = if a < b { (a, b) } else { (b, a) };
+                            *primary_edge_count.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                    let overlap = complement.chunks_exact(3).any(|tri| {
+                        (0..3).any(|k| {
+                            let a = tri[k];
+                            let b = tri[(k + 1) % 3];
+                            let key = if a < b { (a, b) } else { (b, a) };
+                            primary_edge_count.get(&key).copied().unwrap_or(0) >= 2
+                        })
+                    });
+                    if overlap {
+                        log::warn!(
+                            "spike-chain complement: overlap with primary coverage detected (chain len {}) — skipping second pass",
+                            interior_uv_points.len(),
+                        );
+                    } else {
+                        log::info!(
+                            "spike-chain complement: added {} triangles (chain len {})",
+                            complement.len() / 3,
+                            interior_uv_points.len(),
+                        );
+                        tris.extend(complement);
+                    }
+                }
+            }
+
+            tris
         } else {
             cdt.into_iter()
                 .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
