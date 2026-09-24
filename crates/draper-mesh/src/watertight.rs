@@ -829,7 +829,48 @@ fn triangle_area_3d(v0: &Point3d, v1: &Point3d, v2: &Point3d) -> f64 {
 /// TEMPORARY DIAGNOSTIC (session-42): scan a mesh for same-face fold-over
 /// pairs (shared usage-2 edge, dihedral > 170°, apexes on the same side)
 /// and log them with a stage tag. Env-gated via DRAPPER_SCAN_STAGES.
+/// If DRAPPER_DUMP_STAGE_OBJS=<dir> is set, ALSO dump the mesh at this
+/// stage as <dir>/<stage>.obj (+ .fmap) — session-50 diagnostics for
+/// attributing post-merge fan creation to a specific repair stage.
 pub fn scan_fold_pairs_stage(mesh: &TriangleMesh, stage: &str) -> usize {
+    // session-50 diagnostics: stage mesh dump (works with or without
+    // DRAPPER_SCAN_STAGES). A process-global pass counter keeps BOTH
+    // gated-retry passes (first + halved-deviation retry) separate.
+    if let Ok(dir) = std::env::var("DRAPPER_DUMP_STAGE_OBJS") {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PASS: AtomicUsize = AtomicUsize::new(0);
+        static LAST_STAGE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+        // New pass = stage name lexically restarts (e.g. d-after-merge after
+        // d-after-winding).
+        {
+            let mut last = LAST_STAGE.lock().unwrap();
+            // A repeated "d-after-merge" (or non-detailed "after-merge")
+            // marks the start of the gated retry pass.
+            if stage.ends_with("after-merge") && !last.is_empty() {
+                PASS.fetch_add(1, Ordering::SeqCst);
+            }
+            *last = stage.to_string();
+        }
+        let pass = PASS.load(Ordering::SeqCst);
+        let _ = std::fs::create_dir_all(&dir);
+        let path = format!("{}/p{}_{}.obj", dir, pass, stage);
+        let mut obj = String::with_capacity(1 << 20);
+        for v in &mesh.vertices {
+            obj.push_str(&format!("v {:.9} {:.9} {:.9}\n", v.x, v.y, v.z));
+        }
+        for t in &mesh.triangles {
+            obj.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+        }
+        let _ = std::fs::write(&path, obj);
+        if let Some(ids) = mesh.triangle_face_ids.as_ref() {
+            let mut fmap = String::new();
+            for (ti, t) in mesh.triangles.iter().enumerate() {
+                let fid = ids.get(ti).copied().unwrap_or(u64::MAX);
+                fmap.push_str(&format!("t {} {}\n", ti, fid));
+            }
+            let _ = std::fs::write(&path.replace(".obj", ".fmap"), fmap);
+        }
+    }
     if std::env::var("DRAPPER_SCAN_STAGES").is_err() {
         return 0;
     }
@@ -2275,11 +2316,32 @@ fn weld_boundary_edge_vertices_with_pass2_frac(
                                 let root_cand = find(&mut parent, candidate);
                                 if root_v1 == root_cand { continue; }
                                 // CRITICAL #2: Refuse to weld two vertices that share
-                                // ANY face ID, UNLESS very close. See PASS 1 comment.
-                                // PASS 3 uses pass3_tol_sq as best_dist_sq threshold,
-                                // so the distance exemption is automatic.
+                                // ANY face ID, UNLESS very close (FP drift). See PASS 1
+                                // comment for the full rationale.
+                                //
+                                // session-50 FIX: this guard was previously
+                                // `dist_sq > pass3_tol_sq` — a NO-OP, because any
+                                // candidate reaching this point already satisfies
+                                // `dist_sq < best_dist_sq <= pass3_tol_sq`. With the
+                                // guard disabled, PASS 3 welded ANY same-face
+                                // boundary vertices within the FULL weld_tolerance
+                                // (e.g. 0.0306 on drill_top HOUSING). On faces with
+                                // pinched rims / near-coincident boundary vertex
+                                // clusters (duplicate columns 0.016-0.033 apart),
+                                // union-find transitively chained the whole cluster
+                                // into ONE root — every triangle touching any
+                                // cluster member was remapped to the root, creating
+                                // a giant fold-over fan (477 triangles around one
+                                // vertex on drill_top face #140, 2900 fold pairs on
+                                // HOUSING_MIRROR). The exemption threshold must be
+                                // the FP-drift range (pass2), identical to PASS 1;
+                                // true periodic-seam duplicates (u=0 vs u=2π) are
+                                // bit-identical or FP-drift apart, so they still
+                                // weld. Cross-face welds keep the full pass3
+                                // tolerance (the LINE-vs-CIRCLE discretization
+                                // mismatch case is cross-face by definition).
                                 if shares_face_flat(&vf_offsets, &vf_faces, v1, candidate)
-                                    && dist_sq > pass3_tol_sq
+                                    && dist_sq > pass2_tol_sq_for_pass1
                                 {
                                     continue;
                                 }
