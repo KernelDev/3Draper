@@ -2545,10 +2545,50 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
 
         // Spatial hash grid for fast vertex lookup.
         // MS-3: Use effective_cell_size (coarser for batch mode >2M vertices).
+        //
+        // session-52: cell size DECOUPLED from tolerance. With the pipeline
+        // tj_tol ≈ 1e-8 the tol-derived cell (≈4e-8) made every real-world
+        // edge exceed the 8000-cell AABB budget → O(V) linear-scan fallback
+        // per edge → ~7 s per iteration on a 61k-triangle mesh (180k edges
+        // × 40k vertices of point-on-segment tests). Size the cells from the
+        // mesh's spatial extent instead; the tolerance only decides
+        // ACCEPTANCE (point_on_segment_3d), never the search granularity.
+        //
+        // Correctness: any vertex within `tolerance` of the segment lies in
+        // a cell inside the expanded AABB range [cmin..cmax] regardless of
+        // the cell size (vertex coord ∈ [min−tol, max+tol] ⇒ its cell index
+        // is inside the scanned range), so the grid path is exhaustive —
+        // result-identical to the linear scan, just faster.
+        let bbox_diag = {
+            let mut bnx = f64::INFINITY;
+            let mut bny = f64::INFINITY;
+            let mut bnz = f64::INFINITY;
+            let mut bxx = f64::NEG_INFINITY;
+            let mut bxy = f64::NEG_INFINITY;
+            let mut bxz = f64::NEG_INFINITY;
+            for p in &mesh.vertices {
+                if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                    bnx = bnx.min(p.x);
+                    bny = bny.min(p.y);
+                    bnz = bnz.min(p.z);
+                    bxx = bxx.max(p.x);
+                    bxy = bxy.max(p.y);
+                    bxz = bxz.max(p.z);
+                }
+            }
+            if bxx >= bnx {
+                let dx = bxx - bnx;
+                let dy = bxy - bny;
+                let dz = bxz - bnz;
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            } else {
+                1.0
+            }
+        };
         let cell_size = if batch_mode {
-            (tolerance * 8.0).max(1e-9)
+            (tolerance * 8.0).max(bbox_diag / 256.0).max(1e-12)
         } else {
-            (tolerance * 4.0).max(1e-9)
+            (tolerance * 4.0).max(bbox_diag / 256.0).max(1e-12)
         };
         let mut grid: HashMap<(i64, i64, i64), Vec<u32>> = HashMap::new();
         for (vi, p) in mesh.vertices.iter().enumerate() {
@@ -2856,6 +2896,32 @@ pub fn repair_t_junctions(mesh: &mut TriangleMesh, tolerance: f64) -> usize {
 
         let n_splits = splits.values().map(|v| v.len()).sum::<usize>();
         total_repaired += n_splits;
+
+        // ── session-52: cascade fuel removal ────────────────────────────
+        // Splitting a DEGENERATE parent triangle (apex on the edge line)
+        // produces only degenerate children whose new fan edges lie ON the
+        // same line — passing exactly through other mesh vertices (grid
+        // rows on planes/cylinders are straight in 3D). The next scan
+        // iteration detects those as new T-junctions, splits again, and
+        // the mesh explodes exponentially (drill HOUSING_MIRROR:
+        // 60903 → 980k in 3 iterations, ~92% degenerate waste).
+        //
+        // Removing degenerates IMMEDIATELY after each iteration is lossless:
+        // a degenerate parent can only spawn degenerate children (all three
+        // vertices collinear ⇒ every sub-triangle collinear), so no healthy
+        // geometry is dropped, and the final filter (same 1e-15 threshold
+        // below) would have removed these triangles anyway. For meshes
+        // where splits create no degenerates this is a no-op — bit-identical.
+        let pre_degen_filter = mesh.triangles.len();
+        filter_degenerate_triangles_in_place(mesh, 1e-15);
+        let degen_removed = pre_degen_filter - mesh.triangles.len();
+        if degen_removed > 0 {
+            log::info!(
+                "repair_t_junctions: iter {} — removed {} degenerate triangles ({} → {})",
+                _iter, degen_removed, pre_degen_filter, mesh.triangles.len(),
+            );
+        }
+
         log::info!(
             "repair_t_junctions: iter {} — split {} edges, inserted {} vertices, replaced {} triangles with {} new",
             _iter,
