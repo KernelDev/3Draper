@@ -109,8 +109,15 @@ fn transform_surface(
 
 fn main() {
     env_logger::builder()
-        // Honor RUST_LOG if set (session-49 diagnostics); default Warn.
-        .filter(Some("RUST_LOG"), log::LevelFilter::Warn)
+        // session-52: default Warn, honor RUST_LOG on top (parse_default_env).
+        // The previous filter(Some("RUST_LOG"), Warn) did NOT parse the env
+        // var — it created a directive for a module literally named
+        // "RUST_LOG", leaving the global default at Error: WARN lines were
+        // silently suppressed without RUST_LOG, which masked the T-junction
+        // explosion in solo runs and manufactured a false "non-determinism"
+        // hypothesis (worklog-52 §2).
+        .filter_level(log::LevelFilter::Warn)
+        .parse_default_env()
         .init();
 
     let args: Vec<String> = std::env::args().collect();
