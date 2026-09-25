@@ -6203,15 +6203,30 @@ pub fn triangulate_surface_consistent(
             // chain is empty, P2 is not simple, a hole straddles P2, or
             // earcutr fails on P2 (never-worsen).
             //
-            // EXPERIMENTAL (session-52): gated OFF by default. On drill HM
-            // the complement closes −1621 boundary edges on 22 faces, but
-            // on the anisotropic tori f198–206 the P2 triangles duplicate
-            // P1's clipped-spike seam coverage after the merge-stage
-            // TOLERANCE vertex collapse (+959 usage-4 same-face NM edges —
-            // invisible to the UV-index overlap guard because the collapse
-            // happens in 3D position space at merge time). Enable with
-            // DRAPPER_CHAIN_COMPLEMENT=1 to experiment; a merge-aware
-            // overlap guard is the s53 continuation.
+            // EXPERIMENTAL (session-52, investigated session-53): gated
+            // OFF by default (DRAPPER_CHAIN_COMPLEMENT=1). session-53
+            // measurements on drill HM (35 candidate faces instrumented
+            // with 3D chain-step + seam-chord diagnostics):
+            // - CLEAN fills: f226 (bnd 534→0, 0 NM — despite a 34x-step
+            //   seam chord), f38 (12→0), f102 (89→36, −1 NM), f42/f44
+            //   (−25/−10 bnd, +6 NM each).
+            // - DIRTY fills: anisotropic fillet tori f198/200/202/204/
+            //   206 (bnd −211 each but +255 same-face usage-4 NM each;
+            //   micro-slivers 4e-7..2.7e-5 mm² appear at the LATE
+            //   post-winding repair stage, after the instance-level
+            //   aggressive weld tol=3.06e-2 = 2-4x their lattice steps).
+            // - f199/201/203/205 never reach the complement (simplicity
+            //   guard); ALL Hamiltonian-ordered faces fail P1/P2
+            //   simplicity (space-filling snake ⇒ seam chords cross
+            //   chain edges) — the complement only ever applies to
+            //   legacy row-major chains.
+            // Two candidate gates were DISPROVEN by the data: (a)
+            // hamiltonian-only (selects only faces that fail simplicity
+            // anyway ⇒ no-op), (b) seam-chord locality (f226's 34x chord
+            // is clean while f198's 29x chords are dirty). The clean/dirty
+            // discriminator remains open — likely tied to the anisotropic
+            // chain layout (s53 worklog §3); the DRAPPER_CHAIN_COMPLEMENT_
+            // MAXCHORD knob (default 0 = off) is kept for calibration.
             if !interior_uv_points.is_empty()
                 && std::env::var("DRAPPER_CHAIN_COMPLEMENT").as_deref() == Ok("1")
             {
@@ -6231,6 +6246,105 @@ pub fn triangulate_surface_consistent(
                     .zip(valid_hole_indices.iter())
                     .map(|(&hs, &vi)| (hs, hs + normalized_holes_uv_capped[vi].len()))
                     .collect();
+
+                // ── session-53: seam-chord locality gate ─────────────────
+                // The P2 region is bounded by the two seam chords
+                // (ring_last→s_0, s_L−1→ring_start) plus the chain.
+                // LOCAL chords (a few lattice steps) ⇒ thin ribbon P2 ⇒
+                // clean fill (drill HM f226: −534 bnd, 0 NM). LONG chords
+                // (closure at rim mid-edge, chain endpoints at far
+                // lattice corners) ⇒ domain-spanning P2 ⇒ micro-slivers
+                // ⇒ +255 same-face NM per face (f198–206). Measured in
+                // 3D through the surface (mirrors Step 5's evaluation);
+                // UV distances are not comparable across
+                // parameterizations.
+                let mut chord_gate_skip = false;
+                {
+                    let chain_3d: Vec<Point3d> = (n_boundary_and_holes_actual
+                        ..n_boundary_and_holes_actual + interior_uv_points.len())
+                        .map(|i| {
+                            let uv = &all_uv[i];
+                            if let Surface::Nurbs(ref nurbs) = surface {
+                                deterministic_round_point(
+                                    nurbs.derivatives_at(uv.u, uv.v).point,
+                                )
+                            } else {
+                                deterministic_round_point(surface.point_at(uv.u, uv.v))
+                            }
+                        })
+                        .collect();
+                    let mut steps: Vec<f64> = chain_3d
+                        .windows(2)
+                        .map(|w| {
+                            let dx = w[0].x - w[1].x;
+                            let dy = w[0].y - w[1].y;
+                            let dz = w[0].z - w[1].z;
+                            (dx * dx + dy * dy + dz * dz).sqrt()
+                        })
+                        .filter(|d| d.is_finite() && *d > 0.0)
+                        .collect();
+                    steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    if let Some(&med_step) = steps.get(steps.len() / 2) {
+                        if med_step > 0.0 {
+                            // Ring endpoint 3D positions (outer ring:
+                            // cached boundary 3D; hole ring: the hole's
+                            // 3D polyline — parallel arrays).
+                            let (rs3, rl3): (&Point3d, &Point3d) = match hole_start_indices.last()
+                            {
+                                None => (
+                                    &boundary_points_3d[0],
+                                    &boundary_points_3d[n_boundary - 1],
+                                ),
+                                Some(_) => {
+                                    let vi = valid_hole_indices.last().unwrap();
+                                    let poly = &hole_polylines_3d_capped[*vi];
+                                    (&poly[0], &poly[poly.len() - 1])
+                                }
+                            };
+                            let d3 = |a: &Point3d, b: &Point3d| {
+                                let dx = a.x - b.x;
+                                let dy = a.y - b.y;
+                                let dz = a.z - b.z;
+                                (dx * dx + dy * dy + dz * dz).sqrt()
+                            };
+                            let c0 = d3(rl3, &chain_3d[0]);
+                            let c1 = d3(&chain_3d[chain_3d.len() - 1], rs3);
+                            let r0 = c0 / med_step;
+                            let r1 = c1 / med_step;
+                            // session-53 verdict: the chord-locality
+                            // hypothesis was DISPROVEN by measurement —
+                            // drill HM f226 has a 34x-step seam chord and
+                            // still fills CLEANLY (bnd 534→0, 0 NM),
+                            // while f198–206 (chords 26–29x) gain +255
+                            // NM each. Default 0.0 = gate OFF (s52
+                            // semantics); the knob is kept for future
+                            // calibration experiments only.
+                            let max_ratio: f64 = std::env::var(
+                                "DRAPPER_CHAIN_COMPLEMENT_MAXCHORD",
+                            )
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.0);
+                            if max_ratio > 0.0 && (r0 > max_ratio || r1 > max_ratio) {
+                                chord_gate_skip = true;
+                                log::warn!(
+                                    "spike-chain complement: NON-LOCAL seam chords c0={:.2e} ({:.1}x step) c1={:.2e} ({:.1}x step), chain {} — skipping second pass",
+                                    c0, r0, c1, r1, interior_uv_points.len(),
+                                );
+                            } else {
+                                log::warn!(
+                                    "complement-geom: chain {} min_step={:.2e} med_step={:.2e} c0={:.1}x c1={:.1}x",
+                                    interior_uv_points.len(),
+                                    steps[0],
+                                    med_step,
+                                    r0,
+                                    r1,
+                                );
+                            }
+                        }
+                    }
+                }
+                if !chord_gate_skip {
                 let complement = triangulate_spike_chain_complement(
                     &all_uv,
                     ring_start_idx,
@@ -6283,6 +6397,7 @@ pub fn triangulate_surface_consistent(
                         );
                         tris.extend(complement);
                     }
+                }
                 }
             }
 
