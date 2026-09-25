@@ -284,8 +284,8 @@ fn triangulate_spike_chain_complement(
         && polygon_area_2d(&p2_ring_uv).abs() >= 1e-12;
     if !p1_simple || !p2_simple {
         log::warn!(
-            "spike-chain complement: P1 simple={} P2 simple={} (ring {}..{}, chain len {}) — skipping second pass",
-            p1_simple, p2_simple, ring_start_idx, ring_last_idx, interior_len,
+            "[f{}] spike-chain complement: P1 simple={} P2 simple={} (ring {}..{}, chain len {}) — skipping second pass",
+            current_face_label(), p1_simple, p2_simple, ring_start_idx, ring_last_idx, interior_len,
         );
         return Vec::new();
     }
@@ -305,8 +305,8 @@ fn triangulate_spike_chain_complement(
         }
         if n_inside != he - hs {
             log::warn!(
-                "spike-chain complement: hole {}..{} straddles P2 boundary ({}/{} pts inside) — skipping second pass",
-                hs, he, n_inside, he - hs,
+                "[f{}] spike-chain complement: hole {}..{} straddles P2 boundary ({}/{} pts inside) — skipping second pass",
+                current_face_label(), hs, he, n_inside, he - hs,
             );
             return Vec::new();
         }
@@ -330,8 +330,8 @@ fn triangulate_spike_chain_complement(
     // Validate + remap local indices to all_uv indices.
     if local.is_empty() || local.iter().any(|&i| i >= p2_all_idx.len()) {
         log::warn!(
-            "spike-chain complement: earcutr returned no/invalid triangles for P2 (chain len {}) — skipping second pass",
-            interior_len,
+            "[f{}] spike-chain complement: earcutr returned no/invalid triangles for P2 (chain len {}) — skipping second pass",
+            current_face_label(), interior_len,
         );
         return Vec::new();
     }
@@ -2193,6 +2193,12 @@ pub enum SteinerChainOrder {
     /// Hamiltonian path with endpoints near the ring closure (Warnsdorff
     /// DFS, deterministic LCG seed); serpentine fallback.
     Hamiltonian,
+    /// session-54 anisotropic COMB: boustrophedon whose runs go along the
+    /// 3D-SHORT axis, so the P2 complement region (the far side of the
+    /// chain) is a comb of teeth exactly one LONG-3D-step wide, with both
+    /// seam chords rim-hugging (start/end on the closure's rims).
+    /// Experimental: `DRAPPER_STEINER_CHAIN=aniso`.
+    Aniso,
 }
 
 impl SteinerChainOrder {
@@ -2206,6 +2212,7 @@ impl SteinerChainOrder {
         match std::env::var("DRAPPER_STEINER_CHAIN").as_deref() {
             Ok("off") | Ok("legacy") => None,
             Ok("serp") => Some(SteinerChainOrder::Serpentine),
+            Ok("aniso") | Ok("comb") => Some(SteinerChainOrder::Aniso),
             Ok("ham") | Err(_) => Some(SteinerChainOrder::Hamiltonian),
             Ok(_) => Some(SteinerChainOrder::Hamiltonian),
         }
@@ -2244,6 +2251,7 @@ fn order_interior_steiner_chain(
     ring_end: &Point2d,
     ring_start: &Point2d,
     mode: SteinerChainOrder,
+    aniso_axes: Option<(f64, f64)>,
 ) -> Vec<Point2d> {
     let n = interior.len();
     if n < 4 {
@@ -2270,6 +2278,333 @@ fn order_interior_steiner_chain(
                 None => interior.to_vec(),
             }
         }
+        SteinerChainOrder::Aniso => {
+            // Aniso = "Hamiltonian where it qualifies (isotropic full
+            // lattices — bit-identical to the default), else the aniso
+            // COMB instead of the legacy row-major fallback".
+            match hamiltonian_chain(interior, &attach) {
+                Some(path) => path,
+                None => match aniso_axes {
+                    Some((u_step3d, v_step3d)) if u_step3d > 0.0 && v_step3d > 0.0 => {
+                        aniso_comb_chain(interior, ring_end, ring_start, u_step3d, v_step3d)
+                    }
+                    _ => interior.to_vec(),
+                },
+            }
+        }
+    }
+}
+
+/// session-54: median 3D lattice step per UV axis, measured through the
+/// surface (the s51 isotropy gate used UV steps and misclassifies faces
+/// whose parameterization compresses one axis — drill HM f226 is 3D-
+/// isotropic at UV ratio 1:5.9, f198 is 3D-anisotropic 3.4:1).
+///
+/// Clusters the interior points by distinct u / v values, pairs each
+/// point with its same-row u-neighbor and same-column v-neighbor, and
+/// takes the median 3D distance per axis. Returns (u_step3d, v_step3d);
+/// (0,0) when the lattice has no neighbor pairs in either axis.
+pub(crate) fn compute_axis_steps_3d(
+    interior: &[Point2d],
+    surface: &Surface,
+) -> (f64, f64) {
+    let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
+        let mut vals: Vec<f64> = interior.iter().map(get).collect();
+        if vals.is_empty() {
+            return vals;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span.abs() * 1e-9).max(1e-12);
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u);
+    let vs = cluster_axis(|p| p.v);
+    if us.len() < 2 || vs.len() < 2 {
+        return (0.0, 0.0);
+    }
+    // Bucket points by (u_idx, v_idx).
+    let u_tol = ((us[us.len() - 1] - us[0]).abs() * 1e-9).max(1e-12);
+    let v_tol = ((vs[vs.len() - 1] - vs[0]).abs() * 1e-9).max(1e-12);
+    let u_idx = |x: f64| -> usize {
+        let mut lo = 0usize;
+        let mut hi = us.len() - 1;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if us[mid] < x - u_tol { lo = mid + 1; } else { hi = mid; }
+        }
+        lo
+    };
+    let v_idx = |y: f64| -> usize {
+        let mut lo = 0usize;
+        let mut hi = vs.len() - 1;
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if vs[mid] < y - v_tol { lo = mid + 1; } else { hi = mid; }
+        }
+        lo
+    };
+    let eval3 = |uv: &Point2d| -> Point3d {
+        if let Surface::Nurbs(ref nurbs) = surface {
+            deterministic_round_point(nurbs.derivatives_at(uv.u, uv.v).point)
+        } else {
+            deterministic_round_point(surface.point_at(uv.u, uv.v))
+        }
+    };
+    let mut grid: std::collections::HashMap<(usize, usize), Point3d> =
+        std::collections::HashMap::with_capacity(interior.len());
+    for p in interior {
+        grid.insert((u_idx(p.u), v_idx(p.v)), eval3(p));
+    }
+    let d3 = |a: &Point3d, b: &Point3d| -> f64 {
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let dz = a.z - b.z;
+        (dx * dx + dy * dy + dz * dz).sqrt()
+    };
+    let mut u_dists: Vec<f64> = Vec::new();
+    let mut v_dists: Vec<f64> = Vec::new();
+    for ((ui, vi), p3) in grid.iter() {
+        if let Some(q3) = grid.get(&(ui + 1, *vi)) {
+            let d = d3(p3, q3);
+            if d.is_finite() && d > 0.0 { u_dists.push(d); }
+        }
+        if let Some(q3) = grid.get(&(*ui, vi + 1)) {
+            let d = d3(p3, q3);
+            if d.is_finite() && d > 0.0 { v_dists.push(d); }
+        }
+    }
+    let med_of = |mut v: Vec<f64>| -> f64 {
+        if v.is_empty() { return 0.0; }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        v[v.len() / 2]
+    };
+    (med_of(u_dists), med_of(v_dists))
+}
+
+/// session-54 anisotropic COMB chain.
+///
+/// Measured root cause of the dirty complement fills (worklog-53 §2 +
+/// session-54 attribution): the legacy row-major sawtooth makes the P2
+/// region a full-width zigzag band whose height is ONE SHORT-axis 3D
+/// step — on the drill HM f198–206 fillet tori (R=4.0) the v-step is
+/// 7.0e-3 mm, at/below the instance sew tolerance 7.57e-3, so late
+/// repair stages (weld/TJ after winding) collapse the P2 fill into
+/// usage-4 same-face micro-slivers (+255 NM per face). The clean
+/// benchmark f226 is 3D-isotropic (steps 1.36e-2) and survives.
+///
+/// The comb fixes the WIDTH: the P2 teeth are exactly one LONG-3D-step
+/// wide (f198: 2.35e-2 = 3.4× the v-step), and every chain step is one
+/// lattice cell (chain_len_3d 23.3→4.0 on f198).
+///
+/// Endpoint rule (derived from measured P1/P2 simplicity failures —
+/// naive corner placements make both chords cut the closure-corner
+/// wedge): one closing-edge vertex usually sits AT the domain corner
+/// (f198: ring_start; f226: ring_last — the mirror case that broke the
+/// first attempt). Each vertex's seam chord must run along the rim the
+/// vertex lies on: the DISPLACED vertex's chord runs along its
+/// displacement axis to the far lattice corner on that rim; the
+/// CORNER vertex's chord takes the other rim. The comb then connects
+/// the two far corners (e.g. bottom-left → top-right for a bottom-
+/// right closure), running along the axis whose 3D step is SHORTER
+/// (teeth width = the longer step). Parity lands the chain end either
+/// exactly on the second far corner (odd run count — legacy-style rim
+/// chord) or on the closure-adjacent corner (even — a short chord);
+/// both pass the simplicity guards. Mid-rim closures (no vertex at a
+/// corner) keep the legacy order — their chords cross any comb.
+fn aniso_comb_chain(
+    interior: &[Point2d],
+    ring_end: &Point2d,
+    ring_start: &Point2d,
+    u_step3d: f64,
+    v_step3d: f64,
+) -> Vec<Point2d> {
+    // ── Lattice structure (original UV space) ──────────────────────
+    let cluster_axis = |get: fn(&Point2d) -> f64, pts: &[Point2d]| -> Vec<f64> {
+        let mut vals: Vec<f64> = pts.iter().map(get).collect();
+        if vals.is_empty() {
+            return vals;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span.abs() * 1e-9).max(1e-12);
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u, interior);
+    let vs = cluster_axis(|p| p.v, interior);
+    if us.len() < 2 || vs.len() < 2 {
+        return interior.to_vec();
+    }
+    let u_lo = us[0];
+    let u_hi = us[us.len() - 1];
+    let v_lo = vs[0];
+    let v_hi = vs[vs.len() - 1];
+    let u_step_uv = (u_hi - u_lo) / (us.len() - 1) as f64;
+    let v_step_uv = (v_hi - v_lo) / (vs.len() - 1) as f64;
+
+    // ── Closure corner + vertex roles ──────────────────────────────
+    // Corner estimate: per axis, the closing-edge coordinate that is
+    // more extreme (the corner vertex carries the extreme value).
+    let mid_u = (ring_end.u + ring_start.u) * 0.5;
+    let mid_v = (ring_end.v + ring_start.v) * 0.5;
+    let corner_u = if mid_u >= (u_lo + u_hi) * 0.5 {
+        ring_end.u.max(ring_start.u)
+    } else {
+        ring_end.u.min(ring_start.u)
+    };
+    let corner_v = if mid_v >= (v_lo + v_hi) * 0.5 {
+        ring_end.v.max(ring_start.v)
+    } else {
+        ring_end.v.min(ring_start.v)
+    };
+    // Per-axis displacement test (a quarter of THAT axis's lattice
+    // step): f198's ring_last sits 0.44 u-steps from the corner —
+    // invisible to a tolerance scaled by the 12× larger v-step.
+    let re_disp_u = (ring_end.u - corner_u).abs() > 0.25 * u_step_uv;
+    let re_disp_v = (ring_end.v - corner_v).abs() > 0.25 * v_step_uv;
+    let rs_disp_u = (ring_start.u - corner_u).abs() > 0.25 * u_step_uv;
+    let rs_disp_v = (ring_start.v - corner_v).abs() > 0.25 * v_step_uv;
+    let re_at_corner = !re_disp_u && !re_disp_v;
+    let rs_at_corner = !rs_disp_u && !rs_disp_v;
+    if !re_at_corner && !rs_at_corner {
+        // Mid-rim closure — no chord pair avoids crossing the comb.
+        // Keep the legacy order (never-worsen; these faces already
+        // fail the complement simplicity guards with legacy too).
+        return interior.to_vec();
+    }
+    // Chord axes: the displaced vertex's chord runs along its
+    // displacement axis; the corner vertex's chord takes the other.
+    // Default (both at corner / tiny edge): c0 along u, c1 along v.
+    let (c0_axis_u, c1_axis_u) = if rs_at_corner && !re_at_corner {
+        // ring_start at corner; ring_last displaced → c0 along its
+        // displacement, c1 the other (f198: c0=u bottom rim, c1=v).
+        let disp_u = (ring_end.u - corner_u).abs() >= (ring_end.v - corner_v).abs();
+        (disp_u, !disp_u)
+    } else if re_at_corner && !rs_at_corner {
+        // ring_last at corner; ring_start displaced → c1 along its
+        // displacement, c0 the other (f226: c1=v right rim, c0=u).
+        let disp_u = (ring_start.u - corner_u).abs() >= (ring_start.v - corner_v).abs();
+        (!disp_u, disp_u)
+    } else {
+        (true, false)
+    };
+
+    // ── Chain endpoints (lattice corners) ──────────────────────────
+    // su/sv: closure corner sides. Far side along a chord axis = the
+    // opposite lattice extreme; near side along the other axis.
+    let su_hi = mid_u >= (u_lo + u_hi) * 0.5;
+    let sv_hi = mid_v >= (v_lo + v_hi) * 0.5;
+    // s_0: far along c0's axis, near along the other.
+    let s0 = if c0_axis_u {
+        Point2d::new(if su_hi { u_lo } else { u_hi }, if sv_hi { v_hi } else { v_lo })
+    } else {
+        Point2d::new(if su_hi { u_hi } else { u_lo }, if sv_hi { v_lo } else { v_hi })
+    };
+    // s_end: far along c1's axis, near along the other.
+    let send = if c1_axis_u {
+        Point2d::new(if su_hi { u_lo } else { u_hi }, if sv_hi { v_hi } else { v_lo })
+    } else {
+        Point2d::new(if su_hi { u_hi } else { u_lo }, if sv_hi { v_lo } else { v_hi })
+    };
+
+    // ── Comb orientation: runs (and therefore the P2 strips, which
+    // run parallel to the runs) along the LOW-CURVATURE axis, i.e. the
+    // axis with the LARGER effective radius (step3d / step_uv ≈ the
+    // arc radius). f198 column-comb measurement: strips along the tube
+    // axis (r=0.1) trigger the chord-error refinement — 1511 bnd edges
+    // at emission (3447 tris = 2.7× explosion) because the refinement
+    // splits chain edges one-sidedly (P1 side keeps the unsplit edge →
+    // T-junction cascades). Strips along the sweep axis (R+r=4.1) stay
+    // under the chord tolerance — the f199 row-comb fill measured clean
+    // (bnd 276→6, NM ≈ baseline) with the same 1-v-step strip width.
+    let u_radius = if u_step_uv > 0.0 { u_step3d / u_step_uv } else { f64::INFINITY };
+    let v_radius = if v_step_uv > 0.0 { v_step3d / v_step_uv } else { f64::INFINITY };
+    let runs_along_v = v_radius > u_radius; // columns (runs along v)
+
+    // Build the comb in a space where runs go along the SECOND
+    // coordinate: for runs-along-v that's identity, for runs-along-u
+    // swap so "u"=original v, "v"=original u.
+    let swap = |p: &Point2d| Point2d::new(p.v, p.u);
+    let (s0x, sendx) = if runs_along_v {
+        (s0, send)
+    } else {
+        (swap(&s0), swap(&send))
+    };
+    // Cluster into columns by x.u; each sorted by x.v.
+    let mut pts: Vec<Point2d> = if runs_along_v {
+        interior.to_vec()
+    } else {
+        interior.iter().map(swap).collect()
+    };
+    pts.sort_by(|a, b| {
+        a.u.partial_cmp(&b.u)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.v.partial_cmp(&b.v).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    let x_u_span = pts.last().map(|p| p.u).unwrap_or(0.0)
+        - pts.first().map(|p| p.u).unwrap_or(0.0);
+    let x_tol = (x_u_span.abs() * 1e-9).max(1e-12);
+    let mut columns: Vec<Vec<Point2d>> = Vec::new();
+    for p in pts.into_iter() {
+        match columns.last_mut() {
+            Some(col) if (col[0].u - p.u).abs() <= x_tol => col.push(p),
+            _ => columns.push(vec![p]),
+        }
+    }
+    let n_cols = columns.len();
+    if n_cols < 2 {
+        return interior.to_vec();
+    }
+    for col in columns.iter_mut() {
+        col.sort_by(|a, b| {
+            a.v.partial_cmp(&b.v).unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    // Column order: from s_0's u side toward s_end's u side. First
+    // column starts at s_0's v end (runs toward the far v side);
+    // alternating directions; parity lands the end on s_end's corner
+    // (odd) or the closure-adjacent corner (even) — both valid.
+    let x_v_all: Vec<f64> = columns.iter().flatten().map(|p| p.v).collect();
+    let x_v_lo = x_v_all.iter().cloned().fold(f64::INFINITY, f64::min);
+    let x_v_hi = x_v_all.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let x_u_mid = (columns[0][0].u + columns[n_cols - 1][0].u) * 0.5;
+    let cols_desc = s0x.u >= x_u_mid; // s_0 on the high-u side → descend
+    let first_up = s0x.v <= (x_v_lo + x_v_hi) * 0.5;
+
+    let order: Vec<usize> = if cols_desc {
+        (0..n_cols).rev().collect()
+    } else {
+        (0..n_cols).collect()
+    };
+    let mut out: Vec<Point2d> = Vec::with_capacity(interior.len());
+    for (k, &ci) in order.iter().enumerate() {
+        let col = columns[ci].clone();
+        let go_up = if k % 2 == 0 { first_up } else { !first_up };
+        if go_up {
+            out.extend(col.iter().copied());
+        } else {
+            out.extend(col.iter().rev().copied());
+        }
+    }
+    if runs_along_v {
+        out
+    } else {
+        out.iter().map(swap).collect()
     }
 }
 
@@ -4500,6 +4835,35 @@ pub fn clear_shared_nurbs_grid() {
     SHARED_NURBS_GRID.with(|g| *g.borrow_mut() = None);
 }
 
+// Thread-local face label for per-face log attribution (session-54).
+// The STEP converter sets this around each per-face triangulation call
+// with the same sequential face id that lands in `triangle_face_ids`
+// (and thus in the DRAPPER_DUMP_FINAL_OBJS .fmap), so diagnostics
+// emitted deep inside `triangulate_surface_consistent` (complement-geom,
+// complement skip reasons) can be mapped 1:1 to face ids from the
+// final-OBJ python analysis (worklog-53 §2 clean/dirty map).
+thread_local! {
+    static CURRENT_FACE_LABEL: std::cell::RefCell<String> =
+        const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Set the per-face log label (e.g. "brep62542_f198_Torus").
+///
+/// Must be paired with `clear_current_face_label` after the call.
+/// Diagnostics log it as `[f<label}]` — grep-friendly and stable.
+pub fn set_current_face_label(label: String) {
+    CURRENT_FACE_LABEL.with(|l| *l.borrow_mut() = label);
+}
+
+/// Clear the per-face log label.
+pub fn clear_current_face_label() {
+    CURRENT_FACE_LABEL.with(|l| l.borrow_mut().clear());
+}
+
+pub(crate) fn current_face_label() -> String {
+    CURRENT_FACE_LABEL.with(|l| l.borrow().clone())
+}
+
 pub fn triangulate_surface_consistent(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -6123,7 +6487,31 @@ pub fn triangulate_surface_consistent(
                 (Some(e), Some(s)) => (e, s),
                 _ => return TriangleMesh::new(),
             };
-            order_interior_steiner_chain(&interior_uv_points, &ring_end, &ring_start, mode)
+            // session-54: the aniso comb needs the median 3D lattice
+            // step per axis (through the surface) to pick the run
+            // direction — UV steps misclassify compressed
+            // parameterizations (f226 is 3D-isotropic at UV 1:5.9).
+            // Computed lazily: only in the experimental aniso mode.
+            let aniso_axes = if mode == SteinerChainOrder::Aniso
+                && !interior_uv_points.is_empty()
+            {
+                let (u3, v3) =
+                    compute_axis_steps_3d(&interior_uv_points, surface);
+                if u3 > 0.0 && v3 > 0.0 {
+                    Some((u3, v3))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            order_interior_steiner_chain(
+                &interior_uv_points,
+                &ring_end,
+                &ring_start,
+                mode,
+                aniso_axes,
+            )
         } else {
             interior_uv_points
         };
@@ -6259,6 +6647,10 @@ pub fn triangulate_surface_consistent(
                 // UV distances are not comparable across
                 // parameterizations.
                 let mut chord_gate_skip = false;
+                // session-54: total 3D chain length (sum of unsorted
+                // steps) — shared by the complement-geom diagnostics and
+                // the applied-line ribbon-width estimate.
+                let mut chain_len_3d = 0.0f64;
                 {
                     let chain_3d: Vec<Point3d> = (n_boundary_and_holes_actual
                         ..n_boundary_and_holes_actual + interior_uv_points.len())
@@ -6283,6 +6675,7 @@ pub fn triangulate_surface_consistent(
                         })
                         .filter(|d| d.is_finite() && *d > 0.0)
                         .collect();
+                    chain_len_3d = steps.iter().sum();
                     steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                     if let Some(&med_step) = steps.get(steps.len() / 2) {
                         if med_step > 0.0 {
@@ -6328,17 +6721,104 @@ pub fn triangulate_surface_consistent(
                             if max_ratio > 0.0 && (r0 > max_ratio || r1 > max_ratio) {
                                 chord_gate_skip = true;
                                 log::warn!(
-                                    "spike-chain complement: NON-LOCAL seam chords c0={:.2e} ({:.1}x step) c1={:.2e} ({:.1}x step), chain {} — skipping second pass",
-                                    c0, r0, c1, r1, interior_uv_points.len(),
+                                    "[f{}] spike-chain complement: NON-LOCAL seam chords c0={:.2e} ({:.1}x step) c1={:.2e} ({:.1}x step), chain {} — skipping second pass",
+                                    current_face_label(), c0, r0, c1, r1, interior_uv_points.len(),
                                 );
                             } else {
+                                // ── session-54: full per-face attribution ──
+                                // (worklog-53 «Осталось»-①: map every
+                                // complement-geom line to a face id —
+                                // the label carries the same sequential
+                                // face id as the .fmap, so the clean/
+                                // dirty per-face map from the python
+                                // OBJ analysis joins 1:1) + the lattice
+                                // geometry needed to test the anisotropy
+                                // hypothesis: lattice dims (distinct u ×
+                                // distinct v), median 3D step per axis
+                                // (chain steps classified by UV delta
+                                // dominance), axis anisotropy ratio, UV
+                                // bbox and ring-closure UV position.
+                                let flabel = current_face_label();
+                                let surf_desc = match surface {
+                                    Surface::Torus(t) => format!(
+                                        "Torus R={:.3} r={:.3}",
+                                        t.major_radius, t.minor_radius
+                                    ),
+                                    Surface::Plane(_) => "Plane".to_string(),
+                                    Surface::Cylinder(_) => "Cylinder".to_string(),
+                                    Surface::Cone(_) => "Cone".to_string(),
+                                    Surface::Sphere(_) => "Sphere".to_string(),
+                                    Surface::Nurbs(_) => "Nurbs".to_string(),
+                                    _ => "Other".to_string(),
+                                };
+                                // UV bbox of the face's outer ring.
+                                let (u_lo, u_hi, v_lo, v_hi) = {
+                                    let mut it = outer_uv.iter();
+                                    let p0 = it.next().copied().unwrap_or(Point2d::new(0.0, 0.0));
+                                    let mut u_lo = p0.u; let mut u_hi = p0.u;
+                                    let mut v_lo = p0.v; let mut v_hi = p0.v;
+                                    for p in it {
+                                        u_lo = u_lo.min(p.u); u_hi = u_hi.max(p.u);
+                                        v_lo = v_lo.min(p.v); v_hi = v_hi.max(p.v);
+                                    }
+                                    (u_lo, u_hi, v_lo, v_hi)
+                                };
+                                // Lattice dims: distinct u / v coordinate
+                                // clusters among the interior points.
+                                let cluster_count = |vals: &mut Vec<f64>| -> usize {
+                                    if vals.is_empty() { return 0; }
+                                    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                    let span = (vals[vals.len() - 1] - vals[0]).abs();
+                                    let tol = (span * 1e-9).max(1e-12);
+                                    let mut n = 1usize;
+                                    for w in vals.windows(2) {
+                                        if (w[1] - w[0]).abs() > tol { n += 1; }
+                                    }
+                                    n
+                                };
+                                let n_u_lat = cluster_count(&mut interior_uv_points.iter().map(|p| p.u).collect());
+                                let n_v_lat = cluster_count(&mut interior_uv_points.iter().map(|p| p.v).collect());
+                                // Median 3D step per axis: classify each
+                                // chain step by UV-delta dominance.
+                                let med_of = |v: &mut Vec<f64>| -> f64 {
+                                    if v.is_empty() { return 0.0; }
+                                    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                    v[v.len() / 2]
+                                };
+                                let mut u_steps3d: Vec<f64> = Vec::new();
+                                let mut v_steps3d: Vec<f64> = Vec::new();
+                                for k in 0..chain_3d.len().saturating_sub(1) {
+                                    let du = (interior_uv_points[k + 1].u - interior_uv_points[k].u).abs();
+                                    let dv = (interior_uv_points[k + 1].v - interior_uv_points[k].v).abs();
+                                    let dx = chain_3d[k].x - chain_3d[k + 1].x;
+                                    let dy = chain_3d[k].y - chain_3d[k + 1].y;
+                                    let dz = chain_3d[k].z - chain_3d[k + 1].z;
+                                    let len = (dx * dx + dy * dy + dz * dz).sqrt();
+                                    if !len.is_finite() || len <= 0.0 { continue; }
+                                    if du > dv { u_steps3d.push(len); } else { v_steps3d.push(len); }
+                                }
+                                let med_u3 = med_of(&mut u_steps3d);
+                                let med_v3 = med_of(&mut v_steps3d);
+                                let aniso = if med_v3 > 0.0 { med_u3 / med_v3 } else { 0.0 };
+                                let rs_uv = all_uv[ring_start_idx];
+                                let rl_uv = all_uv[ring_last_idx];
                                 log::warn!(
-                                    "complement-geom: chain {} min_step={:.2e} med_step={:.2e} c0={:.1}x c1={:.1}x",
+                                    "[f{}] complement-geom: {} chain {} lat={}x{} bbox=[{:.3},{:.3}]x[{:.3},{:.3}] step3d u={:.2e} v={:.2e} aniso={:.2} min_step={:.2e} med_step={:.2e} c0={:.1}x c1={:.1}x closure=({:.3},{:.3})/({:.3},{:.3})",
+                                    flabel,
+                                    surf_desc,
                                     interior_uv_points.len(),
+                                    n_u_lat,
+                                    n_v_lat,
+                                    u_lo, u_hi, v_lo, v_hi,
+                                    med_u3,
+                                    med_v3,
+                                    aniso,
                                     steps[0],
                                     med_step,
                                     r0,
                                     r1,
+                                    rl_uv.u, rl_uv.v,
+                                    rs_uv.u, rs_uv.v,
                                 );
                             }
                         }
@@ -6386,14 +6866,69 @@ pub fn triangulate_surface_consistent(
                     });
                     if overlap {
                         log::warn!(
-                            "spike-chain complement: overlap with primary coverage detected (chain len {}) — skipping second pass",
+                            "[f{}] spike-chain complement: overlap with primary coverage detected (chain len {}) — skipping second pass",
+                            current_face_label(),
                             interior_uv_points.len(),
                         );
                     } else {
-                        log::info!(
-                            "spike-chain complement: added {} triangles (chain len {})",
+                        // session-54: P2 ribbon statistics on the applied
+                        // line — UV area, 3D area (through the surface,
+                        // same evaluation as Step 5) and ribbon width
+                        // (3D area / 3D chain length). The s53-④ root
+                        // cause placed the damage at late repair stages
+                        // where weld tol = 2–4x lattice steps; ribbon
+                        // width vs step is the quantity to watch.
+                        let p2_uv_area = {
+                            let mut ring: Vec<Point2d> =
+                                Vec::with_capacity(interior_uv_points.len() + 2);
+                            ring.push(all_uv[ring_start_idx]);
+                            for p in interior_uv_points.iter().rev() {
+                                ring.push(*p);
+                            }
+                            ring.push(all_uv[ring_last_idx]);
+                            polygon_area_2d(&ring).abs()
+                        };
+                        let ev3 = |i: usize| -> Point3d {
+                            let uv = &all_uv[i];
+                            if let Surface::Nurbs(ref nurbs) = surface {
+                                deterministic_round_point(
+                                    nurbs.derivatives_at(uv.u, uv.v).point,
+                                )
+                            } else {
+                                deterministic_round_point(surface.point_at(uv.u, uv.v))
+                            }
+                        };
+                        let mut p2_3d_area = 0.0f64;
+                        for tri in complement.chunks_exact(3) {
+                            let a = ev3(tri[0]);
+                            let b = ev3(tri[1]);
+                            let c = ev3(tri[2]);
+                            let ux = b.x - a.x;
+                            let uy = b.y - a.y;
+                            let uz = b.z - a.z;
+                            let vx = c.x - a.x;
+                            let vy = c.y - a.y;
+                            let vz = c.z - a.z;
+                            let cx = uy * vz - uz * vy;
+                            let cy = uz * vx - ux * vz;
+                            let cz = ux * vy - uy * vx;
+                            p2_3d_area +=
+                                0.5 * (cx * cx + cy * cy + cz * cz).sqrt();
+                        }
+                        let ribbon_w = if chain_len_3d > 0.0 {
+                            p2_3d_area / chain_len_3d
+                        } else {
+                            0.0
+                        };
+                        log::warn!(
+                            "[f{}] spike-chain complement: added {} triangles (chain len {}) p2_uv_area={:.3e} p2_3d_area={:.3e} ribbon_w={:.2e} chain_len_3d={:.3e}",
+                            current_face_label(),
                             complement.len() / 3,
                             interior_uv_points.len(),
+                            p2_uv_area,
+                            p2_3d_area,
+                            ribbon_w,
+                            chain_len_3d,
                         );
                         tris.extend(complement);
                     }
@@ -6439,10 +6974,11 @@ pub fn triangulate_surface_consistent(
             let path = format!("{}/tri_{:04}_{}.txt", dir, n, stype);
             let mut out = String::with_capacity(1 << 16);
             out.push_str(&format!(
-                "type={} forward={} n_boundary={} n_holes={} n_interior={} n_tris={}\n",
+                "type={} forward={} n_boundary={} n_holes={} n_interior={} n_tris={} label={}\n",
                 stype, forward, outer_uv.len(),
                 valid_hole_indices.len(), interior_uv_points.len(),
-                triangle_indices.len() / 3
+                triangle_indices.len() / 3,
+                current_face_label(),
             ));
             out.push_str("boundary\n");
             for p in &outer_uv {

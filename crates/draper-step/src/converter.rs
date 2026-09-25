@@ -5810,7 +5810,16 @@ impl<'a> StepConverter<'a> {
             };
 
             let tri_start = mesh.triangle_count();
+            // session-54: per-face log label — the SAME sequential face id
+            // that lands in `triangle_face_ids` (and the .fmap dump), so
+            // diagnostics from deep inside triangulation (complement-geom
+            // family) attribute 1:1 to the final-OBJ python per-face map.
+            draper_mesh::parametric_domain::set_current_face_label(format!(
+                "brep{}_f{}_{}",
+                brep_id, face_id, surface_type
+            ));
             let face_mesh = self.surface_to_mesh_cached(face_data, &params, bbox, &mut edge_cache);
+            draper_mesh::parametric_domain::clear_current_face_label();
             
             // Set face ID for all triangles in this face mesh
             let face_tri_count = face_mesh.triangle_count();
