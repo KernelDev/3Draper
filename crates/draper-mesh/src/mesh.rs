@@ -71,6 +71,12 @@ pub struct VertexDedupMap {
     /// True when the last `get()` returned via the tolerance path
     /// (diagnostic: distinguishes bit-exact reuse from near-miss welds).
     last_tol_hit: Cell<bool>,
+    /// session-56: vertex index → set of face ids that use it. Populated
+    /// only in face-aware mode (merge_deduplicating with
+    /// DRAPPER_MERGE_SAMEFACE_GUARD=1) so the tolerance path can refuse
+    /// merges between vertices of the SAME face while keeping legitimate
+    /// cross-face rim near-miss welds.
+    vertex_faces: HashMap<u32, std::collections::HashSet<u64>>,
     /// Incremental triangle-duplicate index (C5 follow-up #1, industrial
     /// perf): sorted vertex triple → face id of the first triangle with
     /// that key. Maintained by [`TriangleMesh::merge_deduplicating`]
@@ -118,6 +124,7 @@ impl VertexDedupMap {
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
             last_tol_hit: Cell::new(false),
+            vertex_faces: HashMap::new(),
             tri_keys: HashMap::new(),
             tri_keys_sync_len: 0,
         }
@@ -140,6 +147,7 @@ impl VertexDedupMap {
             tolerance_hits: Cell::new(0),
             misses: Cell::new(0),
             last_tol_hit: Cell::new(false),
+            vertex_faces: HashMap::new(),
             tri_keys: HashMap::new(),
             tri_keys_sync_len: 0,
         }
@@ -156,16 +164,74 @@ impl VertexDedupMap {
     /// First tries bit-exact match, then tolerance-based spatial lookup.
     /// Tracks hit statistics: exact_hits (bit-identical), tolerance_hits (near-miss).
     pub fn get(&self, p: &Point3d) -> Option<u32> {
+        self.get_impl(p, None)
+    }
+
+    /// session-56 face-aware lookup: like [`get`](Self::get), but the
+    /// tolerance path REFUSES candidates that are used by `exclude_face`
+    /// (the incoming face) unless they are within the FP-drift range
+    /// (1% of the tolerance, mirroring the weld pass2 exemption).
+    ///
+    /// Measured motivation (session-56, drill_top HOUSING_MIRROR): the
+    /// instance merge_tol = max(vertex_merge_tolerance, sewing_tol) can
+    /// EXCEED a face's own lattice step (f198–206 fillet tori: v-step
+    /// 6.98e-3 < merge_tol 7.57e-3). The tolerance path then welded each
+    /// lattice vertex into its own neighbor (~450 vertices per face,
+    /// TOLWELD distance histogram peak exactly at the 6.98e-3 step),
+    /// collapsing the lattice: 452 of 1259 triangles dropped, 101
+    /// same-face usage>=3 edges and 206 micro-slivers per face BEFORE
+    /// any repair stage — the long-sought root cause of the f198-family
+    /// baseline dirt and of the layout-independent complement-fill dirt
+    /// (legacy +255 / comb +255 / tower +190 NM per face).
+    ///
+    /// The bit-exact fast path is unaffected (bit-identical vertices are
+    /// the same point by definition — seam duplicates must still unify).
+    /// Cross-face tolerance welds are unaffected (rim near-misses between
+    /// different faces are the legitimate purpose of the tolerance path).
+    pub fn get_face_aware(&self, p: &Point3d, exclude_face: u64) -> Option<u32> {
+        self.get_impl(p, Some(exclude_face))
+    }
+
+    fn get_impl(&self, p: &Point3d, exclude_face: Option<u64>) -> Option<u32> {
         self.last_tol_hit.set(false);
-        // Fast path: bit-exact match
+        // Fast path: bit-exact match — never filtered by face: bit-identical
+        // positions are the same geometric point (edge-cache seam reuse).
         let key = VertexKey::from_point(p);
         if let Some(&idx) = self.exact.get(&key) {
             self.exact_hits.set(self.exact_hits.get() + 1);
             return Some(idx);
         }
 
+        // FP-drift exemption threshold for the same-face refusal: within
+        // 1% of the tolerance, a same-face match is treated as legitimate
+        // floating-point drift on a seam vertex (same semantics as the
+        // weld pass2_frac=0.01 exemption in watertight.rs).
+        let fp_drift_sq = if exclude_face.is_some() {
+            let t = 0.01 * self.tolerance;
+            t * t
+        } else {
+            0.0
+        };
+
         // Slow path: tolerance-based spatial lookup
         if self.use_tolerance {
+            // session-56: same-face candidate test for the face-aware mode.
+            // A candidate already used by the excluded (incoming) face is
+            // refused unless it is within the FP-drift range — this is what
+            // stops sub-tolerance lattices from collapsing into themselves.
+            let same_face_refused = |idx: u32, dist_sq: f64| -> bool {
+                match exclude_face {
+                    Some(fid) => {
+                        dist_sq > fp_drift_sq
+                            && self
+                                .vertex_faces
+                                .get(&idx)
+                                .map(|fs| fs.contains(&fid))
+                                .unwrap_or(false)
+                    }
+                    None => false,
+                }
+            };
             let cell = self.cell_key(p);
             if let Some(candidates) = self.spatial.get(&cell) {
                 let tol_sq = self.tolerance * self.tolerance;
@@ -173,7 +239,8 @@ impl VertexDedupMap {
                     let dx = p.x - vp.x;
                     let dy = p.y - vp.y;
                     let dz = p.z - vp.z;
-                    if dx * dx + dy * dy + dz * dz <= tol_sq {
+                    let dist_sq = dx * dx + dy * dy + dz * dz;
+                    if dist_sq <= tol_sq && !same_face_refused(idx, dist_sq) {
                         self.tolerance_hits.set(self.tolerance_hits.get() + 1);
                         self.last_tol_hit.set(true);
                         return Some(idx);
@@ -195,7 +262,8 @@ impl VertexDedupMap {
                                 let ddx = p.x - vp.x;
                                 let ddy = p.y - vp.y;
                                 let ddz = p.z - vp.z;
-                                if ddx * ddx + ddy * ddy + ddz * ddz <= tol_sq {
+                                let dist_sq = ddx * ddx + ddy * ddy + ddz * ddz;
+                                if dist_sq <= tol_sq && !same_face_refused(idx, dist_sq) {
                                     self.tolerance_hits.set(self.tolerance_hits.get() + 1);
                                     self.last_tol_hit.set(true);
                                     return Some(idx);
@@ -210,8 +278,29 @@ impl VertexDedupMap {
         None
     }
 
-    /// Insert a vertex with its index.
+    /// Insert a vertex with its index (face unknown — no face tracking;
+    /// face-aware lookups treat this vertex as owned by no face).
     pub fn insert(&mut self, p: &Point3d, idx: u32) {
+        self.insert_impl(p, idx, u64::MAX);
+    }
+
+    /// session-56: insert a vertex with its index and the face id that
+    /// owns it, enabling later [`get_face_aware`](Self::get_face_aware)
+    /// refusals against this vertex for that face.
+    pub fn insert_face(&mut self, p: &Point3d, idx: u32, fid: u64) {
+        self.insert_impl(p, idx, fid);
+    }
+
+    /// session-56: record that `fid` now uses vertex `idx` (called on the
+    /// reuse path of merge_deduplicating so shared vertices accumulate
+    /// the faces that use them).
+    pub fn record_face_use(&mut self, idx: u32, fid: u64) {
+        if fid != u64::MAX {
+            self.vertex_faces.entry(idx).or_default().insert(fid);
+        }
+    }
+
+    fn insert_impl(&mut self, p: &Point3d, idx: u32, fid: u64) {
         let key = VertexKey::from_point(p);
         self.exact.insert(key, idx);
         self.misses.set(self.misses.get() + 1);
@@ -219,6 +308,9 @@ impl VertexDedupMap {
         if self.use_tolerance {
             let cell = self.cell_key(p);
             self.spatial.entry(cell).or_default().push((idx, *p));
+        }
+        if fid != u64::MAX {
+            self.vertex_faces.entry(idx).or_default().insert(fid);
         }
     }
 
@@ -965,6 +1057,26 @@ impl TriangleMesh {
         let old_vertex_count = self.vertices.len();
         let _old_triangle_count = self.triangles.len();
 
+        // session-56: face-aware tolerance-dedup guard (default OFF —
+        // bit-identical default). When DRAPPER_MERGE_SAMEFACE_GUARD=1 and
+        // the incoming mesh carries per-triangle face ids, the tolerance
+        // path of VertexDedupMap refuses merges into vertices that the
+        // SAME face already uses (beyond the FP-drift exemption). This
+        // stops the measured sub-tolerance lattice collapse (drill HM
+        // f198–206: ~450 vertices/face welded into their own v-neighbors
+        // at exactly the 6.98e-3 lattice step, 452 triangles/face dropped
+        // at merge — the root cause of the family's baseline dirt and the
+        // layout-independent complement-fill dirt). Bit-exact reuse and
+        // cross-face near-miss welds are unchanged.
+        let sameface_guard =
+            std::env::var("DRAPPER_MERGE_SAMEFACE_GUARD").as_deref() == Ok("1");
+        let incoming_fid = other
+            .triangle_face_ids
+            .as_ref()
+            .and_then(|ids| ids.first().copied())
+            .unwrap_or(u64::MAX);
+        let face_aware = sameface_guard && incoming_fid != u64::MAX;
+
         // Build index remapping: other's local vertex index → global index
         let mut index_map: Vec<u32> = Vec::with_capacity(other.vertices.len());
         let mut reuse_count = 0usize;
@@ -974,7 +1086,12 @@ impl TriangleMesh {
         // checked ONCE per merge call — the per-vertex loop stays clean).
         let dump_tol_welds = std::env::var("DRAPPER_DUMP_WELDS").is_ok();
         for vertex in &other.vertices {
-            if let Some(existing_idx) = dedup_map.get(vertex) {
+            let lookup = if face_aware {
+                dedup_map.get_face_aware(vertex, incoming_fid)
+            } else {
+                dedup_map.get(vertex)
+            };
+            if let Some(existing_idx) = lookup {
                 // TEMPORARY DIAGNOSTIC (session-42): dump tolerance welds
                 if dump_tol_welds && dedup_map.last_get_was_tolerance() {
                     let q = self.vertices[existing_idx as usize];
@@ -988,13 +1105,20 @@ impl TriangleMesh {
                     );
                 }
                 // Vertex already exists — reuse its index
+                if face_aware {
+                    dedup_map.record_face_use(existing_idx, incoming_fid);
+                }
                 index_map.push(existing_idx);
                 reuse_count += 1;
             } else {
                 // New vertex — add to mesh and record in dedup map
                 let new_idx = self.vertices.len() as u32;
                 self.vertices.push(*vertex);
-                dedup_map.insert(vertex, new_idx);
+                if face_aware {
+                    dedup_map.insert_face(vertex, new_idx, incoming_fid);
+                } else {
+                    dedup_map.insert(vertex, new_idx);
+                }
                 index_map.push(new_idx);
                 new_count += 1;
             }
