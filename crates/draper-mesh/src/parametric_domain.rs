@@ -2199,6 +2199,18 @@ pub enum SteinerChainOrder {
     /// seam chords rim-hugging (start/end on the closure's rims).
     /// Experimental: `DRAPPER_STEINER_CHAIN=aniso`.
     Aniso,
+    /// session-55 brick TOWER: for full rectangular 3D-ANISOTROPIC
+    /// lattices, u-slabs of `DRAPPER_CHAIN_BRICK_CAP`+1 points (default
+    /// 3), each slab traversed as a boustrophedon along the other axis
+    /// with runs along the LOW-curvature axis. Every chain step = 1
+    /// lattice cell. The P2 complement becomes brick rows of <=2K+1
+    /// cells (sagitta ~10x under the s54 comb teeth) plus 1-cell zigzag
+    /// pillars at the slab boundaries (the known risk — measured).
+    /// Full 3D-ISOTROPIC lattices go Hamiltonian (3D-step gate, item-③:
+    /// f226 is 3D-iso at UV 1:5.9 and its legacy chain must not be
+    /// replaced by a tower); ragged lattices keep the s54 comb.
+    /// Experimental: `DRAPPER_STEINER_CHAIN=brick`.
+    Brick,
 }
 
 impl SteinerChainOrder {
@@ -2213,6 +2225,7 @@ impl SteinerChainOrder {
             Ok("off") | Ok("legacy") => None,
             Ok("serp") => Some(SteinerChainOrder::Serpentine),
             Ok("aniso") | Ok("comb") => Some(SteinerChainOrder::Aniso),
+            Ok("brick") | Ok("tower") => Some(SteinerChainOrder::Brick),
             Ok("ham") | Err(_) => Some(SteinerChainOrder::Hamiltonian),
             Ok(_) => Some(SteinerChainOrder::Hamiltonian),
         }
@@ -2246,12 +2259,28 @@ impl ChainLcg {
 /// within ~2 cells of the ring closure), every spike is local and the
 /// slit gap-fill (post-merge `fill_boundary_loops`) connects points one
 /// cell apart instead of spanning the domain.
+/// session-55: routing context for the brick mode — the caller-side
+/// pre-checks that the chain-order dispatcher needs:
+/// - `nurbs`: the surface is a NURBS patch (the comb's corner logic was
+///   derived on analytic fillet tori; the NURBS closures — rim chords
+///   up to 30x — break it, measured +77/+42 pairs on f49/f193);
+/// - `legacy_fill_ok`: the LEGACY chain's complement is eligible and
+///   expected clean (P2 ring simple + ribbon aspect <= threshold) —
+///   keep the legacy order so the clean fill applies (f226: bnd 534→0,
+///   NM 0 measured).
+#[derive(Clone, Copy)]
+struct ChainRoutingCtx {
+    nurbs: bool,
+    legacy_fill_ok: bool,
+}
+
 fn order_interior_steiner_chain(
     interior: &[Point2d],
     ring_end: &Point2d,
     ring_start: &Point2d,
     mode: SteinerChainOrder,
     aniso_axes: Option<(f64, f64)>,
+    chain_ctx: Option<ChainRoutingCtx>,
 ) -> Vec<Point2d> {
     let n = interior.len();
     if n < 4 {
@@ -2269,7 +2298,7 @@ fn order_interior_steiner_chain(
         SteinerChainOrder::Off => interior.to_vec(),
         SteinerChainOrder::Serpentine => serpentine_chain(interior, &attach),
         SteinerChainOrder::Hamiltonian => {
-            match hamiltonian_chain(interior, &attach) {
+            match hamiltonian_chain(interior, &attach, None) {
                 Some(path) => path,
                 // Anisotropic / ragged lattices: the legacy row-major
                 // structure folds LESS than both the serpentine and the
@@ -2282,7 +2311,7 @@ fn order_interior_steiner_chain(
             // Aniso = "Hamiltonian where it qualifies (isotropic full
             // lattices — bit-identical to the default), else the aniso
             // COMB instead of the legacy row-major fallback".
-            match hamiltonian_chain(interior, &attach) {
+            match hamiltonian_chain(interior, &attach, None) {
                 Some(path) => path,
                 None => match aniso_axes {
                     Some((u_step3d, v_step3d)) if u_step3d > 0.0 && v_step3d > 0.0 => {
@@ -2291,6 +2320,74 @@ fn order_interior_steiner_chain(
                     _ => interior.to_vec(),
                 },
             }
+        }
+        SteinerChainOrder::Brick => {
+            // session-55 MEASURED routing (worklog-55 §4), keyed off
+            // the caller's pre-checks (ChainRoutingCtx):
+            // 1. NURBS surfaces: the s51 default routing (UV-gate
+            //    Hamiltonian or legacy) — the comb's corner logic was
+            //    derived on analytic fillet tori and measurably breaks
+            //    on NURBS closures (f49 +77, f193 +42 pairs).
+            // 2. Legacy-fill-ELIGIBLE faces (P2 simple + aspect <= 40):
+            //    keep the LEGACY order so the clean complement applies
+            //    (f226: bnd 534→0, NM 0; f38/f42/f44/f102).
+            // 3. Full rectangular 3D-ANISOTROPIC lattices (the f198
+            //    family): LEGACY — the tower measured P1 +30 pairs/face
+            //    and its fill +190 NM/face (every layout dirty there;
+            //    the aspect gate skips their fill). The tower stays
+            //    reachable for experiments via DRAPPER_CHAIN_TOWER=1.
+            // 4. Full 3D-ISOTROPIC lattices, fill ineligible: the
+            //    Hamiltonian with the 3D-step gate (item-③; the drill
+            //    SHAFT −57 pairs measured).
+            // 5. Ragged analytic lattices: the s54 comb (the f199
+            //    family's clean fills: bnd −270/face at NM ≈ baseline).
+            let ctx = match chain_ctx {
+                Some(c) => c,
+                None => return interior.to_vec(),
+            };
+            if ctx.nurbs {
+                return match hamiltonian_chain(interior, &attach, None) {
+                    Some(path) => path,
+                    None => interior.to_vec(),
+                };
+            }
+            if ctx.legacy_fill_ok {
+                return interior.to_vec();
+            }
+            if let Some((u_step3d, v_step3d)) = aniso_axes {
+                if u_step3d > 0.0 && v_step3d > 0.0 {
+                    let ratio_3d = v_step3d / u_step3d;
+                    let full = lattice_is_full_rect(interior);
+                    if full && !(0.6..=1.67).contains(&ratio_3d) {
+                        if std::env::var("DRAPPER_CHAIN_TOWER").as_deref() == Ok("1") {
+                            if let Some(tower) = brick_tower_chain(
+                                interior,
+                                ring_end,
+                                ring_start,
+                                u_step3d,
+                                v_step3d,
+                            ) {
+                                return tower;
+                            }
+                        }
+                        return interior.to_vec();
+                    }
+                    if full {
+                        return match hamiltonian_chain(interior, &attach, Some(ratio_3d)) {
+                            Some(path) => path,
+                            None => interior.to_vec(),
+                        };
+                    }
+                    return aniso_comb_chain(
+                        interior,
+                        ring_end,
+                        ring_start,
+                        u_step3d,
+                        v_step3d,
+                    );
+                }
+            }
+            interior.to_vec()
         }
     }
 }
@@ -2389,6 +2486,410 @@ pub(crate) fn compute_axis_steps_3d(
     (med_of(u_dists), med_of(v_dists))
 }
 
+/// session-55: would the LEGACY chain's complement be eligible and
+/// expected clean? P2 ring simple + ribbon aspect <= the gate
+/// threshold (DRAPPER_CHAIN_COMPLEMENT_MAXASPECT, default 40). Used by
+/// the brick mode's routing: eligible faces keep the legacy order so
+/// the clean fill applies (f226: bnd 534→0, NM 0 measured); the
+/// ineligible 3D-iso full lattices take the Hamiltonian instead (the
+/// drill SHAFT −57 pairs measured) and the ragged analytic ones the
+/// comb (the f199 family's clean fills).
+fn legacy_p2_fill_eligible(
+    interior: &[Point2d],
+    ring_end: &Point2d,
+    ring_start: &Point2d,
+    surface: &Surface,
+    axes: Option<(f64, f64)>,
+) -> bool {
+    if interior.len() < 4 {
+        return false;
+    }
+    // P2 ring = [ring_start, interior reversed, ring_end] (the no-hole
+    // form; holed faces are rare with interior chains and the full
+    // guard re-checks at fill time anyway).
+    let mut ring: Vec<Point2d> = Vec::with_capacity(interior.len() + 2);
+    ring.push(*ring_start);
+    ring.extend(interior.iter().rev());
+    ring.push(*ring_end);
+    if check_uv_polygon_self_intersection(&ring) {
+        return false;
+    }
+    if polygon_area_2d(&ring).abs() < 1e-12 {
+        return false;
+    }
+    let (u3, v3) = match axes {
+        Some(a) => a,
+        None => return false,
+    };
+    if u3 <= 0.0 || v3 <= 0.0 {
+        return false;
+    }
+    let max_aspect: f64 = std::env::var("DRAPPER_CHAIN_COMPLEMENT_MAXASPECT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(40.0);
+    if max_aspect <= 0.0 {
+        return true; // aspect gate disabled: P2-simple is the criterion
+    }
+    // lattice clusters for the UV steps
+    let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
+        let mut vals: Vec<f64> = interior.iter().map(get).collect();
+        if vals.is_empty() {
+            return vals;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span.abs() * 1e-9).max(1e-12);
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u);
+    let vs = cluster_axis(|p| p.v);
+    if us.len() < 2 || vs.len() < 2 {
+        return false;
+    }
+    let u_step_uv = (us[us.len() - 1] - us[0]) / (us.len() - 1) as f64;
+    let v_step_uv = (vs[vs.len() - 1] - vs[0]) / (vs.len() - 1) as f64;
+    if u_step_uv <= 0.0 || v_step_uv <= 0.0 {
+        return false;
+    }
+    let runs_along_u = (u3 / u_step_uv) >= (v3 / v_step_uv);
+    // 3D length of the legacy chain (through the surface)
+    let ev = |p: &Point2d| -> Point3d {
+        if let Surface::Nurbs(ref nurbs) = surface {
+            deterministic_round_point(nurbs.derivatives_at(p.u, p.v).point)
+        } else {
+            deterministic_round_point(surface.point_at(p.u, p.v))
+        }
+    };
+    let mut chain_len_3d = 0.0f64;
+    for w in interior.windows(2) {
+        let a = ev(&w[0]);
+        let b = ev(&w[1]);
+        let dx = a.x - b.x;
+        let dy = a.y - b.y;
+        let dz = a.z - b.z;
+        chain_len_3d += (dx * dx + dy * dy + dz * dz).sqrt();
+    }
+    if chain_len_3d <= 0.0 {
+        return false;
+    }
+    // run counting: a run ends at every turn step (perpendicular
+    // delta or a >1.5-cell run-axis jump)
+    let n_runs = 1 + interior
+        .windows(2)
+        .filter(|w| {
+            let du = (w[1].u - w[0].u).abs();
+            let dv = (w[1].v - w[0].v).abs();
+            if runs_along_u {
+                dv > 0.5 * v_step_uv || du > 1.5 * u_step_uv
+            } else {
+                du > 0.5 * u_step_uv || dv > 1.5 * v_step_uv
+            }
+        })
+        .count();
+    let width3d = if runs_along_u { v3 } else { u3 };
+    let run_len = chain_len_3d / n_runs as f64;
+    let aspect = run_len / width3d;
+    aspect <= max_aspect
+}
+
+/// session-55: is the interior point set a FULL rectangular lattice
+/// (every distinct-u × distinct-v combination present)? Extracted from
+/// `brick_tower_chain`'s admission check — the routing (legacy vs comb
+/// vs tower) keys off it.
+fn lattice_is_full_rect(interior: &[Point2d]) -> bool {
+    let n = interior.len();
+    if n < 16 {
+        return false;
+    }
+    let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
+        let mut vals: Vec<f64> = interior.iter().map(get).collect();
+        if vals.is_empty() {
+            return vals;
+        }
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span.abs() * 1e-9).max(1e-12);
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u);
+    let vs = cluster_axis(|p| p.v);
+    let (n_u, n_v) = (us.len(), vs.len());
+    if n_u < 4 || n_v < 4 || n_u * n_v != n {
+        return false;
+    }
+    let u_tol = ((us[n_u - 1] - us[0]).abs() * 1e-9).max(1e-12);
+    let v_tol = ((vs[n_v - 1] - vs[0]).abs() * 1e-9).max(1e-12);
+    let mut grid_seen = vec![false; n_u * n_v];
+    for p in interior {
+        let cu = match us.iter().position(|&x| (x - p.u).abs() <= u_tol) {
+            Some(c) => c,
+            None => return false,
+        };
+        let cv = match vs.iter().position(|&y| (y - p.v).abs() <= v_tol) {
+            Some(c) => c,
+            None => return false,
+        };
+        grid_seen[cv * n_u + cu] = true;
+    }
+    grid_seen.iter().all(|&s| s)
+}
+
+/// session-55: brick TOWER chain for full rectangular 3D-anisotropic
+/// lattices (the drill HM f198 family: Torus R=4.0 r=0.1, 23x23, 3D
+/// aniso 3.4:1, UV 1:12).
+///
+/// Layout (validated in scripts/brick_proto.py on f198: P1 ∧ P2 simple,
+/// all chain steps = 1 lattice cell): the run axis = the LOW-curvature
+/// axis (larger effective radius step3d/step_uv, the s54 comb v3
+/// rule); the run axis is partitioned into slabs of
+/// `DRAPPER_CHAIN_BRICK_CAP` cells (+1 points, default 3); each slab
+/// is traversed as a boustrophedon over the perpendicular axis; slab
+/// transitions are 1-column steps at the alternating traversal ends.
+///
+/// P2 complement shape: brick rows of <=2K+1 cells along the run axis
+/// (f198: 7 cells = 0.165mm, sagitta 8.3e-4 — 10x under the s54 comb
+/// teeth's 8.2e-3) plus 1-cell-wide zigzag pillars at the slab
+/// boundaries running the full perpendicular span (f198: 22 cells
+/// along the tube r=0.1 — the known risk, the v2 column-comb failure
+/// mode; measured in the session-55 gate).
+///
+/// The start corner follows the s54 comb's chord-axis rule (s_0 far
+/// along c0's displacement axis, near along the other); the end corner
+/// lands by slab/row parity (both parities measured simple on f198).
+/// Returns None on ragged lattices, mid-rim closures, or
+/// non-rectangular grids — the caller falls back to the s54 comb.
+fn brick_tower_chain(
+    interior: &[Point2d],
+    ring_end: &Point2d,
+    ring_start: &Point2d,
+    u_step3d: f64,
+    v_step3d: f64,
+) -> Option<Vec<Point2d>> {
+    let n = interior.len();
+    if n < 16 {
+        return None;
+    }
+    // ── Lattice clustering + full-rectangular check ───────────────
+    let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
+        let mut vals: Vec<f64> = interior.iter().map(get).collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span.abs() * 1e-9).max(1e-12);
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u);
+    let vs = cluster_axis(|p| p.v);
+    let (n_u, n_v) = (us.len(), vs.len());
+    if n_u < 4 || n_v < 4 || n_u * n_v != n {
+        return None; // full rectangular lattice required
+    }
+    let u_tol = ((us[n_u - 1] - us[0]).abs() * 1e-9).max(1e-12);
+    let v_tol = ((vs[n_v - 1] - vs[0]).abs() * 1e-9).max(1e-12);
+    let mut grid_seen = vec![false; n_u * n_v];
+    for p in interior {
+        let cu = us.iter().position(|&x| (x - p.u).abs() <= u_tol)?;
+        let cv = vs.iter().position(|&y| (y - p.v).abs() <= v_tol)?;
+        grid_seen[cv * n_u + cu] = true;
+    }
+    if !grid_seen.iter().all(|&s| s) {
+        return None;
+    }
+
+    // ── Closure corner + chord axes (the s54 comb rules) ──────────
+    let u_lo = us[0];
+    let u_hi = us[n_u - 1];
+    let v_lo = vs[0];
+    let v_hi = vs[n_v - 1];
+    let mid_u = (ring_end.u + ring_start.u) * 0.5;
+    let mid_v = (ring_end.v + ring_start.v) * 0.5;
+    let corner_u = if mid_u >= (u_lo + u_hi) * 0.5 {
+        ring_end.u.max(ring_start.u)
+    } else {
+        ring_end.u.min(ring_start.u)
+    };
+    let corner_v = if mid_v >= (v_lo + v_hi) * 0.5 {
+        ring_end.v.max(ring_start.v)
+    } else {
+        ring_end.v.min(ring_start.v)
+    };
+    let u_step_uv = (u_hi - u_lo) / (n_u - 1) as f64;
+    let v_step_uv = (v_hi - v_lo) / (n_v - 1) as f64;
+    let re_disp_u = (ring_end.u - corner_u).abs() > 0.25 * u_step_uv;
+    let re_disp_v = (ring_end.v - corner_v).abs() > 0.25 * v_step_uv;
+    let rs_disp_u = (ring_start.u - corner_u).abs() > 0.25 * u_step_uv;
+    let rs_disp_v = (ring_start.v - corner_v).abs() > 0.25 * v_step_uv;
+    let re_at_corner = !re_disp_u && !re_disp_v;
+    let rs_at_corner = !rs_disp_u && !rs_disp_v;
+    if !re_at_corner && !rs_at_corner {
+        // Mid-rim closure — no chord pair avoids crossing the comb;
+        // the s54 comb (same rule) keeps the legacy order there.
+        return None;
+    }
+    let (c0_axis_u, _c1_axis_u) = if rs_at_corner && !re_at_corner {
+        let disp_u = (ring_end.u - corner_u).abs() >= (ring_end.v - corner_v).abs();
+        (disp_u, !disp_u)
+    } else if re_at_corner && !rs_at_corner {
+        let disp_u = (ring_start.u - corner_u).abs() >= (ring_start.v - corner_v).abs();
+        (!disp_u, disp_u)
+    } else {
+        (true, false)
+    };
+    let su_hi = mid_u >= (u_lo + u_hi) * 0.5;
+    let sv_hi = mid_v >= (v_lo + v_hi) * 0.5;
+    // s_0: far along c0's axis, near along the other (the comb rule).
+    let s0 = if c0_axis_u {
+        Point2d::new(
+            if su_hi { u_lo } else { u_hi },
+            if sv_hi { v_hi } else { v_lo },
+        )
+    } else {
+        Point2d::new(
+            if su_hi { u_hi } else { u_lo },
+            if sv_hi { v_lo } else { v_hi },
+        )
+    };
+
+    // ── Run axis = larger effective radius (low curvature) ────────
+    let u_radius = if u_step_uv > 0.0 {
+        u_step3d / u_step_uv
+    } else {
+        f64::INFINITY
+    };
+    let v_radius = if v_step_uv > 0.0 {
+        v_step3d / v_step_uv
+    } else {
+        f64::INFINITY
+    };
+    let runs_along_v = v_radius > u_radius;
+
+    // ── Swapped space: runs along x.u, boustrophedon over x.v ─────
+    let swap = |p: &Point2d| Point2d::new(p.v, p.u);
+    let (xs_us, xs_vs, xs_nu, xs_nv) = if runs_along_v {
+        (vs.clone(), us.clone(), n_v, n_u)
+    } else {
+        (us.clone(), vs.clone(), n_u, n_v)
+    };
+    let s0x = if runs_along_v { swap(&s0) } else { s0 };
+    let s0_iu = xs_us.iter().position(|&x| (x - s0x.u).abs() <= u_tol.max(v_tol))?;
+    let s0_iv = xs_vs.iter().position(|&y| (y - s0x.v).abs() <= u_tol.max(v_tol))?;
+    if s0_iu != 0 && s0_iu != xs_nu - 1 {
+        return None; // s_0 must sit at a run-axis extreme (corner)
+    }
+    if s0_iv != 0 && s0_iv != xs_nv - 1 {
+        return None; // ... and at a perpendicular extreme
+    }
+
+    // ── Slabs of cap cells along the run axis ─────────────────────
+    let cap_cells: usize = std::env::var("DRAPPER_CHAIN_BRICK_CAP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .filter(|&k| k > 0)
+        .unwrap_or(3);
+    let cap = cap_cells.min(xs_nu - 1); // in cells; slabs hold cap+1 pts
+    let mut slabs: Vec<(usize, usize)> = Vec::new();
+    let mut a = 0usize;
+    while a < xs_nu {
+        let b = (a + cap).min(xs_nu - 1);
+        slabs.push((a, b));
+        a = b + 1;
+    }
+    if slabs.len() < 2 {
+        return None; // degenerate: the s54 comb already covers this
+    }
+
+    // Slab order: monotone from s_0's side toward the far end.
+    let first_slab = slabs
+        .iter()
+        .position(|&(a, b)| s0_iu >= a && s0_iu <= b)
+        .unwrap_or(0);
+    let ascending = first_slab == 0;
+    let order: Vec<usize> = if ascending {
+        (0..slabs.len()).collect()
+    } else {
+        (0..slabs.len()).rev().collect()
+    };
+
+    // Traversal: first slab starts at s_0 (its run-axis extreme column
+    // and perpendicular extreme row); each next slab continues from the
+    // previous exit with flipped perpendicular direction; runs inside a
+    // slab alternate direction row by row.
+    let mut out: Vec<Point2d> = Vec::with_capacity(n);
+    let mut go_up = s0_iv == 0;
+    let mut prev: Option<(usize, usize)> = None; // previous slab (a, b)
+    for &si in order.iter() {
+        let (a, b) = slabs[si];
+        let mut entry: Option<usize> = None;
+        if prev.is_none() {
+            entry = Some(s0_iu);
+        }
+        let rows: Vec<usize> = if go_up {
+            (0..xs_nv).collect()
+        } else {
+            (0..xs_nv).rev().collect()
+        };
+        for row in rows {
+            let e = match entry {
+                Some(e) => e,
+                None => {
+                    // first row of a later slab: enter from the column
+                    // adjacent to the previous slab's exit
+                    match prev {
+                        Some(p) if a == p.1 + 1 => a,
+                        Some(p) if b == p.0 - 1 => b,
+                        _ => return None,
+                    }
+                }
+            };
+            let (run_start, run_end) = if e == a {
+                (a, b)
+            } else if e == b {
+                (b, a)
+            } else {
+                return None;
+            };
+            let step = if run_start <= run_end { 1 } else { -1 };
+            let mut c = run_start as isize;
+            while c != run_end as isize + step {
+                out.push(if runs_along_v {
+                    swap(&Point2d::new(xs_vs[row], xs_us[c as usize]))
+                } else {
+                    Point2d::new(xs_us[c as usize], xs_vs[row])
+                });
+                c += step;
+            }
+            entry = Some(run_end);
+        }
+        prev = Some((a, b));
+        go_up = !go_up;
+    }
+    if out.len() != n {
+        return None;
+    }
+    Some(out)
+}
+
 /// session-54 anisotropic COMB chain.
 ///
 /// Measured root cause of the dirty complement fills (worklog-53 §2 +
@@ -2419,6 +2920,9 @@ pub(crate) fn compute_axis_steps_3d(
 /// chord) or on the closure-adjacent corner (even — a short chord);
 /// both pass the simplicity guards. Mid-rim closures (no vertex at a
 /// corner) keep the legacy order — their chords cross any comb.
+/// session-55: kept for ragged lattices (f199 family) and as the
+/// aniso mode's chain; the brick mode prefers the tower on full
+/// rectangular 3D-anisotropic grids.
 fn aniso_comb_chain(
     interior: &[Point2d],
     ring_end: &Point2d,
@@ -2681,7 +3185,11 @@ fn serpentine_chain(interior: &[Point2d], attach: &Point2d) -> Vec<Point2d> {
 /// Hamiltonian path over the Steiner grid graph (adjacency = nearest
 /// lattice neighbors), endpoints near `attach` and within 2 hops of
 /// each other. Deterministic LCG; bounded work; None on failure.
-fn hamiltonian_chain(interior: &[Point2d], attach: &Point2d) -> Option<Vec<Point2d>> {
+fn hamiltonian_chain(
+    interior: &[Point2d],
+    attach: &Point2d,
+    iso_ratio_3d: Option<f64>,
+) -> Option<Vec<Point2d>> {
     let n = interior.len();
     // Bounded work: the search is O(attempts × steps). For big sets the
     // serpentine fallback is good enough — cap Hamiltonian at 1600 pts.
@@ -2774,7 +3282,16 @@ fn hamiltonian_chain(interior: &[Point2d], attach: &Point2d) -> Option<Vec<Point
     // are the right structure there; reserve the Hamiltonian for
     // near-isotropic grids where it eliminated the seam fans entirely
     // (f245: emission 284→46).
-    let ratio = v_step / u_step;
+    //
+    // session-55 item-③: in the brick mode the gate uses the 3D step
+    // ratio when provided (compute_axis_steps_3d) — UV steps
+    // misclassify compressed parameterizations (f226: 3D-iso 1.46 at
+    // UV 1:5.9 — it belongs in the Hamiltonian, not in a tower/comb).
+    // The default (no 3D ratio) keeps the s51 UV gate bit-identically.
+    let ratio = match iso_ratio_3d {
+        Some(r3) if r3.is_finite() && r3 > 0.0 => r3,
+        _ => v_step / u_step,
+    };
     if !(0.6..=1.67).contains(&ratio) {
         return None;
     }
@@ -6491,9 +7008,13 @@ pub fn triangulate_surface_consistent(
             // step per axis (through the surface) to pick the run
             // direction — UV steps misclassify compressed
             // parameterizations (f226 is 3D-isotropic at UV 1:5.9).
-            // Computed lazily: only in the experimental aniso mode.
-            let aniso_axes = if mode == SteinerChainOrder::Aniso
-                && !interior_uv_points.is_empty()
+            // session-55: the brick mode needs the same axes for the
+            // tower's run orientation and the 3D isotropy gate.
+            // Computed lazily: only in the experimental modes.
+            let aniso_axes = if matches!(
+                mode,
+                SteinerChainOrder::Aniso | SteinerChainOrder::Brick
+            ) && !interior_uv_points.is_empty()
             {
                 let (u3, v3) =
                     compute_axis_steps_3d(&interior_uv_points, surface);
@@ -6505,12 +7026,35 @@ pub fn triangulate_surface_consistent(
             } else {
                 None
             };
+            // session-55: the brick mode's routing pre-checks — the
+            // NURBS flag (the comb breaks on NURBS closures) and the
+            // legacy fill eligibility (P2 simple + aspect <= gate).
+            let chain_ctx = if mode == SteinerChainOrder::Brick
+                && !interior_uv_points.is_empty()
+            {
+                let nurbs = matches!(surface, Surface::Nurbs(_));
+                let legacy_fill_ok = !nurbs
+                    && legacy_p2_fill_eligible(
+                        &interior_uv_points,
+                        &ring_end,
+                        &ring_start,
+                        surface,
+                        aniso_axes,
+                    );
+                Some(ChainRoutingCtx {
+                    nurbs,
+                    legacy_fill_ok,
+                })
+            } else {
+                None
+            };
             order_interior_steiner_chain(
                 &interior_uv_points,
                 &ring_end,
                 &ring_start,
                 mode,
                 aniso_axes,
+                chain_ctx,
             )
         } else {
             interior_uv_points
@@ -6820,6 +7364,93 @@ pub fn triangulate_surface_consistent(
                                     rl_uv.u, rl_uv.v,
                                     rs_uv.u, rs_uv.v,
                                 );
+                                // ── session-55: P2 ribbon ASPECT gate ──
+                                // The s54 clean/dirty map: the measured
+                                // discriminator is the P2 ribbon ASPECT
+                                // (straight run length / ribbon width):
+                                // f198-family comb teeth 75:1 → +255 NM
+                                // each; f199 21:1 and f226 15:1 → clean.
+                                // Skips the second pass when the
+                                // estimated aspect exceeds the threshold
+                                // (DRAPPER_CHAIN_COMPLEMENT_MAXASPECT,
+                                // default 40, 0 = off). The run length
+                                // uses the ACTUAL chain structure
+                                // (chain_len_3d / n_runs, a run ending at
+                                // every turn step), so the brick tower's
+                                // short slab runs pass while full-span
+                                // comb teeth fail.
+                                let max_aspect: f64 = std::env::var(
+                                    "DRAPPER_CHAIN_COMPLEMENT_MAXASPECT",
+                                )
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(40.0);
+                                if max_aspect > 0.0 && chain_len_3d > 0.0 {
+                                    let u_step_uv_g = if n_u_lat > 1 {
+                                        (u_hi - u_lo) / (n_u_lat - 1) as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    let v_step_uv_g = if n_v_lat > 1 {
+                                        (v_hi - v_lo) / (n_v_lat - 1) as f64
+                                    } else {
+                                        0.0
+                                    };
+                                    // session-55 fix: the axis steps MUST
+                                    // be the LATTICE medians
+                                    // (compute_axis_steps_3d), not the
+                                    // chain-step classification — legacy
+                                    // row-major chains have NO pure v-steps
+                                    // (row transitions are diagonal jumps
+                                    // classified u), so med_v3 = 0 silently
+                                    // disabled this gate and the f198
+                                    // family filled dirty (+255 NM, the
+                                    // exact s53 signature).
+                                    let (lat_u3, lat_v3) =
+                                        compute_axis_steps_3d(&interior_uv_points, surface);
+                                    if u_step_uv_g > 0.0
+                                        && v_step_uv_g > 0.0
+                                        && lat_u3 > 0.0
+                                        && lat_v3 > 0.0
+                                    {
+                                        // run axis = larger effective radius
+                                        let runs_along_u = (lat_u3 / u_step_uv_g)
+                                            >= (lat_v3 / v_step_uv_g);
+                                        let n_runs = 1 + interior_uv_points
+                                            .windows(2)
+                                            .filter(|w| {
+                                                let du = (w[1].u - w[0].u).abs();
+                                                let dv = (w[1].v - w[0].v).abs();
+                                                if runs_along_u {
+                                                    dv > 0.5 * v_step_uv_g
+                                                        || du > 1.5 * u_step_uv_g
+                                                } else {
+                                                    du > 0.5 * u_step_uv_g
+                                                        || dv > 1.5 * v_step_uv_g
+                                                }
+                                            })
+                                            .count();
+                                        let width3d = if runs_along_u {
+                                            lat_v3
+                                        } else {
+                                            lat_u3
+                                        };
+                                        let run_len =
+                                            chain_len_3d / n_runs as f64;
+                                        let aspect = if width3d > 0.0 {
+                                            run_len / width3d
+                                        } else {
+                                            0.0
+                                        };
+                                        if aspect > max_aspect {
+                                            chord_gate_skip = true;
+                                            log::warn!(
+                                                "[f{}] spike-chain complement: ribbon aspect {:.1}:1 (run_len={:.3e} width={:.3e} n_runs={}) > {:.0} — skipping second pass",
+                                                flabel, aspect, run_len, width3d, n_runs, max_aspect,
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
