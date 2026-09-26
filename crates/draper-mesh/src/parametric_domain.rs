@@ -6960,6 +6960,29 @@ pub fn triangulate_surface_consistent(
     }
 
     // ============================================================
+    // Step 3.98 (session-58, DRAPPER_GRID_BAND=1, default OFF):
+    // direct grid + local-band triangulation for analytic faces with
+    // a CONVEX rim and a FULL-RECT interior lattice — kills the
+    // self-intersecting spike-chain ring (dive-in edge crossing the
+    // whole domain → earcutr corner fans + monster ears → same-side
+    // fold-over pairs). Falls through to the legacy path unchanged
+    // when not eligible or when the construction invariants fail.
+    // ============================================================
+    if normalized_holes_uv_capped.iter().all(|h| h.len() < 3) {
+        if let Some(mesh) = try_grid_band_triangulate(
+            surface,
+            &outer_uv,
+            &boundary_points_3d,
+            &interior_uv_points,
+            forward,
+            &params,
+            &domain,
+        ) {
+            return mesh;
+        }
+    }
+
+    // ============================================================
     // Step 4: Build earcutr input with ALL points
     //
     // KEY: interior points are inserted via a proper CDT (Bowyer-Watson
@@ -8066,6 +8089,403 @@ pub fn triangulate_surface_consistent(
     }
 
     mesh
+}
+
+// ============================================================
+// Session-58: grid + local-band triangulation (env-gated)
+// ============================================================
+
+/// Direct structured triangulation for analytic faces whose UV rim is
+/// CONVEX and whose interior Steiner points form a FULL rectangular
+/// lattice. Env-gated (`DRAPPER_GRID_BAND=1`, default OFF — the legacy
+/// spike-chain path is bit-frozen).
+///
+/// WHY: the legacy path appends the interior lattice to the earcutr
+/// ring as a spike chain. On anisotropic ribbon lattices (e.g. drill
+/// SHAFT f20/f23 half-torus: 23×23 over u∈[-π,0]×v-[arc 1.17]) the
+/// row-major chain's dive-in edge (ring end → first lattice point)
+/// crosses the whole domain: the 653-gon is SELF-INTERSECTING (43
+/// proper crossings measured, session-58), earcutr answers with corner
+/// fans + cross-strip monster ears (460/651 triangles with u-span > 4
+/// lattice steps), and after chord-error refinement the face carries
+/// ~2895 same-side fold-over pairs (FACEFOLD ovTot 5.2e-1 per merge).
+///
+/// CONSTRUCTION (single coverage by design — no earcutr at all):
+///  1. lattice cells → 2 CCW triangles each (n_u-1)(n_v-1)·2;
+///  2. the rim↔lattice band → angular zipper between the convex rim
+///     ring and the lattice perimeter ring (both CCW, both star-shaped
+///     around the lattice-rect center): merge by polar angle, one
+///     triangle per advanced vertex (session-43/47 zipper lineage);
+///     every emitted triangle is local (rim edge ↔ nearby perimeter
+///     point), so no fans and no domain-spanning ears are possible;
+///  3. chord-error refinement identical to Step 6.
+///
+/// CONTRACTS:
+///  - rim vertices use the cached 3D positions (bit-identical with
+///    neighbouring faces — watertight by construction);
+///  - every positive-length rim edge is consumed exactly once;
+///  - every lattice perimeter edge is consumed exactly twice (grid +
+///    band) — validated before returning; on ANY invariant failure the
+///    function returns None and the caller falls through to the legacy
+///    path unchanged (never-worsen).
+///
+/// Returns `None` when the face is not eligible (non-analytic surface,
+/// holes, non-convex/CW ring, non-full-rect lattice, <2×2).
+#[allow(clippy::too_many_arguments)]
+fn try_grid_band_triangulate(
+    surface: &Surface,
+    outer_uv: &[Point2d],
+    boundary_points_3d: &[Point3d],
+    interior_uv_points: &[Point2d],
+    forward: bool,
+    params: &crate::triangulate::TriangulationParams,
+    domain: &ParametricDomain,
+) -> Option<TriangleMesh> {
+    // ── gate 0: env (default OFF) ─────────────────────────────────
+    if std::env::var("DRAPPER_GRID_BAND").as_deref() != Ok("1") {
+        return None;
+    }
+    // ── gate 1: analytic surfaces only (NURBS shared-grid Steiner
+    //    contracts are out of scope for V1) ────────────────────────
+    if !matches!(
+        surface,
+        Surface::Cylinder(_) | Surface::Cone(_) | Surface::Sphere(_) | Surface::Torus(_)
+    ) {
+        return None;
+    }
+    // ── gate 2: sizes ─────────────────────────────────────────────
+    let n_b = outer_uv.len();
+    if n_b < 4 || boundary_points_3d.len() != n_b || interior_uv_points.len() < 4 {
+        return None;
+    }
+
+    // ── gate 3: rim convex + CCW (collinear runs allowed) ─────────
+    let (mut u_lo, mut u_hi, mut v_lo, mut v_hi) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in outer_uv {
+        u_lo = u_lo.min(p.u);
+        u_hi = u_hi.max(p.u);
+        v_lo = v_lo.min(p.v);
+        v_hi = v_hi.max(p.v);
+    }
+    let diag2 = (u_hi - u_lo).powi(2) + (v_hi - v_lo).powi(2);
+    let eps = -1e-12 * diag2.max(1.0);
+    let cr2 = |o: &Point2d, a: &Point2d, b: &Point2d| {
+        (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u)
+    };
+    let mut ring_area2 = 0.0f64;
+    for i in 0..n_b {
+        let a = &outer_uv[i];
+        let b = &outer_uv[(i + 1) % n_b];
+        ring_area2 += a.u * b.v - b.u * a.v;
+        let c = &outer_uv[(i + 2) % n_b];
+        if cr2(a, b, c) < eps {
+            return None; // reflex vertex or CW winding → not eligible
+        }
+    }
+    if ring_area2 <= 0.0 {
+        return None; // CW ring (safety; Step 1.25 normalizes to CCW)
+    }
+
+    // ── gate 4: interior lattice is a FULL rectangular grid ───────
+    let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
+        let mut vals: Vec<f64> = interior_uv_points.iter().map(get).collect();
+        vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let span = vals[vals.len() - 1] - vals[0];
+        let tol = (span * 1e-9).max(1e-12);
+        let mut uniq: Vec<f64> = Vec::with_capacity(vals.len());
+        uniq.push(vals[0]);
+        for w in vals.windows(2) {
+            if (w[1] - w[0]).abs() > tol {
+                uniq.push(w[1]);
+            }
+        }
+        uniq
+    };
+    let us = cluster_axis(|p| p.u);
+    let vs = cluster_axis(|p| p.v);
+    let (n_u, n_v) = (us.len(), vs.len());
+    if n_u < 2 || n_v < 2 || n_u * n_v != interior_uv_points.len() {
+        return None;
+    }
+    let u_tol = ((us[n_u - 1] - us[0]) * 1e-9).max(1e-12);
+    let v_tol = ((vs[n_v - 1] - vs[0]) * 1e-9).max(1e-12);
+    let find_cluster = |vals: &[f64], x: f64, tol: f64| -> Option<usize> {
+        let k = match vals
+            .binary_search_by(|&v| v.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal))
+        {
+            Ok(i) => return Some(i),
+            Err(i) => i,
+        };
+        let d_prev = if k > 0 { (vals[k - 1] - x).abs() } else { f64::MAX };
+        let d_next = if k < vals.len() { (vals[k] - x).abs() } else { f64::MAX };
+        if d_prev <= tol && d_prev <= d_next {
+            Some(k - 1)
+        } else if d_next <= tol {
+            Some(k)
+        } else {
+            None
+        }
+    };
+    // grid[r * n_u + c] = index of the lattice point at (u=us[c], v=vs[r])
+    let mut grid = vec![usize::MAX; n_u * n_v];
+    for (pi, p) in interior_uv_points.iter().enumerate() {
+        let c = find_cluster(&us, p.u, u_tol)?;
+        let r = find_cluster(&vs, p.v, v_tol)?;
+        if grid[r * n_u + c] != usize::MAX {
+            return None; // cluster collision — not a clean grid
+        }
+        grid[r * n_u + c] = pi;
+    }
+
+    // ── vertices: [rim (cached 3D)] + [lattice (point_at)] ────────
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_uvs: Vec<Point2d> = Vec::with_capacity(n_b + interior_uv_points.len());
+    let mut is_boundary_vertex: Vec<bool> = Vec::with_capacity(n_b + interior_uv_points.len());
+    for (i, uv) in outer_uv.iter().enumerate() {
+        let p3d = boundary_points_3d[i];
+        let n = surface.normal_at(uv.u, uv.v);
+        let n = if forward {
+            n
+        } else {
+            draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+        };
+        let vi = mesh.add_vertex(p3d);
+        mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+        vertex_uvs.push(*uv);
+        is_boundary_vertex.push(true);
+    }
+    for uv in interior_uv_points.iter() {
+        let p3d = deterministic_round_point(surface.point_at(uv.u, uv.v));
+        let n = surface.normal_at(uv.u, uv.v);
+        let n = if forward {
+            n
+        } else {
+            draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+        };
+        let vi = mesh.add_vertex(p3d);
+        mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+        vertex_uvs.push(*uv);
+        is_boundary_vertex.push(false);
+    }
+    // mesh vertex index of lattice point grid[r][c]:
+    let g = |r: usize, c: usize| -> usize { n_b + grid[r * n_u + c] };
+
+    // ── triangles (CCW in UV; mirrored for !forward at emit) ──────
+    let mut raw_tris: Vec<(usize, usize, usize)> = Vec::with_capacity(
+        (n_u - 1) * (n_v - 1) * 2 + n_b + 2 * (n_u + n_v),
+    );
+    // 1) grid cells
+    for r in 0..n_v - 1 {
+        for c in 0..n_u - 1 {
+            let p00 = g(r, c);
+            let p10 = g(r, c + 1);
+            let p11 = g(r + 1, c + 1);
+            let p01 = g(r + 1, c);
+            raw_tris.push((p00, p10, p11));
+            raw_tris.push((p00, p11, p01));
+        }
+    }
+    // 2) lattice perimeter ring (CCW): bottom row, right col, top row
+    //    reversed, left col reversed
+    let mut perim: Vec<usize> = Vec::with_capacity(2 * n_u + 2 * n_v);
+    for c in 0..n_u {
+        perim.push(g(0, c));
+    }
+    for r in 1..n_v {
+        perim.push(g(r, n_u - 1));
+    }
+    for c in (0..n_u - 1).rev() {
+        perim.push(g(n_v - 1, c));
+    }
+    for r in (1..n_v - 1).rev() {
+        perim.push(g(r, 0));
+    }
+    let n_p = perim.len();
+
+    // 3) angular zipper between the rim ring and the lattice
+    //    perimeter ring, both CCW and star-shaped around the lattice
+    //    rect center O.
+    let o_u = 0.5 * (us[0] + us[n_u - 1]);
+    let o_v = 0.5 * (vs[0] + vs[n_v - 1]);
+    let angle = |p: &Point2d| -> f64 { (p.v - o_v).atan2(p.u - o_u) }
+    // note: atan2 in (-π, π]; both rings start at their angle-minimum
+    // vertex so the sequences are non-decreasing;
+    ;
+    let start_min = |pts: &[Point2d]| -> usize {
+        let mut best = 0usize;
+        let mut best_a = f64::MAX;
+        for (i, p) in pts.iter().enumerate() {
+            let a = angle(p);
+            if a < best_a {
+                best_a = a;
+                best = i;
+            }
+        }
+        best
+    };
+    let rim0 = start_min(outer_uv);
+    let rim_idx: Vec<usize> = (0..n_b).map(|k| (rim0 + k) % n_b).collect();
+    let perim_pts: Vec<Point2d> = perim.iter().map(|&vi| vertex_uvs[vi]).collect();
+    let per0 = start_min(&perim_pts);
+    let per_idx: Vec<usize> = (0..n_p).map(|k| (per0 + k) % n_p).collect();
+    let rim_ang: Vec<f64> = rim_idx.iter().map(|&i| angle(&outer_uv[i])).collect();
+    let per_ang: Vec<f64> = per_idx.iter().map(|&k| angle(&perim_pts[k])).collect();
+    // Branch-cut unwrap: raw atan2 jumps by −2π when the CCW walk
+    // crosses the +π→−π cut. The unwrapped sequences are strictly
+    // increasing (convex rings + O strictly inside ⇒ per-step angle
+    // increments in (0, π)), starting at the global angle minimum.
+    let unwrap = |raw: &mut Vec<f64>| {
+        for k in 1..raw.len() {
+            while raw[k] < raw[k - 1] {
+                raw[k] += 2.0 * PI;
+            }
+        }
+    };
+    let mut rim_ang = rim_ang;
+    let mut per_ang = per_ang;
+    unwrap(&mut rim_ang);
+    unwrap(&mut per_ang);
+    let next_rim =
+        |i: usize| -> f64 { if i + 1 < n_b { rim_ang[i + 1] } else { rim_ang[0] + 2.0 * PI } };
+    let next_per =
+        |j: usize| -> f64 { if j + 1 < n_p { per_ang[j + 1] } else { per_ang[0] + 2.0 * PI } };
+
+    let mut i = 0usize;
+    let mut j = 0usize;
+    while i < n_b || j < n_p {
+        let advance_rim = if i >= n_b {
+            false
+        } else if j >= n_p {
+            true
+        } else {
+            next_rim(i) <= next_per(j)
+        };
+        if advance_rim {
+            // (rim_i, rim_{i+1}, lat_j) — lat_j strictly left of the hull edge
+            raw_tris.push((rim_idx[i], rim_idx[(i + 1) % n_b], perim[per_idx[j % n_p]]));
+            i += 1;
+        } else {
+            // (lat_j, rim_i, lat_{j+1}) — CCW annulus winding
+            raw_tris.push((
+                perim[per_idx[j]],
+                rim_idx[i % n_b],
+                perim[per_idx[(j + 1) % n_p]],
+            ));
+            j += 1;
+        }
+    }
+
+    // ── emit with the Step-5 degenerate filter + winding mirror ───
+    let d2 = |a: &Point3d, b: &Point3d| {
+        (a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)
+    };
+    let mut emitted: Vec<[u32; 3]> = Vec::with_capacity(raw_tris.len());
+    for (a, b, c) in &raw_tris {
+        if a == b || b == c || a == c {
+            continue;
+        }
+        let (pa, pb, pc) = (
+            &mesh.vertices[*a],
+            &mesh.vertices[*b],
+            &mesh.vertices[*c],
+        );
+        if d2(pa, pb) < 1e-20 || d2(pb, pc) < 1e-20 || d2(pa, pc) < 1e-20 {
+            continue;
+        }
+        if forward {
+            emitted.push([*a as u32, *b as u32, *c as u32]);
+        } else {
+            emitted.push([*a as u32, *c as u32, *b as u32]);
+        }
+    }
+
+    // ── invariants (never-worsen bail) ────────────────────────────
+    // (a) every positive-3D-length rim edge used exactly once;
+    // (b) every positive-3D-length lattice perimeter edge used twice;
+    // (c) emitted UV area ≈ ring area − lattice rect area.
+    let mut edge_use: std::collections::HashMap<(u32, u32), u32> =
+        std::collections::HashMap::with_capacity(emitted.len() * 3);
+    for t in &emitted {
+        for k in 0..3 {
+            let a = t[k];
+            let b = t[(k + 1) % 3];
+            *edge_use.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    let rim_ok = (0..n_b).all(|k| {
+        let a = k as u32;
+        let b = ((k + 1) % n_b) as u32;
+        if d2(&boundary_points_3d[k], &boundary_points_3d[(k + 1) % n_b]) < 1e-20 {
+            return true; // degenerate rim edge — skip the contract
+        }
+        edge_use.get(&(a.min(b), a.max(b))).copied() == Some(1)
+    });
+    let perim_ok = (0..n_p).all(|k| {
+        let a = perim[per_idx[k]] as u32;
+        let b = perim[per_idx[(k + 1) % n_p]] as u32;
+        let (pa, pb) = (&mesh.vertices[a as usize], &mesh.vertices[b as usize]);
+        if d2(pa, pb) < 1e-20 {
+            return true;
+        }
+        edge_use.get(&(a.min(b), a.max(b))).copied() == Some(2)
+    });
+    let tri_area2 = |t: &[u32; 3]| -> f64 {
+        let (a, b, c) = (
+            &vertex_uvs[t[0] as usize],
+            &vertex_uvs[t[1] as usize],
+            &vertex_uvs[t[2] as usize],
+        );
+        (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u)
+    };
+    // Single-coverage check: the sum of SIGNED double-areas over all
+    // emitted triangles (grid + band; all share one winding) must
+    // equal the ring's shoelace double-area. `!forward` faces emit
+    // reversed windings, hence the outer .abs().
+    let signed_sum: f64 = emitted.iter().map(tri_area2).sum();
+    let rect_area = (us[n_u - 1] - us[0]) * (vs[n_v - 1] - vs[0]);
+    let expect = ring_area2; // shoelace double-area of the rim
+    let area_ok = (signed_sum.abs() - expect.abs()).abs()
+        <= 1e-6 * expect.abs().max(1e-9);
+    if !(rim_ok && perim_ok && area_ok) {
+        log::warn!(
+            "[f{}] grid-band: INVARIANT FAIL (rim_ok={} perim_ok={} area {:.3e} vs {:.3e}) — falling back to legacy",
+            current_face_label(), rim_ok, perim_ok, signed_sum.abs(), expect,
+        );
+        return None;
+    }
+
+    for t in emitted {
+        mesh.add_triangle(t[0], t[1], t[2]);
+    }
+
+    log::warn!(
+        "[f{}] grid-band: ring={} lat={}x{} tris={} (grid {} + band {}) area_ok={}",
+        current_face_label(),
+        n_b,
+        n_u,
+        n_v,
+        mesh.triangles.len(),
+        (n_u - 1) * (n_v - 1) * 2,
+        n_b + n_p,
+        area_ok,
+    );
+
+    // ── chord-error refinement — identical to Step 6 ──────────────
+    if params.max_deviation > 0.0 {
+        let max_refine_iters = 2usize; // non-NURBS analytic
+        refine_mesh_chord_error_uv(
+            &mut mesh,
+            surface,
+            forward,
+            params.max_deviation,
+            max_refine_iters,
+            &mut vertex_uvs,
+            &mut is_boundary_vertex,
+            domain,
+        );
+    }
+
+    Some(mesh)
 }
 
 // ============================================================
