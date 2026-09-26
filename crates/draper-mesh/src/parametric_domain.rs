@@ -6968,7 +6968,62 @@ pub fn triangulate_surface_consistent(
     // fold-over pairs). Falls through to the legacy path unchanged
     // when not eligible or when the construction invariants fail.
     // ============================================================
+    // session-61 diagnostic (no behavior change): dump the EXACT
+    // production outer_uv ring + interior lattice for the face whose
+    // CURRENT_FACE_LABEL contains DRAPPER_DUMP_RING_LABEL — offline
+    // anatomy of the GEAR cone-band faces (11×1 lattice, n_v<2 gate).
+    if let Ok(want) = std::env::var("DRAPPER_DUMP_RING_LABEL") {
+        let label = current_face_label();
+        if !label.is_empty() && label.contains(&want) {
+            let safe: String = label
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+                .collect();
+            let path = format!("/tmp/ring_{}.tsv", safe);
+            let mut out = String::with_capacity(1 << 16);
+            for (ri, p) in outer_uv.iter().enumerate() {
+                let p3 = boundary_points_3d[ri.min(boundary_points_3d.len() - 1)];
+                out.push_str(&format!(
+                    "ring\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\n",
+                    p.u, p.v, p3.x, p3.y, p3.z
+                ));
+            }
+            for h in normalized_holes_uv_capped.iter() {
+                if h.len() < 3 {
+                    continue;
+                }
+                for p in h.iter() {
+                    out.push_str(&format!("hole\t{:.9}\t{:.9}\n", p.u, p.v));
+                }
+            }
+            for p in interior_uv_points.iter() {
+                out.push_str(&format!("lat\t{:.9}\t{:.9}\n", p.u, p.v));
+            }
+            let _ = std::fs::write(&path, out);
+            log::warn!("[{}] ring dumped: {} ring pts, {} lattice pts → {}",
+                label, outer_uv.len(), interior_uv_points.len(), path);
+        }
+    }
+    // session-61 (env-gated, default OFF): cone-slab path for the
+    // doubled-wire sawtooth bands (GEAR f18/f20) — internal retrace
+    // collapse + slab decomposition, runs BEFORE grid-band (those
+    // rings are non-rectilinear with n_v=1 lattices, so grid-band
+    // cannot take them). The standalone global retrace collapse
+    // (DRAPPER_COLLAPSE_RETRACE) measured NET-NEGATIVE on the final
+    // metric (8444 vs 8436: the merge dissolves the micro-slivers,
+    // while the exposed corner-fan monsters survive) — removed from
+    // this site; the collapse lives on inside the slab construction.
     if normalized_holes_uv_capped.iter().all(|h| h.len() < 3) {
+        if let Some(mesh) = try_cone_slab_triangulate(
+            surface,
+            &outer_uv,
+            &boundary_points_3d,
+            forward,
+            &params,
+            &domain,
+        ) {
+            return mesh;
+        }
         if let Some(mesh) = try_grid_band_triangulate(
             surface,
             &outer_uv,
@@ -8645,6 +8700,641 @@ fn monotone_strip_band(
     // session-60: spike on-track fans (measure-zero membranes)
     tris.extend(fans);
     Some((tris, wavy))
+}
+
+// ============================================================================
+// session-61: collapse bit-exact DOUBLED rim passes (GEAR cone bands).
+//
+// A malformed face wire visits the same edge chain TWICE in the same
+// direction: run1 = ring[i..i+L), run2 = ring[i+L..i+2L) with
+// ring[i+t] == ring[j+t] BIT-EXACT in 3D (edge-cache determinism
+// guarantees the doubled edge discretizes identically) AND in UV,
+// run2 immediately adjacent to run1 (j == i+L). The tooth cycle on
+// drill GEAR f18/f20 (Cone, u-span π, 36 teeth): spike chord up,
+// 55-pt flank curve down, jump chord back to the tooth top, then a
+// BIT-EXACT retrace of the flank — 36 runs of L=56, 2016/5214 ring
+// points are duplicates. The self-touching ring (zero proper
+// crossings, but a chord cutting the tooth interior) drives earcutr
+// into overlapping ears: FACEFOLD FO=941/997 per merge.
+//
+// Dropping run2 loses no unique 3D geometry (every dropped vertex is
+// a bit-exact duplicate of a kept one) and no UV coverage (the UVs
+// are likewise bit-exact duplicates); the leftover ring is the clean
+// tooth outline. Env-gated, default OFF.
+// ============================================================================
+fn collapse_doubled_rim_passes(
+    outer_uv: &mut Vec<Point2d>,
+    boundary_3d: &mut Vec<Point3d>,
+) -> usize {
+    const MIN_RUN: usize = 8;
+    let n = boundary_3d.len();
+    if n < 2 * MIN_RUN || outer_uv.len() != n {
+        return 0;
+    }
+    let key = |p: &Point3d| -> [u64; 3] {
+        [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+    };
+    // next-occurrence index by bit-exact 3D key
+    use std::collections::HashMap;
+    let mut last: HashMap<[u64; 3], usize> = HashMap::with_capacity(n);
+    let mut next_occ = vec![usize::MAX; n];
+    for i in (0..n).rev() {
+        let k = key(&boundary_3d[i]);
+        next_occ[i] = *last.get(&k).unwrap_or(&usize::MAX);
+        last.insert(k, i);
+    }
+    let uv_eq = |a: usize, b: usize| -> bool {
+        outer_uv[a].u.to_bits() == outer_uv[b].u.to_bits()
+            && outer_uv[a].v.to_bits() == outer_uv[b].v.to_bits()
+    };
+    let mut drop_idx = vec![false; n];
+    let mut dropped = 0usize;
+    let mut i = 0usize;
+    while i < n {
+        let j = next_occ[i];
+        let mut advanced = false;
+        if j != usize::MAX {
+            // grow the parallel duplicated run ring[i+t] == ring[j+t]
+            let mut t = 0usize;
+            while j + t < n
+                && key(&boundary_3d[i + t]) == key(&boundary_3d[j + t])
+                && uv_eq(i + t, j + t)
+            {
+                t += 1;
+            }
+            if t >= MIN_RUN && j == i + t {
+                for k in j..j + t {
+                    if !drop_idx[k] {
+                        drop_idx[k] = true;
+                        dropped += 1;
+                    }
+                }
+                i = j + t;
+                advanced = true;
+            }
+        }
+        if !advanced {
+            i += 1;
+        }
+    }
+    if dropped == 0 {
+        return 0;
+    }
+    // stable compaction of both arrays
+    let mut w = 0usize;
+    for r in 0..n {
+        if !drop_idx[r] {
+            outer_uv[w] = outer_uv[r];
+            boundary_3d[w] = boundary_3d[r];
+            w += 1;
+        }
+    }
+    outer_uv.truncate(w);
+    boundary_3d.truncate(w);
+    dropped
+}
+
+// ============================================================
+// session-61: CONE SLAB triangulation for doubled-wire sawtooth
+// bands (drill GEAR f18/f20).
+//
+// Anatomy (measured on GEAR f18/f20, Cone, u-span π):
+//   * the wire visits every tooth flank TWICE (bit-exact retrace
+//     + jump chord) — 36 doubled runs of L=56, 2016/5214 pts;
+//   * after the retrace collapse the ring is a SAWTOOTH band:
+//     [bottom run at v_lo] [R side at u_hi] [sawtooth: valley
+//     runs at v_base with teeth above] [L side at u_lo];
+//   * the valley chain is ~1300 pts vs the bottom's 32 → the
+//     legacy earcutr+CDT on this density-mismatched self-touching
+//     ring degenerates into monster fans (a single apex spans the
+//     whole shared arc with Plane f1 → the 16 Plane|Cone fold
+//     pairs that survive the merge).
+//
+// CONSTRUCTION (single coverage by design):
+//   1. internal retrace collapse on ring COPIES (the caller's
+//      arrays stay untouched; fires only on the doubled-wire
+//      pathology — dropped > 0 is a hard gate);
+//   2. slab split: BAND = u-monotone region between the bottom
+//      chain and the valley chain (two-pointer strip; side points
+//      fan-split into the cap-edge triangles); TEETH = convex
+//      excursions above the base level, fanned from their first
+//      base point;
+//   3. tooth base chords are shared edges (band top-chain edge +
+//      tooth closing edge = exactly 2 uses, manifold);
+//   4. chord-error refinement identical to Step 6.
+//
+// CONTRACTS (bail → legacy on ANY failure):
+//   * every positive-length rim edge of the COLLAPSED ring used
+//     exactly once (band strip + cap fans + tooth fans);
+//   * every tooth base chord used exactly twice;
+//   * |Σ signed UV areas| == |shoelace of the collapsed ring|.
+// ============================================================
+#[allow(clippy::too_many_arguments)]
+fn try_cone_slab_triangulate(
+    surface: &Surface,
+    outer_uv: &[Point2d],
+    boundary_points_3d: &[Point3d],
+    forward: bool,
+    params: &crate::triangulate::TriangulationParams,
+    domain: &ParametricDomain,
+) -> Option<TriangleMesh> {
+    // session-61 bail tracer (temporary diagnostic — keep gated)
+    macro_rules! bail {
+        ($why:expr) => {{
+            if std::env::var("DRAPPER_SLAB_TRACE").is_ok() {
+                log::warn!("[{}] cone-slab BAIL: {}", current_face_label(), $why);
+            }
+            return None;
+        }};
+    }
+    // ── gate 0: env (default OFF) ─────────────────────────────────
+    if std::env::var("DRAPPER_CONE_SLAB").as_deref() != Ok("1") {
+        return None;
+    }
+    // ── gate 1: cone/cylinder band only ───────────────────────────
+    if !matches!(surface, Surface::Cone(_) | Surface::Cylinder(_)) {
+        return None;
+    }
+    // ── gate 2: sizes ─────────────────────────────────────────────
+    let n_orig = outer_uv.len();
+    if n_orig < 64 || boundary_points_3d.len() != n_orig {
+        bail!("sizes");
+    }
+    // ── gate 3: internal retrace collapse on copies ───────────────
+    // (the caller's arrays stay untouched; the global
+    // DRAPPER_COLLAPSE_RETRACE env measured NET-NEGATIVE standalone
+    // (+8 final pairs: merge dissolves the micro-slivers better
+    // than the exposed corner-fan monsters) — the collapse now
+    // lives ONLY inside this construction)
+    let mut ring_uv: Vec<Point2d> = outer_uv.to_vec();
+    let mut ring_3d: Vec<Point3d> = boundary_points_3d.to_vec();
+    let dropped = collapse_doubled_rim_passes(&mut ring_uv, &mut ring_3d);
+    if dropped == 0 {
+        bail!("no retraces"); // this path exists for the doubled-wire pathology
+    }
+    let n = ring_uv.len();
+
+    // ── structure detection (on the collapsed ring) ───────────────
+    let (mut u_lo, mut u_hi, mut v_lo, mut v_hi) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    for p in ring_uv.iter() {
+        u_lo = u_lo.min(p.u);
+        u_hi = u_hi.max(p.u);
+        v_hi = v_hi.max(p.v);
+        v_lo = v_lo.min(p.v);
+    }
+    let u_span = u_hi - u_lo;
+    let v_span = v_hi - v_lo;
+    if u_span <= 0.0 || v_span <= 0.0 {
+        bail!("span");
+    }
+    let eps_u = u_span * 1e-6;
+    let eps_v = v_span * 1e-6;
+
+    // 3a. rotate so the ring starts at the longest circular v_lo run
+    //     (the bottom edge of the band).
+    let at_bottom = |p: &Point2d| (p.v - v_lo).abs() <= eps_v;
+    let mut best_start = 0usize;
+    let mut best_len = 0usize;
+    let mut run_start = 0usize;
+    let mut run_len = 0usize;
+    for i in 0..2 * n {
+        if at_bottom(&ring_uv[i % n]) {
+            if run_len == 0 {
+                run_start = i;
+            }
+            run_len += 1;
+        } else {
+            if run_len > best_len {
+                best_len = run_len;
+                best_start = run_start;
+            }
+            run_len = 0;
+        }
+    }
+    if run_len > best_len {
+        best_len = run_len;
+        best_start = run_start;
+    }
+    if best_len < 4 || best_len > n - 8 {
+        bail!("bottom run"); // no meaningful bottom band (or almost everything)
+    }
+    let best_start = best_start % n;
+    let rot: Vec<usize> = (0..n).map(|k| (best_start + k) % n).collect();
+    let uv: Vec<Point2d> = rot.iter().map(|&i| ring_uv[i]).collect();
+    let p3: Vec<Point3d> = rot.iter().map(|&i| ring_3d[i]).collect();
+
+    // 3b. orientation: CCW (interior on the left) — the collapsed
+    //     ring inherits Step 1.25's normalization. A CCW ring's
+    //     bottom edge (interior above) walks u_lo → u_hi.
+    let mut ring_area2 = 0.0f64;
+    for k in 0..n {
+        let a = &uv[k];
+        let b = &uv[(k + 1) % n];
+        ring_area2 += a.u * b.v - b.u * a.v;
+    }
+    if ring_area2 <= 0.0 {
+        bail!("CW ring"); // CW ring — unexpected past Step 1.25, bail
+    }
+
+    // 3c. bottom run = uv[0..nb]; u non-decreasing from u_lo to u_hi.
+    let mut nb = 0usize;
+    while nb < n && at_bottom(&uv[nb]) {
+        nb += 1;
+    }
+    if nb < 4 {
+        bail!("nb < 4");
+    }
+    let bottom_mono = uv
+        .windows(2)
+        .take(nb - 1)
+        .all(|w| w[1].u >= w[0].u - eps_u);
+    if !bottom_mono {
+        bail!("bottom not u-monotone");
+    }
+    if (uv[0].u - u_lo).abs() > eps_u || (uv[nb - 1].u - u_hi).abs() > eps_u {
+        bail!("bottom u-extremes"); // bottom must span the full u range (BL at u_lo, BR at u_hi)
+    }
+
+    // 3d. R side: walk the u≈u_hi run after BR; the first point OFF
+    //     the u_hi extreme is a sawtooth point and defines the base
+    //     level. Side points are the walked ones STRICTLY below the
+    //     base (the R-valley itself, at base level, starts the
+    //     sawtooth).
+    let mut i = nb;
+    while i < n && (uv[i].u - u_hi).abs() <= eps_u && (uv[i].v - v_lo).abs() > eps_v {
+        i += 1;
+    }
+    if i >= n {
+        bail!("R-side walk to end");
+    }
+    let v_base = uv[i].v; // first sawtooth point = a base-level point
+    if (v_base - v_lo).abs() < v_span * 0.05 {
+        bail!("base too close to bottom"); // base level too close to the bottom — not a band
+    }
+    let at_base = |p: &Point2d| (p.v - v_base).abs() <= eps_v * 10.0;
+    // re-scan the u_hi run: strictly-below-base points are the side;
+    // the walk stops at the first at-base point (the R-valley).
+    let mut rs = nb;
+    while rs < i && uv[rs].v < v_base - eps_v * 10.0 {
+        rs += 1;
+    }
+    let r_side_end = rs; // uv[nb..r_side_end) = R side (strictly below base)
+    let saw_start = rs; // the sawtooth starts at the R-valley (at base)
+    if saw_start >= n || !at_base(&uv[saw_start]) {
+        bail!("R-side did not close at base"); // the u_hi run did not close at the base level
+    }
+
+    // 3e. L side: walk back from the ring end — points at u≈u_lo
+    //     clearly below the base level; stop at the L-valley.
+    let mut j = n;
+    while j > 0
+        && (uv[j - 1].u - u_lo).abs() <= eps_u
+        && uv[j - 1].v < v_base - eps_v * 10.0
+    {
+        j -= 1;
+    }
+    let l_side_start = j; // uv[l_side_start..n] = L side (descends to BL)
+    if l_side_start <= saw_start + 4 {
+        bail!("no sawtooth region"); // no sawtooth region
+    }
+    let lv = &uv[l_side_start - 1];
+    if !at_base(lv) || (lv.u - u_lo).abs() > eps_u {
+        bail!("L-valley mismatch"); // the sawtooth must close at the L-valley (u≈u_lo, at base)
+    }
+
+    // 3f. sawtooth = uv[saw_start..l_side_start]; teeth = maximal
+    //     strictly-above-base runs, each bounded by base points.
+    let saw = &uv[saw_start..l_side_start];
+    let saw_off = saw_start;
+    let saw_len = saw.len();
+    let mut teeth: Vec<(usize, usize)> = Vec::new();
+    {
+        let mut k = 0usize;
+        while k < saw_len {
+            if at_base(&saw[k]) {
+                k += 1;
+                continue;
+            }
+            let t0 = k;
+            while k < saw_len && !at_base(&saw[k]) {
+                if saw[k].v <= v_base {
+                    bail!("tooth dipped to base"); // dipped to/below the base inside a tooth
+                }
+                k += 1;
+            }
+            if k >= saw_len {
+                bail!("tooth unclosed"); // tooth ran into the L valley without closing
+            }
+            if t0 == 0 {
+                bail!("tooth at sawtooth head"); // tooth at the sawtooth head (no base_A) — bail
+            }
+            teeth.push((t0, k)); // saw[t0..k) strictly above base
+        }
+    }
+    if teeth.is_empty() {
+        bail!("no teeth");
+    }
+
+    // 3g. valley chain: all base points of the sawtooth in ring
+    //     order (walk R→L, u non-increasing).
+    let mut valley: Vec<usize> = Vec::new();
+    for k in 0..saw_len {
+        if at_base(&saw[k]) {
+            valley.push(saw_off + k);
+        }
+    }
+    if valley.len() < 4 {
+        bail!("valley too short");
+    }
+    let valley_mono_dec = valley.windows(2).all(|w| uv[w[1]].u <= uv[w[0]].u + eps_u);
+    if !valley_mono_dec {
+        bail!("valley not u-monotone");
+    }
+    let mut valley_rev: Vec<usize> = valley.clone();
+    valley_rev.reverse(); // u non-decreasing, L-valley first, R-valley last
+    let bottom_chain: Vec<usize> = (0..nb).collect();
+
+    // 3h. session-61 measurement note: the teeth are NOT convex (the
+    //     spike chord overshoots the flank tangent at the apex —
+    //     19/36 reflex sign flips on f18), so no convexity gate here;
+    //     the per-tooth construction below validates star-shapedness
+    //     explicitly (or falls back to earcutr).
+
+    // ── vertices: collapsed-ring points, ring order ───────────────
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_uvs: Vec<Point2d> = Vec::with_capacity(n);
+    let mut is_boundary_vertex: Vec<bool> = Vec::with_capacity(n);
+    for (k, uv_p) in uv.iter().enumerate() {
+        let p3d = p3[k];
+        let nrm = surface.normal_at(uv_p.u, uv_p.v);
+        let nrm = if forward {
+            nrm
+        } else {
+            draper_geometry::Direction3d::new(-nrm.x, -nrm.y, -nrm.z).unwrap_or(nrm)
+        };
+        let vi = mesh.add_vertex(p3d);
+        mesh.add_vertex_normal(vi, [nrm.x, nrm.y, nrm.z]);
+        vertex_uvs.push(*uv_p);
+        is_boundary_vertex.push(true);
+    }
+
+    // ── triangles (CCW in UV; mirrored for !forward at emit) ──────
+    let mut raw: Vec<(usize, usize, usize)> = Vec::with_capacity(n);
+    let emit = |raw: &mut Vec<(usize, usize, usize)>, a: usize, b: usize, c: usize| {
+        let (pa, pb, pc) = (&vertex_uvs[a], &vertex_uvs[b], &vertex_uvs[c]);
+        let area2 = (pb.u - pa.u) * (pc.v - pa.v) - (pb.v - pa.v) * (pc.u - pa.u);
+        if area2.abs() <= 1e-18 {
+            return; // skip exactly-degenerate UV triangles
+        }
+        if area2 > 0.0 {
+            raw.push((a, b, c));
+        } else {
+            raw.push((a, c, b));
+        }
+    };
+
+    // 4a. band: two-pointer u-monotone strip between the bottom
+    //     chain (lower) and the reversed valley chain (upper).
+    {
+        let a = &bottom_chain;
+        let b = &valley_rev;
+        let (mut ia, mut jb) = (0usize, 0usize);
+        while ia + 1 < a.len() || jb + 1 < b.len() {
+            let adv_a = if jb + 1 >= b.len() {
+                true
+            } else if ia + 1 >= a.len() {
+                false
+            } else {
+                uv[a[ia + 1]].u <= uv[b[jb + 1]].u + eps_u
+            };
+            if adv_a && ia + 1 < a.len() {
+                emit(&mut raw, a[ia], b[jb], a[ia + 1]);
+                ia += 1;
+            } else if jb + 1 < b.len() {
+                emit(&mut raw, a[ia], b[jb + 1], b[jb]);
+                jb += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    // 4b. cap splits: side points lie collinearly on the cap edges
+    //     (BL,L-valley) and (BR,R-valley); split the cap-edge
+    //     triangle into a fan through them so their rim edges stay
+    //     manifold against the neighbouring face.
+    let cap_split = |raw: &mut Vec<(usize, usize, usize)>,
+                     cap_a: usize,
+                     cap_b: usize,
+                     side_pts: &[usize]| {
+        if side_pts.is_empty() {
+            return;
+        }
+        let pos = raw.iter().position(|t| {
+            let edges = [(t.0, t.1), (t.1, t.2), (t.2, t.0)];
+            edges.iter().any(|&(e0, e1)| {
+                (e0 == cap_a && e1 == cap_b) || (e0 == cap_b && e1 == cap_a)
+            })
+        });
+        let Some(ti) = pos else { return };
+        let t = raw[ti];
+        let apex = if t.0 != cap_a && t.0 != cap_b {
+            t.0
+        } else if t.1 != cap_a && t.1 != cap_b {
+            t.1
+        } else {
+            t.2
+        };
+        raw.remove(ti);
+        let mut chain: Vec<usize> = Vec::with_capacity(side_pts.len() + 2);
+        chain.push(cap_a);
+        chain.extend_from_slice(side_pts);
+        chain.push(cap_b);
+        for w in chain.windows(2) {
+            emit(raw, w[0], w[1], apex);
+        }
+    };
+    // L-side chain order: from BL (lowest, adjacent to the wrap)
+    // up to the L-valley — the REVERSE of ring order.
+    let l_side: Vec<usize> = (l_side_start..n).rev().collect();
+    let l_valley_idx = *valley_rev.first()?;
+    cap_split(&mut raw, 0usize, l_valley_idx, &l_side);
+    let r_side: Vec<usize> = (nb..r_side_end).collect();
+    let r_valley_idx = *valley_rev.last()?;
+    cap_split(&mut raw, nb - 1, r_valley_idx, &r_side);
+
+    // 4c. teeth: fan from base_A when star-shaped from it, else fan
+    //     from base_B, else earcutr on the tooth polygon. The star
+    //     check (monotone angle sweep from the apex, no full wrap)
+    //     GUARANTEES the fan has no self-overlap; earcutr handles the
+    //     rest (simple polygons).
+    let tao = std::f64::consts::TAU;
+    for &(t0, t1) in teeth.iter() {
+        let mut poly: Vec<usize> = Vec::with_capacity(t1 - t0 + 3);
+        poly.push(saw_off + t0 - 1); // base_A
+        for k in t0..t1 {
+            poly.push(saw_off + k);
+        }
+        poly.push(saw_off + t1); // base_B
+        let m = poly.len();
+        // try fan from apex position `ap` (0 = base_A, m-1 = base_B)
+        let try_fan = |ap: usize| -> Option<Vec<(usize, usize, usize)>> {
+            let a = poly[ap];
+            let (au, av) = (uv[a].u, uv[a].v);
+            let theta = |p: &Point2d| (p.v - av).atan2(p.u - au);
+            let mut seq: Vec<usize> = Vec::with_capacity(m - 1);
+            for k in 1..m {
+                seq.push(poly[(ap + k) % m]);
+            }
+            let t_first = theta(&uv[seq[0]]);
+            let mut prev = 0.0f64;
+            for w in 0..seq.len() {
+                let mut t = theta(&uv[seq[w]]) - t_first;
+                while t < -1e-12 {
+                    t += tao;
+                }
+                while t >= tao {
+                    t -= tao;
+                }
+                if t < prev - 1e-9 {
+                    return None; // angle went backward — not star-shaped
+                }
+                prev = t;
+            }
+            if prev > tao - 1e-6 {
+                return None; // wrapped the full circle
+            }
+            let mut tris = Vec::with_capacity(m - 2);
+            for w in 0..seq.len() - 1 {
+                tris.push((a, seq[w], seq[w + 1]));
+            }
+            Some(tris)
+        };
+        if let Some(tris) = try_fan(0).or_else(|| try_fan(m - 1)) {
+            for (a, b, c) in tris {
+                emit(&mut raw, a, b, c);
+            }
+            continue;
+        }
+        // earcutr fallback (simple polygon, no holes, no interior)
+        let mut coords: Vec<[f64; 2]> = poly.iter().map(|&i| [uv[i].u, uv[i].v]).collect();
+        let mut area2 = 0.0f64;
+        for k in 0..m {
+            let a = &uv[poly[k]];
+            let b = &uv[poly[(k + 1) % m]];
+            area2 += a.u * b.v - b.u * a.v;
+        }
+        let reversed = area2 < 0.0;
+        if reversed {
+            coords.reverse();
+        }
+        let tris_idx = crate::custom_cdt::triangulate_polygon_cdt(&coords, &[], &[]);
+        if tris_idx.is_empty() {
+            bail!("tooth earcutr empty");
+        }
+        let remap = |k: usize| -> usize {
+            if reversed {
+                poly[m - 1 - k]
+            } else {
+                poly[k]
+            }
+        };
+        for t in tris_idx.iter() {
+            emit(
+                &mut raw,
+                remap(t[0] as usize),
+                remap(t[1] as usize),
+                remap(t[2] as usize),
+            );
+        }
+    }
+
+    // ── invariants (never-worsen bail) ────────────────────────────
+    let d2 = |a: &Point3d, b: &Point3d| {
+        let (dx, dy, dz) = (a.x - b.x, a.y - b.y, a.z - b.z);
+        dx * dx + dy * dy + dz * dz
+    };
+    let mut edge_use: std::collections::HashMap<(u32, u32), u32> =
+        std::collections::HashMap::with_capacity(raw.len() * 3);
+    for t in raw.iter() {
+        let tri = [t.0, t.1, t.2];
+        for k in 0..3 {
+            let a = tri[k] as u32;
+            let b = tri[(k + 1) % 3] as u32;
+            *edge_use.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+        }
+    }
+    // (a) every positive-length rim edge of the collapsed ring: 1×
+    let rim_ok = (0..n).all(|k| {
+        let a = k as u32;
+        let b = ((k + 1) % n) as u32;
+        if d2(&p3[k], &p3[(k + 1) % n]) < 1e-20 {
+            return true; // degenerate rim edge — skip the contract
+        }
+        edge_use.get(&(a.min(b), a.max(b))).copied() == Some(1)
+    });
+    // (b) every tooth base chord: exactly 2×
+    let chords_ok = teeth.iter().all(|&(t0, t1)| {
+        let a = (saw_off + t0 - 1) as u32;
+        let b = (saw_off + t1) as u32;
+        edge_use.get(&(a.min(b), a.max(b))).copied() == Some(2)
+    });
+    // (c) single coverage by signed area
+    let tri_area2 = |t: &(usize, usize, usize)| -> f64 {
+        let (a, b, c) = (&vertex_uvs[t.0], &vertex_uvs[t.1], &vertex_uvs[t.2]);
+        (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u)
+    };
+    let signed_sum: f64 = raw.iter().map(tri_area2).sum();
+    let area_ok =
+        (signed_sum - ring_area2).abs() <= 1e-4 * ring_area2.abs().max(1e-12);
+    if !(rim_ok && chords_ok && area_ok) {
+        log::warn!(
+            "[{}] cone-slab: INVARIANT FAIL (rim_ok={} chords_ok={} area {:.3e} vs {:.3e}) — falling back to legacy",
+            current_face_label(),
+            rim_ok,
+            chords_ok,
+            signed_sum,
+            ring_area2,
+        );
+        return None;
+    }
+
+    for t in raw.iter() {
+        if forward {
+            mesh.add_triangle(t.0 as u32, t.1 as u32, t.2 as u32);
+        } else {
+            mesh.add_triangle(t.0 as u32, t.2 as u32, t.1 as u32);
+        }
+    }
+
+    log::warn!(
+        "[{}] cone-slab: ring {} (collapsed −{}) teeth={} band=({} bottom + {} valley) tris={} area_ok={}",
+        current_face_label(),
+        n,
+        dropped,
+        teeth.len(),
+        nb,
+        valley.len(),
+        mesh.triangles.len(),
+        area_ok,
+    );
+
+    // ── chord-error refinement — identical to Step 6 ──────────────
+    if params.max_deviation > 0.0 {
+        let max_refine_iters = 2usize; // non-NURBS analytic
+        refine_mesh_chord_error_uv(
+            &mut mesh,
+            surface,
+            forward,
+            params.max_deviation,
+            max_refine_iters,
+            &mut vertex_uvs,
+            &mut is_boundary_vertex,
+            domain,
+        );
+    }
+
+    Some(mesh)
 }
 
 /// Direct structured triangulation for analytic faces whose UV rim is
