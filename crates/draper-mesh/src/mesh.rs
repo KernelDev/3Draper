@@ -138,6 +138,14 @@ impl VertexDedupMap {
     /// Recommended: model_scale * 1e-6 (1 PPM) for production,
     ///              model_scale * 1e-4 (100 PPM) as diagnostic.
     pub fn with_tolerance(tolerance: f64) -> Self {
+        // session-57 DIAGNOSTIC override: DRAPPER_MERGE_TOL=<f64> replaces
+        // the instance-computed tolerance (e.g. 0 = bit-exact-only dedup)
+        // to attribute fold-over creation to the tolerance path. Default
+        // (env unset): unchanged behavior.
+        let tolerance = match std::env::var("DRAPPER_MERGE_TOL") {
+            Ok(v) => v.parse::<f64>().unwrap_or(tolerance),
+            Err(_) => tolerance,
+        };
         Self {
             exact: HashMap::new(),
             spatial: HashMap::new(),
@@ -929,6 +937,93 @@ impl TriangleMesh {
         }
     }
 
+    /// session-57 cold diagnostic helper (only called under
+    /// DRAPPER_SCAN_FACE_FOLDS): exact 2D overlap area of two triangles.
+    /// Projects both onto the plane of the first triangle (basis: e1 of
+    /// tri A, orthonormalized), clips B by A with Sutherland-Hodgman,
+    /// returns the shoelace area of the intersection polygon.
+    fn tri_overlap_area(
+        a: (&draper_geometry::Point3d, &draper_geometry::Point3d, &draper_geometry::Point3d),
+        b: (&draper_geometry::Point3d, &draper_geometry::Point3d, &draper_geometry::Point3d),
+    ) -> Option<f64> {
+        let (a0, a1, a2) = a;
+        let (b0, b1, b2) = b;
+        // Plane basis from triangle A.
+        let e1 = (a1.x - a0.x, a1.y - a0.y, a1.z - a0.z);
+        let e2 = (a2.x - a0.x, a2.y - a0.y, a2.z - a0.z);
+        let n = (
+            e1.1 * e2.2 - e1.2 * e2.1,
+            e1.2 * e2.0 - e1.0 * e2.2,
+            e1.0 * e2.1 - e1.1 * e2.0,
+        );
+        let nl = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+        if nl < 1e-15 {
+            return None;
+        }
+        let n = (n.0 / nl, n.1 / nl, n.2 / nl);
+        let ul = (e1.0 * e1.0 + e1.1 * e1.1 + e1.2 * e1.2).sqrt();
+        if ul < 1e-15 {
+            return None;
+        }
+        let u = (e1.0 / ul, e1.1 / ul, e1.2 / ul);
+        let v = (
+            n.1 * u.2 - n.2 * u.1,
+            n.2 * u.0 - n.0 * u.2,
+            n.0 * u.1 - n.1 * u.0,
+        );
+        let to2 = |p: &draper_geometry::Point3d| {
+            let d = (p.x - a0.x, p.y - a0.y, p.z - a0.z);
+            (d.0 * u.0 + d.1 * u.1 + d.2 * u.2, d.0 * v.0 + d.1 * v.1 + d.2 * v.2)
+        };
+        let pa = [to2(a0), to2(a1), to2(a2)];
+        let pb = [to2(b0), to2(b1), to2(b2)];
+        // Ensure the clip polygon (A) is CCW.
+        let signed = (pa[1].0 - pa[0].0) * (pa[2].1 - pa[0].1)
+            - (pa[1].1 - pa[0].1) * (pa[2].0 - pa[0].0);
+        let clip: Vec<(f64, f64)> = if signed >= 0.0 {
+            pa.to_vec()
+        } else {
+            pa.iter().rev().cloned().collect()
+        };
+        let mut subject: Vec<(f64, f64)> = pb.to_vec();
+        // Sutherland-Hodgman clip of subject by each CCW edge of clip.
+        for i in 0..3 {
+            if subject.is_empty() {
+                break;
+            }
+            let ca = clip[i];
+            let cb = clip[(i + 1) % 3];
+            let side = |p: &(f64, f64)| {
+                (cb.0 - ca.0) * (p.1 - ca.1) - (cb.1 - ca.1) * (p.0 - ca.0)
+            };
+            let mut out: Vec<(f64, f64)> = Vec::with_capacity(subject.len() + 1);
+            let n = subject.len();
+            for j in 0..n {
+                let cur = subject[j];
+                let nxt = subject[(j + 1) % n];
+                let sc = side(&cur);
+                let sn = side(&nxt);
+                if sc >= 0.0 {
+                    out.push(cur);
+                }
+                if (sc > 0.0 && sn < 0.0) || (sc < 0.0 && sn > 0.0) {
+                    let t = sc / (sc - sn);
+                    out.push((cur.0 + t * (nxt.0 - cur.0), cur.1 + t * (nxt.1 - cur.1)));
+                }
+            }
+            subject = out;
+        }
+        if subject.len() < 3 {
+            return Some(0.0);
+        }
+        let mut area = 0.0;
+        for i in 0..subject.len() {
+            let j = (i + 1) % subject.len();
+            area += subject[i].0 * subject[j].1 - subject[j].0 * subject[i].1;
+        }
+        Some(area.abs() * 0.5)
+    }
+
     /// Merge another mesh into this one with vertex deduplication.
     ///
     /// This is the **topology-first** merge: when two faces share an edge,
@@ -982,6 +1077,16 @@ impl TriangleMesh {
                 }
             }
             let mut folds = 0usize;
+            // session-57: split the >170° count into REAL same-side
+            // overlaps (FOLD-OVER) vs proper flat fans (INVERTED) and
+            // measure the 2D overlap area of every same-side pair —
+            // the s56 "folds" number conflated both, leaving the
+            // "residual root is in per-face triangulations" attribution
+            // untested.
+            let mut foldover = 0usize;
+            let mut inverted = 0usize;
+            let mut ov_total = 0.0f64;
+            let mut ov_max = 0.0f64;
             let mut first: Option<String> = None;
             for ((&(a, b), &u)) in edge_use.iter() {
                 if u != 2 {
@@ -1029,12 +1134,42 @@ impl TriangleMesh {
                     let s1 = side(&p1);
                     let sdot = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2;
                     let same_side = sdot > 0.0;
-                    if ang > 170.0 {
+                    // session-57 CONVENTION FIX: in this same-edge-direction
+                    // parametrization n0 == s0 and n1 == s1, so ang>170°
+                    // (anti-parallel normals) means OPPOSITE apexes — the
+                    // proper-flat-fan case. REAL same-side overlaps have
+                    // PARALLEL normals (ang≈0°) and were NEVER counted by
+                    // the old `ang > 170` gate: the FOLD-OVER branch was
+                    // dead code. The direct same-side test (sdot > 0) is
+                    // the correct overlap detector.
+                    if same_side {
                         folds += 1;
+                        foldover += 1;
+                        let t0v = other.triangles[t0];
+                        let t1v = other.triangles[t1];
+                        let (qa0, qa1, qa2) = (p(t0v[0]), p(t0v[1]), p(t0v[2]));
+                        let (qb0, qb1, qb2) = (p(t1v[0]), p(t1v[1]), p(t1v[2]));
+                        if let Some(area) =
+                            Self::tri_overlap_area((&qa0, &qa1, &qa2), (&qb0, &qb1, &qb2))
+                        {
+                            ov_total += area;
+                            if area > ov_max {
+                                ov_max = area;
+                            }
+                        }
                         if first.is_none() {
                             first = Some(format!(
-                                "{}: edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4}) ang={:.1}",
-                                if same_side { "FOLD-OVER" } else { "INVERTED" },
+                                "FOLD-OVER: edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4}) ang={:.1}",
+                                pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
+                                p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, ang
+                            ));
+                        }
+                    } else if ang > 170.0 {
+                        folds += 1;
+                        inverted += 1;
+                        if first.is_none() {
+                            first = Some(format!(
+                                "FLAT-FAN: edge ({:.4},{:.4},{:.4})-({:.4},{:.4},{:.4}) apexes ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4}) ang={:.1}",
                                 pa.x, pa.y, pa.z, pb.x, pb.y, pb.z,
                                 p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, ang
                             ));
@@ -1044,12 +1179,41 @@ impl TriangleMesh {
             }
             if folds > 0 {
                 eprintln!(
-                    "FACEFOLD: face_id={} tris={} folds={} | {}",
+                    "FACEFOLD: face_id={} tris={} folds={} [FO={} ovTot={:.3e} ovMax={:.3e} | INV={}] | {}",
                     fid,
                     other.triangles.len(),
                     folds,
+                    foldover,
+                    ov_total,
+                    ov_max,
+                    inverted,
                     first.unwrap_or_default()
                 );
+                // session-57: dump the pre-merge per-face mesh when it has
+                // real same-side overlaps, for offline localization (seam?
+                // chain region? lattice-wide?).
+                if foldover > 0 {
+                    if let Ok(dir) = std::env::var("DRAPPER_DUMP_DIRTY_FACES") {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let path = format!("{}/face_{}_fo{}.obj", dir, fid, foldover);
+                        let mut obj = String::with_capacity(1 << 16);
+                        for v in &other.vertices {
+                            obj.push_str(&format!(
+                                "v {:.9} {:.9} {:.9}\n",
+                                v.x, v.y, v.z
+                            ));
+                        }
+                        for t in &other.triangles {
+                            obj.push_str(&format!(
+                                "f {} {} {}\n",
+                                t[0] + 1,
+                                t[1] + 1,
+                                t[2] + 1
+                            ));
+                        }
+                        let _ = std::fs::write(&path, obj);
+                    }
+                }
             }
         }
 
