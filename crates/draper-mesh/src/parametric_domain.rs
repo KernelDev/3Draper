@@ -8126,7 +8126,8 @@ fn monotone_strip_band(
     us: &[f64],
     vs: &[f64],
     grid: &[usize],
-) -> Option<Vec<(usize, usize, usize)>> {
+    convex: bool,
+) -> Option<(Vec<(usize, usize, usize)>, bool)> {
     let n_u = us.len();
     let n_v = vs.len();
     let rim = &vertex_uvs[..n_b];
@@ -8154,26 +8155,6 @@ fn monotone_strip_band(
     let on_r = |p: &Point2d| (p.u - u_hi).abs() <= tol;
     let on_b = |p: &Point2d| (p.v - v_lo).abs() <= tol;
     let on_t = |p: &Point2d| (p.v - v_hi).abs() <= tol;
-    if !rim.iter().all(|p| on_l(p) || on_r(p) || on_b(p) || on_t(p)) {
-        return None;
-    }
-    // four corner vertices: BL, BR, TR, TL (on two sides at once)
-    let mut corner = [usize::MAX; 4];
-    for (i, p) in rim.iter().enumerate() {
-        let (l, r, b, t) = (on_l(p), on_r(p), on_b(p), on_t(p));
-        if l && b {
-            corner[0] = i;
-        } else if r && b {
-            corner[1] = i;
-        } else if r && t {
-            corner[2] = i;
-        } else if l && t {
-            corner[3] = i;
-        }
-    }
-    if corner.iter().any(|&c| c == usize::MAX) {
-        return None;
-    }
     // CCW chain walk `from`..=`to` inclusive (mesh vertex indices)
     let chain = |from: usize, to: usize| -> Option<Vec<usize>> {
         if from == to {
@@ -8193,33 +8174,418 @@ fn monotone_strip_band(
         }
         Some(out)
     };
-    let bottom = chain(corner[0], corner[1])?; // BL→BR, u non-decr
-    let right = chain(corner[1], corner[2])?; // BR→TR, v non-decr
-    let top = chain(corner[2], corner[3])?; // TR→TL, u non-incr
-    let left = chain(corner[3], corner[0])?; // TL→BL, v non-incr
     let mono = |idx: &[usize], get: fn(&Point2d) -> f64, incr: bool| -> bool {
         idx.windows(2).all(|w| {
             let d = get(&vertex_uvs[w[1]]) - get(&vertex_uvs[w[0]]);
             if incr { d >= -tol } else { d <= tol }
         })
     };
-    if !bottom.iter().all(|&i| on_b(&rim[i])) || !mono(&bottom, |p| p.u, true) {
-        return None;
-    }
-    if !right.iter().all(|&i| on_r(&rim[i])) || !mono(&right, |p| p.v, true) {
-        return None;
-    }
-    if !top.iter().all(|&i| on_t(&rim[i])) || !mono(&top, |p| p.u, false) {
-        return None;
-    }
-    if !left.iter().all(|&i| on_l(&rim[i])) || !mono(&left, |p| p.v, false) {
-        return None;
-    }
+
+    // ── s59 strict-rectilinear chains (bit-frozen) ────────────────
+    let strict: Option<[Vec<usize>; 4]> = (|| {
+        if !rim.iter().all(|p| on_l(p) || on_r(p) || on_b(p) || on_t(p)) {
+            return None;
+        }
+        // four corner vertices: BL, BR, TR, TL (on two sides at once)
+        let mut corner = [usize::MAX; 4];
+        for (i, p) in rim.iter().enumerate() {
+            let (l, r, b, t) = (on_l(p), on_r(p), on_b(p), on_t(p));
+            if l && b {
+                corner[0] = i;
+            } else if r && b {
+                corner[1] = i;
+            } else if r && t {
+                corner[2] = i;
+            } else if l && t {
+                corner[3] = i;
+            }
+        }
+        if corner.iter().any(|&c| c == usize::MAX) {
+            return None;
+        }
+        let bottom = chain(corner[0], corner[1])?; // BL→BR, u non-decr
+        let right = chain(corner[1], corner[2])?; // BR→TR, v non-decr
+        let top = chain(corner[2], corner[3])?; // TR→TL, u non-incr
+        let left = chain(corner[3], corner[0])?; // TL→BL, v non-incr
+        if !bottom.iter().all(|&i| on_b(&rim[i])) || !mono(&bottom, |p| p.u, true) {
+            return None;
+        }
+        if !right.iter().all(|&i| on_r(&rim[i])) || !mono(&right, |p| p.v, true) {
+            return None;
+        }
+        if !top.iter().all(|&i| on_t(&rim[i])) || !mono(&top, |p| p.u, false) {
+            return None;
+        }
+        if !left.iter().all(|&i| on_l(&rim[i])) || !mono(&left, |p| p.v, false) {
+            return None;
+        }
+        Some([bottom, right, top, left])
+    })();
+
+    let (bottom, right, top, left, fans, wavy) = match strict {
+        Some([b, r, t, l]) => (b, r, t, l, Vec::new(), false),
+        None => {
+            // ── session-60: WAVY-BOTTOM rim (meander / sag trim) ──
+            // Non-convex rims whose bottom chain leaves the bbox
+            // frame — trim meanders (SLEEVE f93/f152: 38 single-edge
+            // vertical jumps between 142-pt runs at 5e-4 steps) and
+            // sag curves (SHAFT f7/f10/f14) — provided:
+            //   * exactly one TL and one TR corner; left/right/top
+            //     chains stay on their bbox sides and are monotone;
+            //   * the wavy chain is u-monotone up to bit-identical
+            //     out-and-back SPIKES (self-touching trim: the last
+            //     f93 "tooth" runs out to the peak and retraces
+            //     bit-identically — a zero-width slit);
+            //   * every wavy point stays strictly below the bottom
+            //     strip's upper envelope (lattice row 0 + the two
+            //     corner diagonals).
+            // Spikes are collapsed out of the strip chain (the base
+            // keeps both ring vertices; the zero-length strip edge
+            // only loses a 3D-degenerate triangle to the emit filter)
+            // and their rim edges are consumed by local on-track fans
+            // around the spike apex: every fan triangle has all three
+            // vertices ON the track arc, so each fan is a
+            // measure-zero membrane inside the strip region (its
+            // welded duplicate is dropped at merge — same-face dup
+            // skip). Kills the earcutr cross-meander monster ears
+            // (f93/f152 FACEFOLD FO=284/284, ovMax 1.7e-2 — triangles
+            // from the spike peak to the far TOP rim).
+            if convex {
+                return None; // convex rims keep the s59 strict/zipper split
+            }
+            // exactly one TL (l∩t) and one TR (r∩t)
+            let (mut tl, mut tr) = (usize::MAX, usize::MAX);
+            for (i, p) in rim.iter().enumerate() {
+                if on_l(p) && on_t(p) {
+                    if tl != usize::MAX {
+                        return None;
+                    }
+                    tl = i;
+                } else if on_r(p) && on_t(p) {
+                    if tr != usize::MAX {
+                        return None;
+                    }
+                    tr = i;
+                }
+            }
+            if tl == usize::MAX || tr == usize::MAX {
+                return None;
+            }
+            // left chain: CCW from tl while on_l (ends at W1)
+            let mut left: Vec<usize> = Vec::new();
+            {
+                let mut i = tl;
+                loop {
+                    left.push(i);
+                    let nx = (i + 1) % n_b;
+                    if nx == tr {
+                        return None; // degenerate wrap
+                    }
+                    if !on_l(&rim[nx]) {
+                        break;
+                    }
+                    i = nx;
+                    if left.len() > n_b {
+                        return None;
+                    }
+                }
+            }
+            // right chain: CCW W2→TR — collect backward from tr while on_r
+            let right: Vec<usize> = {
+                let mut rrev: Vec<usize> = Vec::new();
+                let mut j = tr;
+                loop {
+                    rrev.push(j);
+                    let pv = (j + n_b - 1) % n_b;
+                    if pv == tl {
+                        return None; // degenerate wrap
+                    }
+                    if !on_r(&rim[pv]) {
+                        break;
+                    }
+                    j = pv;
+                    if rrev.len() > n_b {
+                        return None;
+                    }
+                }
+                rrev.reverse(); // W2→TR
+                rrev
+            };
+            if left.len() < 2 || right.len() < 2 {
+                return None;
+            }
+            let w1 = *left.last().unwrap();
+            let w2 = right[0];
+            let top = chain(tr, tl)?;
+            let wavy_raw = chain(w1, w2)?;
+            if top.len() < 2 || wavy_raw.len() < 2 {
+                return None;
+            }
+            // density guard (session-60): the two-pointer pairs
+            // consecutive wavy points with lattice row points; if the
+            // wavy chain is far denser than the lattice (SLEEVE f93:
+            // 5147 pts vs 11 columns — 6e-4 vs 0.26 u-steps), every
+            // strip triangle is a ~100:1 sliver whose chord-error
+            // refinement sprouts same-side wedges (measured +16 final
+            // pairs on f93/f152 — while their legacy pre-merge
+            // monsters dissolve at merge anyway: the final-probe
+            // contribution of the meander family was 1 pair). Keep
+            // the strips for density-comparable rims (sag curves
+            // SHAFT f7/f10/f14, HOUSING f60).
+            let wavy_step = (u_hi - u_lo) / (wavy_raw.len() as f64 - 1.0);
+            let lat_step = (us[n_u - 1] - us[0]) / (n_u as f64 - 1.0);
+            if wavy_step * 8.0 < lat_step {
+                return None;
+            }
+            if !top.iter().all(|&k| on_t(&rim[k])) {
+                return None;
+            }
+            if !mono(&left, |p| p.v, false) {
+                return None; // TL→W1 v non-increasing
+            }
+            if !mono(&right, |p| p.v, true) {
+                return None; // W2→TR v non-decreasing
+            }
+            if !mono(&top, |p| p.u, false) {
+                return None; // TR→TL u non-increasing
+            }
+            // envelope: every wavy point strictly below the bottom
+            // strip's upper envelope — corner diagonals (W1→lattice
+            // BL, lattice BR→W2) and lattice row 0 between them. A
+            // crossing would fold the strip over itself (same-side
+            // overlaps), so a violation rejects the face.
+            let (w1v, w2v) = (rim[w1].v, rim[w2].v);
+            if !(w1v < vs[0] - tol) || !(w2v < vs[0] - tol) {
+                return None;
+            }
+            for &k in &wavy_raw {
+                let p = &rim[k];
+                let lim = if p.u < us[0] {
+                    let t = (p.u - u_lo) / (us[0] - u_lo);
+                    w1v + t * (vs[0] - w1v)
+                } else if p.u > us[n_u - 1] {
+                    let t = (p.u - us[n_u - 1]) / (u_hi - us[n_u - 1]);
+                    vs[0] + t * (w2v - vs[0])
+                } else {
+                    vs[0]
+                };
+                if p.v > lim + tol {
+                    return None;
+                }
+            }
+            // spike collapse + on-track fans
+            let pos_eq = |a: &Point2d, b: &Point2d| -> bool {
+                (a.u - b.u).abs() <= tol && (a.v - b.v).abs() <= tol
+            };
+            let push_fan = |fans: &mut Vec<(usize, usize, usize)>,
+                            apex: usize,
+                            j: usize,
+                            k: usize| {
+                let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
+                let cr = (pj.u - pa.u) * (pk.v - pa.v)
+                    - (pj.v - pa.v) * (pk.u - pa.u);
+                if cr >= 0.0 {
+                    fans.push((apex, j, k));
+                } else {
+                    fans.push((apex, k, j));
+                }
+            };
+            // ret-track fans are wound CW ON PURPOSE: the ret track is
+            // the bit-identical reverse of the out track, so the CW
+            // ret fan's signed area cancels the out fan's EXACTLY —
+            // the spike slit is tiled twice with opposite windings
+            // instead of adding its area to the coverage sum. The
+            // welded duplicate is dropped at merge (same-face dup
+            // skip); if the skip is winding-sensitive the surviving
+            // CW membranes only add flat CURVED-180 pairs (the class
+            // the legacy earcutr micro-triangles already produce).
+            let push_fan_cw = |fans: &mut Vec<(usize, usize, usize)>,
+                               apex: usize,
+                               j: usize,
+                               k: usize| {
+                let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
+                let cr = (pj.u - pa.u) * (pk.v - pa.v)
+                    - (pj.v - pa.v) * (pk.u - pa.u);
+                if cr >= 0.0 {
+                    fans.push((apex, k, j));
+                } else {
+                    fans.push((apex, j, k));
+                }
+            };
+            let mut strip_chain: Vec<usize> = Vec::with_capacity(wavy_raw.len());
+            let mut fans: Vec<(usize, usize, usize)> = Vec::new();
+            let m = wavy_raw.len();
+            let mut a = 0usize;
+            while a < m {
+                // forward run a..=b (u non-decreasing)
+                let mut b = a;
+                while b + 1 < m
+                    && rim[wavy_raw[b + 1]].u >= rim[wavy_raw[b]].u - tol
+                {
+                    b += 1;
+                }
+                if b + 1 >= m {
+                    // no turnaround — the rest is a clean monotone tail
+                    strip_chain.extend_from_slice(&wavy_raw[a..]);
+                    break;
+                }
+                // turnaround at b: backward run b..=c (u decreasing)
+                let mut c = b;
+                while c + 1 < m
+                    && rim[wavy_raw[c + 1]].u < rim[wavy_raw[c]].u - tol
+                {
+                    c += 1;
+                }
+                // the backward run must retrace the forward run
+                // bit-identically (a perfect zero-width slit); anything
+                // else is a real hook → reject (never-worsen bail).
+                let mut s = usize::MAX;
+                for k in (a..=b).rev() {
+                    if pos_eq(&rim[wavy_raw[k]], &rim[wavy_raw[c]]) {
+                        s = k;
+                        break;
+                    }
+                }
+                if s == usize::MAX {
+                    // ── END-SPIKE (session-60, f152): the chain makes a
+                    // BIG forward jump to the base (positionally equal
+                    // to the chain's END point W2), doubles back to the
+                    // peak, and returns along the same line to W2 — a
+                    // spike attached AT the frame corner instead of at
+                    // the tooth base. The tail is a palindrome around
+                    // the peak: pos[c+k] == pos[c−k].
+                    let mut d = c;
+                    while d + 1 < m
+                        && rim[wavy_raw[d + 1]].u >= rim[wavy_raw[d]].u - tol
+                    {
+                        d += 1;
+                    }
+                    let pal_ok = d == m - 1
+                        && c - b >= 2
+                        && d - c == c - b
+                        && pos_eq(&rim[wavy_raw[m - 1]], &rim[wavy_raw[b]])
+                        && (1..=(c - b)).all(|k| {
+                            pos_eq(&rim[wavy_raw[c + k]], &rim[wavy_raw[c - k]])
+                        });
+                    if !pal_ok {
+                        return None;
+                    }
+                    // collapse: keep the forward run INCLUDING the base
+                    // (the base sits at W2's position and is the
+                    // chain's effective end); the doubled tail
+                    // [b+1..m-1] is consumed by on-track fans around
+                    // the peak, exactly like the mid-chain spike.
+                    strip_chain.extend_from_slice(&wavy_raw[a..=b]);
+                    let peak = wavy_raw[c];
+                    // "out" track = the backward run [b..=c]
+                    for j in b..=c - 2 {
+                        push_fan(&mut fans, peak, wavy_raw[j], wavy_raw[j + 1]);
+                    }
+                    // "ret" track = the forward run [c..=m-1], CW
+                    for j in c + 1..=m - 2 {
+                        push_fan_cw(&mut fans, peak, wavy_raw[j], wavy_raw[j + 1]);
+                    }
+                    a = m;
+                    continue;
+                }
+                if b < s || b - s < 1 {
+                    return None;
+                }
+                if c == b + 1 {
+                    // ── HAIR (session-60): out-run [s..=b] on the
+                    // track, ONE jump-back chord (b, c) to the base,
+                    // then the chain continues FORWARD from c and
+                    // retraces [s..=b] point-by-point (f93 left end:
+                    // the trim runs out along the v=0.084 micro-edges
+                    // to the far end, jumps back to the seam base on
+                    // a single chord, and repeats the same line). The
+                    // same zero-area self-touching family as the
+                    // spike, with the return leg collapsed to one
+                    // edge. Collapse [s..=c] to the base pair (s, c);
+                    // the retrace points after c stay in the strip
+                    // chain (they ARE the effective boundary).
+                    if b - s < 3 {
+                        return None; // too small to fan without double rim edges
+                    }
+                    if c + (b - s) >= m {
+                        return None; // not enough points to retrace
+                    }
+                    for t in 0..=(b - s) {
+                        if !pos_eq(&rim[wavy_raw[s + t]], &rim[wavy_raw[c + t]]) {
+                            return None; // forward retrace mismatch — real hook
+                        }
+                    }
+                    strip_chain.extend_from_slice(&wavy_raw[a..=s]);
+                    strip_chain.push(wavy_raw[c]);
+                    // on-track fan around the far end wavy_raw[b]:
+                    // (far, j, j+1) for j in s..=b-2 — the (j, j+1)
+                    // edges consume rim edges (s,s+1)..(b-2,b-1) and
+                    // the j=b-2 triangle's apex edge (far, b-1)
+                    // consumes the LAST out rim edge (b-1, b).
+                    let far = wavy_raw[b];
+                    for j in s..=b - 2 {
+                        push_fan(&mut fans, far, wavy_raw[j], wavy_raw[j + 1]);
+                    }
+                    // closing triangle (far, c, s+1) consumes the
+                    // jump-back rim edge (b, c); its other edges weld
+                    // onto the fan's (far, s+1) chord and the
+                    // geometric rim edge (s, s+1) — manifold after
+                    // the merge dedup.
+                    push_fan(&mut fans, far, wavy_raw[c], wavy_raw[s + 1]);
+                } else {
+                    // ── SPIKE: point-by-point backward retrace with
+                    // equal run lengths (b - s == c - b).
+                    if b - s != c - b || c - b < 2 {
+                        return None;
+                    }
+                    for t in 0..=(c - b) {
+                        if !pos_eq(&rim[wavy_raw[s + t]], &rim[wavy_raw[c - t]]) {
+                            return None;
+                        }
+                    }
+                    // prefix [a..=s] stays in the strip chain; the
+                    // spike [s..=c] collapses to its base pair (s, c)
+                    strip_chain.extend_from_slice(&wavy_raw[a..=s]);
+                    strip_chain.push(wavy_raw[c]);
+                    // on-track fans around the peak wavy_raw[b]
+                    let peak = wavy_raw[b];
+                    // out track [s..=b]: (peak, j, j+1) for j in
+                    // s..=b-2; the last one's edge (b-1, peak) also
+                    // consumes the final out rim edge (b-1, b).
+                    for j in s..=b - 2 {
+                        push_fan(&mut fans, peak, wavy_raw[j], wavy_raw[j + 1]);
+                    }
+                    // ret track [b..=c]: (peak, j, j+1) for j in
+                    // b+1..=c-1, wound CW so its signed area cancels
+                    // the out fan's (bit-identical track); the first
+                    // one's edge (peak, b+1) also consumes the first
+                    // ret rim edge (b, b+1).
+                    for j in b + 1..=c - 1 {
+                        push_fan_cw(&mut fans, peak, wavy_raw[j], wavy_raw[j + 1]);
+                    }
+                }
+                a = c + 1;
+            }
+            // the collapsed strip chain must be u-monotone
+            if !mono(&strip_chain, |p| p.u, true) {
+                return None;
+            }
+            (
+                strip_chain,
+                right,
+                top,
+                left,
+                fans,
+                true,
+            )
+        }
+    };
     // lattice mesh vertex index at row r, column c
     let g = |r: usize, c: usize| -> usize { n_b + grid[r * n_u + c] };
     let vu = |vi: usize| -> f64 { vertex_uvs[vi].u };
     let vv = |vi: usize| -> f64 { vertex_uvs[vi].v };
-    let mut tris: Vec<(usize, usize, usize)> = Vec::with_capacity(n_b + 2 * n_u + 2 * n_v);
+    let mut tris: Vec<(usize, usize, usize)> =
+        Vec::with_capacity(n_b + 2 * n_u + 2 * n_v + fans.len());
     // horizontal (u-monotone) strip between a lower chain `l` and an
     // upper chain `u`, both u-increasing (CCW emits)
     let mut h_strip = |l: &[usize], u: &[usize], tris: &mut Vec<(usize, usize, usize)>| {
@@ -8276,7 +8642,9 @@ fn monotone_strip_band(
     // right: lattice right col (left) ↔ rim right chain (right)
     let lat_right: Vec<usize> = (0..n_v).map(|r| g(r, n_u - 1)).collect();
     v_strip(&lat_right, &right, &mut tris);
-    Some(tris)
+    // session-60: spike on-track fans (measure-zero membranes)
+    tris.extend(fans);
+    Some((tris, wavy))
 }
 
 /// Direct structured triangulation for analytic faces whose UV rim is
@@ -8360,13 +8728,18 @@ fn try_grid_band_triangulate(
         (a.u - o.u) * (b.v - o.v) - (a.v - o.v) * (b.u - o.u)
     };
     let mut ring_area2 = 0.0f64;
+    // session-60: reflex vertices no longer disqualify the face outright
+    // — the wavy-bottom strip path (spiked meanders, sag trims) may
+    // still handle the ring. The angular zipper keeps requiring
+    // convexity (star-shaped contract), so the flag guards it below.
+    let mut convex = true;
     for i in 0..n_b {
         let a = &outer_uv[i];
         let b = &outer_uv[(i + 1) % n_b];
         ring_area2 += a.u * b.v - b.u * a.v;
         let c = &outer_uv[(i + 2) % n_b];
         if cr2(a, b, c) < eps {
-            return None; // reflex vertex or CW winding → not eligible
+            convex = false; // reflex vertex — zipper ineligible, strips may proceed
         }
     }
     if ring_area2 <= 0.0 {
@@ -8494,10 +8867,22 @@ fn try_grid_band_triangulate(
     //    strips (two-pointer by axis value — kills the zipper's
     //    angular shear micro-slivers, f20/f23 FO 29→0); everything
     //    else keeps the s58 angular zipper.
-    let strip_tris = monotone_strip_band(&vertex_uvs, n_b, &us, &vs, &grid);
-    let band_kind = if strip_tris.is_some() { "strips" } else { "zipper" };
-    if let Some(st) = strip_tris {
+    //    session-60: NON-CONVEX rims may take the wavy-bottom strip
+    //    path (meander/sag trims + collapsed self-touching spikes) —
+    //    the angular zipper still requires a convex (star-shaped)
+    //    ring, so non-convex strip failures fall back to legacy.
+    let strip_tris = monotone_strip_band(&vertex_uvs, n_b, &us, &vs, &grid, convex);
+    let band_kind = match &strip_tris {
+        Some((_, true)) => "strips-wavy",
+        Some((_, false)) => "strips",
+        None => "zipper",
+    };
+    if let Some((st, _)) = strip_tris {
         raw_tris.extend(st);
+    } else if !convex {
+        // session-60: no angular zipper for non-convex rims — the
+        // star-shaped contract would be violated; bail to legacy.
+        return None;
     } else {
     // angular zipper between the rim ring and the lattice
     // perimeter ring, both CCW and star-shaped around the lattice
