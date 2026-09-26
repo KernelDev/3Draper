@@ -8095,6 +8095,190 @@ pub fn triangulate_surface_consistent(
 // Session-58: grid + local-band triangulation (env-gated)
 // ============================================================
 
+/// session-59: rim↔lattice band as FOUR value-matched monotone strips
+/// (two-pointer merge by AXIS VALUE — the s43/s47 band-stitch lineage).
+///
+/// ELIGIBILITY (bail → angular zipper): the rim must be strictly
+/// RECTILINEAR — every rim point on one of the four bbox sides, all
+/// four corner vertices present (on two sides at once), each side
+/// chain monotone along its axis — and the lattice rect strictly
+/// inset from all four sides (a flush side would triangulate between
+/// coincident chains and emit zero-area garbage that the area
+/// invariant cannot catch).
+///
+/// WHY (vs the s58 angular zipper): the zipper matches rim↔perimeter
+/// points by polar angle around the lattice-rect center. On a thin
+/// ribbon the rim edge and the lattice row sit at different distances
+/// from the center, so equal angles mean systematically SHIFTED axis
+/// values (f20: rim u-step 0.101 vs lattice u-step 0.131 ≈ 9% shear)
+/// — wherever the shift exceeds the local step the band folds into
+/// micro-sliver same-side overlaps (FACEFOLD FO=29, ovTot 6.6e-4).
+/// Value-matched monotone strips span at most one chain step in the
+/// strip axis, so same-side overlaps are impossible by construction.
+///
+/// The four strips share the four corner diagonals (rim corner ↔
+/// lattice corner), each consumed by both adjacent strips — a
+/// manifold partition of the frame annulus. Triangle winding is CCW
+/// in UV, identical to the grid cells.
+fn monotone_strip_band(
+    vertex_uvs: &[Point2d],
+    n_b: usize,
+    us: &[f64],
+    vs: &[f64],
+    grid: &[usize],
+) -> Option<Vec<(usize, usize, usize)>> {
+    let n_u = us.len();
+    let n_v = vs.len();
+    let rim = &vertex_uvs[..n_b];
+    let mut u_lo = f64::MAX;
+    let mut u_hi = f64::MIN;
+    let mut v_lo = f64::MAX;
+    let mut v_hi = f64::MIN;
+    for p in rim {
+        u_lo = u_lo.min(p.u);
+        u_hi = u_hi.max(p.u);
+        v_lo = v_lo.min(p.v);
+        v_hi = v_hi.max(p.v);
+    }
+    let span = (u_hi - u_lo).max(v_hi - v_lo);
+    let tol = 1e-9 * span.max(1e-12);
+    // strict inset of the lattice rect on all four sides
+    if us[0] - u_lo <= tol
+        || u_hi - us[n_u - 1] <= tol
+        || vs[0] - v_lo <= tol
+        || v_hi - vs[n_v - 1] <= tol
+    {
+        return None;
+    }
+    let on_l = |p: &Point2d| (p.u - u_lo).abs() <= tol;
+    let on_r = |p: &Point2d| (p.u - u_hi).abs() <= tol;
+    let on_b = |p: &Point2d| (p.v - v_lo).abs() <= tol;
+    let on_t = |p: &Point2d| (p.v - v_hi).abs() <= tol;
+    if !rim.iter().all(|p| on_l(p) || on_r(p) || on_b(p) || on_t(p)) {
+        return None;
+    }
+    // four corner vertices: BL, BR, TR, TL (on two sides at once)
+    let mut corner = [usize::MAX; 4];
+    for (i, p) in rim.iter().enumerate() {
+        let (l, r, b, t) = (on_l(p), on_r(p), on_b(p), on_t(p));
+        if l && b {
+            corner[0] = i;
+        } else if r && b {
+            corner[1] = i;
+        } else if r && t {
+            corner[2] = i;
+        } else if l && t {
+            corner[3] = i;
+        }
+    }
+    if corner.iter().any(|&c| c == usize::MAX) {
+        return None;
+    }
+    // CCW chain walk `from`..=`to` inclusive (mesh vertex indices)
+    let chain = |from: usize, to: usize| -> Option<Vec<usize>> {
+        if from == to {
+            return None; // side with a single point — no chain
+        }
+        let mut out = Vec::new();
+        let mut i = from;
+        loop {
+            out.push(i);
+            if i == to {
+                break;
+            }
+            i = (i + 1) % n_b;
+            if out.len() > n_b {
+                return None; // `to` never reached — bad corners
+            }
+        }
+        Some(out)
+    };
+    let bottom = chain(corner[0], corner[1])?; // BL→BR, u non-decr
+    let right = chain(corner[1], corner[2])?; // BR→TR, v non-decr
+    let top = chain(corner[2], corner[3])?; // TR→TL, u non-incr
+    let left = chain(corner[3], corner[0])?; // TL→BL, v non-incr
+    let mono = |idx: &[usize], get: fn(&Point2d) -> f64, incr: bool| -> bool {
+        idx.windows(2).all(|w| {
+            let d = get(&vertex_uvs[w[1]]) - get(&vertex_uvs[w[0]]);
+            if incr { d >= -tol } else { d <= tol }
+        })
+    };
+    if !bottom.iter().all(|&i| on_b(&rim[i])) || !mono(&bottom, |p| p.u, true) {
+        return None;
+    }
+    if !right.iter().all(|&i| on_r(&rim[i])) || !mono(&right, |p| p.v, true) {
+        return None;
+    }
+    if !top.iter().all(|&i| on_t(&rim[i])) || !mono(&top, |p| p.u, false) {
+        return None;
+    }
+    if !left.iter().all(|&i| on_l(&rim[i])) || !mono(&left, |p| p.v, false) {
+        return None;
+    }
+    // lattice mesh vertex index at row r, column c
+    let g = |r: usize, c: usize| -> usize { n_b + grid[r * n_u + c] };
+    let vu = |vi: usize| -> f64 { vertex_uvs[vi].u };
+    let vv = |vi: usize| -> f64 { vertex_uvs[vi].v };
+    let mut tris: Vec<(usize, usize, usize)> = Vec::with_capacity(n_b + 2 * n_u + 2 * n_v);
+    // horizontal (u-monotone) strip between a lower chain `l` and an
+    // upper chain `u`, both u-increasing (CCW emits)
+    let mut h_strip = |l: &[usize], u: &[usize], tris: &mut Vec<(usize, usize, usize)>| {
+        let (mut i, mut j) = (0usize, 0usize);
+        while i + 1 < l.len() || j + 1 < u.len() {
+            let adv_l = if j + 1 >= u.len() {
+                true
+            } else if i + 1 >= l.len() {
+                false
+            } else {
+                vu(l[i + 1]) <= vu(u[j + 1])
+            };
+            if adv_l {
+                tris.push((l[i], l[i + 1], u[j]));
+                i += 1;
+            } else {
+                tris.push((l[i], u[j + 1], u[j]));
+                j += 1;
+            }
+        }
+    };
+    // vertical (v-monotone) strip between a left chain `a` and a
+    // right chain `b`, both v-increasing (CCW emits)
+    let mut v_strip = |a: &[usize], b: &[usize], tris: &mut Vec<(usize, usize, usize)>| {
+        let (mut i, mut j) = (0usize, 0usize);
+        while i + 1 < a.len() || j + 1 < b.len() {
+            let adv_a = if j + 1 >= b.len() {
+                true
+            } else if i + 1 >= a.len() {
+                false
+            } else {
+                vv(a[i + 1]) <= vv(b[j + 1])
+            };
+            if adv_a {
+                tris.push((a[i], b[j], a[i + 1]));
+                i += 1;
+            } else {
+                tris.push((a[i], b[j], b[j + 1]));
+                j += 1;
+            }
+        }
+    };
+    // bottom: rim bottom chain ↔ lattice bottom row (u-monotone)
+    let lat_bottom: Vec<usize> = (0..n_u).map(|c| g(0, c)).collect();
+    h_strip(&bottom, &lat_bottom, &mut tris);
+    // top: lattice top row (lower) ↔ rim top chain reversed (upper)
+    let lat_top: Vec<usize> = (0..n_u).map(|c| g(n_v - 1, c)).collect();
+    let top_rev: Vec<usize> = top.iter().rev().copied().collect();
+    h_strip(&lat_top, &top_rev, &mut tris);
+    // left: rim left chain reversed (BL→TL, left) ↔ lattice left col
+    let lat_left: Vec<usize> = (0..n_v).map(|r| g(r, 0)).collect();
+    let left_rev: Vec<usize> = left.iter().rev().copied().collect();
+    v_strip(&left_rev, &lat_left, &mut tris);
+    // right: lattice right col (left) ↔ rim right chain (right)
+    let lat_right: Vec<usize> = (0..n_v).map(|r| g(r, n_u - 1)).collect();
+    v_strip(&lat_right, &right, &mut tris);
+    Some(tris)
+}
+
 /// Direct structured triangulation for analytic faces whose UV rim is
 /// CONVEX and whose interior Steiner points form a FULL rectangular
 /// lattice. Env-gated (`DRAPPER_GRID_BAND=1`, default OFF — the legacy
@@ -8112,12 +8296,15 @@ pub fn triangulate_surface_consistent(
 ///
 /// CONSTRUCTION (single coverage by design — no earcutr at all):
 ///  1. lattice cells → 2 CCW triangles each (n_u-1)(n_v-1)·2;
-///  2. the rim↔lattice band → angular zipper between the convex rim
-///     ring and the lattice perimeter ring (both CCW, both star-shaped
-///     around the lattice-rect center): merge by polar angle, one
-///     triangle per advanced vertex (session-43/47 zipper lineage);
-///     every emitted triangle is local (rim edge ↔ nearby perimeter
-///     point), so no fans and no domain-spanning ears are possible;
+///  2. the rim↔lattice band → session-59: FOUR value-matched
+///     monotone strips (two-pointer by axis value, s43/s47 lineage)
+///     when the rim is rectilinear (f20/f23 FO 29→0); otherwise the
+///     s58 angular zipper between the convex rim ring and the lattice
+///     perimeter ring (both CCW, both star-shaped around the
+///     lattice-rect center): merge by polar angle, one triangle per
+///     advanced vertex; every emitted triangle is local (rim edge ↔
+///     nearby perimeter point), so no fans and no domain-spanning
+///     ears are possible;
 ///  3. chord-error refinement identical to Step 6.
 ///
 /// CONTRACTS:
@@ -8302,9 +8489,19 @@ fn try_grid_band_triangulate(
     }
     let n_p = perim.len();
 
-    // 3) angular zipper between the rim ring and the lattice
-    //    perimeter ring, both CCW and star-shaped around the lattice
-    //    rect center O.
+    // 3) band between the rim ring and the lattice perimeter ring.
+    //    session-59: RECTILINEAR rims get four value-matched monotone
+    //    strips (two-pointer by axis value — kills the zipper's
+    //    angular shear micro-slivers, f20/f23 FO 29→0); everything
+    //    else keeps the s58 angular zipper.
+    let strip_tris = monotone_strip_band(&vertex_uvs, n_b, &us, &vs, &grid);
+    let band_kind = if strip_tris.is_some() { "strips" } else { "zipper" };
+    if let Some(st) = strip_tris {
+        raw_tris.extend(st);
+    } else {
+    // angular zipper between the rim ring and the lattice
+    // perimeter ring, both CCW and star-shaped around the lattice
+    // rect center O.
     let o_u = 0.5 * (us[0] + us[n_u - 1]);
     let o_v = 0.5 * (vs[0] + vs[n_v - 1]);
     let angle = |p: &Point2d| -> f64 { (p.v - o_v).atan2(p.u - o_u) }
@@ -8374,6 +8571,7 @@ fn try_grid_band_triangulate(
             j += 1;
         }
     }
+    } // end angular-zipper fallback
 
     // ── emit with the Step-5 degenerate filter + winding mirror ───
     let d2 = |a: &Point3d, b: &Point3d| {
@@ -8421,8 +8619,8 @@ fn try_grid_band_triangulate(
         edge_use.get(&(a.min(b), a.max(b))).copied() == Some(1)
     });
     let perim_ok = (0..n_p).all(|k| {
-        let a = perim[per_idx[k]] as u32;
-        let b = perim[per_idx[(k + 1) % n_p]] as u32;
+        let a = perim[k] as u32;
+        let b = perim[(k + 1) % n_p] as u32;
         let (pa, pb) = (&mesh.vertices[a as usize], &mesh.vertices[b as usize]);
         if d2(pa, pb) < 1e-20 {
             return true;
@@ -8459,8 +8657,9 @@ fn try_grid_band_triangulate(
     }
 
     log::warn!(
-        "[f{}] grid-band: ring={} lat={}x{} tris={} (grid {} + band {}) area_ok={}",
+        "[f{}] grid-band: band={} ring={} lat={}x{} tris={} (grid {} + band {}) area_ok={}",
         current_face_label(),
+        band_kind,
         n_b,
         n_u,
         n_v,
