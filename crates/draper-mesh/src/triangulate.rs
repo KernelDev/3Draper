@@ -3979,6 +3979,58 @@ fn has_intermediate_v_ring(
     false
 }
 
+/// Detect a WAVY (scalloped) full-u-wrap rim: the boundary oscillates in
+/// v around the whole period instead of forming two constant-v rings.
+///
+/// Session-63 (Zentralstaender cone #1736): the scalloped 6-B-spline rim
+/// has smooth flanks whose consecutive points differ in v by ~v_tol, so
+/// `has_intermediate_v_ring` (which looks for ≥3 points inside ONE v_tol
+/// window — a flat constant-v arc) never fires. The discriminator that
+/// actually separates a wavy rim from a legitimate tube-with-seams face
+/// is the ANGULAR SPREAD of the mid-v points: a wavy rim's flanks cover
+/// the whole period (points in most 10° bins), while seam-line midpoints
+/// cluster at a couple of angular positions.
+///
+/// Returns true when ≥6 mid-v points occupy ≥half of the 36 angular bins.
+fn wavy_full_wrap_rim(
+    boundary_3d: &[draper_geometry::Point3d],
+    origin: &draper_geometry::Point3d,
+    axis: &draper_geometry::Direction3d,
+    x_dir: &draper_geometry::Direction3d,
+    v_min: f64,
+    v_max: f64,
+) -> bool {
+    let v_tol = (v_max - v_min).abs() * 0.05 + 1e-9;
+    let lo = v_min + v_tol;
+    let hi = v_max - v_tol;
+    if lo >= hi {
+        return false;
+    }
+    let y_dir = axis.cross(x_dir);
+    const N_BINS: usize = 36;
+    let mut bins = [false; N_BINS];
+    let mut n_mid = 0usize;
+    for p in boundary_3d {
+        let dx = p.x - origin.x;
+        let dy = p.y - origin.y;
+        let dz = p.z - origin.z;
+        let v = dx * axis.x + dy * axis.y + dz * axis.z;
+        if v > lo && v < hi {
+            n_mid += 1;
+            let x_comp = dx * x_dir.x + dy * x_dir.y + dz * x_dir.z;
+            let y_comp = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
+            let u = y_comp.atan2(x_comp).rem_euclid(2.0 * PI);
+            let b = (u / (2.0 * PI / N_BINS as f64)) as usize % N_BINS;
+            bins[b] = true;
+        }
+    }
+    if n_mid < 6 {
+        return false;
+    }
+    let occupied = bins.iter().filter(|b| **b).count();
+    occupied >= N_BINS / 2
+}
+
 /// Analytic fallback: triangulate a full cylinder between v_min and v_max
 /// using a uniform `2π*i/n_u` angular grid. Used when `triangulate_cylinder_tube_from_boundary`
 /// can't recover enough cached boundary points (e.g., degenerate input).
@@ -4031,15 +4083,6 @@ fn triangulate_cylinder_full_at_v_range(
     mesh
 }
 
-/// Triangulate a cone face whose boundary forms a closed tube
-/// (bottom circle + top circle/apex + 2 seam edges wrapping the full U period).
-///
-/// Same angular-alignment fix as `triangulate_cylinder_tube_from_boundary`:
-/// intermediate grid rows are sampled at the bottom ring's actual u angles
-/// (not uniform 2π*i/n_u), so each column of the grid is at a single angular
-/// position. This avoids the "twisted/lobed" bug.
-///
-/// Apex degeneracy: when v_max reaches the cone's apex height, the top row
 /// Negate a surface normal for `forward:false` faces (Bug B fix — 8.2.1/8.2.2).
 /// For `forward:false`, the geometric outward normal must be flipped so it
 /// points inward (toward the solid), matching the inverted triangle winding.
@@ -4052,6 +4095,220 @@ fn orient_normal(n: Direction3d, forward: bool) -> Direction3d {
     }
 }
 
+/// Triangulate a cone face whose boundary is a single full-u-wrap WAVY
+/// (non-constant-v) rim and whose region extends to the apex.
+///
+/// Session-63 root cause (Zentralstaender BNO #1086/#1088, cone face
+/// #1736): the scalloped 6-B-spline rim (6 corners at v_max + 6 valleys
+/// at v_min, all wrapping the full u-period) was routed to
+/// `triangulate_cone_tube_from_boundary`, which (a) built a band between
+/// the valley and corner v-levels only, leaving the whole apex region
+/// below the valleys uncovered (the face's VERTEX_LOOP apex bound marks
+/// the region as rim→apex); (b) kept only the valley-bottom points as
+/// the boundary row and synthesized an ANALYTIC top ring at v_max — no
+/// neighbor has geometry there, so it became 72 orphan boundary edges;
+/// (c) dropped the rim flank points, so the adjacent planar faces'
+/// cached rims only stitched at the valley points (42 unmatched rim
+/// points per neighbor face).
+///
+/// Geometry: a single star-shaped u-wrapping loop on a cone bounds
+/// exactly the rim→apex region (the alternative is unbounded). We keep
+/// EVERY cached boundary point as the rim row (watertight with
+/// neighbors by construction), emit intermediate analytic rows along
+/// each rim point's generator (constant-u lines are straight on a
+/// cone), and collapse row 0 to the single apex vertex — the same
+/// row/triangle layout as the `apex_at_bottom` case of the tube
+/// builder, generalized to a wavy rim.
+///
+/// Returns an EMPTY mesh when the boundary does not qualify (caller
+/// falls back to the tube path).
+fn triangulate_cone_wavy_rim_to_apex(
+    cone: &ConeSurface,
+    params: &TriangulationParams,
+    boundary_3d: &[draper_geometry::Point3d],
+    forward: bool,
+) -> TriangleMesh {
+    let mut mesh = TriangleMesh::new();
+    let apex_v = cone.apex_v();
+    if !apex_v.is_finite() {
+        return mesh; // ha≈0 (cylinder-like) — no apex
+    }
+
+    // Project boundary onto (u, v) — same convention as
+    // split_boundary_into_rings_with_u.
+    let y_dir = cone.axis.cross(&cone.x_dir);
+    let mut ring: Vec<(f64, f64, draper_geometry::Point3d)> = Vec::with_capacity(boundary_3d.len());
+    for p in boundary_3d {
+        let dx = p.x - cone.origin.x;
+        let dy = p.y - cone.origin.y;
+        let dz = p.z - cone.origin.z;
+        let v = dx * cone.axis.x + dy * cone.axis.y + dz * cone.axis.z;
+        let x_comp = dx * cone.x_dir.x + dy * cone.x_dir.y + dz * cone.x_dir.z;
+        let y_comp = dx * y_dir.x + dy * y_dir.y + dz * y_dir.z;
+        let u = y_comp.atan2(x_comp).rem_euclid(2.0 * PI);
+        ring.push((u, v, *p));
+    }
+    if ring.len() < 6 {
+        return mesh;
+    }
+    let v_max_b = ring.iter().fold(f64::MIN, |m, r| m.max(r.1));
+    let v_min_b = ring.iter().fold(f64::MAX, |m, r| m.min(r.1));
+    if v_max_b <= v_min_b {
+        return mesh; // constant-v rim — not wavy
+    }
+    // Apex must lie strictly below the whole rim (region = rim→apex).
+    let apex_eps = (v_max_b - apex_v).abs() * 1e-9 + 1e-12;
+    if apex_v > v_min_b - apex_eps {
+        return mesh;
+    }
+
+    // Sort by u ascending, then dedup by 3D position (adjacent B-spline
+    // edges share their corner vertices → duplicates in the cache).
+    ring.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    let dedup_tol = (v_max_b - v_min_b).abs() * 0.01 + 1e-12;
+    let mut rim: Vec<(f64, f64, draper_geometry::Point3d)> = Vec::with_capacity(ring.len());
+    for r in ring {
+        if let Some(last) = rim.last() {
+            if last.2.distance_to(&r.2) <= dedup_tol {
+                continue;
+            }
+        }
+        rim.push(r);
+    }
+    if rim.len() > 1 && rim[0].2.distance_to(&rim[rim.len() - 1].2) <= dedup_tol {
+        rim.pop();
+    }
+    let n_u = rim.len();
+    if n_u < 6 {
+        return mesh;
+    }
+
+    // Star-shape / full-coverage guards:
+    // (a) max angular gap between consecutive rim points < π/2 (a dense
+    //     full-period rim; a big gap means a partial wrap — the apex-fan
+    //     would be wrong there);
+    // (b) no two rim points at (nearly) the same u with very different v
+    //     (non-star-shaped rim — sorting by u would zigzag).
+    let v_range = v_max_b - v_min_b;
+    for i in 0..n_u {
+        let j = (i + 1) % n_u;
+        let du = if j == 0 {
+            rim[0].0 + 2.0 * PI - rim[i].0
+        } else {
+            rim[j].0 - rim[i].0
+        };
+        if du > PI / 2.0 {
+            return mesh;
+        }
+        if du <= 1e-9 && (rim[j].1 - rim[i].1).abs() > v_range * 0.05 {
+            return mesh;
+        }
+    }
+
+    // Row count: apex (j=0) → rim (j=n_v).
+    let n_v = if params.adaptive {
+        crate::adaptive::required_samples(
+            &Surface::Cone(cone.clone()),
+            0.0,
+            2.0 * PI,
+            apex_v,
+            v_max_b,
+            params.max_deviation,
+            params.detail_level,
+        )
+        .1
+        .max(2)
+    } else {
+        params.height_samples.max(2)
+    };
+
+    let mut row_vertex_offset: Vec<u32> = Vec::with_capacity(n_v + 1);
+    let mut row_vertex_count: Vec<usize> = Vec::with_capacity(n_v + 1);
+
+    // Row 0: the apex (single vertex).
+    {
+        let p = cone.point_at(0.0, apex_v);
+        let n = orient_normal(cone.normal_at(0.0, apex_v), forward);
+        let idx = mesh.add_vertex(p);
+        mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        row_vertex_offset.push(idx);
+        row_vertex_count.push(1);
+    }
+    // Rows 1..n_v: along each rim point's generator; row n_v uses the
+    // CACHED rim points bit-exactly (watertight with adjacent faces).
+    let mut total_vertices = 1u32;
+    for j in 1..=n_v {
+        let t = j as f64 / n_v as f64;
+        let base = total_vertices;
+        row_vertex_offset.push(base);
+        row_vertex_count.push(n_u);
+        for i in 0..n_u {
+            let (u_i, v_i, p_i) = &rim[i];
+            let v_ij = apex_v + (v_i - apex_v) * t;
+            let p = if j == n_v {
+                *p_i
+            } else {
+                crate::edge_cache::deterministic_round_point(cone.point_at(*u_i, v_ij))
+            };
+            let n = orient_normal(cone.normal_at(*u_i, v_ij), forward);
+            let idx = mesh.add_vertex(p);
+            mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+        }
+        total_vertices += n_u as u32;
+    }
+
+    // Triangles — identical winding to the tube builder's apex_at_bottom
+    // case: apex fan to row 1, quads with u-wrap between higher rows.
+    for j in 0..n_v {
+        let row_count = row_vertex_count[j];
+        let next_row_count = row_vertex_count[j + 1];
+        let row_base = row_vertex_offset[j];
+        let next_row_base = row_vertex_offset[j + 1];
+        if row_count == 1 {
+            for i in 0..next_row_count {
+                let i_next = (i + 1) % next_row_count;
+                let v0 = next_row_base + i as u32;
+                let v1 = next_row_base + i_next as u32;
+                if forward {
+                    mesh.add_triangle(row_base, v0, v1);
+                } else {
+                    mesh.add_triangle(row_base, v1, v0);
+                }
+            }
+        } else {
+            for i in 0..row_count {
+                let i_next = (i + 1) % row_count;
+                let v0 = row_base + i as u32;
+                let v1 = row_base + i_next as u32;
+                let v2 = next_row_base + i_next as u32;
+                let v3 = next_row_base + i as u32;
+                if forward {
+                    mesh.add_triangle(v0, v1, v2);
+                    mesh.add_triangle(v0, v2, v3);
+                } else {
+                    mesh.add_triangle(v0, v2, v1);
+                    mesh.add_triangle(v0, v3, v2);
+                }
+            }
+        }
+    }
+
+    log::debug!(
+        "Cone wavy-rim→apex: n_u={}, n_v={}, rim v=[{:.4},{:.4}], apex_v={:.4}",
+        n_u, n_v, v_min_b, v_max_b, apex_v
+    );
+    mesh
+}
+
+/// Triangulate a cone face whose boundary forms a closed tube
+/// (bottom circle + top circle/apex + 2 seam edges wrapping the full U period).
+///
+/// Same angular-alignment fix as `triangulate_cylinder_tube_from_boundary`:
+/// intermediate grid rows are sampled at the bottom ring's actual u angles
+/// (not uniform 2π*i/n_u), so each column of the grid is at a single angular
+/// position. This avoids the "twisted/lobed" bug.
+///
+/// Apex degeneracy: when v_max reaches the cone's apex height, the top row
 /// collapses to a single apex vertex (since `cone.point_at(u, apex_v)` is
 /// the apex point for any u). Triangles connecting the bottom row to the
 /// apex row are fan-triangulated.
@@ -4638,6 +4895,24 @@ fn triangulate_cone_face(face: &StagedFace, cone: &ConeSurface, params: &Triangu
     if boundary_uvs.len() >= 4 && is_full_u_period_wrap(&boundary_uvs, 2.0 * PI) {
         let (hole_polylines, _hole_uvs) = collect_face_holes_with_uv_from_cache(face, cache, &surface);
         if hole_polylines.is_empty() {
+            // s63: a WAVY (non-constant-v) full-wrap rim bounds the
+            // rim→apex region — the tube grid would band-ify it (drop
+            // rim flank points, synthesize an orphan analytic ring at
+            // v_max, and leave the apex uncovered). Clean 2-ring tubes
+            // (with or without seam lines) keep the existing path.
+            let (v_min_fw, v_max_fw) = compute_axis_v_range_pts(&boundary_3d, &cone.origin, &cone.axis);
+            if v_max_fw > v_min_fw
+                && wavy_full_wrap_rim(&boundary_3d, &cone.origin, &cone.axis, &cone.x_dir, v_min_fw, v_max_fw)
+            {
+                let mesh = triangulate_cone_wavy_rim_to_apex(cone, params, &boundary_3d, face.forward);
+                if !mesh.triangles.is_empty() {
+                    log::info!(
+                        "Cone face #{}: WAVY full-wrap rim → apex-fan grid ({} bnd pts, {} tris)",
+                        face.id, boundary_3d.len(), mesh.triangles.len()
+                    );
+                    return mesh;
+                }
+            }
             log::info!(
                 "Cone face #{}: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
                 face.id, boundary_3d.len()
@@ -6859,6 +7134,23 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             // the apex height, the top row collapses to a single apex vertex.
             if hole_polylines.is_empty() && boundary_points.len() >= 6 {
                 if is_full_u_period_wrap(boundary_uvs, 2.0 * PI) {
+                    // s63: WAVY (scalloped) full-wrap rim → rim→apex region —
+                    // see triangulate_cone_wavy_rim_to_apex. Mirrors the hook
+                    // in triangulate_cone_face's full-wrap branch.
+                    let (v_min_fw, v_max_fw) = compute_axis_v_range_pts(boundary_points, &cone.origin, &cone.axis);
+                    if v_max_fw > v_min_fw
+                        && wavy_full_wrap_rim(boundary_points, &cone.origin, &cone.axis, &cone.x_dir, v_min_fw, v_max_fw)
+                    {
+                        let mesh = triangulate_cone_wavy_rim_to_apex(cone, params, boundary_points, forward);
+                        if !mesh.triangles.is_empty() {
+                            log::info!(
+                                "Cone face: WAVY full-wrap rim → apex-fan grid ({} bnd pts, {} tris)",
+                                boundary_points.len(),
+                                mesh.triangles.len()
+                            );
+                            return mesh;
+                        }
+                    }
                     log::info!(
                         "Cone face: full U-period wrap detected ({} bnd pts, u-range≈2π) — using tube grid triangulation",
                         boundary_points.len()
@@ -10087,6 +10379,166 @@ mod intermediate_v_ring_tests {
         for p in &bnd3d {
             let found = mesh.vertices.iter().any(|v| v.distance_to(p) < 1e-9);
             assert!(found, "boundary point {:?} missing from mesh — coverage dropped", p);
+        }
+    }
+}
+
+#[cfg(test)]
+mod wavy_rim_cone_tests {
+    use super::*;
+    use draper_geometry::{Point3d, Direction3d, Surface, Point2d, ConeSurface};
+
+    fn cone_axis_z() -> ConeSurface {
+        // Expanding cone: apex at origin, axis +z, half_angle 45° (r = v).
+        ConeSurface::new_expanding(
+            Point3d::ORIGIN,
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            std::f64::consts::FRAC_PI_4,
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+        )
+    }
+
+    /// Scalloped rim: v(u) = 2.0 + 0.3·cos(6u), dense sampling around the
+    /// full period — the Zentralstaender BNO #1736 family (6 corners at
+    /// v_max + 6 valleys at v_min, smooth B-spline flanks).
+    fn scalloped_rim(n: usize) -> Vec<Point3d> {
+        let cone = cone_axis_z();
+        (0..n)
+            .map(|i| {
+                let u = 2.0 * PI * i as f64 / n as f64;
+                let v = 2.0 + 0.3 * (6.0 * u).cos();
+                cone.point_at(u, v)
+            })
+            .collect()
+    }
+
+    /// The scalloped rim must be detected as wavy: its mid-v flank points
+    /// spread around the whole period (has_intermediate_v_ring does NOT
+    /// fire here — consecutive flank points differ in v by ~v_tol).
+    #[test]
+    fn test_wavy_full_wrap_rim_detected() {
+        let cone = cone_axis_z();
+        let bnd = scalloped_rim(120);
+        let v_min = 1.7f64; // 2.0 - 0.3
+        let v_max = 2.3f64; // 2.0 + 0.3
+        assert!(
+            wavy_full_wrap_rim(&bnd, &cone.origin, &cone.axis, &cone.x_dir, v_min, v_max),
+            "scalloped full-wrap rim must be detected as wavy"
+        );
+        // NOTE: has_intermediate_v_ring (the s49 flat-arc detector) CAN also
+        // fire on scalloped rims (v-levels repeat once per wave), but it is
+        // NOT a safe discriminator here: a legitimate 2-ring tube whose
+        // seam lines carry symmetric v-sampling repeats levels 4× and would
+        // be hijacked. The angular-spread test is the reliable one.
+    }
+
+    /// A legitimate full-wrap tube (2 constant-v rings + 2 seam columns)
+    /// must NOT be classified as wavy — seam midpoints cluster at a couple
+    /// of angular positions.
+    #[test]
+    fn test_seamed_tube_not_wavy() {
+        let cone = cone_axis_z();
+        let mut bnd = Vec::new();
+        for i in 0..48 {
+            let u = 2.0 * PI * i as f64 / 48.0;
+            bnd.push(cone.point_at(u, 1.0));
+        }
+        for i in 0..48 {
+            let u = 2.0 * PI * i as f64 / 48.0;
+            bnd.push(cone.point_at(u, 3.0));
+        }
+        // 2 seam columns at u=0 and u=π, 8 mid-v points each
+        for k in 1..8 {
+            let v = 1.0 + 2.0 * k as f64 / 8.0;
+            bnd.push(cone.point_at(0.0, v));
+            bnd.push(cone.point_at(PI, v));
+        }
+        assert!(
+            !wavy_full_wrap_rim(&bnd, &cone.origin, &cone.axis, &cone.x_dir, 1.0, 3.0),
+            "2-ring tube with seam columns must keep the tube path"
+        );
+    }
+
+    /// End-to-end: a scalloped cone rim through the boundary_uv entry must
+    /// (a) keep EVERY cached rim point, (b) include the apex vertex, and
+    /// (c) produce a closed manifold fan (no boundary edges at all).
+    /// Regression for Zentralstaender BNO #1086/#1088 (348 boundary edges).
+    #[test]
+    fn test_cone_wavy_rim_to_apex_end_to_end() {
+        let cone = cone_axis_z();
+        let surface = Surface::Cone(cone.clone());
+        let bnd3d = scalloped_rim(120);
+        let bnduv: Vec<Point2d> = (0..120)
+            .map(|i| {
+                let u = 2.0 * PI * i as f64 / 120.0;
+                let v = 2.0 + 0.3 * (6.0 * u).cos();
+                Point2d::new(u, v)
+            })
+            .collect();
+
+        let params = TriangulationParams::default();
+        let mesh = triangulate_face_with_boundary_and_holes_uv(
+            &surface, &bnd3d, &bnduv, &[], &[], true, &params,
+        );
+        assert!(
+            mesh.triangles.len() >= 200,
+            "wavy-rim cone must produce a real mesh, got {} tris",
+            mesh.triangles.len()
+        );
+        // (a) full rim coverage — every cached boundary point is a vertex
+        for p in &bnd3d {
+            let found = mesh.vertices.iter().any(|v| v.distance_to(p) < 1e-9);
+            assert!(found, "rim point {:?} dropped from mesh", p);
+        }
+        // (b) apex vertex present
+        let apex = Point3d::ORIGIN;
+        assert!(
+            mesh.vertices.iter().any(|v| v.distance_to(&apex) < 1e-9),
+            "apex vertex missing — region not covered to the tip"
+        );
+        // (c) the ONLY boundary edges are the rim ring itself: exactly n_u
+        // edges, each connecting two consecutive cached rim points. A
+        // single-face mesh always has its outer loop as boundary (it turns
+        // interior after merging with the adjacent faces); what must NOT
+        // exist are STRAY boundary edges like the old path's analytic ring
+        // at v_max (which had no neighbor at all).
+        let mut edge_count: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        for t in &mesh.triangles {
+            let (a, b, c) = (t[0], t[1], t[2]);
+            for (v0, v1) in [(a, b), (b, c), (c, a)] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                *edge_count.entry(key).or_insert(0) += 1;
+            }
+        }
+        let nonmanifold: Vec<_> = edge_count.iter().filter(|(_, n)| **n > 2).collect();
+        assert!(
+            nonmanifold.is_empty(),
+            "wavy-rim cone must be manifold, found {} non-manifold edges",
+            nonmanifold.len()
+        );
+        let boundary: Vec<_> = edge_count
+            .iter()
+            .filter(|(_, n)| **n == 1)
+            .map(|(e, _)| {
+                let pa = mesh.vertices[e.0 as usize];
+                let pb = mesh.vertices[e.1 as usize];
+                let on_rim = |p: &Point3d| bnd3d.iter().any(|q| q.distance_to(p) < 1e-9);
+                (on_rim(&pa), on_rim(&pb))
+            })
+            .collect();
+        assert_eq!(
+            boundary.len(),
+            bnd3d.len(),
+            "boundary must be exactly the rim ring ({} edges), got {}",
+            bnd3d.len(),
+            boundary.len()
+        );
+        for (a, b) in &boundary {
+            assert!(
+                *a && *b,
+                "stray boundary edge off the rim ring — coverage hole (old bug class: analytic ring at v_max)"
+            );
         }
     }
 }
