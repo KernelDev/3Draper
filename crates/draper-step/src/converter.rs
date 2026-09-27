@@ -15117,6 +15117,38 @@ fn earcutr_triangulate_planar_converter(
         return None;
     }
 
+    // session-62 diagnostic (env-gated): dump the earcutr input/output
+    // correspondence for offline winding forensics — 2D coords vs 3D
+    // vertices vs final triangles, with per-triangle 2D signed area and
+    // 3D normal·plane.normal sign. Reveals index desync between the
+    // earcutr output and the vertex arrays.
+    if std::env::var("DRAPPER_DUMP_EARCUTR").is_ok() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static DUMP_N: AtomicUsize = AtomicUsize::new(0);
+        let n = DUMP_N.fetch_add(1, Ordering::SeqCst);
+        let label = draper_mesh::parametric_domain::current_face_label();
+        let path = format!("/tmp/earcutr_dump_{}_{}.tsv", n, if label.is_empty() { "x".into() } else { label });
+        let mut out = String::with_capacity(1 << 16);
+        out.push_str(&format!("meta\tforward={}\tn2d={}\tn3d={}\tntris={}\tplane_n=({:.6},{:.6},{:.6})\n",
+            forward, coords.len() / 2, all_3d.len(), mesh.triangles.len(),
+            plane.normal.x, plane.normal.y, plane.normal.z));
+        for (i, p) in all_3d.iter().enumerate() {
+            let (u, v) = if i * 2 + 1 < coords.len() { (coords[i * 2], coords[i * 2 + 1]) } else { (f64::NAN, f64::NAN) };
+            out.push_str(&format!("v\t{}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\t{:.9}\n",
+                i, u, v, p.x, p.y, p.z));
+        }
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let sa2 = (coords.get(b * 2).copied().unwrap_or(f64::NAN) - coords.get(a * 2).copied().unwrap_or(f64::NAN))
+                * (coords.get(c * 2 + 1).copied().unwrap_or(f64::NAN) - coords.get(a * 2 + 1).copied().unwrap_or(f64::NAN))
+                - (coords.get(c * 2).copied().unwrap_or(f64::NAN) - coords.get(a * 2).copied().unwrap_or(f64::NAN))
+                * (coords.get(b * 2 + 1).copied().unwrap_or(f64::NAN) - coords.get(a * 2 + 1).copied().unwrap_or(f64::NAN));
+            out.push_str(&format!("t\t{}\t{}\t{}\t{}\tsa2={:.6e}\n", ti, a, b, c, sa2));
+        }
+        let _ = std::fs::write(&path, out);
+        log::warn!("EARCUTR_DUMP: {} tris, {} verts → {}", mesh.triangles.len(), all_3d.len(), path);
+    }
+
     let normal = if forward { plane.normal } else {
         Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
     };

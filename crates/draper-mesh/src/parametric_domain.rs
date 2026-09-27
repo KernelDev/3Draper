@@ -5377,7 +5377,9 @@ pub fn clear_current_face_label() {
     CURRENT_FACE_LABEL.with(|l| l.borrow_mut().clear());
 }
 
-pub(crate) fn current_face_label() -> String {
+/// Read the per-face log label (session-62: also used cross-crate by the
+/// step converter's earcutr dump diagnostics).
+pub fn current_face_label() -> String {
     CURRENT_FACE_LABEL.with(|l| l.borrow().clone())
 }
 

@@ -168,6 +168,14 @@ impl VertexDedupMap {
         self.last_tol_hit.get()
     }
 
+    /// The tolerance radius used by the tolerance path (session-62:
+    /// needed by the merge edge-collapse guard to mirror the same
+    /// neighborhood when searching for edge-connected twins).
+    #[inline]
+    pub fn tolerance(&self) -> f64 {
+        self.tolerance
+    }
+
     /// Look up a vertex. Returns Some(index) if found, None otherwise.
     /// First tries bit-exact match, then tolerance-based spatial lookup.
     /// Tracks hit statistics: exact_hits (bit-identical), tolerance_hits (near-miss).
@@ -1067,6 +1075,36 @@ impl TriangleMesh {
                 .as_ref()
                 .and_then(|ids| ids.first().copied())
                 .unwrap_or(u64::MAX);
+            // session-62 diagnostic: dump the FULL incoming per-face mesh
+            // for a chosen face id at FULL precision (the FACE_OBJS dump
+            // rounds to 6 decimals — useless for 1e-7 forensics).
+            if let Ok(want) = std::env::var("DRAPPER_DUMP_MERGE_FID") {
+                let want_all = want == "all";
+                if want_all || want.parse::<u64>().map(|w| w == fid).unwrap_or(false) {
+                    use std::sync::atomic::{AtomicUsize, Ordering};
+                    static MF_N: AtomicUsize = AtomicUsize::new(0);
+                    let n = MF_N.fetch_add(1, Ordering::SeqCst);
+                    let path = format!("/tmp/mergefid_{}_p{}.tsv", fid, n);
+                    let mut out = String::with_capacity(1 << 16);
+                    for (i, p) in other.vertices.iter().enumerate() {
+                        out.push_str(&format!(
+                            "v\t{}\t{:.12e}\t{:.12e}\t{:.12e}\n",
+                            i, p.x, p.y, p.z
+                        ));
+                    }
+                    for (i, t) in other.triangles.iter().enumerate() {
+                        out.push_str(&format!("t\t{}\t{}\t{}\t{}\n", i, t[0], t[1], t[2]));
+                    }
+                    let _ = std::fs::write(&path, out);
+                    log::warn!(
+                        "MERGE_FID_DUMP: fid={} verts={} tris={} → {}",
+                        fid,
+                        other.vertices.len(),
+                        other.triangles.len(),
+                        path
+                    );
+                }
+            }
             let mut edge_use: std::collections::HashMap<(u32, u32), usize> =
                 std::collections::HashMap::new();
             for tri in &other.triangles {
@@ -1249,12 +1287,124 @@ impl TriangleMesh {
         // TEMPORARY DIAGNOSTIC (session-42): dump tolerance welds (env
         // checked ONCE per merge call — the per-vertex loop stays clean).
         let dump_tol_welds = std::env::var("DRAPPER_DUMP_WELDS").is_ok();
-        for vertex in &other.vertices {
-            let lookup = if face_aware {
+
+        // session-62: FLIP GUARD (env DRAPPER_MERGE_FLIP_GUARD=1, default
+        // OFF — bit-identical default). The tolerance path may weld an
+        // incoming vertex V into an existing vertex E up to merge_tol away.
+        // When a triangle of the incoming mesh using V is THIN (height
+        // below the weld distance), the replacement V→E lands the apex on
+        // the far side of the opposite edge and the triangle's normal
+        // FLIPS — measured (session-62, drill_top GEAR): merge_tol 15.3e-3
+        // exceeds the 9.03e-3 ring sampling step, the weld v63→v62 flips
+        // the hair (144,63,145) (height 5.6e-5) into (144,62,145) → 18
+        // same-face FOLD-OVER pairs surviving to the final mesh as the
+        // (1,1)/(12,12) families. Harmless welds (shift along a dense arc,
+        // e.g. cone faces f3..f8 with a 7.09e-3 step: every triangle keeps
+        // its normal sign) are allowed through — refusing them (the
+        // edge/self guards v2/v3) opened holes instead (GEAR 49→340/293).
+        // The guard refuses a tolerance weld iff replacing V's position
+        // with E's position changes the signed-normal orientation of ANY
+        // incoming triangle that uses V. Bit-exact reuse is untouched.
+        let flip_guard = std::env::var("DRAPPER_MERGE_FLIP_GUARD").as_deref() == Ok("1");
+        // session-62 v4 refinement: apply the flip refusal ONLY to SELF
+        // welds (E added by this same merge call). Cross-face tolerance
+        // welds (seam chains into earlier faces) MUST stay: refusing them
+        // opens boundary holes (measured: full-scope flip guard → GEAR
+        // 620 pairs vs 49 baseline).
+        let merge_start_vertices = self.vertices.len();
+        // local vertex index → triangles using it (for the flip check)
+        let mut vert_tris: std::collections::HashMap<u32, Vec<usize>> =
+            std::collections::HashMap::new();
+        if flip_guard {
+            for (ti, tri) in other.triangles.iter().enumerate() {
+                vert_tris.entry(tri[0]).or_default().push(ti);
+                vert_tris.entry(tri[1]).or_default().push(ti);
+                vert_tris.entry(tri[2]).or_default().push(ti);
+            }
+        }
+        let mut flip_guard_refusals = 0usize;
+        for (vi, vertex) in other.vertices.iter().enumerate() {
+            let vi = vi as u32;
+            let mut lookup = if face_aware {
                 dedup_map.get_face_aware(vertex, incoming_fid)
             } else {
                 dedup_map.get(vertex)
             };
+            // Flip refusal: replacing V(vi) by E must not change the
+            // orientation of any incoming triangle using vi.
+            if let Some(existing_idx) = lookup {
+                // optional per-face restriction (diagnostics): comma-list of
+                // face ids to which the flip refusal applies.
+                let guard_this_face = match std::env::var("DRAPPER_MERGE_FLIP_GUARD_FIDS") {
+                    Ok(list) => list
+                        .split(',')
+                        .filter_map(|s| s.trim().parse::<u64>().ok())
+                        .any(|f| f == incoming_fid),
+                    Err(_) => true,
+                };
+                if flip_guard
+                    && guard_this_face
+                    && dedup_map.last_get_was_tolerance()
+                    && (existing_idx as usize) >= merge_start_vertices
+                {
+                    let e = self.vertices[existing_idx as usize];
+                    let mut flipped = false;
+                    if let Some(tris_using) = vert_tris.get(&vi) {
+                        for &ti in tris_using {
+                            let tri = &other.triangles[ti];
+                            // positions BEFORE: all local
+                            let pa = other.vertices[tri[0] as usize];
+                            let pb = other.vertices[tri[1] as usize];
+                            let pc = other.vertices[tri[2] as usize];
+                            // positions AFTER: vi replaced by E
+                            let qa = if tri[0] == vi { e } else { pa };
+                            let qb = if tri[1] == vi { e } else { pb };
+                            let qc = if tri[2] == vi { e } else { pc };
+                            let cross = |a: Point3d, b: Point3d, c: Point3d| {
+                                let e1 = (b.x - a.x, b.y - a.y, b.z - a.z);
+                                let e2 = (c.x - a.x, c.y - a.y, c.z - a.z);
+                                (
+                                    e1.1 * e2.2 - e1.2 * e2.1,
+                                    e1.2 * e2.0 - e1.0 * e2.2,
+                                    e1.0 * e2.1 - e1.1 * e2.0,
+                                )
+                            };
+                            let n0 = cross(pa, pb, pc);
+                            let n1 = cross(qa, qb, qc);
+                            let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+                            let l0 = (n0.0 * n0.0 + n0.1 * n0.1 + n0.2 * n0.2).sqrt();
+                            let l1 = (n1.0 * n1.0 + n1.1 * n1.1 + n1.2 * n1.2).sqrt();
+                            if l0 > 1e-30 && l1 > 1e-30 && dot < 0.0 {
+                                flipped = true;
+                                break;
+                            }
+                        }
+                    }
+                    if flipped {
+                        flip_guard_refusals += 1;
+                        lookup = None;
+                    }
+                }
+            }
+            // session-62 trace: per-vertex lookup result for a chosen fid
+            if std::env::var("DRAPPER_TRACE_MERGE_FID")
+                .ok()
+                .and_then(|w| w.parse::<u64>().ok())
+                .map(|w| w == incoming_fid)
+                .unwrap_or(false)
+            {
+                let status = match &lookup {
+                    Some(idx) if dedup_map.last_get_was_tolerance() => {
+                        format!("TOL→{}", idx)
+                    }
+                    Some(idx) => format!("EXACT→{}", idx),
+                    None => "NEW".to_string(),
+                };
+                eprintln!(
+                    "MERGETRACE fid={} v=({:.12},{:.12},{:.12}) {}",
+                    incoming_fid, vertex.x, vertex.y, vertex.z, status
+                );
+            }
             if let Some(existing_idx) = lookup {
                 // TEMPORARY DIAGNOSTIC (session-42): dump tolerance welds
                 if dump_tol_welds && dedup_map.last_get_was_tolerance() {
@@ -1286,6 +1436,12 @@ impl TriangleMesh {
                 index_map.push(new_idx);
                 new_count += 1;
             }
+        }
+        if flip_guard_refusals > 0 {
+            log::warn!(
+                "MERGE_FLIP_GUARD: fid={} refused {} normal-flipping tolerance welds (of {} vertices)",
+                incoming_fid, flip_guard_refusals, other.vertices.len()
+            );
         }
 
         // Add triangles with remapped indices, filtering out:
