@@ -7206,6 +7206,144 @@ pub fn triangulate_surface_consistent(
                 &hole_start_indices,
             );
 
+            // session-64: unused-ring-vertex rescue (CDT re-route).
+            //
+            // The spike-chain pass can leave RING vertices unused in two
+            // flavors (both leave the neighboring face's matching cached
+            // tessellation unmerged → boundary edges in the BREP mesh):
+            // (a) collinear rim drop — a constant-v rim arc (STEP circle
+            //     shared with a neighboring face) is a straight UV line;
+            //     ear-clipping treats its interior points as zero-area
+            //     ears and silently drops them (Zentralstaender #1092
+            //     f32: 24 of 32 c5741 arc points);
+            // (b) strip cut-off — the interior chain's outermost lattice
+            //     row runs parallel to the rim arc at one lattice step
+            //     and the polygon closes chain_end→ring_start through a
+            //     chord that cuts the thin rim strip out of the triangu-
+            //     lated region: the rim points lie on NO mesh edge at
+            //     all (Zentralstaender #1092 f29: all 31 interior c5684
+            //     arc points unused, mesh top = the v=−0.39 lattice row,
+            //     277 boundary edges × 4 instances).
+            //
+            // Both are fixed by re-running the face through the per-face
+            // CDT (custom_cdt::triangulate_polygon_cdt): earcutr gets
+            // the CLEAN boundary+holes polygon (no chain to cut strips),
+            // repair_unused_ring_vertices re-inserts collinear drops by
+            // winding-preserving edge splits, Bowyer-Watson inserts the
+            // interior Steiner points. Ring edges are constraints and
+            // come back bit-exact, preserving the cross-face edge-cache
+            // contract.
+            //
+            // NOT routed: Nurbs (faces sharing one NURBS surface would
+            // build different per-face CDT connectivity over the same
+            // shared Steiner points — the documented s50/s51 regression,
+            // HOUSING 6035→14292 bnd) and Torus (s51: Delaunay near the
+            // rim creates more fold pairs, drill HM 4105→5470).
+            // Kill-switch: DRAPPER_UNUSED_CDT_RESCUE=0.
+            let mut rescued_by_cdt = false;
+            if !tris.is_empty() {
+                let rescue_ok = !matches!(surface, Surface::Nurbs(_) | Surface::Torus(_))
+                    && std::env::var("DRAPPER_UNUSED_CDT_RESCUE").as_deref() != Ok("0");
+                if rescue_ok {
+                    let mut used = vec![false; all_uv.len()];
+                    for &i in &tris {
+                        if i < used.len() {
+                            used[i] = true;
+                        }
+                    }
+                    let n_unused = (0..n_boundary_and_holes_actual)
+                        .filter(|&i| !used[i])
+                        .count();
+                    if n_unused > 0 {
+                        let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
+                            &boundary_2d,
+                            &holes_2d,
+                            &interior_2d,
+                        );
+                        // session-64 acceptance gate: the rescue exists to
+                        // restore RING coverage — accept the CDT result
+                        // only when it actually carries MORE ring edges
+                        // (consecutive (i, i+1) pairs of the outer rim
+                        // and of every hole rim appearing as triangle
+                        // edges — the cross-face watertight contract)
+                        // than the legacy spike-chain pass. Degenerate
+                        // inputs (e.g. seam-wrap polygons with a
+                        // zero-length closing edge —
+                        // test_cylinder_seam_watertight_two_holes) can
+                        // make the clean-polygon earcutr produce a tiny
+                        // garbage triangulation; the ring-edge
+                        // comparison rejects it and keeps the legacy
+                        // result (never-worsen).
+                        let ring_edges_present = |flat: &[usize]| -> usize {
+                            use std::collections::HashSet;
+                            let mut edges: HashSet<(usize, usize)> = HashSet::new();
+                            for c in flat.chunks_exact(3) {
+                                for k in 0..3 {
+                                    let a = c[k];
+                                    let b = c[(k + 1) % 3];
+                                    edges.insert((a.min(b), a.max(b)));
+                                }
+                            }
+                            let mut n = 0usize;
+                            // outer rim edges: (i, i+1 mod n_boundary)
+                            for i in 0..n_boundary {
+                                let j = (i + 1) % n_boundary;
+                                if edges.contains(&(i.min(j), i.max(j))) {
+                                    n += 1;
+                                }
+                            }
+                            // hole rim edges: hole k spans
+                            // [hole_start_indices[k], next_start) where the
+                            // next start is the following hole's start or
+                            // n_boundary_and_holes_actual
+                            for (k, &hs) in hole_start_indices.iter().enumerate() {
+                                let he = if k + 1 < hole_start_indices.len() {
+                                    hole_start_indices[k + 1]
+                                } else {
+                                    n_boundary_and_holes_actual
+                                };
+                                let hlen = he - hs;
+                                for i in 0..hlen {
+                                    let a = hs + i;
+                                    let b = hs + (i + 1) % hlen;
+                                    if edges.contains(&(a.min(b), a.max(b))) {
+                                        n += 1;
+                                    }
+                                }
+                            }
+                            n
+                        };
+                        let legacy_ring_edges = ring_edges_present(&tris);
+                        let cdt_flat: Vec<usize> = cdt2
+                            .iter()
+                            .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+                            .collect();
+                        let cdt_ring_edges = ring_edges_present(&cdt_flat);
+                        if !cdt2.is_empty() && cdt_ring_edges > legacy_ring_edges {
+                            log::warn!(
+                                "[f{}] unused-ring-vertex rescue: {} ring verts unused by spike-chain pass — re-routing through per-face CDT (ring edges {} → {}, {} → {} tris)",
+                                current_face_label(),
+                                n_unused,
+                                legacy_ring_edges,
+                                cdt_ring_edges,
+                                tris.len() / 3,
+                                cdt2.len()
+                            );
+                            tris = cdt_flat;
+                            rescued_by_cdt = true;
+                        } else {
+                            log::warn!(
+                                "[f{}] unused-ring-vertex rescue: {} ring verts unused, CDT re-route did not improve ring edges ({} → {}) — keeping legacy spike-chain result",
+                                current_face_label(),
+                                n_unused,
+                                legacy_ring_edges,
+                                cdt_ring_edges
+                            );
+                        }
+                    }
+                }
+            }
+
             // session-52: second pass — the interior spike chain (appended
             // to the last input ring) cut the far side of the domain away
             // from the primary triangulation. Triangulate the complement
@@ -7239,7 +7377,11 @@ pub fn triangulate_surface_consistent(
             // discriminator remains open — likely tied to the anisotropic
             // chain layout (s53 worklog §3); the DRAPPER_CHAIN_COMPLEMENT_
             // MAXCHORD knob (default 0 = off) is kept for calibration.
-            if !interior_uv_points.is_empty()
+            // session-64: skipped when the unused-ring-vertex rescue
+            // already re-routed this face through the CDT — the CDT
+            // result has no one-sided slit by construction.
+            if !rescued_by_cdt
+                && !interior_uv_points.is_empty()
                 && std::env::var("DRAPPER_CHAIN_COMPLEMENT").as_deref() == Ok("1")
             {
                 // The chain extends the LAST ring: the outer ring when no

@@ -99,6 +99,20 @@ pub fn triangulate_polygon_cdt(
     // vertex by splitting the covering edge.
     repair_unused_ring_vertices(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
 
+    // session-64: Delaunay improvement (Lawson flips) — re-enabled with
+    // the convexity guard inside lawson_flip (opposite-sides test; the
+    // 2026-09-09 disable was for exactly the missing guard). Base
+    // quality matters: ear-clip triangulations of elongated L-shaped
+    // polygons contain long diagonal chords (Zentralstaender #1092 f29:
+    // chords of UV length 12 spanning the whole stepped band) whose
+    // adjacent triangles are 300:1 tents — the ~180° dihedral "folds"
+    // the probe reports, and any Steiner insertion near such a chord
+    // degenerates. Flipping toward Delaunay before the insertion breaks
+    // the chords into well-shaped triangles; constraint (ring) edges
+    // are never flipped. A second round after the insertion cleans up
+    // the fan products.
+    lawson_flip(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
+
     // Insert interior Steiner points using Bowyer-Watson
     if !interior_2d.is_empty() {
         insert_interior_points(
@@ -111,19 +125,19 @@ pub fn triangulate_polygon_cdt(
         );
     }
 
-    // Delaunay improvement (Lawson flips) — DISABLED 2026-09-09.
-    //
-    // The flip phase had no quad-convexity guard: for a non-convex quad
-    // the incircle test passes trivially (the "opposite" vertex lies
-    // inside the neighbor triangle, hence inside its circumcircle), and
-    // the flip then produces OVERLAPPING triangles — corrupting an
-    // otherwise valid greedy-insertion triangulation (stress test
-    // `test_cdt_with_hole_and_grid_no_gaps` caught 2 interior gaps from
-    // exactly this). Correctness (watertightness) strictly dominates
-    // Delaunay quality here; re-enable only with a convexity guard AND
-    // a post-flip validity check (no edge usage != 2 in the interior).
+    // session-64: post-insertion Delaunay round (same guarded flips) —
+    // DISABLED after measurement: flipping around the inserted fan
+    // triangles introduced 276 winding conflicts + 5 non-manifold edges
+    // on #1092 f29 (the pre-insertion round alone is clean). The fan
+    // products' local structure interacts badly with the flip winding
+    // slots; re-enable only after a winding-preserving flip rewrite.
     // lawson_flip(&all_2d, &mut triangles, n_boundary, &hole_index_ranges);
-    let _ = (&n_boundary, &hole_index_ranges);
+
+    // Delaunay improvement (Lawson flips) — history: disabled 2026-09-09
+    // for the missing quad-convexity guard (non-convex quads flipped to
+    // overlapping triangles, stress test
+    // `test_cdt_with_hole_and_grid_no_gaps`); re-enabled session-64
+    // with the opposite-sides convexity guard inside lawson_flip.
 
     // Verify constraint edges exist (debug only)
     #[cfg(debug_assertions)]
@@ -180,6 +194,54 @@ fn insert_interior_points(
                     }
                     insert_point_on_edge_fast(all_2d, triangles, tri_idx, point_idx, &mut edge_map);
                 } else {
+                    // session-64 SLIVER GUARDS: an interior lattice point
+                    // landing within a hair of the containing triangle's
+                    // edge produces a fan product that is a 100:1+ sliver
+                    // whose 3D normal is noise-dominated — adjacent
+                    // slivers show ~180° dihedrals = the probe's
+                    // FOLD-OVER pairs (Zentralstaender #1092 f29/f32).
+                    // Interior Steiner points are NOT a cross-face
+                    // contract (only the ring is) — skipping a
+                    // degenerate insertion is always watertight-safe
+                    // and costs a negligible deviation increase.
+                    //
+                    // Guard 1 (relative): the smallest fan product under
+                    // 5% of the parent's area.
+                    // Guard 2 (aspect, scale-free): the smallest product
+                    // under 0.005 · (its longest edge)² — a 200:1 sliver.
+                    // Guard 2 catches the case guard 1 misses: a thin
+                    // PARENT (an earlier product hugging a long chord —
+                    // the 10-long column chord (b63, b32)) makes the
+                    // ratio look healthy while the product is still a
+                    // tent flap (aspect ~5e-4).
+                    let [a, b, c] = triangles[tri_idx];
+                    let pa = all_2d[a as usize];
+                    let pb = all_2d[b as usize];
+                    let pc = all_2d[c as usize];
+                    let parent_area = orient2d(pa, pb, pc).abs();
+                    let prod = |q: [f64; 2], r: [f64; 2]| orient2d(p, q, r).abs();
+                    let min_prod = prod(pa, pb).min(prod(pb, pc)).min(prod(pc, pa));
+                    const MIN_FAN_PRODUCT_FRAC: f64 = 0.05;
+                    const MIN_FAN_ASPECT: f64 = 0.005;
+                    let edge_sq = |q: [f64; 2], r: [f64; 2], s: [f64; 2]| {
+                        let e1 = (q[0] - r[0]) * (q[0] - r[0]) + (q[1] - r[1]) * (q[1] - r[1]);
+                        let e2 = (r[0] - s[0]) * (r[0] - s[0]) + (r[1] - s[1]) * (r[1] - s[1]);
+                        let e3 = (s[0] - q[0]) * (s[0] - q[0]) + (s[1] - q[1]) * (s[1] - q[1]);
+                        e1.max(e2).max(e3)
+                    };
+                    let max_edge_sq = edge_sq(pa, pb, pc).max(edge_sq(p, pb, pc))
+                        .max(edge_sq(pa, p, pc)).max(edge_sq(pa, pb, p));
+                    let skip_relative = parent_area > 0.0
+                        && min_prod < MIN_FAN_PRODUCT_FRAC * parent_area;
+                    let skip_aspect =
+                        max_edge_sq > 0.0 && min_prod < MIN_FAN_ASPECT * max_edge_sq;
+                    if skip_relative || skip_aspect {
+                        log::debug!(
+                            "insert_interior_points: sliver guard — point {} min product {:.3e} (parent {:.3e}, max_edge² {:.3e}) skipped",
+                            point_idx, min_prod, parent_area, max_edge_sq
+                        );
+                        continue;
+                    }
                     insert_point_in_triangle_fast(triangles, tri_idx, point_idx, &mut edge_map);
                 }
             }
@@ -712,6 +774,31 @@ fn lawson_flip(
                 } else {
                     nbr[2]
                 };
+
+                // session-64 CONVEXITY GUARD (the reason this phase was
+                // disabled 2026-09-09): a flip is geometrically valid
+                // ONLY when the two apexes lie strictly on OPPOSITE
+                // sides of the shared edge. For a reflex/dart quad one
+                // apex lies inside the other's triangle — SAME side —
+                // and the incircle test passes trivially there, so the
+                // unguarded flip produced overlapping triangles (the
+                // stress-test regression). Opposite sides ⟺ neither
+                // apex inside the other triangle ⟺ the quad is strictly
+                // convex ⟺ both new triangles are non-degenerate and
+                // consistently oriented.
+                let s_a = orient2d(
+                    vertices[ev1 as usize],
+                    vertices[ev2 as usize],
+                    vertices[opposite as usize],
+                );
+                let s_b = orient2d(
+                    vertices[ev1 as usize],
+                    vertices[ev2 as usize],
+                    vertices[nbr_opposite as usize],
+                );
+                if s_a * s_b >= 0.0 || s_a.abs() < EPS || s_b.abs() < EPS {
+                    continue; // same side (reflex quad) or degenerate — never flip
+                }
 
                 // Check if the flip would improve Delaunay quality
                 if should_flip(vertices, opposite, ev1, ev2, nbr_opposite) {
