@@ -188,6 +188,19 @@ fn main() {
                 fmap.push_str(&format!("t {} {}\n", ti, fid));
             }
             let _ = std::fs::write(&path.replace(".obj", ".fmap"), fmap);
+            // session-67 diagnostics: face-id → surface type map, for
+            // offline bnd census by surface class.
+            let mut facemap = String::new();
+            for f in &inst.faces {
+                facemap.push_str(&format!(
+                    "f {} {} {} {}\n",
+                    f.face_id,
+                    f.surface_type,
+                    f.step_face_id,
+                    f.forward
+                ));
+            }
+            let _ = std::fs::write(&path.replace(".obj", ".facemap"), facemap);
         }
         let faces = &inst.faces;
         // face_id → FaceInfo (face ids are NOT guaranteed dense; the vec is
