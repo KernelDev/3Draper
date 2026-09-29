@@ -5324,6 +5324,44 @@ fn triangulate_torus_face(face: &StagedFace, torus: &TorusSurface, params: &Tria
         return triangulate_torus_full_grid(face, torus, params);
     }
 
+    // session-66 (#1083 ELBETAETIGUNG root): MERIDIAN-STRIP (bend/elbow)
+    // class. A torus digon whose two boundary loops are each a FULL wrap of
+    // one parametric direction (e.g. v ∈ [0, 2π]) at ~constant value of the
+    // other (u = u1 and u = u2) — the elbow-bend wall of a bent pipe. The
+    // face region is the annulus strip u ∈ [u1, u2] × v full-wrap.
+    //
+    // Why neither existing path can handle it:
+    //  * earcutr gets outer = one meridian line (31 collinear UV pts) +
+    //    hole = the other meridian line → zero-area polygon → collapsed
+    //    single-ring disk (measured on #1083: 29-33 tris hugging ONE circle,
+    //    the neighbor face's circle left as 31 open boundary edges ×4 tori).
+    //  * the u_range<1e-6 full-grid guard below does not fire (atan2 noise
+    //    gives u_range ≈ 3e-5) and would be WRONG anyway: the face is a
+    //    partial strip, not the full torus.
+    //
+    // Fix (mirrors the cylinder tube path): ring-grid along the stack
+    // direction between the two cached meridian circles — end rows reuse
+    // the CACHED edge points (watertight weld with the neighboring faces),
+    // interior rows are analytic samples on a merged wrap-angle partition,
+    // adjacent rows connected by a two-pointer zipper band (watertight by
+    // construction: every frontier edge is shared by exactly 2 triangles).
+    // Kill-switch: DRAPPER_TORUS_STRIP=0.
+    if std::env::var("DRAPPER_TORUS_STRIP").map(|v| v != "0").unwrap_or(true) {
+        let (hole_polylines, hole_uvs) =
+            collect_face_holes_with_uv_from_cache(face, cache, &surface);
+        if let Some(strip) = detect_torus_meridian_strip(
+            &boundary_3d, &boundary_uvs, &hole_polylines, &hole_uvs,
+        ) {
+            log::warn!(
+                "TORUS_STRIP: face #{} meridian-strip (bend) class — {}+{} cached ring pts, stack [{:.4},{:.4}] (span {:.4}), wrap={} — ring grid",
+                face.id, strip.ring_a.len(), strip.ring_b.len(),
+                strip.a, strip.b, (strip.b - strip.a).abs(),
+                if strip.wrap_v { 'v' } else { 'u' },
+            );
+            return triangulate_torus_strip_grid(face.id.to_u64(), face.forward, torus, params, &strip);
+        }
+    }
+
     // A torus is closed in BOTH U and V directions. If the face's boundary
     // forms a degenerate UV polygon (all u values constant or all v values
     // constant), it means the boundary is a 1D loop wrapping around ONE
@@ -5387,6 +5425,327 @@ fn triangulate_torus_face(face: &StagedFace, torus: &TorusSurface, params: &Tria
         face.forward,
         params,
     )
+}
+
+/// session-66: a torus face detected as a MERIDIAN STRIP (bend/elbow wall).
+///
+/// Produced by [`detect_torus_meridian_strip`]: the face has exactly two
+/// boundary loops, each a full wrap of one parametric direction at
+/// ~constant value of the other. `ring_a`/`ring_b` are the two loops as
+/// wrap-angle-sorted rings (`(angle in [0, 2π), cached 3D point)`), and
+/// `a`/`b` are the UNWRAPPED stack-direction endpoint values (|b - a| < π;
+/// if the short arc crosses the seam, b may be < a or negative —
+/// `point_at` is periodic, so this is fine).
+struct TorusMeridianStrip {
+    /// true: loops wrap v (rows stack along u); false: loops wrap u.
+    wrap_v: bool,
+    /// stack-direction value of ring_a's meridian (unwrapped).
+    a: f64,
+    /// stack-direction value of ring_b's meridian (unwrapped, |b-a| < π).
+    b: f64,
+    /// ring at stack value `a`: (wrap angle in [0, 2π), cached 3D point).
+    ring_a: Vec<(f64, draper_geometry::Point3d)>,
+    /// ring at stack value `b`.
+    ring_b: Vec<(f64, draper_geometry::Point3d)>,
+}
+
+/// Detect the torus meridian-strip (bend/elbow) face class.
+///
+/// Signature (all must hold):
+/// * exactly one outer loop + one hole loop, each with ≥ 8 points;
+/// * BOTH loops span ≥ 87.5% of the period in the SAME parametric
+///   direction (the wrap direction; a ring of n ≥ 8 evenly spread
+///   points spans 2π − 2π/n — cf. `unwrap_periodic_torus_boundary`);
+/// * BOTH loops are ~constant (range < 1e-3, seam-normalized) in the OTHER
+///   direction (atan2 projection noise is ~3e-5, real spans are ≥ 0.05);
+/// * the two meridians are distinct (cyclic separation ∈ [0.05, π));
+/// * the two rings share no 3D point (else the strip is a degenerate
+///   sliver — leave it to the legacy paths).
+fn detect_torus_meridian_strip(
+    boundary_3d: &[draper_geometry::Point3d],
+    boundary_uvs: &[draper_geometry::Point2d],
+    hole_polylines: &[Vec<draper_geometry::Point3d>],
+    hole_uvs: &[Vec<draper_geometry::Point2d>],
+) -> Option<TorusMeridianStrip> {
+    use draper_geometry::Point2d;
+
+    if hole_polylines.len() != 1 || hole_uvs.len() != 1 {
+        return None;
+    }
+    let h3 = &hole_polylines[0];
+    let hu = &hole_uvs[0];
+    if boundary_3d.len() != boundary_uvs.len() || h3.len() != hu.len() {
+        return None;
+    }
+    if boundary_3d.len() < 8 || h3.len() < 8 {
+        return None;
+    }
+
+    /// (range, center) of one parametric direction, seam-normalized: when
+    /// the raw range exceeds π the values may straddle the 0/2π seam, so
+    /// remap values > π by -2π and take whichever range is smaller.
+    fn dir_stats(vals: &[f64]) -> (f64, f64) {
+        let lo = vals.iter().cloned().fold(f64::MAX, f64::min);
+        let hi = vals.iter().cloned().fold(f64::MIN, f64::max);
+        let raw_range = hi - lo;
+        let center = |xs: &[f64]| xs.iter().sum::<f64>() / xs.len() as f64;
+        if raw_range > PI {
+            let sn: Vec<f64> =
+                vals.iter().map(|&x| if x > PI { x - 2.0 * PI } else { x }).collect();
+            let sn_lo = sn.iter().cloned().fold(f64::MAX, f64::min);
+            let sn_hi = sn.iter().cloned().fold(f64::MIN, f64::max);
+            if sn_hi - sn_lo < raw_range {
+                return (sn_hi - sn_lo, center(&sn));
+            }
+        }
+        (raw_range, center(vals))
+    }
+
+    let stats = |uvs: &[Point2d]| {
+        let us: Vec<f64> = uvs.iter().map(|p| p.u).collect();
+        let vs: Vec<f64> = uvs.iter().map(|p| p.v).collect();
+        let (ur, uc) = dir_stats(&us);
+        let (vr, vc) = dir_stats(&vs);
+        (ur, vr, uc, vc)
+    };
+    let (u_r0, v_r0, u_c0, v_c0) = stats(boundary_uvs);
+    let (u_r1, v_r1, u_c1, v_c1) = stats(hu);
+
+    const WRAP_MIN: f64 = 2.0 * PI - PI / 4.0; // ≥ 87.5% of the period:
+    // a ring of n ≥ 8 evenly spread points spans 2π − 2π/n ≥ 2π − π/4.
+    // (The old 1.9π house threshold needs n ≥ 20 — too strict for coarse
+    // LOD rings; sparser-than-87.5% arcs are open arcs, not closed rings,
+    // and strips with span ≥ π are rejected below by the separation cap.)
+    const CONST_MAX: f64 = 1e-3;    // const-direction noise (atan2 FP ~3e-5)
+    const MIN_SEP: f64 = 0.05;      // min meridian separation (rad)
+
+    let wrap_v = v_r0 > WRAP_MIN && v_r1 > WRAP_MIN && u_r0 < CONST_MAX && u_r1 < CONST_MAX;
+    let wrap_u = u_r0 > WRAP_MIN && u_r1 > WRAP_MIN && v_r0 < CONST_MAX && v_r1 < CONST_MAX;
+    // XOR: exactly one orientation may match; both = contradictory input.
+    if wrap_v == wrap_u {
+        return None;
+    }
+
+    let (c0, c1) = if wrap_v { (u_c0, u_c1) } else { (v_c0, v_c1) };
+    let mut sep = (c1 - c0).abs();
+    if sep > PI {
+        sep = 2.0 * PI - sep;
+    }
+    if sep < MIN_SEP || sep >= PI {
+        return None;
+    }
+
+    // Build wrap-angle-sorted rings; drop a seam duplicate (first/last
+    // point of the loop coinciding in 3D after the angle sort).
+    let ring_of = |pts: &[draper_geometry::Point3d], uvs: &[Point2d]| -> Vec<(f64, draper_geometry::Point3d)> {
+        let mut ring: Vec<(f64, draper_geometry::Point3d)> = pts
+            .iter()
+            .zip(uvs.iter())
+            .map(|(p, uv)| {
+                let ang = if wrap_v { uv.v } else { uv.u };
+                (ang.rem_euclid(2.0 * PI), *p)
+            })
+            .collect();
+        ring.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        // seam duplicate guard: identical 3D points at both ends of the
+        // angle-sorted ring (angle ~0 and ~2π)
+        if ring.len() >= 2 {
+            let n = ring.len();
+            if ring[0].1.distance_to(&ring[n - 1].1) <= 1e-7 {
+                ring.pop();
+            }
+        }
+        ring
+    };
+    let mut ring0 = ring_of(boundary_3d, boundary_uvs);
+    let mut ring1 = ring_of(h3, hu);
+    if ring0.len() < 8 || ring1.len() < 8 {
+        return None;
+    }
+
+    // Degenerate-sliver guard: the two meridians must be geometrically
+    // disjoint point sets (a shared point means zero-width strip).
+    {
+        let mut min_d2 = f64::MAX;
+        'outer: for p in &ring0 {
+            for q in &ring1 {
+                let dx = p.1.x - q.1.x;
+                let dy = p.1.y - q.1.y;
+                let dz = p.1.z - q.1.z;
+                min_d2 = min_d2.min(dx * dx + dy * dy + dz * dz);
+                if min_d2 < 1e-12 {
+                    break 'outer;
+                }
+            }
+        }
+        if min_d2 < 1e-12 {
+            return None;
+        }
+    }
+
+    // Unwrap the stack endpoints along the SHORT arc: order so lo < hi,
+    // and if hi - lo > π shift hi by -2π (rows then run "downward" from
+    // the lo-side ring to the hi-side ring — point_at is periodic).
+    let (lo_ring, hi_ring, lo_c, hi_c) =
+        if c0 <= c1 { (&mut ring0, &mut ring1, c0, c1) } else { (&mut ring1, &mut ring0, c1, c0) };
+    let (a, b) = if hi_c - lo_c > PI {
+        (lo_c, hi_c - 2.0 * PI)
+    } else {
+        (lo_c, hi_c)
+    };
+    Some(TorusMeridianStrip {
+        wrap_v,
+        a,
+        b,
+        ring_a: std::mem::take(lo_ring),
+        ring_b: std::mem::take(hi_ring),
+    })
+}
+
+/// session-66: ring-grid triangulation of a torus meridian strip.
+///
+/// Rows run along the stack direction from `strip.a` (ring_a — CACHED edge
+/// points, welds with the neighbor face) to `strip.b` (ring_b — cached),
+/// with `n_rows - 2` analytic interior rows sampled on a merged wrap-angle
+/// partition (union of both end rings' angles, deduplicated). Adjacent
+/// rows are connected by [`zipper_band`] — watertight by construction.
+fn triangulate_torus_strip_grid(
+    face_id: u64,
+    forward: bool,
+    torus: &TorusSurface,
+    params: &TriangulationParams,
+    strip: &TorusMeridianStrip,
+) -> TriangleMesh {
+    let _ = face_id; // logging only (caller logs the detection)
+    let mut mesh = TriangleMesh::new();
+    let surface = Surface::Torus(torus.clone());
+
+    // Adaptive row count along the stack arc (the u-range passed to
+    // required_samples must be an ascending span; direction of row travel
+    // is a<b handled below).
+    let (lo, hi) = if strip.a <= strip.b { (strip.a, strip.b) } else { (strip.b, strip.a) };
+    let n_rows = crate::adaptive::required_samples(
+        &surface, lo, hi, 0.0, 2.0 * PI,
+        params.max_deviation, params.detail_level,
+    )
+    .0
+    .max(3);
+
+    // Merged wrap-angle partition for interior rows: union of both rings'
+    // angles, deduplicated within a quarter of the finer ring's step.
+    let step_a = 2.0 * PI / strip.ring_a.len() as f64;
+    let step_b = 2.0 * PI / strip.ring_b.len() as f64;
+    let merge_tol = 0.25 * step_a.min(step_b);
+    let mut merged: Vec<f64> = strip
+        .ring_a
+        .iter()
+        .chain(strip.ring_b.iter())
+        .map(|x| x.0)
+        .collect();
+    merged.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    merged.dedup_by(|a, b| (*a - *b).abs() <= merge_tol);
+
+    // Build rows: each row is (wrap angles, vertex ids).
+    let mut rows: Vec<Vec<(f64, u32)>> = Vec::with_capacity(n_rows);
+    for j in 0..n_rows {
+        let t = j as f64 / (n_rows - 1) as f64;
+        let stack = strip.a + (strip.b - strip.a) * t;
+        let is_end_a = j == 0;
+        let is_end_b = j == n_rows - 1;
+        let mut row: Vec<(f64, u32)> = Vec::new();
+        if is_end_a {
+            for (ang, p) in &strip.ring_a {
+                let (uu, vv) = if strip.wrap_v { (stack, *ang) } else { (*ang, stack) };
+                let n = orient_normal(torus.normal_at(uu, vv), forward);
+                let idx = mesh.add_vertex(*p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+                row.push((*ang, idx));
+            }
+        } else if is_end_b {
+            for (ang, p) in &strip.ring_b {
+                let (uu, vv) = if strip.wrap_v { (stack, *ang) } else { (*ang, stack) };
+                let n = orient_normal(torus.normal_at(uu, vv), forward);
+                let idx = mesh.add_vertex(*p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+                row.push((*ang, idx));
+            }
+        } else {
+            for &ang in &merged {
+                let (uu, vv) = if strip.wrap_v { (stack, ang) } else { (ang, stack) };
+                let p = crate::edge_cache::deterministic_round_point(torus.point_at(uu, vv));
+                let n = orient_normal(torus.normal_at(uu, vv), forward);
+                let idx = mesh.add_vertex(p);
+                mesh.add_vertex_normal(idx, [n.x, n.y, n.z]);
+                row.push((ang.rem_euclid(2.0 * PI), idx));
+            }
+        }
+        rows.push(row);
+    }
+
+    for w in rows.windows(2) {
+        zipper_band(&w[0], &w[1], forward, &mut mesh);
+    }
+
+    mesh
+}
+
+/// session-66: two-pointer zipper band between two wrap-angle-sorted
+/// cyclic rings (the strip triangulation between adjacent grid rows).
+///
+/// Classic zipper walk: each "advance" emits the triangle (anchor_a, new,
+/// anchor_b), covering the old frontier edge and creating the new one.
+/// Ties advance the lower ring first. The two closure triangles cover the
+/// wrap cell (through angle 2π) plus the final frontier and the start
+/// edge. Every ring edge appears in exactly one triangle (band boundary);
+/// every frontier/diagonal edge in exactly two (internal) — watertight.
+///
+/// Degenerate triangles (repeated vertex indices) are skipped — they can
+/// only arise from coincident angles after dedup.
+fn zipper_band(
+    lower: &[(f64, u32)],
+    upper: &[(f64, u32)],
+    forward: bool,
+    mesh: &mut TriangleMesh,
+) {
+    let n_a = lower.len();
+    let n_b = upper.len();
+    if n_a < 3 || n_b < 3 {
+        return;
+    }
+    let mut emit = |mesh: &mut TriangleMesh, x: u32, y: u32, z: u32| {
+        if x != y && y != z && x != z {
+            if forward {
+                mesh.add_triangle(x, y, z);
+            } else {
+                mesh.add_triangle(x, z, y);
+            }
+        }
+    };
+    let mut i = 1usize; // next unvisited lower event
+    let mut j = 1usize; // next unvisited upper event
+    let mut a = 0usize; // current lower anchor
+    let mut b = 0usize; // current upper anchor
+    while i < n_a || j < n_b {
+        let take_a = if i >= n_a {
+            false
+        } else if j >= n_b {
+            true
+        } else {
+            lower[i].0 <= upper[j].0
+        };
+        if take_a {
+            emit(mesh, lower[a].1, lower[i].1, upper[b].1);
+            a = i;
+            i += 1;
+        } else {
+            emit(mesh, lower[a].1, upper[j].1, upper[b].1);
+            b = j;
+            j += 1;
+        }
+    }
+    // Closure: wrap cell between the last events and angle 2π.
+    emit(mesh, lower[n_a - 1].1, lower[0].1, upper[n_b - 1].1);
+    emit(mesh, lower[0].1, upper[0].1, upper[n_b - 1].1);
 }
 
 /// Unwrap a torus face's periodic UV boundary so earcutr can triangulate it.
@@ -7230,6 +7589,37 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             // Other curved surfaces (Torus, Revolution, Extrusion):
             // use the consistent UV-space triangulation (earcutr CDT)
             //
+            // session-66 (#1083 ELBETAETIGUNG): MERIDIAN-STRIP (bend/elbow)
+            // torus class FIRST — see the hook in `triangulate_torus_face`
+            // for the full rationale. Signature: exactly one outer loop +
+            // one hole loop, each a FULL wrap of one parametric direction
+            // at ~constant value of the other (the two meridian circles of
+            // an elbow-bend wall). earcutr gets a zero-area degenerate
+            // polygon here (two parallel UV lines) and collapses the face
+            // to a single-ring disk, leaving both neighbor faces' circles
+            // open (139 bnd edges on #1083). The ring-grid strip reuses the
+            // CACHED edge points on its end rows — watertight weld with the
+            // cylinder neighbors. Kill-switch: DRAPPER_TORUS_STRIP=0.
+            if let Surface::Torus(torus) = surface {
+                if std::env::var("DRAPPER_TORUS_STRIP").map(|v| v != "0").unwrap_or(true) {
+                    if let Some(strip) = detect_torus_meridian_strip(
+                        boundary_points,
+                        boundary_uvs,
+                        hole_polylines,
+                        hole_uvs,
+                    ) {
+                        log::warn!(
+                            "TORUS_STRIP(UV): meridian-strip (bend) class — {}+{} cached ring pts, stack [{:.4},{:.4}] (span {:.4}), wrap={} — ring grid",
+                            strip.ring_a.len(), strip.ring_b.len(),
+                            strip.a, strip.b, (strip.b - strip.a).abs(),
+                            if strip.wrap_v { 'v' } else { 'u' },
+                        );
+                        return triangulate_torus_strip_grid(
+                            u64::MAX, forward, torus, params, &strip,
+                        );
+                    }
+                }
+            }
             // For torus (periodic in BOTH u and v): unwrap any periodic
             // wrap in the pre-computed UVs. PCURVE-based UVs may have
             // values spanning > 1.9π in one axis when the boundary crosses
@@ -11836,5 +12226,162 @@ mod adaptive_lod_tests {
             "Default bbox_surface_area should be None");
         params.bbox_surface_area = Some(1000.0);
         assert_eq!(params.bbox_surface_area, Some(1000.0));
+    }
+}
+
+#[cfg(test)]
+mod torus_strip_tests {
+    use super::*;
+
+    /// session-66: the two-pointer zipper band must be a watertight annulus
+    /// between two cyclic rings with ARBITRARY (different) angle partitions.
+    /// Invariants: every ring edge appears exactly once (band boundary),
+    /// every other edge exactly twice (internal), χ = 0, no degenerate tris.
+    #[test]
+    fn zipper_band_watertight_annulus_mismatched_partitions() {
+        let n_a = 8usize;
+        let n_b = 5usize; // deliberately mismatched partitions
+        let lower: Vec<(f64, u32)> = (0..n_a)
+            .map(|i| {
+                let ang = 2.0 * PI * i as f64 / n_a as f64;
+                (ang, i as u32)
+            })
+            .collect();
+        let upper: Vec<(f64, u32)> = (0..n_b)
+            .map(|i| {
+                // offset phase to stress the tie handling
+                let ang = (2.0 * PI * i as f64 / n_b as f64 + 0.3).rem_euclid(2.0 * PI);
+                (ang, (n_a + i) as u32)
+            })
+            .collect();
+
+        let mut mesh = TriangleMesh::new();
+        zipper_band(&lower, &upper, true, &mut mesh);
+
+        assert!(!mesh.triangles.is_empty(), "band must have triangles");
+        for t in &mesh.triangles {
+            assert!(t[0] != t[1] && t[1] != t[2] && t[0] != t[2],
+                "degenerate triangle {:?}", t);
+        }
+
+        // edge census
+        use std::collections::HashMap;
+        let mut ec: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in &mesh.triangles {
+            for (u, v) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                *ec.entry((u.min(v), u.max(v))).or_insert(0) += 1;
+            }
+        }
+        let bnd: Vec<_> = ec.iter().filter(|(_, &n)| n == 1).collect();
+        let nm: Vec<_> = ec.iter().filter(|(_, &n)| n > 2).collect();
+        assert!(nm.is_empty(), "non-manifold edges in band: {:?}", nm);
+
+        // boundary edges must be exactly the ring edges of both rings
+        let mut expected: Vec<(u32, u32)> = Vec::new();
+        for i in 0..n_a {
+            let j = (i + 1) % n_a;
+            expected.push((lower[i].1.min(lower[j].1), lower[i].1.max(lower[j].1)));
+        }
+        for i in 0..n_b {
+            let j = (i + 1) % n_b;
+            expected.push((upper[i].1.min(upper[j].1), upper[i].1.max(upper[j].1)));
+        }
+        expected.sort_unstable();
+        let mut got: Vec<(u32, u32)> = bnd.iter().map(|(&k, _)| k).collect();
+        got.sort_unstable();
+        assert_eq!(got, expected,
+            "band boundary must be exactly the two rings (coverage hole/overflow)");
+        // χ = V - E + F = 0 for the annulus
+        let v = (n_a + n_b) as i64;
+        let e = ec.len() as i64;
+        let f = mesh.triangles.len() as i64;
+        assert_eq!(v - e + f, 0,
+            "annulus χ must be 0, got V={} E={} F={} χ={}", v, e, f, v - e + f);
+    }
+
+    /// session-66: aligned partitions degenerate to the plain quad grid —
+    /// 2·n triangles, same invariants.
+    #[test]
+    fn zipper_band_aligned_is_quad_grid() {
+        let n = 12usize;
+        let lower: Vec<(f64, u32)> = (0..n)
+            .map(|i| (2.0 * PI * i as f64 / n as f64, i as u32))
+            .collect();
+        let upper: Vec<(f64, u32)> = (0..n)
+            .map(|i| (2.0 * PI * i as f64 / n as f64, (n + i) as u32))
+            .collect();
+        let mut mesh = TriangleMesh::new();
+        zipper_band(&lower, &upper, false, &mut mesh);
+        assert_eq!(mesh.triangles.len(), 2 * n,
+            "aligned rings must produce exactly 2·n triangles (quad grid)");
+    }
+
+    /// session-66: detect_torus_meridian_strip must REJECT non-strip shapes
+    /// (no holes; partial v-wrap trimmed faces) and ACCEPT the genuine
+    /// elbow signature (two full-v-wrap loops at distinct constant u).
+    #[test]
+    fn detect_rejects_non_strip_shapes() {
+        // single loop, no holes -> reject
+        let b3: Vec<draper_geometry::Point3d> = (0..8)
+            .map(|i| {
+                let a = 2.0 * PI * i as f64 / 8.0;
+                draper_geometry::Point3d::new(a.cos(), a.sin(), 0.0)
+            })
+            .collect();
+        let buv: Vec<draper_geometry::Point2d> = (0..8)
+            .map(|i| {
+                let a = 2.0 * PI * i as f64 / 8.0;
+                draper_geometry::Point2d::new(0.5, a)
+            })
+            .collect();
+        assert!(detect_torus_meridian_strip(&b3, &buv, &[], &[]).is_none(),
+            "no holes -> not a strip");
+
+        // two loops but only PARTIAL v wrap (real trimmed torus face) -> reject
+        let partial: Vec<draper_geometry::Point2d> = (0..8)
+            .map(|i| {
+                let a = 0.1 + 0.3 * i as f64; // span ~2.2 << 1.9π
+                draper_geometry::Point2d::new(0.5, a)
+            })
+            .collect();
+        let h3 = b3.clone();
+        let hu = partial.clone();
+        assert!(detect_torus_meridian_strip(&b3, &partial, &[h3], &[hu]).is_none(),
+            "partial wrap -> not a strip");
+
+        // genuine meridian-strip signature -> ACCEPT
+        let good_outer: Vec<draper_geometry::Point2d> = (0..12)
+            .map(|i| {
+                let a = 2.0 * PI * i as f64 / 12.0;
+                draper_geometry::Point2d::new(3.927, a)
+            })
+            .collect();
+        let good_hole: Vec<draper_geometry::Point2d> = (0..12)
+            .map(|i| {
+                let a = (2.0 * PI * i as f64 / 12.0 + 0.1).rem_euclid(2.0 * PI);
+                draper_geometry::Point2d::new(4.712, a)
+            })
+            .collect();
+        let outer3: Vec<draper_geometry::Point3d> = (0..12)
+            .map(|i| {
+                let a = 2.0 * PI * i as f64 / 12.0;
+                draper_geometry::Point3d::new(10.0 + a.cos(), a.sin(), 0.0)
+            })
+            .collect();
+        let hole3: Vec<draper_geometry::Point3d> = (0..12)
+            .map(|i| {
+                let a = (2.0 * PI * i as f64 / 12.0 + 0.1).rem_euclid(2.0 * PI);
+                draper_geometry::Point3d::new(20.0 + a.cos(), a.sin(), 0.0)
+            })
+            .collect();
+        let strip = detect_torus_meridian_strip(
+            &outer3, &good_outer, &[hole3], &[good_hole],
+        )
+        .expect("genuine elbow signature must be accepted");
+        assert!(strip.wrap_v, "loops wrap v");
+        assert!((strip.a - 3.927).abs() < 1e-9 && (strip.b - 4.712).abs() < 1e-9,
+            "stack endpoints");
+        assert_eq!(strip.ring_a.len(), 12);
+        assert_eq!(strip.ring_b.len(), 12);
     }
 }
