@@ -7176,6 +7176,215 @@ pub fn triangulate_surface_consistent(
     // boundary polygon), fall back to the legacy spike-chain path — a
     // partial mesh is better than none (never-worsen).
     let triangle_indices: Vec<usize> = {
+        // session-65: TWO-CHAIN MONOTONE STRIP triangulation.
+        //
+        // For pinched-crescent polygons — two monotone chains sharing both
+        // endpoint vertices (the Zentralstaender #1086 lune flaps: the
+        // constant-v corner arc is a straight UV line, the B_SPLINE lip
+        // waves below it, both corners deduped by LOOP_JUNCTION_DEDUP so
+        // the chains share endpoint INDICES) — ear-clipping fans cross the
+        // near-zero-width pinch (triangle areas sum to 137% of the polygon
+        // — overlaps — while whole sub-regions stay uncovered), and the
+        // CDT's repair/flips cascade struggles with the collinear rim run.
+        // The two-pointer merge strip between the chains is the natural
+        // triangulation: exactly 100% of the polygon area, every rim edge
+        // covered (including the tiny corner-closing edges), zero
+        // non-rim boundary edges. Interior Steiner points are DROPPED —
+        // they are not a cross-face contract (s64: skipping is always
+        // watertight-safe).
+        //
+        // Returns an empty Vec when the polygon does not qualify (holes,
+        // non-monotone chains, endpoint mismatch, area mismatch).
+        fn two_chain_monotone_strip(boundary_2d: &[[f64; 2]]) -> Vec<usize> {
+            let n = boundary_2d.len();
+            if n < 4 {
+                return Vec::new();
+            }
+            for swap in [false, true] {
+                let key = |p: &[f64; 2]| -> f64 {
+                    if swap { p[1] } else { p[0] }
+                };
+                let umin_i = (0..n).min_by(|&a, &b| {
+                    key(&boundary_2d[a])
+                        .partial_cmp(&key(&boundary_2d[b]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(&b))
+                }).unwrap_or(0);
+                let umax_i = (0..n).min_by(|&a, &b| {
+                    key(&boundary_2d[b])
+                        .partial_cmp(&key(&boundary_2d[a]))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then(a.cmp(&b))
+                }).unwrap_or(0);
+                if umin_i == umax_i {
+                    continue;
+                }
+                // chain A: umin -> umax (cyclic forward)
+                let mut a_chain = vec![umin_i];
+                let mut i = umin_i;
+                while i != umax_i {
+                    i = (i + 1) % n;
+                    a_chain.push(i);
+                }
+                // chain B: umax -> umin (cyclic forward), then reversed to
+                // run umin -> umax
+                let mut b_walk = vec![umax_i];
+                i = umax_i;
+                while i != umin_i {
+                    i = (i + 1) % n;
+                    b_walk.push(i);
+                }
+                let mut b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
+                // both chains must be non-decreasing in the key
+                let mono = |c: &[usize]| -> bool {
+                    c.windows(2).all(|w| {
+                        key(&boundary_2d[w[0]]) <= key(&boundary_2d[w[1]]) + 1e-12
+                    })
+                };
+                if !mono(&a_chain) || !mono(&b_chain) {
+                    continue;
+                }
+                // the crescent class: chains share both endpoint indices
+                if a_chain[0] != b_chain[0] || *a_chain.last().unwrap() != *b_chain.last().unwrap() {
+                    continue;
+                }
+                if a_chain.len() < 2 || b_chain.len() < 2 {
+                    continue;
+                }
+                // two-pointer merge strip
+                let mut tris: Vec<usize> = Vec::with_capacity(a_chain.len() + b_chain.len());
+                let mut ia = 0usize;
+                let mut ib = 0usize;
+                while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
+                    let tri = if ia >= a_chain.len() - 1 {
+                        let t = [a_chain[ia], b_chain[ib], b_chain[ib + 1]];
+                        ib += 1;
+                        t
+                    } else if ib >= b_chain.len() - 1 {
+                        let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                        ia += 1;
+                        t
+                    } else if key(&boundary_2d[a_chain[ia + 1]])
+                        <= key(&boundary_2d[b_chain[ib + 1]])
+                    {
+                        let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                        ia += 1;
+                        t
+                    } else {
+                        let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
+                        ib += 1;
+                        t
+                    };
+                    if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                        tris.extend_from_slice(&tri);
+                    }
+                }
+                if tris.len() < 3 {
+                    continue;
+                }
+                // orientation + area guard: the strip's signed area must
+                // match the polygon's signed area (same sign, magnitude
+                // within 0.5% + tiny absolute slack). Rejects strips over
+                // self-intersecting / mis-split polygons.
+                let poly_area: f64 = (0..n)
+                    .map(|k| {
+                        let p = boundary_2d[k];
+                        let q = boundary_2d[(k + 1) % n];
+                        p[0] * q[1] - q[0] * p[1]
+                    })
+                    .sum::<f64>()
+                    * 0.5;
+                let strip_area: f64 = tris
+                    .chunks_exact(3)
+                    .map(|c| {
+                        let (a, b, cc) = (
+                            boundary_2d[c[0]],
+                            boundary_2d[c[1]],
+                            boundary_2d[c[2]],
+                        );
+                        (b[0] - a[0]) * (cc[1] - a[1]) - (cc[0] - a[0]) * (b[1] - a[1])
+                    })
+                    .sum::<f64>()
+                    * 0.5;
+                let area_ok = if poly_area >= 0.0 {
+                    strip_area >= poly_area * 0.995 - 1e-12
+                        && strip_area <= poly_area * 1.005 + 1e-12
+                } else {
+                    strip_area <= poly_area * 0.995 + 1e-12
+                        && strip_area >= poly_area * 1.005 - 1e-12
+                };
+                if !area_ok {
+                    continue;
+                }
+                // session-65 SLIVER GUARD: reject strips containing LONG
+                // thin triangles — the u-matched two-pointer shears when
+                // the chains are density-mismatched or non-parallel
+                // (#1092 f29/f32 stepped bands: 40-unit diagonals, 85:1
+                // aspect, 180° dihedral folds — the s59 angular-shear
+                // class). Tiny corner pinch slivers (the lune's 0.82°
+                // triangles at the deduped corners, longest edge ~4% of
+                // the bbox diagonal) are allowed; a thin triangle that
+                // spans a large fraction of the domain is not.
+                let (min_u, max_u) = boundary_2d.iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                        (lo.min(p[0]), hi.max(p[0]))
+                    });
+                let (min_v, max_v) = boundary_2d.iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                        (lo.min(p[1]), hi.max(p[1]))
+                    });
+                let bbox_diag =
+                    ((max_u - min_u).max(1e-12)).hypot((max_v - min_v).max(1e-12));
+                let mut strip_ok = true;
+                for c in tris.chunks_exact(3) {
+                    let pts = [
+                        boundary_2d[c[0]],
+                        boundary_2d[c[1]],
+                        boundary_2d[c[2]],
+                    ];
+                    // min angle over the three vertices
+                    let mut min_ang = f64::INFINITY;
+                    let mut longest = 0.0f64;
+                    for k in 0..3 {
+                        let p0 = pts[k];
+                        let p1 = pts[(k + 1) % 3];
+                        let p2 = pts[(k + 2) % 3];
+                        let v1 = [p1[0] - p0[0], p1[1] - p0[1]];
+                        let v2 = [p2[0] - p0[0], p2[1] - p0[1]];
+                        let l1 = v1[0].hypot(v1[1]);
+                        let l2 = v2[0].hypot(v2[1]);
+                        longest = longest
+                            .max(l1)
+                            .max(l2)
+                            .max((p2[0] - p1[0]).hypot(p2[1] - p1[1]));
+                        if l1 > 1e-15 && l2 > 1e-15 {
+                            let cosang = ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2))
+                                .clamp(-1.0, 1.0);
+                            let ang = cosang.acos().to_degrees();
+                            min_ang = min_ang.min(ang);
+                        } else {
+                            min_ang = 0.0;
+                        }
+                    }
+                    if min_ang < 2.0 && longest > 0.10 * bbox_diag {
+                        strip_ok = false;
+                        break;
+                    }
+                }
+                if !strip_ok {
+                    continue;
+                }
+                // normalize winding to the polygon's sign
+                if strip_area * poly_area < 0.0 {
+                    for c in tris.chunks_exact_mut(3) {
+                        c.swap(1, 2);
+                    }
+                }
+                return tris;
+            }
+            Vec::new()
+        }
+
         let boundary_2d: Vec<[f64; 2]> =
             outer_uv.iter().map(|p| [p.u, p.v]).collect();
         let holes_2d: Vec<Vec<[f64; 2]>> = valid_hole_indices
@@ -7254,7 +7463,148 @@ pub fn triangulate_surface_consistent(
                     let n_unused = (0..n_boundary_and_holes_actual)
                         .filter(|&i| !used[i])
                         .count();
-                    if n_unused > 0 {
+                    // session-65: REGION-DROP detector — mesh boundary
+                    // edges that are NOT polygon rim edges. When earcutr
+                    // drops a sub-region of the polygon (Zentralstaender
+                    // #1086 lune flaps: thin UV lune between a constant-v
+                    // collinear arc run and a wavy lip — the lower
+                    // crescent between the Steiner ring and the lip is
+                    // left untriangulated and its 11-edge loop shows up as
+                    // face-boundary edges that belong to no polygon rim),
+                    // every RING vertex is still used, so the s64
+                    // unused-vertex trigger cannot see it. The dropped
+                    // region breaks the cross-face contract the same way:
+                    // its rim edges have no partner in the neighbor's
+                    // cached chain.
+                    let rim_edge_set = |() : ()| -> std::collections::HashSet<(usize, usize)> {
+                        let mut rims = std::collections::HashSet::new();
+                        for i in 0..n_boundary {
+                            let j = (i + 1) % n_boundary;
+                            rims.insert((i.min(j), i.max(j)));
+                        }
+                        for (k, &hs) in hole_start_indices.iter().enumerate() {
+                            let he = if k + 1 < hole_start_indices.len() {
+                                hole_start_indices[k + 1]
+                            } else {
+                                n_boundary_and_holes_actual
+                            };
+                            let hlen = he - hs;
+                            for i in 0..hlen {
+                                let a = hs + i;
+                                let b = hs + (i + 1) % hlen;
+                                rims.insert((a.min(b), a.max(b)));
+                            }
+                        }
+                        rims
+                    };
+                    let extra_boundary_edges = |flat: &[usize]| -> usize {
+                        use std::collections::HashMap;
+                        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+                        for c in flat.chunks_exact(3) {
+                            for k in 0..3 {
+                                let a = c[k];
+                                let b = c[(k + 1) % 3];
+                                if a != b {
+                                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                                }
+                            }
+                        }
+                        let rims = rim_edge_set(());
+                        ecount
+                            .into_iter()
+                            .filter(|(e, n)| *n == 1 && !rims.contains(e))
+                            .count()
+                    };
+                    let legacy_extra_bnd = extra_boundary_edges(&tris);
+                    // session-65: the region-drop rescue is restricted to
+                    // the CRESCENT class (the polygon qualifies as two
+                    // monotone chains sharing both endpoints — the lune
+                    // flap shape). A blanket "extra non-rim boundary edges"
+                    // trigger misfires on ordinary spike-chain faces: the
+                    // appended interior chain IS a one-sided slit by design
+                    // (s52), so its edges legitimately appear as face
+                    // boundary — re-routing those through the CDT changed
+                    // drill_top 8334→8580 fold pairs (measured). n_unused
+                    // cases keep the exact s64 behavior (priority over the
+                    // crescent path so the s64 rescue stays bit-identical).
+                    let crescent_strip: Vec<usize> = if n_unused == 0
+                        && legacy_extra_bnd > 0
+                        && holes_2d.is_empty()
+                    {
+                        two_chain_monotone_strip(&boundary_2d)
+                    } else {
+                        Vec::new()
+                    };
+                    if n_unused > 0 || !crescent_strip.is_empty() {
+                        // session-65 candidate 1 (crescent region-drop):
+                        // the two-chain monotone strip. Deterministic and
+                        // structurally exact for the pinched-crescent class;
+                        // the CDT remains the fallback.
+                        let mut strip_accepted = false;
+                        if !crescent_strip.is_empty() {
+                            {
+                                let strip = crescent_strip.clone();
+                                // reuse the ring-edge gate below: compute it
+                                // early for the comparison
+                                let strip_rim = {
+                                    let mut edges: std::collections::HashSet<(usize, usize)> =
+                                        std::collections::HashSet::new();
+                                    for c in strip.chunks_exact(3) {
+                                        for k in 0..3 {
+                                            let a = c[k];
+                                            let b = c[(k + 1) % 3];
+                                            edges.insert((a.min(b), a.max(b)));
+                                        }
+                                    }
+                                    let mut cnt = 0usize;
+                                    for i in 0..n_boundary {
+                                        let j = (i + 1) % n_boundary;
+                                        if edges.contains(&(i.min(j), i.max(j))) {
+                                            cnt += 1;
+                                        }
+                                    }
+                                    cnt
+                                };
+                                // legacy ring-edge count (computed here once;
+                                // the CDT gate below recomputes its own)
+                                let legacy_rim_count = {
+                                    let mut edges: std::collections::HashSet<(usize, usize)> =
+                                        std::collections::HashSet::new();
+                                    for c in tris.chunks_exact(3) {
+                                        for k in 0..3 {
+                                            let a = c[k];
+                                            let b = c[(k + 1) % 3];
+                                            edges.insert((a.min(b), a.max(b)));
+                                        }
+                                    }
+                                    let mut cnt = 0usize;
+                                    for i in 0..n_boundary {
+                                        let j = (i + 1) % n_boundary;
+                                        if edges.contains(&(i.min(j), i.max(j))) {
+                                            cnt += 1;
+                                        }
+                                    }
+                                    cnt
+                                };
+                                let strip_extra = extra_boundary_edges(&strip);
+                                if strip_rim >= legacy_rim_count && strip_extra < legacy_extra_bnd {
+                                    log::warn!(
+                                        "[f{}] region-drop rescue: two-chain monotone strip accepted ({} non-rim bnd edges → {}, rim edges {} → {}, {} → {} tris, interior Steiners dropped)",
+                                        current_face_label(),
+                                        legacy_extra_bnd,
+                                        strip_extra,
+                                        legacy_rim_count,
+                                        strip_rim,
+                                        tris.len() / 3,
+                                        strip.len() / 3
+                                    );
+                                    tris = strip;
+                                    rescued_by_cdt = true;
+                                    strip_accepted = true;
+                                }
+                            }
+                        }
+                        if !strip_accepted {
                         let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
                             &boundary_2d,
                             &holes_2d,
@@ -7319,13 +7669,33 @@ pub fn triangulate_surface_consistent(
                             .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
                             .collect();
                         let cdt_ring_edges = ring_edges_present(&cdt_flat);
-                        if !cdt2.is_empty() && cdt_ring_edges > legacy_ring_edges {
+                        // session-65 gate extension: for REGION-DROP cases
+                        // (all ring verts used, extra boundary edges > 0)
+                        // the CDT wins when it covers the same rim edges
+                        // AND leaves FEWER non-rim boundary edges (the
+                        // crescent hole disappears). Never-worsen: ring
+                        // edges must not decrease in either branch.
+                        let cdt_extra_bnd = extra_boundary_edges(&cdt_flat);
+                        // s64 semantics for n_unused cases (strictly more
+                        // ring edges — bit-identical to the session-64
+                        // gate); the extended equal-rim/fewer-extra branch
+                        // applies ONLY to the crescent region-drop class.
+                        let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
+                        let cdt_improves = !cdt2.is_empty()
+                            && (cdt_ring_edges > legacy_ring_edges
+                                || (crescent_fallback
+                                    && cdt_ring_edges == legacy_ring_edges
+                                    && cdt_extra_bnd < legacy_extra_bnd));
+                        if cdt_improves {
                             log::warn!(
-                                "[f{}] unused-ring-vertex rescue: {} ring verts unused by spike-chain pass — re-routing through per-face CDT (ring edges {} → {}, {} → {} tris)",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris)",
                                 current_face_label(),
                                 n_unused,
+                                legacy_extra_bnd,
                                 legacy_ring_edges,
                                 cdt_ring_edges,
+                                legacy_extra_bnd,
+                                cdt_extra_bnd,
                                 tris.len() / 3,
                                 cdt2.len()
                             );
@@ -7333,13 +7703,58 @@ pub fn triangulate_surface_consistent(
                             rescued_by_cdt = true;
                         } else {
                             log::warn!(
-                                "[f{}] unused-ring-vertex rescue: {} ring verts unused, CDT re-route did not improve ring edges ({} → {}) — keeping legacy spike-chain result",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}) — keeping legacy spike-chain result",
                                 current_face_label(),
                                 n_unused,
+                                legacy_extra_bnd,
                                 legacy_ring_edges,
-                                cdt_ring_edges
+                                cdt_ring_edges,
+                                legacy_extra_bnd,
+                                cdt_extra_bnd
                             );
+                            // session-65 diagnostics: dump the failing CDT
+                            // inputs + both triangulations for offline
+                            // analysis (DRAPPER_DUMP_CDT_FAIL=<dir>).
+                            if let Ok(dir) = std::env::var("DRAPPER_DUMP_CDT_FAIL") {
+                                let _ = std::fs::create_dir_all(&dir);
+                                let label: String = current_face_label()
+                                    .chars()
+                                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
+                                    .collect();
+                                let path = format!("{}/{}.cdtfail.txt", dir, label);
+                                let mut out = String::new();
+                                out.push_str(&format!(
+                                    "n_boundary={} n_holes={} n_interior={} legacy_tris={} cdt_tris={}\n",
+                                    n_boundary, holes_2d.len(), interior_2d.len(),
+                                    tris.len() / 3, cdt2.len()
+                                ));
+                                out.push_str("BOUNDARY\n");
+                                for p in boundary_2d.iter() {
+                                    out.push_str(&format!("{} {}\n", p[0], p[1]));
+                                }
+                                out.push_str("HOLES\n");
+                                for h in holes_2d.iter() {
+                                    out.push_str(&format!("HOLE {}\n", h.len()));
+                                    for p in h.iter() {
+                                        out.push_str(&format!("{} {}\n", p[0], p[1]));
+                                    }
+                                }
+                                out.push_str("INTERIOR\n");
+                                for p in interior_2d.iter() {
+                                    out.push_str(&format!("{} {}\n", p[0], p[1]));
+                                }
+                                out.push_str("LEGACY\n");
+                                for c in tris.chunks(3) {
+                                    out.push_str(&format!("{} {} {}\n", c[0], c[1], c[2]));
+                                }
+                                out.push_str("CDT\n");
+                                for t in cdt2.iter() {
+                                    out.push_str(&format!("{} {} {}\n", t[0], t[1], t[2]));
+                                }
+                                let _ = std::fs::write(path, out);
+                            }
                         }
+                        } // !strip_accepted (CDT fallback)
                     }
                 }
             }

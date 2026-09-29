@@ -4783,29 +4783,60 @@ impl<'a> StepConverter<'a> {
                         }
                     }
                     if curve_types.len() > 1 {
-                        // Different curve types — merge ALL and alias
-                        let all_sids: Vec<i64> = shape_groups.iter()
-                            .flat_map(|(_, g)| g.iter().copied())
-                            .collect();
-                        let canonical = *all_sids.iter().max_by_key(|&&sid| {
-                            self.edge_curve_complexity_score(sid)
-                        }).unwrap();
-                        for &sid in &all_sids {
-                            if sid != canonical {
-                                edge_cache.register_step_id_alias(sid, canonical);
-                                alias_count += 1;
-                                alias_stats.phase1_aliases += 1;
+                        // session-65 TRUSTED-SHAPE GUARD: only fall through
+                        // to the blanket merge when the shape grouping is
+                        // UNRELIABLE (some edge's 5-point signature came from
+                        // the control-polygon fallback, or failed to resolve).
+                        // When ALL edges have trusted true-curve signatures,
+                        // landing in DIFFERENT shape groups means they are
+                        // DIFFERENT physical boundaries sharing a vertex pair
+                        // (Zentralstaender #1086 lune flaps: CIRCLE corner
+                        // arc vs B_SPLINE lip, midpoints 0.44 mm apart) —
+                        // merging them collapses faces onto the wrong curve
+                        // and creates non-manifold junctions. In that case
+                        // skip the cross-group merge and let the normal
+                        // per-group aliasing run (singletons alias nothing).
+                        // Kill-switch: DRAPPER_ALIAS_SHAPE_GUARD=0.
+                        let guard_on = std::env::var("DRAPPER_ALIAS_SHAPE_GUARD")
+                            .as_deref() != Ok("0");
+                        let all_trusted = step_ids.iter().all(|&sid| {
+                            self.edge_curve_shape_signature_trusted(sid).is_some()
+                        });
+                        if guard_on && all_trusted {
+                            log::info!(
+                                "BREP #{}: NOT merging {} step_ids at vertex_pair {:?} — trusted shape signatures differ (different physical boundaries; types: {:?})",
+                                brep_id, step_ids.len(), vp, {
+                                    let mut ts: Vec<String> = curve_types.iter().cloned().collect();
+                                    ts.sort_unstable();
+                                    ts
+                                }
+                            );
+                            // Fall through to per-group aliasing below.
+                        } else {
+                            // Different curve types — merge ALL and alias
+                            let all_sids: Vec<i64> = shape_groups.iter()
+                                .flat_map(|(_, g)| g.iter().copied())
+                                .collect();
+                            let canonical = *all_sids.iter().max_by_key(|&&sid| {
+                                self.edge_curve_complexity_score(sid)
+                            }).unwrap();
+                            for &sid in &all_sids {
+                                if sid != canonical {
+                                    edge_cache.register_step_id_alias(sid, canonical);
+                                    alias_count += 1;
+                                    alias_stats.phase1_aliases += 1;
+                                }
                             }
+                            log::info!(
+                                "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
+                                brep_id, all_sids.len(), vp, {
+                                    let mut ts: Vec<String> = curve_types.iter().cloned().collect();
+                                    ts.sort_unstable();
+                                    ts
+                                }
+                            );
+                            continue; // Skip normal aliasing — already done
                         }
-                        log::info!(
-                            "BREP #{}: aliased {} step_ids with different curve types at vertex_pair {:?} (types: {:?})",
-                            brep_id, all_sids.len(), vp, {
-                                let mut ts: Vec<String> = curve_types.iter().cloned().collect();
-                                ts.sort_unstable();
-                                ts
-                            }
-                        );
-                        continue; // Skip normal aliasing — already done
                     }
                 }
 
@@ -8859,8 +8890,18 @@ impl<'a> StepConverter<'a> {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     match entity.type_name.as_str() {
-                        "NURBS_CURVE" | "BSPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE" |
-                        "RATIONAL_BSPLINE_CURVE" => return "NURBS".to_string(),
+                        // session-65: correct STEP type names ("B_SPLINE_*" with
+                        // underscore, "RATIONAL_B_SPLINE_CURVE") — the legacy
+                        // spellings "BSPLINE_CURVE_WITH_KNOTS"/"RATIONAL_BSPLINE_CURVE"
+                        // never match a real STEP file, so every spline came back
+                        // "UNKNOWN" (breaking curve-type discrimination in the
+                        // Phase-1 aliaser). Legacy spellings kept for internal names.
+                        "NURBS_CURVE" |
+                        "B_SPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE_WITH_KNOTS" |
+                        "B_SPLINE_CURVE" | "BSPLINE_CURVE" | "BEZIER_CURVE" |
+                        "RATIONAL_B_SPLINE_CURVE" | "RATIONAL_BSPLINE_CURVE" => {
+                            return "NURBS".to_string();
+                        }
                         "CIRCLE" | "ARC" => return "CIRCLE".to_string(),
                         "ELLIPSE" => return "ELLIPSE".to_string(),
                         "LINE" => return "LINE".to_string(),
@@ -8906,6 +8947,18 @@ impl<'a> StepConverter<'a> {
             if let Some(ref_id) = self.get_ref(param) {
                 if let Some(entity) = self.step.find_entity(ref_id) {
                     match entity.type_name.as_str() {
+                        // session-65 NOTE: the legacy (mis-spelled) arms
+                        // "BSPLINE_CURVE_WITH_KNOTS"/"RATIONAL_BSPLINE_CURVE"
+                        // never match a real STEP file, so B-spline edges
+                        // score 0 and CIRCLE/LINE win canonicality. A fix
+                        // was tried (correct "B_SPLINE_*" names → splines
+                        // score 1000) and MEASURED-REJECTED: flipping the
+                        // merge canonical to the spline regressed drill_top
+                        // 8334→8580 fold pairs (+246) with no measurable
+                        // gain elsewhere (the Zentralstaender lune merges
+                        // are rejected by the shape guard regardless of
+                        // scores). Canonical selection stays bit-identical
+                        // to the legacy behavior; see worklog session-65.
                         "NURBS_CURVE" | "BSPLINE_CURVE_WITH_KNOTS" | "BSPLINE_CURVE" |
                         "RATIONAL_BSPLINE_CURVE" | "SURFACE_CURVE" => return 1000,
                         "CIRCLE" | "ARC" | "ELLIPSE" | "TRIMMED_CURVE" => return 100,
@@ -9228,6 +9281,59 @@ impl<'a> StepConverter<'a> {
     ///
     /// For LINEs (where samples are determined by endpoints), this still works
     /// correctly — two LINEs with the same endpoints produce identical samples.
+    ///
+    /// Trusted 5-point shape signature of an edge curve (session-65).
+    ///
+    /// Unlike `compute_edge_curve_sample_points`, this NEVER falls back to
+    /// control-polygon interpolation: it returns `Some(points)` ONLY when the
+    /// edge resolves to a TopoEdge with a non-degenerate parameter range and
+    /// ALL five true-curve samples evaluate. A `None` result means the shape
+    /// is untrustworthy for deciding whether two edges are the same physical
+    /// boundary.
+    ///
+    /// Used by the Phase-1 merge guard and the seam-alias guard: two edges
+    /// with the same vertex pair are the same physical boundary ONLY if their
+    /// trusted signatures agree (forward or reversed). The lune-flap case
+    /// (Zentralstaender #1086: CIRCLE corner arc vs B_SPLINE lip sharing both
+    /// corner vertices, midpoints 0.44 mm apart) must NOT be glued — gluing
+    /// collapsed the flap onto the top plane and produced 189 non-manifold
+    /// edges at the f1 × cone × skirt junction.
+    fn edge_curve_shape_signature_trusted(&self, edge_curve_id: i64) -> Option<Vec<Point3d>> {
+        let edge = self.resolve_edge_curve(edge_curve_id)?;
+        let (t1, t2) = edge.param_range;
+        if (t2 - t1).abs() < 1e-15 {
+            return None;
+        }
+        let mut pts = Vec::with_capacity(5);
+        for &frac in &[0.1, 0.3, 0.5, 0.7, 0.9] {
+            let t = t1 + (t2 - t1) * frac;
+            pts.push(edge.point_at(t)?);
+        }
+        Some(pts)
+    }
+
+    /// Compare two edge curves' trusted shape signatures (session-65).
+    ///
+    /// Returns `None` when either signature is untrusted (caller should keep
+    /// legacy behavior), otherwise `Some(true)` if the curves trace the same
+    /// physical boundary (samples agree forward or reversed within `tol`) and
+    /// `Some(false)` if they are genuinely different curves.
+    fn edge_curve_shapes_compatible(&self, a: i64, b: i64, tol: f64) -> Option<bool> {
+        let pa = self.edge_curve_shape_signature_trusted(a)?;
+        let pb = self.edge_curve_shape_signature_trusted(b)?;
+        if pa.is_empty() || pa.len() != pb.len() {
+            return None;
+        }
+        let fwd = pa.iter().zip(pb.iter())
+            .all(|(x, y)| x.distance_to(y) <= tol);
+        if fwd {
+            return Some(true);
+        }
+        let rev = pa.iter().zip(pb.iter().rev())
+            .all(|(x, y)| x.distance_to(y) <= tol);
+        Some(rev)
+    }
+
     fn compute_edge_curve_sample_points(&self, edge_curve_id: i64) -> Option<Vec<Point3d>> {
         // Primary path: use resolve_edge_curve to get a proper TopoEdge.
         if let Some(edge) = self.resolve_edge_curve(edge_curve_id) {
@@ -9796,6 +9902,37 @@ impl<'a> StepConverter<'a> {
                     let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
 
                     if dist_a < seam_tol && dist_b < seam_tol {
+                        // session-65 SHAPE GUARD (DIGON-ONLY): same vertex
+                        // pair does NOT imply the same physical boundary.
+                        // A periodic face with EXACTLY TWO edges (a topo-
+                        // logical DIGON — the Zentralstaender #1086 lune
+                        // flaps: CIRCLE corner arc + B_SPLINE lip on cone
+                        // f9-f14) has two DISTINCT boundary curves between
+                        // the same corner vertices; gluing them collapses
+                        // the flap onto one curve and creates non-manifold
+                        // junctions. For faces with MORE edges the same-
+                        // vertex-pair pairs are genuine seam candidates
+                        // (incl. "sloppy seams" — two exports of one
+                        // intended boundary, drill_top #831/#833 midpoints
+                        // 0.25 apart, where gluing is the repair that
+                        // keeps the mesh clean) — legacy gluing preserved.
+                        // Kill-switch: DRAPPER_ALIAS_SHAPE_GUARD=0.
+                        let is_digon = edges.len() == 2;
+                        if is_digon
+                            && std::env::var("DRAPPER_ALIAS_SHAPE_GUARD").as_deref() != Ok("0")
+                        {
+                            let shape_tol = seam_tol.max(1e-6);
+                            match self.edge_curve_shapes_compatible(*sid_i, *sid_j, shape_tol) {
+                                Some(false) => {
+                                    log::info!(
+                                        "BREP: seam alias REJECTED by digon shape guard: #{} vs #{} (2-edge lune face, different curves)",
+                                        sid_i, sid_j
+                                    );
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         // These are likely seam edges — register alias
                         edge_cache.register_step_id_alias(*sid_j, *sid_i);
                         seam_count += 1;
