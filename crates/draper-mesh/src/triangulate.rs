@@ -10763,7 +10763,14 @@ mod intermediate_v_ring_tests {
         let mesh = triangulate_face_with_boundary_and_holes_uv(
             &surface, &bnd3d, &bnduv, &[], &[], true, &params,
         );
-        assert!(mesh.triangles.len() >= 20, "L-shaped band must produce a real mesh, got {} tris", mesh.triangles.len());
+        // session-68: the L-band now routes through CYL_RULED_BAND
+        // (the stepped L rim is u-monotone; the two-pointer band between
+        // the bottom arc and the L chain is watertight by construction
+        // — every rim edge exactly 1×, interior edges 2×, no interior
+        // Steiners). 18 triangles vs the legacy earcutr+Steiner mesh's
+        // ≥20; the REAL regression guard is the full-coverage loop
+        // below (the s52 bug dropped the intermediate arc entirely).
+        assert!(mesh.triangles.len() >= 10, "L-shaped band must produce a real mesh, got {} tris", mesh.triangles.len());
         // FULL coverage: every boundary 3D point must appear in the mesh
         // (the old tube-grid path dropped the intermediate arc + step region).
         for p in &bnd3d {

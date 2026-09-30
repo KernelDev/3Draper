@@ -11,7 +11,7 @@
 //! which is fast (O(n log n) typical) and handles holes natively.
 
 #![allow(dead_code)]
-use draper_geometry::{Point2d, Point3d, Surface, Curve3d};
+use draper_geometry::{Point2d, Point3d, Surface, Curve3d, CylinderSurface};
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::deterministic_round_point;
 use std::cell::Cell;
@@ -5383,6 +5383,353 @@ pub fn current_face_label() -> String {
     CURRENT_FACE_LABEL.with(|l| l.borrow().clone())
 }
 
+/// session-68: CYL_RULED_BAND — ruled-band strip for cylinder patch
+/// faces (the drill HOUSING bnd-debt class, s67 root cause).
+///
+/// Debt mechanism: quarter-patch cylinder faces — rim = 2 u-monotone
+/// chains (arc + variable-v spline) joined by 2 short side lines — get
+/// their interior Steiner lattice appended to the earcutr ring as a
+/// spike chain; the clipped spikes leave one-sided interior slits
+/// (f125: 700 bnd edges, bnd chain 6× the face perimeter, 82% of the
+/// face's vertices on the mesh boundary, 81.5% of the whole HOUSING
+/// debt lives on ~70 such faces).
+///
+/// A cylinder is RULED along v: the exact surface between two points at
+/// the same u is the straight ruling, so the band between the two
+/// cached u-monotone rim chains needs NO interior Steiner points — the
+/// rim discretization IS the cross-face contract and already carries
+/// the chord tolerance (s67 prototype f125: 56 triangles vs 1060
+/// legacy, 0 edge violations, 0 fold pairs, u chord error 66× under
+/// budget).
+///
+/// Split: u-unwrap the ring (seam-crossing patches), then cut at the
+/// u-extremes into two u-monotone chains (weakly u-monotone polygon).
+/// Unlike the s65 crescent the chains meet through short SIDE LINES,
+/// not pinched shared corners: both cyclic walks keep the extreme
+/// vertices (chain[0] == umin, chain.last == umax), and the head/tail
+/// corner cells self-close — the first two-pointer advance is always
+/// degenerate (both anchors are umin) and skipped, while at an
+/// exhausted end the remaining chain fans into the shared corner
+/// vertex whose fan boundary edges ARE the side-line rim edges.
+///
+/// Geometry guards run in the ISOMETRIC unrolled plane (R·u, v) —
+/// exact 3D lengths/angles for a cylinder:
+///   - chains ≥ 3 points each, both u-monotone, u-span ≤ 1.05·2π;
+///   - strip area == polygon area (±0.5%) — rejects mis-splits and
+///     self-intersecting rings;
+///   - sliver guard (band-adapted s65): min angle < 2° AND the
+///     triangle's u-span > 10% of the band's u width — the s59/#1092
+///     stepped-band shear class. Thin triangles ALONG the ruling
+///     direction (v) are inherent and harmless: the cylinder is ruled
+///     in v, a thin v-sliver is a flat piece of surface, not a fold
+///     (s67 prototype f125: min 3D angle 0.22°, 0 fold pairs);
+///   - u chord guard: every NEW (non-rim) edge must satisfy
+///     R·(1 − cos(Δu/2)) ≤ max_dev — the band has no interior points,
+///     so the rim alone must carry the tolerance (rim edges themselves
+///     are contract-fixed and exempt);
+///   - edge-accounting audit: every ring edge exactly 1×, every other
+///     edge exactly 2× — watertight by construction or reject;
+///   - fold guard: same-face fold pairs in 3D (adjacent triangle
+///     normals >170° apart) must be ZERO — a legitimate ruled band on
+///     a developable cylinder is fold-free (s67 prototype f125:
+///     0 pairs); sheared bands double back and are rejected
+///     (brick_thin_round f6/f11/f32: +26 pairs, s68 A/B measured).
+///
+/// Returns an empty Vec when the polygon does not qualify.
+fn cylinder_ruled_band_strip(
+    cyl: &CylinderSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+) -> Vec<usize> {
+    let cyl_radius = cyl.radius;
+    const U_PERIOD: f64 = 2.0 * std::f64::consts::PI;
+    let n = boundary_2d.len();
+    if n < 6 || !(cyl_radius > 0.0) {
+        return Vec::new();
+    }
+    // ── u-unwrap: make u continuous along the ring walk ────────────
+    // (PCURVE/atan2 UVs jump by ±2π at the seam for patches that cross
+    // it; consecutive rim points are always geometrically close, so a
+    // relative-to-previous adjustment restores the continuous chain.)
+    let mut us: Vec<f64> = Vec::with_capacity(n);
+    us.push(boundary_2d[0][0]);
+    for k in 1..n {
+        let mut u = boundary_2d[k][0];
+        let prev = us[k - 1];
+        while u - prev > U_PERIOD * 0.5 {
+            u -= U_PERIOD;
+        }
+        while prev - u > U_PERIOD * 0.5 {
+            u += U_PERIOD;
+        }
+        us.push(u);
+    }
+    let u_lo = us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let u_hi = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let u_span = u_hi - u_lo;
+    if !(u_span > 0.0) || u_span > U_PERIOD * 1.05 {
+        return Vec::new(); // degenerate or spiral/double wrap
+    }
+    let eps_u = u_span * 1e-9;
+    // ── split at the u-extremes (first strict min / max) ───────────
+    let mut umin_i = 0usize;
+    let mut umax_i = 0usize;
+    for k in 1..n {
+        if us[k] < us[umin_i] {
+            umin_i = k;
+        }
+        if us[k] > us[umax_i] {
+            umax_i = k;
+        }
+    }
+    if umin_i == umax_i {
+        return Vec::new();
+    }
+    // chain A: umin → umax (cyclic forward)
+    let mut a_chain = vec![umin_i];
+    let mut i = umin_i;
+    while i != umax_i {
+        i = (i + 1) % n;
+        a_chain.push(i);
+    }
+    // chain B: umax → umin (cyclic forward), reversed → umin → umax.
+    // Both walks keep the extreme vertices (shared endpoint indices);
+    // the side-line points between the extremes become chain heads and
+    // tails, so every ring edge appears in exactly one chain.
+    let mut b_walk = vec![umax_i];
+    i = umax_i;
+    while i != umin_i {
+        i = (i + 1) % n;
+        b_walk.push(i);
+    }
+    let b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
+    let mono = |c: &[usize]| -> bool {
+        c.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u)
+    };
+    if !mono(&a_chain) || !mono(&b_chain) {
+        return Vec::new();
+    }
+    if a_chain.len() < 3 || b_chain.len() < 3 {
+        return Vec::new();
+    }
+    // ── two-pointer strip (s65 machinery, open-band form) ───────────
+    let na = a_chain.len();
+    let nb = b_chain.len();
+    let mut tris: Vec<usize> = Vec::with_capacity(na + nb);
+    {
+        let mut ia = 0usize;
+        let mut ib = 0usize;
+        while ia < na - 1 || ib < nb - 1 {
+            let tri: [usize; 3] = if ia >= na - 1 {
+                let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
+                ib += 1;
+                t
+            } else if ib >= nb - 1 {
+                let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                ia += 1;
+                t
+            } else if us[a_chain[ia + 1]] <= us[b_chain[ib + 1]] {
+                let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                ia += 1;
+                t
+            } else {
+                let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
+                ib += 1;
+                t
+            };
+            if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                tris.extend_from_slice(&tri);
+            }
+        }
+    }
+    if tris.len() < 3 {
+        return Vec::new();
+    }
+    // ── edge-accounting audit: watertight by construction, or reject ─
+    // Every ring edge (i, i+1 mod n) exactly once; every other edge
+    // exactly twice. This is the structural watertightness proof of
+    // the band (rim = cross-face contract, interior = manifold).
+    {
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        let rim = |a: usize, b: usize| -> bool {
+            (a + 1) % n == b || (b + 1) % n == a
+        };
+        let all_rim_once = (0..n).all(|k| {
+            let j = (k + 1) % n;
+            ecount.get(&(k.min(j), k.max(j))).copied() == Some(1)
+        });
+        let nonrim_twice = ecount.iter().all(|(&(a, b), &c)| rim(a, b) || c == 2);
+        if !all_rim_once || !nonrim_twice {
+            return Vec::new();
+        }
+    }
+    // ── isometric unrolled plane (R·u, v) for all geometry guards ──
+    let su: Vec<f64> = us.iter().map(|&u| u * cyl_radius).collect();
+    let pt2 = |k: usize| -> [f64; 2] { [su[k], boundary_2d[k][1]] };
+    // area guard: the strip must tile exactly the polygon (±0.5%)
+    let poly_area: f64 = (0..n)
+        .map(|k| {
+            let p = pt2(k);
+            let q = pt2((k + 1) % n);
+            p[0] * q[1] - q[0] * p[1]
+        })
+        .sum::<f64>()
+        * 0.5;
+    let strip_area: f64 = tris
+        .chunks_exact(3)
+        .map(|c| {
+            let a = pt2(c[0]);
+            let b = pt2(c[1]);
+            let d = pt2(c[2]);
+            (b[0] - a[0]) * (d[1] - a[1]) - (d[0] - a[0]) * (b[1] - a[1])
+        })
+        .sum::<f64>()
+        * 0.5;
+    let area_ok = if poly_area >= 0.0 {
+        strip_area >= poly_area * 0.995 - 1e-12
+            && strip_area <= poly_area * 1.005 + 1e-12
+    } else {
+        strip_area <= poly_area * 0.995 + 1e-12
+            && strip_area >= poly_area * 1.005 - 1e-12
+    };
+    if !area_ok {
+        return Vec::new();
+    }
+    // sliver guard (band-adapted s65): reject thin triangles that
+    // shear across the u direction — min angle < 2° AND the
+    // triangle's u-span exceeds 10% of the band's u width (the
+    // s59/#1092 stepped-band shear: 40-unit diagonals, 85:1 aspect,
+    // 180° dihedral folds). Thin triangles ALONG the ruling
+    // direction (v) are inherent to the band class and harmless —
+    // the cylinder is ruled in v, so a thin v-sliver is a flat
+    // piece of the surface, not a fold (s67 prototype f125: min 3D
+    // angle 0.22°, 0 fold pairs, measured).
+    let u_arc_span = u_span * cyl_radius;
+    for c in tris.chunks_exact(3) {
+        let pts = [pt2(c[0]), pt2(c[1]), pt2(c[2])];
+        let mut min_ang = f64::INFINITY;
+        for k in 0..3 {
+            let p0 = pts[k];
+            let p1 = pts[(k + 1) % 3];
+            let p2 = pts[(k + 2) % 3];
+            let v1 = [p1[0] - p0[0], p1[1] - p0[1]];
+            let v2 = [p2[0] - p0[0], p2[1] - p0[1]];
+            let l1 = v1[0].hypot(v1[1]);
+            let l2 = v2[0].hypot(v2[1]);
+            if l1 > 1e-15 && l2 > 1e-15 {
+                let cosang =
+                    ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
+                min_ang = min_ang.min(cosang.acos().to_degrees());
+            } else {
+                min_ang = 0.0;
+            }
+        }
+        let tri_u = pts[0][0].max(pts[1][0]).max(pts[2][0])
+            - pts[0][0].min(pts[1][0]).min(pts[2][0]);
+        if min_ang < 2.0 && tri_u > 0.10 * u_arc_span {
+            return Vec::new();
+        }
+    }
+    // u chord guard: NEW edges only (rim edges are contract-fixed).
+    // Chord sagitta for an edge spanning Δu: R·(1 − cos(Δu/2)) ≤ max_dev.
+    if max_dev > 0.0 && max_dev < 2.0 * cyl_radius {
+        let du_max = 2.0 * (1.0 - max_dev / cyl_radius).acos() * cyl_radius;
+        let rim = |a: usize, b: usize| -> bool {
+            (a + 1) % n == b || (b + 1) % n == a
+        };
+        let chord_ok = tris.chunks_exact(3).all(|c| {
+            (0..3).all(|k| {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                rim(a, b) || (su[a] - su[b]).abs() <= du_max * 1.05 + 1e-12
+            })
+        });
+        if !chord_ok {
+            return Vec::new();
+        }
+    }
+    // ── fold guard: same-face fold pairs in 3D must be ZERO ───────
+    // A ruled band on a developable cylinder is fold-free when it is
+    // the right triangulation for the face (s67 prototype f125: 0
+    // pairs, min 3D angle 0.22° yet flat). A band that doubles back
+    // (sheared split, interleaved chains) produces adjacent triangles
+    // with nearly anti-parallel normals (>170°) — reject and keep the
+    // legacy mesh (never-worsen; brick_thin_round f6/f11/f32 measured
+    // +26 pairs without this guard, s68 A/B).
+    {
+        use std::collections::HashMap;
+        // 3D positions via the cylinder parametrization (the cached
+        // rim points lie on the surface within edge tolerance; the
+        // unwrapped u is 2π-periodic so point_at is unaffected).
+        let p3 = |k: usize| -> Point3d {
+            cyl.point_at(us[k], boundary_2d[k][1])
+        };
+        let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+            let a = p3(c[0]);
+            let b = p3(c[1]);
+            let d = p3(c[2]);
+            let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+            let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+            let n = [
+                ab[1] * ad[2] - ab[2] * ad[1],
+                ab[2] * ad[0] - ab[0] * ad[2],
+                ab[0] * ad[1] - ab[1] * ad[0],
+            ];
+            let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if l > 1e-18 {
+                Some([n[0] / l, n[1] / l, n[2] / l])
+            } else {
+                None
+            }
+        };
+        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (ti, c) in tris.chunks_exact(3).enumerate() {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    edge_tris.entry((a.min(b), a.max(b))).or_default().push(ti);
+                }
+            }
+        }
+        let mut folds = 0usize;
+        for ts in edge_tris.values() {
+            if ts.len() != 2 {
+                continue;
+            }
+            let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+            let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+            if let (Some(n1), Some(n2)) = (n1, n2) {
+                let dot =
+                    (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                if dot.acos().to_degrees() > 170.0 {
+                    folds += 1;
+                }
+            }
+        }
+        if folds > 0 {
+            return Vec::new();
+        }
+    }
+    // normalize winding to the polygon's sign (matches earcutr output)
+    if strip_area * poly_area < 0.0 {
+        for c in tris.chunks_exact_mut(3) {
+            c.swap(1, 2);
+        }
+    }
+    tris
+}
+
 pub fn triangulate_surface_consistent(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -7535,7 +7882,39 @@ pub fn triangulate_surface_consistent(
                     } else {
                         Vec::new()
                     };
-                    if n_unused > 0 || !crescent_strip.is_empty() {
+                    // session-68: CYL_RULED_BAND candidate — the cylinder
+                    // patch class (rim = 2 u-monotone chains + short side
+                    // lines; s67 root cause: the appended interior Steiner
+                    // lattice leaves one-sided slit seams = the 81.5%
+                    // HOUSING debt). Tried for cylinder faces with no
+                    // holes whenever the legacy result carries debt
+                    // (unused ring verts or non-rim boundary edges);
+                    // accepted only through the never-worsen gate below
+                    // (bit-identical when the legacy is already clean).
+                    // Kill-switch: DRAPPER_CYL_RULED_BAND=0.
+                    let cyl_band_strip: Vec<usize> =
+                        if holes_2d.is_empty()
+                            && (n_unused > 0 || legacy_extra_bnd > 0)
+                            && std::env::var("DRAPPER_CYL_RULED_BAND").as_deref()
+                                != Ok("0")
+                        {
+                            match surface {
+                                Surface::Cylinder(cyl) if cyl.radius > 0.0 => {
+                                    cylinder_ruled_band_strip(
+                                        cyl,
+                                        &boundary_2d,
+                                        params.max_deviation,
+                                    )
+                                }
+                                _ => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                    if n_unused > 0
+                        || !crescent_strip.is_empty()
+                        || !cyl_band_strip.is_empty()
+                    {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
                         // structurally exact for the pinched-crescent class;
@@ -7602,6 +7981,86 @@ pub fn triangulate_surface_consistent(
                                     rescued_by_cdt = true;
                                     strip_accepted = true;
                                 }
+                            }
+                        }
+                        // session-68: CYL_RULED_BAND acceptance (after the
+                        // s65 crescent — the classes are disjoint by
+                        // construction: a crescent shares pinched endpoint
+                        // vertices, a band meets through side lines). The
+                        // strip is edge-audited (all rim edges exactly 1×,
+                        // all interior edges exactly 2×), so it wins when
+                        // it covers at least as many rim edges with
+                        // strictly better debt in ONE dimension (rim or
+                        // extra) and no regression in the other. Equal on
+                        // both = keep legacy (bit-identity).
+                        if !strip_accepted && !cyl_band_strip.is_empty() {
+                            let strip = cyl_band_strip.clone();
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let never_worse = strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count
+                                    || strip_extra < legacy_extra_bnd);
+                            if never_worse {
+                                log::warn!(
+                                    "[f{}] CYL_RULED_BAND rescue: ruled band between cached rim chains accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] CYL_RULED_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
                             }
                         }
                         if !strip_accepted {
@@ -13410,6 +13869,236 @@ mod tests {
         // The polygon spans only 50% of the U period → no proactive split
         let result = proactive_seam_split(&polygon, &points_3d, &surface);
         assert!(result.is_none(), "Proactive seam-split should NOT activate for partial cylinder");
+    }
+
+    // ── session-68: CYL_RULED_BAND unit tests ─────────────────────
+
+    /// Shared invariant checker: every ring edge (i, i+1 mod n) used
+    /// exactly once, every other edge exactly twice, all vertices used,
+    /// and the strip area matches the polygon area within 0.5%.
+    fn assert_band_invariants(ring: &[[f64; 2]], tris: &[usize], radius: f64) {
+        let n = ring.len();
+        use std::collections::{HashMap, HashSet};
+        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut used: HashSet<usize> = HashSet::new();
+        for c in tris.chunks_exact(3) {
+            used.insert(c[0]);
+            used.insert(c[1]);
+            used.insert(c[2]);
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        for k in 0..n {
+            let j = (k + 1) % n;
+            assert_eq!(
+                ecount.get(&(k.min(j), k.max(j))).copied(),
+                Some(1),
+                "rim edge ({}, {}) must be used exactly once",
+                k,
+                j
+            );
+        }
+        for (e, c) in &ecount {
+            let is_rim = (e.0 + 1) % n == e.1 || (e.1 + 1) % n == e.0;
+            assert!(
+                is_rim || *c == 2,
+                "non-rim edge {:?} used {} times (must be 2)",
+                e,
+                c
+            );
+        }
+        for k in 0..n {
+            assert!(used.contains(&k), "ring vertex {} unused", k);
+        }
+        // area comparison in the isometric plane (R·u, v)
+        let su: Vec<f64> = ring.iter().map(|p| p[0] * radius).collect();
+        let poly_area: f64 = (0..n)
+            .map(|k| {
+                let p = (su[k], ring[k][1]);
+                let q = (su[(k + 1) % n], ring[(k + 1) % n][1]);
+                p.0 * q.1 - q.0 * p.1
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_area: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let a = (su[c[0]], ring[c[0]][1]);
+                let b = (su[c[1]], ring[c[1]][1]);
+                let d = (su[c[2]], ring[c[2]][1]);
+                (b.0 - a.0) * (d.1 - a.1) - (d.0 - a.0) * (b.1 - a.1)
+            })
+            .sum::<f64>()
+            * 0.5;
+        assert!(
+            (strip_area - poly_area).abs() <= poly_area.abs() * 0.005 + 1e-12,
+            "strip area {} vs polygon area {}",
+            strip_area,
+            poly_area
+        );
+    }
+
+    /// f125-like quarter patch (drill HOUSING debt class): bottom arc
+    /// 17 pts at v=−1.2, top variable-v chain 41 pts, short side lines.
+    /// R=0.125, max_dev=0.01 (the measured s67 values).
+    #[test]
+    fn cyl_ruled_band_f125_like_unequal_densities() {
+        let r = 0.125f64;
+        let max_dev = 0.01f64;
+        let u_hi = std::f64::consts::PI / 2.0;
+        let v_top =
+            |u: f64| -> f64 { 1.2 + 0.6 * (2.0 * u / u_hi - 1.0) + 0.1 * (3.0 * u).sin() };
+        let v_tl = v_top(0.0);
+        let v_tr = v_top(u_hi);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..17 {
+            ring.push([u_hi * k as f64 / 16.0, -1.2]); // bottom arc (P_bl..P_br)
+        }
+        ring.push([u_hi, 0.5 * (-1.2 + v_tr)]); // right side mid
+        ring.push([u_hi, v_tr]); // P_tr
+        for k in (1..40).rev() {
+            // top chain desc (P_tr excluded, P_tl excluded)
+            let u = u_hi * k as f64 / 40.0;
+            ring.push([u, v_top(u)]);
+        }
+        ring.push([0.0, v_tl]); // P_tl
+        ring.push([0.0, v_tl - 0.4 * (v_tl + 1.2)]); // left side mids
+        ring.push([0.0, v_tl - 0.75 * (v_tl + 1.2)]);
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(r), &ring, max_dev);
+        assert!(
+            !tris.is_empty(),
+            "f125-like quarter patch must qualify for the ruled band"
+        );
+        assert_band_invariants(&ring, &tris, r);
+        // ~56 triangles expected (na + nb − 2 − degenerate skips)
+        assert!(tris.len() / 3 < 80, "band must be small ({} tris)", tris.len() / 3);
+    }
+
+    /// Seam-crossing patch: raw u jumps by ±2π at the seam (350°→100°
+    /// through 0°); the unwrap must restore the continuous band.
+    #[test]
+    fn cyl_ruled_band_seam_crossing_unwrap() {
+        let r = 0.125f64;
+        let max_dev = 0.01f64;
+        let u_start = 350.0f64.to_radians();
+        let u_end = 460.0f64.to_radians(); // = 100°+360°
+        let wrap = |u: f64| -> f64 {
+            let mut x = u % (2.0 * std::f64::consts::PI);
+            if x < 0.0 {
+                x += 2.0 * std::f64::consts::PI;
+            }
+            x
+        };
+        let v_top = |u: f64| -> f64 { 1.0 + 0.5 * (u - u_start) / (u_end - u_start) };
+        let v_tl = v_top(u_start);
+        let v_tr = v_top(u_end);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..17 {
+            ring.push([wrap(u_start + (u_end - u_start) * k as f64 / 16.0), -1.2]);
+        }
+        ring.push([wrap(u_end), 0.5 * (-1.2 + v_tr)]);
+        ring.push([wrap(u_end), v_tr]);
+        for k in (1..40).rev() {
+            ring.push([
+                wrap(u_start + (u_end - u_start) * k as f64 / 40.0),
+                v_top(u_start + (u_end - u_start) * k as f64 / 40.0),
+            ]);
+        }
+        ring.push([wrap(u_start), v_tl]);
+        ring.push([wrap(u_start), v_tl - 0.4 * (v_tl + 1.2)]);
+        ring.push([wrap(u_start), v_tl - 0.75 * (v_tl + 1.2)]);
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(r), &ring, max_dev);
+        assert!(
+            !tris.is_empty(),
+            "seam-crossing patch must qualify after unwrap"
+        );
+        assert_band_invariants(&ring, &tris, r);
+    }
+
+    /// Aligned equal chains: the band degenerates to the exact quad
+    /// grid (2·(k−1) triangles, no shear).
+    #[test]
+    fn cyl_ruled_band_aligned_is_quad_grid() {
+        let r = 0.5f64;
+        let max_dev = 0.01f64;
+        let k = 5;
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for i in 0..k {
+            ring.push([0.2 * i as f64, 0.0]); // bottom u 0..0.8
+        }
+        for i in 0..k {
+            ring.push([0.2 * (k - 1 - i) as f64, 1.0]); // top desc
+        }
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(r), &ring, max_dev);
+        assert!(!tris.is_empty(), "aligned band must qualify");
+        assert_eq!(tris.len() / 3, 2 * (k - 1), "quad grid triangle count");
+        assert_band_invariants(&ring, &tris, r);
+    }
+
+    /// Detector rejects: non-u-monotone ring (notched bottom chain).
+    #[test]
+    fn cyl_ruled_band_rejects_non_monotone() {
+        let r = 0.125f64;
+        let u_hi = std::f64::consts::PI / 2.0;
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // notched bottom: u goes 0, .1, .2, .15, .3, ... (non-monotone)
+        let notched = [0.0f64, 0.1, 0.2, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9];
+        for u in notched {
+            ring.push([u * u_hi, -1.2]);
+        }
+        ring.push([u_hi, 0.0]);
+        ring.push([u_hi, 1.0]);
+        for k in (1..8).rev() {
+            ring.push([u_hi * k as f64 / 8.0, 1.0]);
+        }
+        ring.push([0.0, 1.0]);
+        ring.push([0.0, 0.0]);
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(r), &ring, 0.01);
+        assert!(tris.is_empty(), "non-monotone ring must be rejected");
+    }
+
+    /// Detector rejects: spiral / double wrap (u span > 1.05·2π).
+    #[test]
+    fn cyl_ruled_band_rejects_spiral() {
+        let r = 0.5f64;
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let u_end = 400.0f64.to_radians(); // > 1.05·2π? 6.98 > 6.59 ✓
+        let wrap = |u: f64| -> f64 {
+            let mut x = u % two_pi;
+            if x < 0.0 {
+                x += two_pi;
+            }
+            x
+        };
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..20 {
+            ring.push([wrap(u_end * k as f64 / 19.0), 0.0]);
+        }
+        for k in 0..20 {
+            ring.push([wrap(u_end * (19 - k) as f64 / 19.0), 1.0]);
+        }
+        assert!(u_end > two_pi * 1.05);
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(r), &ring, 0.01);
+        assert!(tris.is_empty(), "spiral ring must be rejected");
+    }
+
+    /// Detector rejects: too few points (n < 6).
+    #[test]
+    fn cyl_ruled_band_rejects_tiny_ring() {
+        let ring: Vec<[f64; 2]> = vec![
+            [0.0, 0.0],
+            [0.5, 0.0],
+            [0.5, 1.0],
+            [0.25, 1.0],
+            [0.0, 1.0],
+        ];
+        let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(0.5), &ring, 0.01);
+        assert!(tris.is_empty(), "tiny ring must be rejected");
     }
 }
 
