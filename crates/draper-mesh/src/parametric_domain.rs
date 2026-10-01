@@ -11,7 +11,7 @@
 //! which is fast (O(n log n) typical) and handles holes natively.
 
 #![allow(dead_code)]
-use draper_geometry::{Point2d, Point3d, Surface, Curve3d, CylinderSurface};
+use draper_geometry::{Point2d, Point3d, Surface, Curve3d, CylinderSurface, TorusSurface};
 use crate::mesh::TriangleMesh;
 use crate::edge_cache::deterministic_round_point;
 use std::cell::Cell;
@@ -5730,6 +5730,774 @@ fn cylinder_ruled_band_strip(
     tris
 }
 
+/// session-69: TORUS_FILLET_BAND — few-level band grid for torus
+/// fillet faces (the drill HOUSING Torus debt class: 25 faces,
+/// 9377 boundary edges post-s68; families f158–166 / f196–204 /
+/// f212 / f127 / f236 / f238).
+///
+/// Class (measured, s69 forensics): a single boundary loop, no
+/// holes, a PARTIAL tube arc (v-span 1.17..1.68 rad, never a full
+/// wrap — the full-meridian class is s66 TORUS_STRIP) and a
+/// partial ring sector (u-span 0.14..1.57 rad). The ring splits at
+/// the v-extremes into two v-rising "walls" plus flat rim runs at
+/// v-min / v-max (the constant-v arcs shared with the neighboring
+/// faces — the cross-face contract). Two flavors, one machinery:
+///  - QUAD (f127/f212/f215/f238): 2 constant-v arcs + 2 constant-u
+///    side lines;
+///  - LUNE (f158–167/f196–205): both walls run the full v-range
+///    and meet at pinch corners (the flat runs degenerate to the
+///    corner points).
+///
+/// The legacy mesh appends an interior Steiner lattice whose
+/// spike-chain seams are the debt (s67 root cause, same as the
+/// cylinder class). The torus is NOT ruled, so a single band
+/// between the walls would fold; instead a FEW-LEVEL grid:
+/// K+1 "connectors" between the walls (K = ceil(v-span / dv_max),
+/// dv_max = 2·acos(1 − tol/r) — 2..4 levels for the corpus):
+///  - connector ends ANCHORED AT CACHED wall points (a level line
+///    never splits a ring run — every ring edge survives verbatim,
+///    the cross-face edge-cache contract is preserved);
+///  - connector interiors analytic at the union-u grid of the rim
+///    (no density discontinuity, s68 lesson);
+///  - bands between consecutive connectors = two-pointer zipper
+///    (s65/s68 machinery) + side fans through the cached wall
+///    points of the band's v-slice.
+/// Every ring edge appears exactly once, every other edge exactly
+/// twice — watertight by construction (the edge-accounting audit
+/// rejects anything else).
+///
+/// Returns (triangle indices over [ring | new interior points],
+/// the new interior UV points); empty triangles = reject.
+/// Debug: DRAPPER_TFB_DEBUG=1 prints the reject reason.
+pub fn torus_fillet_band_strip(
+    torus: &TorusSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+) -> (Vec<usize>, Vec<[f64; 2]>) {
+    macro_rules! tfb_fail {
+        ($reason:expr) => {{
+            if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                eprintln!("[TFB reject] {}", $reason);
+            }
+            return (Vec::new(), Vec::new());
+        }};
+    }
+    let n = boundary_2d.len();
+    let minor = torus.minor_radius;
+    let major = torus.major_radius;
+    if n < 6 || !(minor > 0.0) || !(major > 0.0) {
+        tfb_fail!("tiny ring or bad radii");
+    }
+    const P: f64 = 2.0 * std::f64::consts::PI;
+    // ── unwrap u and v along the ring walk (seam-crossing) ────────
+    let mut us = Vec::with_capacity(n);
+    let mut vs = Vec::with_capacity(n);
+    us.push(boundary_2d[0][0]);
+    vs.push(boundary_2d[0][1]);
+    for k in 1..n {
+        let mut u = boundary_2d[k][0];
+        let mut v = boundary_2d[k][1];
+        while u - us[k - 1] > P * 0.5 {
+            u -= P;
+        }
+        while us[k - 1] - u > P * 0.5 {
+            u += P;
+        }
+        while v - vs[k - 1] > P * 0.5 {
+            v -= P;
+        }
+        while vs[k - 1] - v > P * 0.5 {
+            v += P;
+        }
+        us.push(u);
+        vs.push(v);
+    }
+    let vmin = vs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let vmax = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let vspan = vmax - vmin;
+    let umin = us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let umax = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let uspan = umax - umin;
+    // partial tube arc only (full wrap = s66 class); no u-spiral
+    if !(vspan > 1e-9) || vspan > PI * 1.05 || !(uspan > 0.0) || uspan > P * 1.05 {
+        tfb_fail!("v/u span out of class");
+    }
+    // ── v-extremes + the two chains (both walk vmin→vmax) ─────────
+    let mut vmin_i = 0usize;
+    let mut vmax_i = 0usize;
+    for k in 1..n {
+        if vs[k] < vs[vmin_i] {
+            vmin_i = k;
+        }
+        if vs[k] > vs[vmax_i] {
+            vmax_i = k;
+        }
+    }
+    if vmin_i == vmax_i {
+        tfb_fail!("degenerate extremes");
+    }
+    let mut a: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            a.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + 1) % n;
+        }
+    }
+    let mut b: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            b.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + n - 1) % n;
+        }
+    }
+    // ── decompose a chain into [flat@vmin][wall][flat@vmax] ───────
+    // The flat runs are the constant-v rim arcs (bit-constant in
+    // the corpus — measured spread 0.0; sag arcs at ~1% of the
+    // v-span stay in the wall). pre/mid share the boundary point,
+    // mid/suf share theirs, so the ring-edge partition is exact.
+    let flat_eps = 1e-7 * vspan.max(1e-6);
+    let decompose = |chain: &[usize]| -> Option<(Vec<usize>, Vec<usize>, Vec<usize>)> {
+        let m = chain.len();
+        let mut e1 = 0usize;
+        while e1 + 1 < m && vs[chain[e1 + 1]] <= vmin + flat_eps {
+            e1 += 1;
+        }
+        let mut e2 = m - 1usize;
+        while e2 > e1 + 1 && vs[chain[e2 - 1]] >= vmax - flat_eps {
+            e2 -= 1;
+        }
+        if e2 <= e1 {
+            return None; // no rising section at all
+        }
+        Some((
+            chain[0..=e1].to_vec(),
+            chain[e1..=e2].to_vec(),
+            chain[e2..].to_vec(),
+        ))
+    };
+    let (a_pre, a_mid, a_suf) = match decompose(&a) {
+        Some(x) => x,
+        None => tfb_fail!("chain A has no rising section"),
+    };
+    let (b_pre, b_mid, b_suf) = match decompose(&b) {
+        Some(x) => x,
+        None => tfb_fail!("chain B has no rising section"),
+    };
+    if a_mid.len() < 2 || b_mid.len() < 2 {
+        tfb_fail!("wall too short");
+    }
+    // ── merge flat runs into the bottom / top edges (u-ascending) ─
+    // Each piece must be u-monotone; the pieces' u-ranges may only
+    // meet at the shared extreme point (vmin_i / vmax_i).
+    let eps_u = uspan * 1e-9;
+    let sort_u = |mut pts: Vec<usize>| -> Option<Vec<usize>> {
+        let asc = pts.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u);
+        let desc = pts.windows(2).all(|w| us[w[0]] >= us[w[1]] - eps_u);
+        if !asc && !desc {
+            return None;
+        }
+        if !asc {
+            pts.reverse();
+        }
+        Some(pts)
+    };
+    let merge_edges = |p1: Vec<usize>, p2: Vec<usize>| -> Option<Vec<usize>> {
+        let p1 = sort_u(p1)?;
+        let p2 = sort_u(p2)?;
+        let lo1 = us[p1[0]];
+        let hi1 = us[*p1.last()?];
+        let lo2 = us[p2[0]];
+        let hi2 = us[*p2.last()?];
+        // the pieces' u-ranges may overlap ONLY through ONE shared
+        // point sitting at a junction end of both pieces (vmin_i /
+        // vmax_i belong to both chains)
+        let ov_lo = lo1.max(lo2);
+        let ov_hi = hi1.min(hi2);
+        if ov_lo < ov_hi - eps_u {
+            let shared: Vec<usize> = p1.iter().copied().filter(|k| p2.contains(k)).collect();
+            if shared.len() != 1 {
+                return None;
+            }
+            let su = us[shared[0]];
+            if !(su >= ov_lo - eps_u && su <= ov_hi + eps_u) {
+                return None;
+            }
+            let at_end = (*p1.last()? == shared[0] && p2[0] == shared[0])
+                || (*p2.last()? == shared[0] && p1[0] == shared[0]);
+            if !at_end {
+                return None;
+            }
+        }
+        // index-set union (the shared extreme point appears in both
+        // chains), then a u-sorted merge
+        let mut seen = std::collections::HashSet::new();
+        let mut all: Vec<usize> = p1
+            .into_iter()
+            .chain(p2)
+            .filter(|k| seen.insert(*k))
+            .collect();
+        all.sort_by(|&x, &y| us[x].partial_cmp(&us[y]).unwrap_or(std::cmp::Ordering::Equal));
+        for w in all.windows(2) {
+            if us[w[1]] - us[w[0]] < -eps_u {
+                return None;
+            }
+        }
+        if all.is_empty() {
+            return None;
+        }
+        Some(all)
+    };
+    let bottom = match merge_edges(b_pre.clone(), a_pre.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => tfb_fail!("bottom edge merge failed"),
+    };
+    let top = match merge_edges(a_suf.clone(), b_suf.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => tfb_fail!("top edge merge failed"),
+    };
+    // ── walls: left = smaller mean u, right = larger ──────────────
+    let mean_u =
+        |pts: &[usize]| -> f64 { pts.iter().map(|&k| us[k]).sum::<f64>() / pts.len() as f64 };
+    let (mut w_l, mut w_r) = if mean_u(&b_mid) <= mean_u(&a_mid) {
+        (b_mid.clone(), a_mid.clone())
+    } else {
+        (a_mid.clone(), b_mid.clone())
+    };
+    // extend walls to the top edge's ends (covers the junction ring
+    // edges when the opposite chain's suffix is a single point)
+    if *w_l.last().unwrap() != top[0] {
+        w_l.push(top[0]);
+    }
+    if *w_r.last().unwrap() != top[top.len() - 1] {
+        w_r.push(top[top.len() - 1]);
+    }
+    // topology consistency: the walls' feet must be the bottom ends
+    if w_l[0] != bottom[0] || w_r[0] != bottom[bottom.len() - 1] {
+        tfb_fail!("wall feet do not match the bottom edge ends");
+    }
+    // walls must not be u-degenerate (a corridor needs width)
+    let u_max_r = w_r.iter().map(|&k| us[k]).fold(f64::NEG_INFINITY, f64::max);
+    let u_min_l = w_l.iter().map(|&k| us[k]).fold(f64::INFINITY, f64::min);
+    if !(u_max_r - u_min_l > 1e-9) {
+        tfb_fail!("corridor has no width");
+    }
+    // ── v-chord budget: dv_max from the tube tolerance ────────────
+    let dv_max = if max_dev > 0.0 && max_dev < 2.0 * minor {
+        let c = (1.0 - max_dev / minor).clamp(-1.0, 1.0);
+        (2.0 * c.acos()).max(0.05)
+    } else {
+        PI * 0.5
+    };
+    // ── union-u grid of the whole rim (dense, no discontinuity) ──
+    let dedup_tol = (uspan * 1e-6).max(1e-9);
+    let mut grid: Vec<f64> = us.clone();
+    grid.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    grid.dedup_by(|a, &mut b| (*a - b).abs() <= dedup_tol);
+    // u-chord bound for NEW edges (conservative outer radius R+r)
+    let du_ok = if max_dev > 0.0 {
+        let rad = major + minor;
+        let c = (1.0 - (max_dev / rad).min(1.0)).clamp(-1.0, 1.0);
+        (2.0 * c.acos()).max(0.02)
+    } else {
+        P
+    };
+    // ── choose connectors: anchors on BOTH walls per level ────────
+    let p = w_l.len();
+    let q = w_r.len();
+    let pick_anchors = |k_bands: usize| -> Option<(Vec<usize>, Vec<usize>)> {
+        let mut av = vec![0usize; k_bands + 1];
+        let mut bv = vec![0usize; k_bands + 1];
+        av[k_bands] = p - 1;
+        bv[k_bands] = q - 1;
+        for j in 1..k_bands {
+            let t = vmin + vspan * (j as f64) / (k_bands as f64);
+            let mut aj = av[j - 1];
+            let room = k_bands - j;
+            let lim = p - 1 - room.min(p - 1 - av[j - 1]);
+            for idx in av[j - 1]..=lim {
+                if vs[w_l[idx]] <= t + 1e-12 {
+                    aj = idx;
+                }
+            }
+            av[j] = aj;
+            let mut bj = bv[j - 1];
+            let lim_b = q - 1 - room.min(q - 1 - bv[j - 1]);
+            for idx in bv[j - 1]..=lim_b {
+                if vs[w_r[idx]] <= t + 1e-12 {
+                    bj = idx;
+                }
+            }
+            bv[j] = bj;
+        }
+        // per-band v-gap check (the two-pointer's diagonals span
+        // at most the connectors' combined v-range)
+        for j in 0..k_bands {
+            let hi = vs[w_l[av[j + 1]]].max(vs[w_r[bv[j + 1]]]);
+            let lo = vs[w_l[av[j]]].min(vs[w_r[bv[j]]]);
+            if hi - lo > dv_max * 1.05 {
+                return None;
+            }
+        }
+        Some((av, bv))
+    };
+    let want_k = ((vspan / dv_max).ceil() as usize).clamp(1, 8);
+    let (mut anchors_l, mut anchors_r) = {
+        let mut kk = want_k;
+        loop {
+            if let Some((av, bv)) = pick_anchors(kk) {
+                break (av, bv);
+            }
+            if kk >= 8 {
+                tfb_fail!("no anchor set satisfies the v-gap bound (K=8)");
+            }
+            kk += 1;
+        }
+    };
+    // ── adaptive u-width refinement ────────────────────────────────
+    // A band is "stressed" when an emitted edge would exceed the
+    // u-chord bound: (a) a wall-fan spoke from the band's anchor to
+    // a far wall point of the slice, or (b) a PINCH band (a 1-point
+    // connector = the lune wedge) whose fan reaches every point of
+    // the opposite connector (stress = the corridor width at the
+    // anchor level). Cure: insert the midpoint anchor on BOTH walls
+    // of the stressed band (cached points — the contract survives),
+    // re-check, up to 16 rounds. The chord guard below remains the
+    // exact backstop (measured: the lune needs ~3 rounds, the quad
+    // and wiggly classes need none).
+    for _round in 0..16 {
+        let mut worst = 0.0f64;
+        let mut worst_band = None;
+        for j in 0..anchors_l.len() - 1 {
+            let al = anchors_l[j];
+            let bl = anchors_l[j + 1];
+            let anch_u = us[w_l[al]];
+            for &pidx in &w_l[al..=bl] {
+                let d = (us[pidx] - anch_u).abs();
+                if d > worst {
+                    worst = d;
+                    worst_band = Some(j);
+                }
+            }
+            let ar = anchors_r[j];
+            let br = anchors_r[j + 1];
+            let anch_ur = us[w_r[ar]];
+            for &pidx in &w_r[ar..=br] {
+                let d = (us[pidx] - anch_ur).abs();
+                if d > worst {
+                    worst = d;
+                    worst_band = Some(j);
+                }
+            }
+            let is_pinch = (j == 0 && bottom.len() == 1)
+                || (j == anchors_l.len() - 2 && top.len() == 1);
+            if is_pinch {
+                let width =
+                    (us[w_r[br]] - us[w_l[bl]]).max(us[w_r[ar]] - us[w_l[al]]);
+                if width > worst {
+                    worst = width;
+                    worst_band = Some(j);
+                }
+            }
+        }
+        if worst <= du_ok || worst_band.is_none() {
+            break;
+        }
+        let j = worst_band.unwrap();
+        let (al, bl) = (anchors_l[j], anchors_l[j + 1]);
+        let (ar, br) = (anchors_r[j], anchors_r[j + 1]);
+        if bl - al < 2 && br - ar < 2 {
+            break; // cannot split further
+        }
+        let a_mid = al + (bl - al) / 2;
+        let b_mid = ar + (br - ar) / 2;
+        anchors_l.insert(j + 1, a_mid);
+        anchors_r.insert(j + 1, b_mid);
+        if anchors_l.len() > 24 {
+            break;
+        }
+    }
+    let k_bands = anchors_l.len() - 1;
+    // ── build connectors (index lists) + new interior points ──────
+    // connector 0 = the bottom edge (cached), connector K = the top
+    // edge (cached); interiors = wall anchors + analytic grid pts.
+    let mut new_pts: Vec<[f64; 2]> = Vec::new();
+    let mut connectors: Vec<Vec<usize>> = Vec::with_capacity(k_bands + 1);
+    connectors.push(bottom.clone());
+    for j in 1..k_bands {
+        let li = w_l[anchors_l[j]];
+        let ri = w_r[anchors_r[j]];
+        let (u_l, v_l) = (us[li], vs[li]);
+        let (u_r, v_r) = (us[ri], vs[ri]);
+        if !(u_r > u_l + 1e-12) {
+            tfb_fail!("walls touch mid-face (self-intersection)");
+        }
+        // grid slice strictly inside, refined to the u-chord bound
+        let mut slice: Vec<f64> = grid
+            .iter()
+            .copied()
+            .filter(|&g| g > u_l + dedup_tol && g < u_r - dedup_tol)
+            .collect();
+        let mut guard = 0usize;
+        loop {
+            let mut worst = 0.0f64;
+            let mut worst_at = 0usize;
+            let mut prev = u_l;
+            for (k, &g) in slice.iter().enumerate() {
+                let d = g - prev;
+                if d > worst {
+                    worst = d;
+                    worst_at = k;
+                }
+                prev = g;
+            }
+            let d_last = u_r - prev;
+            if d_last > worst {
+                worst = d_last;
+                worst_at = slice.len();
+            }
+            if worst <= du_ok || guard > 64 || slice.len() + 2 > 4 * n {
+                break;
+            }
+            let mid = if worst_at == 0 {
+                (u_l + slice[0]) * 0.5
+            } else if worst_at == slice.len() {
+                (slice[slice.len() - 1] + u_r) * 0.5
+            } else {
+                (slice[worst_at - 1] + slice[worst_at]) * 0.5
+            };
+            slice.insert(worst_at, mid);
+            guard += 1;
+        }
+        let mut conn = vec![li];
+        for g in slice {
+            let t = (g - u_l) / (u_r - u_l);
+            let v = v_l + (v_r - v_l) * t;
+            conn.push(n + new_pts.len());
+            new_pts.push([g, v]);
+        }
+        conn.push(ri);
+        connectors.push(conn);
+    }
+    connectors.push(top.clone());
+    // ── emit bands: left fan + two-pointer + right fan ────────────
+    // The fan slices EXCLUDE the anchor (the first wall point of the
+    // band IS the bottom connector's end): the first fan triangle
+    // [anchor, w0, w1] covers the ring edge (anchor, w0) that the
+    // degenerate-skipping formulation would silently drop.
+    let u_of = |idx: usize| -> f64 {
+        if idx < n {
+            us[idx]
+        } else {
+            new_pts[idx - n][0]
+        }
+    };
+    let v_of = |idx: usize| -> f64 {
+        if idx < n {
+            vs[idx]
+        } else {
+            new_pts[idx - n][1]
+        }
+    };
+    let mut tris: Vec<usize> = Vec::with_capacity(8 * n);
+    for j in 0..k_bands {
+        let cbtm = &connectors[j];
+        let ctop = &connectors[j + 1];
+        // left fan: anchor = the bottom connector's left end; the
+        // slice = wall points strictly AFTER the anchor, plus the
+        // next anchor (the top connector's left end). CCW winding =
+        // DESCENDING wall order (the left sliver lies left of the
+        // chord, traversed up).
+        let anchor_l = cbtm[0];
+        if anchors_l[j] < anchors_l[j + 1] {
+            let lw = &w_l[(anchors_l[j] + 1)..=anchors_l[j + 1]];
+            for k in 1..lw.len() {
+                let tri = [anchor_l, lw[k], lw[k - 1]];
+                if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                    tris.extend_from_slice(&tri);
+                }
+            }
+        }
+        // right fan: anchor = the bottom connector's right end; CCW
+        // winding = ASCENDING wall order (the right sliver lies
+        // right of the chord).
+        let anchor_r = cbtm[cbtm.len() - 1];
+        if anchors_r[j] < anchors_r[j + 1] {
+            let rw = &w_r[(anchors_r[j] + 1)..=anchors_r[j + 1]];
+            for k in 1..rw.len() {
+                let tri = [anchor_r, rw[k - 1], rw[k]];
+                if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                    tris.extend_from_slice(&tri);
+                }
+            }
+        }
+        // two-pointer zipper between the connectors (s65/s68 form)
+        let na = cbtm.len();
+        let nb = ctop.len();
+        let mut ia = 0usize;
+        let mut ib = 0usize;
+        while ia < na - 1 || ib < nb - 1 {
+            let tri: [usize; 3] = if ia >= na - 1 {
+                let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                ib += 1;
+                t
+            } else if ib >= nb - 1 {
+                let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                ia += 1;
+                t
+            } else if u_of(cbtm[ia + 1]) <= u_of(ctop[ib + 1]) {
+                let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                ia += 1;
+                t
+            } else {
+                let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                ib += 1;
+                t
+            };
+            if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                tris.extend_from_slice(&tri);
+            }
+        }
+    }
+    if tris.len() < 3 || new_pts.len() > 8 * n {
+        tfb_fail!("empty strip or too many new points");
+    }
+    // ── edge-accounting audit: ring edges 1×, everything else 2× ─
+    {
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        let rim = |a: usize, b: usize| -> bool {
+            (a + 1) % n == b || (b + 1) % n == a
+        };
+        let mut missing = 0usize;
+        let mut bad_nonrim = 0usize;
+        for k in 0..n {
+            let j = (k + 1) % n;
+            if ecount.get(&(k.min(j), k.max(j))).copied() != Some(1) {
+                missing += 1;
+            }
+        }
+        for (&(x, y), &c) in ecount.iter() {
+            if !rim(x, y) && c != 2 {
+                bad_nonrim += 1;
+            }
+        }
+        if missing > 0 || bad_nonrim > 0 {
+            if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                eprintln!("[TFB reject] audit: {} rim edges not-1x, {} non-rim edges not-2x", missing, bad_nonrim);
+            }
+            return (Vec::new(), Vec::new());
+        }
+    }
+    // ── area guard (metric-exact, Green's theorem per region) ─────
+    // True surface area element: |S_u × S_v| = r·(R + r·cos v).
+    // Polygon area = ∮ H(v) du, H(v) = r·R·v + r²·sin v (Gauss per
+    // edge); the strip's coverage = the same integral over each
+    // triangle's UV region. Equal (±0.5%) ⇔ no holes/overlaps.
+    let h_of = |v: f64| -> f64 { minor * major * v + minor * minor * v.sin() };
+    let gauss = [
+        -0.8611363115940526,
+        -0.3399810435848563,
+        0.3399810435848563,
+        0.8611363115940526,
+    ];
+    let metric_area = |ring_pts: &[[f64; 2]]| -> f64 {
+        let mut sum = 0.0;
+        for w in ring_pts.windows(2) {
+            let (u1, v1) = (w[0][0], w[0][1]);
+            let (u2, v2) = (w[1][0], w[1][1]);
+            let du = u2 - u1;
+            if du.abs() <= 1e-15 {
+                continue;
+            }
+            for &t in &gauss {
+                let vt = v1 + (v2 - v1) * (t * 0.5 + 0.5);
+                sum += h_of(vt) * du * 0.5;
+            }
+        }
+        sum
+    };
+    let poly_uv: Vec<[f64; 2]> = (0..n).map(|k| [us[k], vs[k]]).collect();
+    let mut poly_closed = poly_uv.clone();
+    poly_closed.push(poly_uv[0]);
+    let poly_area_metric = metric_area(&poly_closed).abs();
+    let uv_of = |idx: usize| -> [f64; 2] {
+        if idx < n {
+            [us[idx], vs[idx]]
+        } else {
+            new_pts[idx - n]
+        }
+    };
+    let mut strip_area_metric = 0.0f64;
+    for c in tris.chunks_exact(3) {
+        let tri = [uv_of(c[0]), uv_of(c[1]), uv_of(c[2])];
+        let mut closed = tri.to_vec();
+        closed.push(tri[0]);
+        strip_area_metric += metric_area(&closed);
+    }
+    if poly_area_metric <= 1e-12 {
+        tfb_fail!("degenerate polygon metric area");
+    }
+    let ratio = strip_area_metric.abs() / poly_area_metric;
+    if !(ratio >= 0.995 && ratio <= 1.005) {
+        if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+            eprintln!("[TFB reject] area ratio {} out of [0.995, 1.005]", ratio);
+        }
+        return (Vec::new(), Vec::new());
+    }
+    // ── sliver policy ─────────────────────────────────────────────
+    // NO s68-style u-shear sliver guard here: the pinch-corner fans
+    // (lune/wiggly walls) legitimately emit thin needles ALONG the
+    // wall arcs — flat surface pieces, chord- and fold-clean
+    // (measured: the wiggly class passes audit+area+chord+fold with
+    // 0.0°-needles). The real shear class (#1092) produced FOLD
+    // pairs — the fold guard below is the primary protection (s68
+    // lesson 3), with the audit/area/chord guards as the structural
+    // and tolerance nets.
+    // ── chord guards on NEW edges (rim edges are contract-fixed) ──
+    if max_dev > 0.0 {
+        let rim = |x: usize, y: usize| -> bool {
+            (x + 1) % n == y || (y + 1) % n == x
+        };
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let x = c[k];
+                let y = c[(k + 1) % 3];
+                if rim(x, y) {
+                    continue;
+                }
+                let du = (u_of(x) - u_of(y)).abs();
+                let dv = (v_of(x) - v_of(y)).abs();
+                // u chord at the conservative outer radius R+r (du is
+                // an ANGLE — the sagitta is R·(1 − cos(Δu/2)))
+                if du > 1e-12 {
+                    let rad = major + minor;
+                    let sag = rad * (1.0 - (du * 0.5).min(PI).cos());
+                    if sag > max_dev * 1.05 + 1e-12 {
+                        if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                            eprintln!("[TFB reject] u-chord sag {:.5} > tol (du {:.4})", sag, du);
+                        }
+                        return (Vec::new(), Vec::new());
+                    }
+                }
+                // v chord on the tube (dv is an angle)
+                if dv > 1e-12 {
+                    let sag = minor * (1.0 - (dv * 0.5).min(PI).cos());
+                    if sag > max_dev * 1.05 + 1e-12 {
+                        if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                            eprintln!("[TFB reject] v-chord sag {:.5} > tol (dv {:.4})", sag, dv);
+                        }
+                        return (Vec::new(), Vec::new());
+                    }
+                }
+            }
+        }
+    }
+    // ── fold guard: same-face fold pairs (>170°) in 3D = 0 ────────
+    {
+        use std::collections::HashMap;
+        let p3 = |idx: usize| -> Point3d {
+            let uv = uv_of(idx);
+            torus.point_at(uv[0], uv[1])
+        };
+        let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+            let a = p3(c[0]);
+            let b = p3(c[1]);
+            let d = p3(c[2]);
+            let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+            let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+            let nn = [
+                ab[1] * ad[2] - ab[2] * ad[1],
+                ab[2] * ad[0] - ab[0] * ad[2],
+                ab[0] * ad[1] - ab[1] * ad[0],
+            ];
+            let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+            if l > 1e-18 {
+                Some([nn[0] / l, nn[1] / l, nn[2] / l])
+            } else {
+                None
+            }
+        };
+        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+        for (ti, c) in tris.chunks_exact(3).enumerate() {
+            for k in 0..3 {
+                let x = c[k];
+                let y = c[(k + 1) % 3];
+                if x != y {
+                    edge_tris.entry((x.min(y), x.max(y))).or_default().push(ti);
+                }
+            }
+        }
+        let mut folds = 0usize;
+        for ts in edge_tris.values() {
+            if ts.len() != 2 {
+                continue;
+            }
+            let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+            let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+            if let (Some(n1), Some(n2)) = (n1, n2) {
+                let dot =
+                    (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                if dot.acos().to_degrees() > 170.0 {
+                    folds += 1;
+                }
+            }
+        }
+        if folds > 0 {
+            if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                eprintln!("[TFB reject] {} same-face fold pairs", folds);
+            }
+            return (Vec::new(), Vec::new());
+        }
+    }
+    // ── winding: match the polygon's UV signed area ───────────────
+    {
+        let signed = |ring: &[[f64; 2]]| -> f64 {
+            let mut s = 0.0;
+            for w in ring.windows(2) {
+                s += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+            }
+            if ring.len() > 1 {
+                let (a, b) = (ring[ring.len() - 1], ring[0]);
+                s += a[0] * b[1] - b[0] * a[1];
+            }
+            s * 0.5
+        };
+        let poly_s = signed(&poly_uv);
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                    + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                    + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                    * 0.5
+            })
+            .sum();
+        if strip_s * poly_s < 0.0 {
+            for c in tris.chunks_exact_mut(3) {
+                c.swap(1, 2);
+            }
+        }
+    }
+    (tris, new_pts)
+}
+
 pub fn triangulate_surface_consistent(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -7798,7 +8566,15 @@ pub fn triangulate_surface_consistent(
             // Kill-switch: DRAPPER_UNUSED_CDT_RESCUE=0.
             let mut rescued_by_cdt = false;
             if !tris.is_empty() {
-                let rescue_ok = !matches!(surface, Surface::Nurbs(_) | Surface::Torus(_))
+                // session-69: Torus faces now ENTER this block — the
+                // s64 blanket exclusion (s51: the per-face CDT made
+                // torus fold pairs WORSE, drill HM 4105→5470) also
+                // blocked the structural strips, which never touch
+                // the CDT. The s65 crescent and the s64 CDT fallback
+                // below stay Torus-excluded (bit-identical legacy
+                // behavior); only the s69 TORUS_FILLET_BAND — a
+                // structural band, fold-guarded — is new for tori.
+                let rescue_ok = !matches!(surface, Surface::Nurbs(_))
                     && std::env::var("DRAPPER_UNUSED_CDT_RESCUE").as_deref() != Ok("0");
                 if rescue_ok {
                     let mut used = vec![false; all_uv.len()];
@@ -7877,6 +8653,10 @@ pub fn triangulate_surface_consistent(
                     let crescent_strip: Vec<usize> = if n_unused == 0
                         && legacy_extra_bnd > 0
                         && holes_2d.is_empty()
+                        // s69: tori were always excluded from this
+                        // block before — keep the crescent off them
+                        // (bit-identity; no fold guard in s65)
+                        && !matches!(surface, Surface::Torus(_))
                     {
                         two_chain_monotone_strip(&boundary_2d)
                     } else {
@@ -7911,9 +8691,49 @@ pub fn triangulate_surface_consistent(
                         } else {
                             Vec::new()
                         };
+                    // session-69: TORUS_FILLET_BAND candidate — the torus
+                    // fillet class (single loop, partial tube arc; the
+                    // ring = 2 v-rising walls + flat rim arcs). Same
+                    // trigger as s68 (legacy debt on a hole-free face),
+                    // disjoint by surface type. Returns index triples
+                    // over [ring | NEW analytic level points] — the new
+                    // points are appended to all_uv ON ACCEPTANCE (see
+                    // the gate below) and resolved through point_at in
+                    // Step 5 (the interior path). Kill-switch:
+                    // DRAPPER_TORUS_FILLET_BAND=0.
+                    if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
+                        if let Surface::Torus(_) = surface {
+                            eprintln!(
+                                "[TFB hook] face reached: n_unused={} extra_bnd={} holes={} nb={}",
+                                n_unused, legacy_extra_bnd, holes_2d.len(), boundary_2d.len()
+                            );
+                        }
+                    }
+                    let torus_band_strip: (Vec<usize>, Vec<[f64; 2]>) =
+                        if holes_2d.is_empty()
+                            && (n_unused > 0 || legacy_extra_bnd > 0)
+                            && std::env::var("DRAPPER_TORUS_FILLET_BAND").as_deref()
+                                != Ok("0")
+                        {
+                            match surface {
+                                Surface::Torus(t)
+                                    if t.minor_radius > 0.0 && t.major_radius > 0.0 =>
+                                {
+                                    torus_fillet_band_strip(
+                                        t,
+                                        &boundary_2d,
+                                        params.max_deviation,
+                                    )
+                                }
+                                _ => (Vec::new(), Vec::new()),
+                            }
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
                     if n_unused > 0
                         || !crescent_strip.is_empty()
                         || !cyl_band_strip.is_empty()
+                        || !torus_band_strip.0.is_empty()
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -8063,7 +8883,103 @@ pub fn triangulate_surface_consistent(
                                 );
                             }
                         }
-                        if !strip_accepted {
+                        // session-69: TORUS_FILLET_BAND acceptance (after
+                        // s65/s68 — disjoint by surface type). The strip
+                        // is edge-audited (ring edges 1×, interior 2×),
+                        // so it wins through the same never-worsen gate;
+                        // its NEW analytic level points are appended to
+                        // all_uv here (Step 5 resolves them through
+                        // point_at — the interior path) and the indices
+                        // remapped from [ring | new] to the all_uv space.
+                        if !strip_accepted && !torus_band_strip.0.is_empty() {
+                            let mut strip = torus_band_strip.0.clone();
+                            let strip_new = &torus_band_strip.1;
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let never_worse = strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count
+                                    || strip_extra < legacy_extra_bnd);
+                            if never_worse {
+                                // remap [ring 0..n | new n..n+m] →
+                                // [ring | …all_uv tail… | appended]
+                                let base = all_uv.len();
+                                for p in strip_new.iter() {
+                                    all_uv.push(Point2d::new(p[0], p[1]));
+                                }
+                                for idx in strip.iter_mut() {
+                                    if *idx >= n_boundary {
+                                        *idx = base + (*idx - n_boundary);
+                                    }
+                                }
+                                log::warn!(
+                                    "[f{}] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, {} analytic level pts, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3,
+                                    strip_new.len(),
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] TORUS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
+                            }
+                        }
+                        // s69: the CDT fallback stays Torus-excluded
+                        // (s51: Delaunay near the torus rim creates more
+                        // fold pairs, drill HM 4105→5470 — measured).
+                        if !strip_accepted
+                            && !matches!(surface, Surface::Torus(_))
+                        {
                         let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
                             &boundary_2d,
                             &holes_2d,
@@ -14099,6 +15015,277 @@ mod tests {
         ];
         let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(0.5), &ring, 0.01);
         assert!(tris.is_empty(), "tiny ring must be rejected");
+    }
+
+    // ── session-69: TORUS_FILLET_BAND unit tests ───────────────────
+
+    /// Shared invariant checker for the torus band: every ring edge
+    /// (i, i+1 mod n) used exactly once, every other edge exactly
+    /// twice, ALL ring AND new vertices used, and the metric area
+    /// (Green integral of |S_u × S_v| = r·(R + r·cos v)) matches
+    /// the polygon's within 1%.
+    fn assert_torus_band_invariants(
+        torus: &TorusSurface,
+        ring: &[[f64; 2]],
+        tris: &[usize],
+        new_pts: &[[f64; 2]],
+    ) {
+        let n = ring.len();
+        use std::collections::{HashMap, HashSet};
+        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut used: HashSet<usize> = HashSet::new();
+        for c in tris.chunks_exact(3) {
+            used.insert(c[0]);
+            used.insert(c[1]);
+            used.insert(c[2]);
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        for k in 0..n {
+            let j = (k + 1) % n;
+            assert_eq!(
+                ecount.get(&(k.min(j), k.max(j))).copied(),
+                Some(1),
+                "rim edge ({}, {}) must be used exactly once",
+                k,
+                j
+            );
+        }
+        for (e, c) in &ecount {
+            let is_rim = (e.0 + 1) % n == e.1 || (e.1 + 1) % n == e.0;
+            assert!(
+                is_rim || *c == 2,
+                "non-rim edge {:?} used {} times (must be 2)",
+                e,
+                c
+            );
+        }
+        for k in 0..n {
+            assert!(used.contains(&k), "ring vertex {} unused", k);
+        }
+        for k in 0..new_pts.len() {
+            assert!(used.contains(&(n + k)), "new vertex {} unused", k);
+        }
+        let (minor, major) = (torus.minor_radius, torus.major_radius);
+        let h_of = |v: f64| -> f64 { minor * major * v + minor * minor * v.sin() };
+        let gauss = [
+            -0.8611363115940526,
+            -0.3399810435848563,
+            0.3399810435848563,
+            0.8611363115940526,
+        ];
+        let metric_area = |pts: &[[f64; 2]]| -> f64 {
+            let mut sum = 0.0;
+            for w in pts.windows(2) {
+                let du = w[1][0] - w[0][0];
+                if du.abs() <= 1e-15 {
+                    continue;
+                }
+                for &t in &gauss {
+                    let vt = w[0][1] + (w[1][1] - w[0][1]) * (t * 0.5 + 0.5);
+                    sum += h_of(vt) * du * 0.5;
+                }
+            }
+            sum
+        };
+        let uv_of = |idx: usize| -> [f64; 2] {
+            if idx < n {
+                ring[idx]
+            } else {
+                new_pts[idx - n]
+            }
+        };
+        let mut poly = ring.to_vec();
+        poly.push(ring[0]);
+        let poly_a = metric_area(&poly).abs();
+        assert!(poly_a > 1e-12, "polygon metric area must be positive");
+        let mut strip_a = 0.0f64;
+        for c in tris.chunks_exact(3) {
+            let tri = [uv_of(c[0]), uv_of(c[1]), uv_of(c[2])];
+            let mut closed = tri.to_vec();
+            closed.push(tri[0]);
+            strip_a += metric_area(&closed);
+        }
+        let ratio = strip_a.abs() / poly_a;
+        assert!(
+            (0.99..=1.01).contains(&ratio),
+            "metric area ratio {} out of [0.99, 1.01]",
+            ratio
+        );
+    }
+
+    /// QUAD fillet (f127-like): 2 constant-v arcs + 2 constant-u side
+    /// lines on a torus R=4, r=0.15, v-span π/2, u-span 0.269.
+    #[test]
+    fn torus_fillet_band_quad_f127_like() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let (v0, v1) = (3.14159265f64, 4.71238898f64);
+        let (u0, u1) = (1.57079633f64, 1.83940762f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom arc v=v0, u ascending (32 pts, starts at the left corner)
+        for k in 0..32 {
+            ring.push([u0 + (u1 - u0) * k as f64 / 31.0, v0]);
+        }
+        // right side u=u1, v ascending (31 pts, ends at the right-top = vmax)
+        for k in 1..=31 {
+            ring.push([u1, v0 + (v1 - v0) * k as f64 / 31.0]);
+        }
+        // top arc v=v1, u descending (31 pts, ends at the left-top corner)
+        for k in (0..31).rev() {
+            ring.push([u0 + (u1 - u0) * k as f64 / 31.0, v1]);
+        }
+        // left side u=u0, v descending (30 pts, no closing dup)
+        for k in (1..31).rev() {
+            ring.push([u0, v0 + (v1 - v0) * k as f64 / 31.0]);
+        }
+        let (tris, new_pts) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(!tris.is_empty(), "quad fillet must qualify");
+        assert_torus_band_invariants(&torus, &ring, &tris, &new_pts);
+        // v-span π/2 > dv_max 0.734 → interior levels expected
+        assert!(!new_pts.is_empty(), "interior level points expected");
+    }
+
+    /// LUNE fillet (f159-like): a meridian wall (u = π) + a circle
+    /// arc wall through both pinch corners (u = π + a·sin θ,
+    /// v = −b·cos θ, θ ∈ [0, π]).
+    #[test]
+    fn torus_fillet_band_lune_f159_like() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let u_m = std::f64::consts::PI;
+        let (au, av) = (0.4488f64, 0.68949096f64);
+        let m = 56usize;
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // circle arc: bottom pinch → bulge → top pinch
+        for k in 0..=m {
+            let th = std::f64::consts::PI * k as f64 / m as f64;
+            ring.push([u_m + au * th.sin(), -av * th.cos()]);
+        }
+        // meridian back down (top pinch → bottom pinch, excl. ends)
+        for k in 1..62 {
+            ring.push([u_m, av - 2.0 * av * k as f64 / 62.0]);
+        }
+        let (tris, new_pts) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(!tris.is_empty(), "lune fillet must qualify");
+        assert_torus_band_invariants(&torus, &ring, &tris, &new_pts);
+        assert!(!new_pts.is_empty(), "interior level points expected");
+    }
+
+    /// WIGGLY wall (f158-like): straight meridian wall + a wall made
+    /// of sag arc / meridian / sag arc (the drill fillet class where
+    /// the near-flat sag runs must stay wall fan points, not edges).
+    #[test]
+    fn torus_fillet_band_wiggly_wall_f158_like() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let u_r = 3.417f64;
+        let u_l = 3.280f64;
+        let (va, vb) = (-0.68949096f64, 0.68949096f64);
+        let v_sag = 0.675f64;
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // start at the bottom pinch, up the straight right meridian
+        for k in 0..63 {
+            ring.push([u_r, va + (vb - va) * k as f64 / 62.0]);
+        }
+        // top pinch → down the wiggly left wall: sag arc (55 pts)
+        for k in 1..=55 {
+            let t = k as f64 / 55.0;
+            ring.push([u_r + (u_l - u_r) * t, vb - (vb - v_sag) * t]);
+        }
+        // left meridian down (v v_sag → −v_sag)
+        for k in 1..=31 {
+            let t = k as f64 / 31.0;
+            ring.push([u_l, v_sag - 2.0 * v_sag * t]);
+        }
+        // bottom sag arc back to the pinch (u_l → u_r, v −v_sag → va)
+        for k in 1..55 {
+            let t = k as f64 / 55.0;
+            ring.push([u_l + (u_r - u_l) * t, -v_sag + (va + v_sag) * t]);
+        }
+        let (tris, new_pts) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(!tris.is_empty(), "wiggly-wall fillet must qualify");
+        assert_torus_band_invariants(&torus, &ring, &tris, &new_pts);
+    }
+
+    /// Seam-crossing u: the ring's raw u wraps past 2π (350° → 460°);
+    /// the unwrap must restore the continuous corridor.
+    #[test]
+    fn torus_fillet_band_seam_crossing_unwrap() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let two_pi = 2.0 * std::f64::consts::PI;
+        let u_start = 350.0f64.to_radians();
+        let u_span = 110.0f64.to_radians(); // 350° → 460°
+        let wrap = |u: f64| -> f64 { u.rem_euclid(two_pi) };
+        let (v0, v1) = (3.14159265f64, 4.71238898f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..32 {
+            ring.push([wrap(u_start + u_span * k as f64 / 31.0), v0]);
+        }
+        for k in 1..=31 {
+            ring.push([wrap(u_start + u_span), v0 + (v1 - v0) * k as f64 / 31.0]);
+        }
+        for k in (0..31).rev() {
+            ring.push([wrap(u_start + u_span * k as f64 / 31.0), v1]);
+        }
+        for k in (1..31).rev() {
+            ring.push([wrap(u_start), v0 + (v1 - v0) * k as f64 / 31.0]);
+        }
+        let (tris, new_pts) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(!tris.is_empty(), "seam-crossing quad must qualify");
+        assert_torus_band_invariants(&torus, &ring, &tris, &new_pts);
+    }
+
+    /// Detector rejects: v-span beyond 1.05π (approaching the
+    /// full-tube wrap = the s66 TORUS_STRIP class, not this band).
+    #[test]
+    fn torus_fillet_band_rejects_deep_wrap() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let (v0, v1) = (0.0f64, 3.6f64); // > 1.05π
+        let (u0, u1) = (1.0f64, 1.3f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..16 {
+            ring.push([u0 + (u1 - u0) * k as f64 / 15.0, v0]);
+        }
+        for k in 1..=15 {
+            ring.push([u1, v0 + (v1 - v0) * k as f64 / 15.0]);
+        }
+        for k in (0..15).rev() {
+            ring.push([u0 + (u1 - u0) * k as f64 / 15.0, v1]);
+        }
+        for k in (1..15).rev() {
+            ring.push([u0, v0 + (v1 - v0) * k as f64 / 15.0]);
+        }
+        let (tris, _new) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(tris.is_empty(), "deep v-wrap must be rejected");
+    }
+
+    /// Detector rejects: non-u-monotone bottom arc (a notched rim
+    /// run cannot be an edge polyline).
+    #[test]
+    fn torus_fillet_band_rejects_notched_arc() {
+        let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 4.0, 0.15);
+        let (v0, v1) = (3.14159265f64, 4.71238898f64);
+        let (u0, u1) = (1.57079633f64, 1.83940762f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // notched bottom arc: u goes 0, .1, .2, .15, .3 ... (non-monotone)
+        let notched = [0.0f64, 0.1, 0.2, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0];
+        for t in notched {
+            ring.push([u0 + (u1 - u0) * t, v0]);
+        }
+        for k in 1..=15 {
+            ring.push([u1, v0 + (v1 - v0) * k as f64 / 15.0]);
+        }
+        for k in (0..15).rev() {
+            ring.push([u0 + (u1 - u0) * k as f64 / 15.0, v1]);
+        }
+        for k in (1..15).rev() {
+            ring.push([u0, v0 + (v1 - v0) * k as f64 / 15.0]);
+        }
+        let (tris, _new) = torus_fillet_band_strip(&torus, &ring, 0.01);
+        assert!(tris.is_empty(), "notched bottom arc must be rejected");
     }
 }
 
