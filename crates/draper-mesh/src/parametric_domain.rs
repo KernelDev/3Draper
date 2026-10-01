@@ -11,9 +11,9 @@
 //! which is fast (O(n log n) typical) and handles holes natively.
 
 #![allow(dead_code)]
-use draper_geometry::{Point2d, Point3d, Surface, Curve3d, CylinderSurface, TorusSurface};
-use crate::mesh::TriangleMesh;
 use crate::edge_cache::deterministic_round_point;
+use crate::mesh::TriangleMesh;
+use draper_geometry::{Curve3d, CylinderSurface, Point2d, Point3d, Surface, TorusSurface};
 use std::cell::Cell;
 use std::f64::consts::PI;
 
@@ -93,7 +93,15 @@ impl ContainmentGrid {
             }
         }
 
-        ContainmentGrid { cells, n_u, n_v, u_min, v_min, du, dv }
+        ContainmentGrid {
+            cells,
+            n_u,
+            n_v,
+            u_min,
+            v_min,
+            du,
+            dv,
+        }
     }
 
     #[inline]
@@ -390,16 +398,21 @@ pub fn triangulate_cdt(
     // `triangulate_surface_consistent` behind
     // `TriangulationParams::use_cdt_steiner` (default off — see its doc
     // for the cross-face connectivity caveat).
-    let triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
+    let triangle_indices =
+        crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
     for chunk in triangle_indices.chunks(3) {
-        if chunk.len() < 3 { break; }
+        if chunk.len() < 3 {
+            break;
+        }
         let a = chunk[0] as u32;
         let b = chunk[1] as u32;
         let c = chunk[2] as u32;
-        if a == b || b == c || a == c { continue; }
+        if a == b || b == c || a == c {
+            continue;
+        }
         result_triangles.push([a, b, c]);
     }
 
@@ -426,7 +439,11 @@ fn uv_triangles_to_3d(
                 let n = surface.normal_at(uv.u, uv.v);
                 // Bug B fix (8.2.1/8.2.2): for forward:false faces, the geometric
                 // normal must be negated so it points inward (toward the solid).
-                let n = if forward { n } else { draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n) };
+                let n = if forward {
+                    n
+                } else {
+                    draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+                };
                 let vi = mesh.add_vertex(p3d);
                 mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
                 vi
@@ -541,9 +558,18 @@ pub enum UvPeriodicityError {
 impl std::fmt::Display for UvPeriodicityError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            UvPeriodicityError::SpanMultiplePeriods { direction, span, period, min, max } => {
-                write!(f, "UV {} spans {:.4} > period {:.4} (range [{:.4}, {:.4}])",
-                    direction, span, period, min, max)
+            UvPeriodicityError::SpanMultiplePeriods {
+                direction,
+                span,
+                period,
+                min,
+                max,
+            } => {
+                write!(
+                    f,
+                    "UV {} spans {:.4} > period {:.4} (range [{:.4}, {:.4}])",
+                    direction, span, period, min, max
+                )
             }
         }
     }
@@ -582,12 +608,17 @@ pub fn reproject_nurbs_point(
         let gu = derivs.du.x * dx + derivs.du.y * dy + derivs.du.z * dz;
         let gv = derivs.dv.x * dx + derivs.dv.y * dy + derivs.dv.z * dz;
 
-        let hu_u = derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
-        let hu_v = derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
-        let hv_v = derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
+        let hu_u =
+            derivs.du.x * derivs.du.x + derivs.du.y * derivs.du.y + derivs.du.z * derivs.du.z;
+        let hu_v =
+            derivs.du.x * derivs.dv.x + derivs.du.y * derivs.dv.y + derivs.du.z * derivs.dv.z;
+        let hv_v =
+            derivs.dv.x * derivs.dv.x + derivs.dv.y * derivs.dv.y + derivs.dv.z * derivs.dv.z;
 
         let det = hu_u * hv_v - hu_v * hu_v;
-        if det.abs() < 1e-20 { break; }
+        if det.abs() < 1e-20 {
+            break;
+        }
 
         let du = -(hv_v * gu - hu_v * gv) / det;
         let dv = -(-hu_v * gu + hu_u * gv) / det;
@@ -603,7 +634,8 @@ pub fn reproject_nurbs_point(
         let new_v = (best_v + dv).clamp(v_min, v_max);
 
         let new_p = surface.point_at(new_u, new_v);
-        let new_dist = (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
+        let new_dist =
+            (new_p.x - point.x).powi(2) + (new_p.y - point.y).powi(2) + (new_p.z - point.z).powi(2);
 
         if new_dist < best_dist {
             if (best_dist - new_dist) < 1e-12 * best_dist.max(1e-20) {
@@ -774,8 +806,8 @@ fn try_split_at_seam(
     // the other near u_max. We verify this by checking that the distance
     // from each endpoint to the nearest seam (u_min or u_max) is small.
     // ================================================================
-    let u_seam_threshold = u_range * 0.5;  // Must span MORE THAN HALF the range
-    let u_seam_proximity = u_range * 0.1;  // Endpoints must be within 10% of a seam
+    let u_seam_threshold = u_range * 0.5; // Must span MORE THAN HALF the range
+    let u_seam_proximity = u_range * 0.1; // Endpoints must be within 10% of a seam
     let mut u_crossings: Vec<SeamCrossing> = Vec::new();
 
     if is_u_periodic {
@@ -791,8 +823,10 @@ fn try_split_at_seam(
                 let dist_i_to_max = (polygon[i].u - u_max).abs();
                 let dist_j_to_min = (polygon[j].u - u_min).abs();
                 let dist_j_to_max = (polygon[j].u - u_max).abs();
-                let i_near_seam = dist_i_to_min < u_seam_proximity || dist_i_to_max < u_seam_proximity;
-                let j_near_seam = dist_j_to_min < u_seam_proximity || dist_j_to_max < u_seam_proximity;
+                let i_near_seam =
+                    dist_i_to_min < u_seam_proximity || dist_i_to_max < u_seam_proximity;
+                let j_near_seam =
+                    dist_j_to_min < u_seam_proximity || dist_j_to_max < u_seam_proximity;
                 // One endpoint should be near u_min, the other near u_max
                 let i_near_min = dist_i_to_min < u_seam_proximity;
                 let i_near_max = dist_i_to_max < u_seam_proximity;
@@ -907,7 +941,12 @@ fn try_split_at_seam(
     // Detection: two crossings on adjacent edges (edge i and edge i+1)
     // where the shared vertex is at the seam (u_min or u_max).
     // ================================================================
-    fn filter_spike_crossings(crossings: &[SeamCrossing], polygon: &[Point2d], u_min: f64, u_max: f64) -> Vec<SeamCrossing> {
+    fn filter_spike_crossings(
+        crossings: &[SeamCrossing],
+        polygon: &[Point2d],
+        u_min: f64,
+        u_max: f64,
+    ) -> Vec<SeamCrossing> {
         if crossings.len() < 2 {
             return crossings.to_vec();
         }
@@ -922,13 +961,14 @@ fn try_split_at_seam(
             // Check if the next crossing is on the adjacent edge
             if i + 1 < crossings.len() {
                 let next = &crossings[i + 1];
-                let is_adjacent = next.edge_idx == c.edge_idx + 1 || 
-                                  (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
+                let is_adjacent = next.edge_idx == c.edge_idx + 1
+                    || (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
                 if is_adjacent {
                     // Check if the shared vertex is at the seam
-                    let shared_idx = next.edge_idx;  // The vertex between the two edges
+                    let shared_idx = next.edge_idx; // The vertex between the two edges
                     let shared_u = polygon[shared_idx].u;
-                    let at_seam = (shared_u - u_min).abs() < 1e-3 || (shared_u - u_max).abs() < 1e-3;
+                    let at_seam =
+                        (shared_u - u_min).abs() < 1e-3 || (shared_u - u_max).abs() < 1e-3;
                     log::debug!(
                         "filter_spike_crossings: checking edges {} and {}, shared vertex {} at u={:.6}, u_min={:.6}, u_max={:.6}, at_seam={}",
                         c.edge_idx, next.edge_idx, shared_idx, shared_u, u_min, u_max, at_seam,
@@ -954,7 +994,12 @@ fn try_split_at_seam(
     // ================================================================
     // Same spike filter for V crossings (mirror of U)
     // ================================================================
-    fn filter_spike_crossings_v(crossings: &[VSeamCrossing], polygon: &[Point2d], v_min: f64, v_max: f64) -> Vec<VSeamCrossing> {
+    fn filter_spike_crossings_v(
+        crossings: &[VSeamCrossing],
+        polygon: &[Point2d],
+        v_min: f64,
+        v_max: f64,
+    ) -> Vec<VSeamCrossing> {
         if crossings.len() < 2 {
             return crossings.to_vec();
         }
@@ -968,12 +1013,13 @@ fn try_split_at_seam(
             let c = &crossings[i];
             if i + 1 < crossings.len() {
                 let next = &crossings[i + 1];
-                let is_adjacent = next.edge_idx == c.edge_idx + 1 || 
-                                  (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
+                let is_adjacent = next.edge_idx == c.edge_idx + 1
+                    || (c.edge_idx == polygon.len() - 1 && next.edge_idx == 0);
                 if is_adjacent {
                     let shared_idx = next.edge_idx;
                     let shared_v = polygon[shared_idx].v;
-                    let at_seam = (shared_v - v_min).abs() < 1e-3 || (shared_v - v_max).abs() < 1e-3;
+                    let at_seam =
+                        (shared_v - v_min).abs() < 1e-3 || (shared_v - v_max).abs() < 1e-3;
                     if at_seam {
                         log::debug!(
                             "filter_spike_crossings_v: skipping spike at vertex {} (v={:.4}), edges {} and {}",
@@ -1024,7 +1070,9 @@ fn get_surface_u_range(surface: &Surface) -> (f64, f64) {
         Surface::Cylinder(_) | Surface::Cone(_) | Surface::Revolution(_) => (0.0, 2.0 * PI),
         Surface::Sphere(_) => (0.0, 2.0 * PI),
         Surface::Torus(_) => (0.0, 2.0 * PI),
-        Surface::Plane(_) | Surface::Extrusion(_) | Surface::Offset(_) | Surface::Ruled(_) => (0.0, 1.0),
+        Surface::Plane(_) | Surface::Extrusion(_) | Surface::Offset(_) | Surface::Ruled(_) => {
+            (0.0, 1.0)
+        }
     }
 }
 
@@ -1148,7 +1196,8 @@ fn split_at_u_seam(
     if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
         log::warn!(
             "split_at_u_seam: sub-polygons too small (sub1={}, sub2={}), falling back",
-            sub1_uv.len(), sub2_uv.len()
+            sub1_uv.len(),
+            sub2_uv.len()
         );
         return None;
     }
@@ -1268,7 +1317,8 @@ fn split_at_v_seam(
     if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
         log::warn!(
             "split_at_v_seam: sub-polygons too small (sub1={}, sub2={}), falling back",
-            sub1_uv.len(), sub2_uv.len()
+            sub1_uv.len(),
+            sub2_uv.len()
         );
         return None;
     }
@@ -1338,14 +1388,18 @@ fn proactive_seam_split(
 
     // Try U-direction split first (most common)
     if u_spans_seam {
-        if let Some(result) = proactive_split_at_midpoint_u(polygon, points_3d, surface, u_min, u_max) {
+        if let Some(result) =
+            proactive_split_at_midpoint_u(polygon, points_3d, surface, u_min, u_max)
+        {
             return Some(result);
         }
     }
 
     // Try V-direction split (torus, sphere)
     if v_spans_seam {
-        if let Some(result) = proactive_split_at_midpoint_v(polygon, points_3d, surface, v_min, v_max) {
+        if let Some(result) =
+            proactive_split_at_midpoint_v(polygon, points_3d, surface, v_min, v_max)
+        {
             return Some(result);
         }
     }
@@ -1366,7 +1420,7 @@ fn proactive_split_at_midpoint_u(
 ) -> Option<(Vec<Point2d>, Vec<Point2d>, Vec<Point3d>, Vec<Point3d>)> {
     let u_range = u_max - u_min;
     let u_mid = u_min + u_range * 0.5;
-    let u_mid_thresh = u_range * 0.01;  // 1% of range
+    let u_mid_thresh = u_range * 0.01; // 1% of range
 
     // Find crossing points: edges that cross u_mid, OR vertices at u_mid
     let mut crossings: Vec<(usize, f64, Point3d)> = Vec::new(); // (edge_idx, v_at_mid, pt_3d)
@@ -1447,12 +1501,20 @@ fn proactive_split_at_midpoint_u(
     let median_u_walk1 = {
         let mut us: Vec<f64> = walk1_uv.iter().map(|p| p.u).collect();
         us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if us.is_empty() { u_mid } else { us[us.len() / 2] }
+        if us.is_empty() {
+            u_mid
+        } else {
+            us[us.len() / 2]
+        }
     };
     let median_u_walk2 = {
         let mut us: Vec<f64> = walk2_uv.iter().map(|p| p.u).collect();
         us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if us.is_empty() { u_mid } else { us[us.len() / 2] }
+        if us.is_empty() {
+            u_mid
+        } else {
+            us[us.len() / 2]
+        }
     };
 
     // Build sub-polygons with crossing points at u_mid
@@ -1500,14 +1562,17 @@ fn proactive_split_at_midpoint_u(
     if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
         log::warn!(
             "proactive seam split: sub-polygons too small (sub1={}, sub2={})",
-            sub1_uv.len(), sub2_uv.len()
+            sub1_uv.len(),
+            sub2_uv.len()
         );
         return None;
     }
 
     log::info!(
         "proactive seam split at u_mid={:.4}: sub1 ({} pts) + sub2 ({} pts)",
-        u_mid, sub1_uv.len(), sub2_uv.len()
+        u_mid,
+        sub1_uv.len(),
+        sub2_uv.len()
     );
 
     Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d))
@@ -1540,10 +1605,16 @@ fn proactive_split_at_midpoint_v(
 
         // Case 2: edge i→j crosses v_mid
         let crosses = (vi < v_mid && vj > v_mid) || (vi > v_mid && vj < v_mid);
-        if !crosses { continue; }
+        if !crosses {
+            continue;
+        }
 
         let d_v = vj - vi;
-        let t = if d_v.abs() > 1e-15 { (v_mid - vi) / d_v } else { 0.5 };
+        let t = if d_v.abs() > 1e-15 {
+            (v_mid - vi) / d_v
+        } else {
+            0.5
+        };
         let t = t.clamp(0.0, 1.0);
         let u_cross = polygon[i].u + t * (polygon[j].u - polygon[i].u);
         let cross_pt_3d = surface.point_at(u_cross, v_mid);
@@ -1551,9 +1622,14 @@ fn proactive_split_at_midpoint_v(
         crossings.push((i, u_cross, cross_pt_3d));
     }
 
-    if crossings.len() < 2 { return None; }
+    if crossings.len() < 2 {
+        return None;
+    }
     if crossings.len() > 2 {
-        log::warn!("proactive_split_at_midpoint_v: {} crossings, using first pair", crossings.len());
+        log::warn!(
+            "proactive_split_at_midpoint_v: {} crossings, using first pair",
+            crossings.len()
+        );
     }
 
     let (i, u1, pt3d_1) = &crossings[0];
@@ -1577,31 +1653,59 @@ fn proactive_split_at_midpoint_v(
         k = (k + 1) % polygon.len();
     }
 
-    let avg_v_walk1 = if walk1_uv.is_empty() { v_mid } else { walk1_uv.iter().map(|p| p.v).sum::<f64>() / walk1_uv.len() as f64 };
-    let avg_v_walk2 = if walk2_uv.is_empty() { v_mid } else { walk2_uv.iter().map(|p| p.v).sum::<f64>() / walk2_uv.len() as f64 };
+    let avg_v_walk1 = if walk1_uv.is_empty() {
+        v_mid
+    } else {
+        walk1_uv.iter().map(|p| p.v).sum::<f64>() / walk1_uv.len() as f64
+    };
+    let avg_v_walk2 = if walk2_uv.is_empty() {
+        v_mid
+    } else {
+        walk2_uv.iter().map(|p| p.v).sum::<f64>() / walk2_uv.len() as f64
+    };
 
     let cross1_uv = Point2d::new(*u1, v_mid);
     let cross2_uv = Point2d::new(*u2, v_mid);
 
     let (sub1_uv, sub1_3d, sub2_uv, sub2_3d) = if avg_v_walk1 <= avg_v_walk2 {
-        let mut s1_uv = vec![cross1_uv]; s1_uv.extend(walk1_uv.iter().cloned()); s1_uv.push(cross2_uv);
-        let mut s1_3d = vec![*pt3d_1]; s1_3d.extend(walk1_3d.iter().cloned()); s1_3d.push(*pt3d_2);
-        let mut s2_uv = vec![cross2_uv]; s2_uv.extend(walk2_uv.iter().cloned()); s2_uv.push(cross1_uv);
-        let mut s2_3d = vec![*pt3d_2]; s2_3d.extend(walk2_3d.iter().cloned()); s2_3d.push(*pt3d_1);
+        let mut s1_uv = vec![cross1_uv];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2_uv);
+        let mut s1_3d = vec![*pt3d_1];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(*pt3d_2);
+        let mut s2_uv = vec![cross2_uv];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1_uv);
+        let mut s2_3d = vec![*pt3d_2];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(*pt3d_1);
         (s1_uv, s1_3d, s2_uv, s2_3d)
     } else {
-        let mut s1_uv = vec![cross1_uv]; s1_uv.extend(walk1_uv.iter().cloned()); s1_uv.push(cross2_uv);
-        let mut s1_3d = vec![*pt3d_1]; s1_3d.extend(walk1_3d.iter().cloned()); s1_3d.push(*pt3d_2);
-        let mut s2_uv = vec![cross2_uv]; s2_uv.extend(walk2_uv.iter().cloned()); s2_uv.push(cross1_uv);
-        let mut s2_3d = vec![*pt3d_2]; s2_3d.extend(walk2_3d.iter().cloned()); s2_3d.push(*pt3d_1);
+        let mut s1_uv = vec![cross1_uv];
+        s1_uv.extend(walk1_uv.iter().cloned());
+        s1_uv.push(cross2_uv);
+        let mut s1_3d = vec![*pt3d_1];
+        s1_3d.extend(walk1_3d.iter().cloned());
+        s1_3d.push(*pt3d_2);
+        let mut s2_uv = vec![cross2_uv];
+        s2_uv.extend(walk2_uv.iter().cloned());
+        s2_uv.push(cross1_uv);
+        let mut s2_3d = vec![*pt3d_2];
+        s2_3d.extend(walk2_3d.iter().cloned());
+        s2_3d.push(*pt3d_1);
         (s1_uv, s1_3d, s2_uv, s2_3d)
     };
 
-    if sub1_uv.len() < 3 || sub2_uv.len() < 3 { return None; }
+    if sub1_uv.len() < 3 || sub2_uv.len() < 3 {
+        return None;
+    }
 
     log::info!(
         "proactive V-seam split at v_mid={:.4}: sub1 ({} pts) + sub2 ({} pts)",
-        v_mid, sub1_uv.len(), sub2_uv.len()
+        v_mid,
+        sub1_uv.len(),
+        sub2_uv.len()
     );
 
     Some((sub1_uv, sub2_uv, sub1_3d, sub2_3d))
@@ -1656,9 +1760,8 @@ fn merge_with_seam_dedup(mesh1: &mut TriangleMesh, mesh2: &TriangleMesh, tol: f6
                     if let Some(candidates) = spatial.get(&neighbor) {
                         for &ci in candidates {
                             let cv = mesh1.vertices[ci as usize];
-                            let d = (cv.x - v.x).powi(2)
-                                + (cv.y - v.y).powi(2)
-                                + (cv.z - v.z).powi(2);
+                            let d =
+                                (cv.x - v.x).powi(2) + (cv.y - v.y).powi(2) + (cv.z - v.z).powi(2);
                             if d < best_dist_sq {
                                 best_dist_sq = d;
                                 best_match = Some(ci);
@@ -1692,7 +1795,10 @@ fn merge_with_seam_dedup(mesh1: &mut TriangleMesh, mesh2: &TriangleMesh, tol: f6
     mesh1.vertices.extend(new_vertices);
     if !new_normals.is_empty() {
         if mesh1.normals.is_none() {
-            mesh1.normals = Some(vec![[0.0, 0.0, 1.0]; mesh1.vertices.len() - new_normals.len()]);
+            mesh1.normals = Some(vec![
+                [0.0, 0.0, 1.0];
+                mesh1.vertices.len() - new_normals.len()
+            ]);
         }
         if let Some(ref mut norms) = mesh1.normals {
             norms.extend(new_normals);
@@ -1763,15 +1869,27 @@ fn check_uv_polygon_validity(uv_points: &[Point2d]) -> bool {
                     continue;
                 }
                 let j_next = (j + 1) % n;
-                if segments_intersect_2d(&uv_points[i], &uv_points[i_next], &uv_points[j], &uv_points[j_next]) {
+                if segments_intersect_2d(
+                    &uv_points[i],
+                    &uv_points[i_next],
+                    &uv_points[j],
+                    &uv_points[j_next],
+                ) {
                     log::error!(
                         "UV polygon self-intersection at edges {}-{} and {}-{}: \
                          ({:.4},{:.4})->({:.4},{:.4}) crosses ({:.4},{:.4})->({:.4},{:.4})",
-                        i, i_next, j, j_next,
-                        uv_points[i].u, uv_points[i].v,
-                        uv_points[i_next].u, uv_points[i_next].v,
-                        uv_points[j].u, uv_points[j].v,
-                        uv_points[j_next].u, uv_points[j_next].v,
+                        i,
+                        i_next,
+                        j,
+                        j_next,
+                        uv_points[i].u,
+                        uv_points[i].v,
+                        uv_points[i_next].u,
+                        uv_points[i_next].v,
+                        uv_points[j].u,
+                        uv_points[j].v,
+                        uv_points[j_next].u,
+                        uv_points[j_next].v,
                     );
                 }
             }
@@ -1784,7 +1902,8 @@ fn check_uv_polygon_validity(uv_points: &[Point2d]) -> bool {
     if area.abs() < 1e-12 {
         log::error!(
             "UV polygon validity: zero area (degenerate), area={:.2e}, n={}",
-            area, n
+            area,
+            n
         );
         return false;
     }
@@ -2006,7 +2125,9 @@ pub fn generate_nurbs_interior_points(
             if is_point_on_boundary(&domain.outer_boundary, &pt, tol) {
                 continue;
             }
-            let on_hole_boundary = domain.holes.iter()
+            let on_hole_boundary = domain
+                .holes
+                .iter()
                 .any(|hole| is_point_on_boundary(hole, &pt, tol));
             if on_hole_boundary {
                 continue;
@@ -2114,7 +2235,10 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
     };
     let mut u_unique: Vec<f64> = Vec::new();
     for u in us {
-        if u_unique.last().map_or(true, |last| (last - u).abs() > u_tol) {
+        if u_unique
+            .last()
+            .map_or(true, |last| (last - u).abs() > u_tol)
+        {
             u_unique.push(u);
         }
     }
@@ -2127,7 +2251,10 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
     };
     let mut v_unique: Vec<f64> = Vec::new();
     for v in vs {
-        if v_unique.last().map_or(true, |last| (last - v).abs() > v_tol) {
+        if v_unique
+            .last()
+            .map_or(true, |last| (last - v).abs() > v_tol)
+        {
             v_unique.push(v);
         }
     }
@@ -2142,9 +2269,7 @@ fn coarse_grid_sample(pts: &[Point2d], budget: usize) -> Vec<Point2d> {
 
     // Build a set of (u,v) keys for fast lookup.
     use std::collections::HashSet;
-    let pt_set: HashSet<(u64, u64)> = pts.iter()
-        .map(|p| (p.u.to_bits(), p.v.to_bits()))
-        .collect();
+    let pt_set: HashSet<(u64, u64)> = pts.iter().map(|p| (p.u.to_bits(), p.v.to_bits())).collect();
 
     // Find the smallest integer stride s such that
     //   ceil(u_unique.len() / s) * ceil(v_unique.len() / s) <= budget
@@ -2237,7 +2362,10 @@ impl SteinerChainOrder {
 struct ChainLcg(u64);
 impl ChainLcg {
     fn next(&mut self) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.0 >> 33
     }
 }
@@ -2361,11 +2489,7 @@ fn order_interior_steiner_chain(
                     if full && !(0.6..=1.67).contains(&ratio_3d) {
                         if std::env::var("DRAPPER_CHAIN_TOWER").as_deref() == Ok("1") {
                             if let Some(tower) = brick_tower_chain(
-                                interior,
-                                ring_end,
-                                ring_start,
-                                u_step3d,
-                                v_step3d,
+                                interior, ring_end, ring_start, u_step3d, v_step3d,
                             ) {
                                 return tower;
                             }
@@ -2378,13 +2502,7 @@ fn order_interior_steiner_chain(
                             None => interior.to_vec(),
                         };
                     }
-                    return aniso_comb_chain(
-                        interior,
-                        ring_end,
-                        ring_start,
-                        u_step3d,
-                        v_step3d,
-                    );
+                    return aniso_comb_chain(interior, ring_end, ring_start, u_step3d, v_step3d);
                 }
             }
             interior.to_vec()
@@ -2401,10 +2519,7 @@ fn order_interior_steiner_chain(
 /// point with its same-row u-neighbor and same-column v-neighbor, and
 /// takes the median 3D distance per axis. Returns (u_step3d, v_step3d);
 /// (0,0) when the lattice has no neighbor pairs in either axis.
-pub(crate) fn compute_axis_steps_3d(
-    interior: &[Point2d],
-    surface: &Surface,
-) -> (f64, f64) {
+pub(crate) fn compute_axis_steps_3d(interior: &[Point2d], surface: &Surface) -> (f64, f64) {
     let cluster_axis = |get: fn(&Point2d) -> f64| -> Vec<f64> {
         let mut vals: Vec<f64> = interior.iter().map(get).collect();
         if vals.is_empty() {
@@ -2435,7 +2550,11 @@ pub(crate) fn compute_axis_steps_3d(
         let mut hi = us.len() - 1;
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if us[mid] < x - u_tol { lo = mid + 1; } else { hi = mid; }
+            if us[mid] < x - u_tol {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         lo
     };
@@ -2444,7 +2563,11 @@ pub(crate) fn compute_axis_steps_3d(
         let mut hi = vs.len() - 1;
         while lo < hi {
             let mid = (lo + hi) / 2;
-            if vs[mid] < y - v_tol { lo = mid + 1; } else { hi = mid; }
+            if vs[mid] < y - v_tol {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         lo
     };
@@ -2471,15 +2594,21 @@ pub(crate) fn compute_axis_steps_3d(
     for ((ui, vi), p3) in grid.iter() {
         if let Some(q3) = grid.get(&(ui + 1, *vi)) {
             let d = d3(p3, q3);
-            if d.is_finite() && d > 0.0 { u_dists.push(d); }
+            if d.is_finite() && d > 0.0 {
+                u_dists.push(d);
+            }
         }
         if let Some(q3) = grid.get(&(*ui, vi + 1)) {
             let d = d3(p3, q3);
-            if d.is_finite() && d > 0.0 { v_dists.push(d); }
+            if d.is_finite() && d > 0.0 {
+                v_dists.push(d);
+            }
         }
     }
     let med_of = |mut v: Vec<f64>| -> f64 {
-        if v.is_empty() { return 0.0; }
+        if v.is_empty() {
+            return 0.0;
+        }
         v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         v[v.len() / 2]
     };
@@ -2792,8 +2921,12 @@ fn brick_tower_chain(
         (us.clone(), vs.clone(), n_u, n_v)
     };
     let s0x = if runs_along_v { swap(&s0) } else { s0 };
-    let s0_iu = xs_us.iter().position(|&x| (x - s0x.u).abs() <= u_tol.max(v_tol))?;
-    let s0_iv = xs_vs.iter().position(|&y| (y - s0x.v).abs() <= u_tol.max(v_tol))?;
+    let s0_iu = xs_us
+        .iter()
+        .position(|&x| (x - s0x.u).abs() <= u_tol.max(v_tol))?;
+    let s0_iv = xs_vs
+        .iter()
+        .position(|&y| (y - s0x.v).abs() <= u_tol.max(v_tol))?;
     if s0_iu != 0 && s0_iu != xs_nu - 1 {
         return None; // s_0 must sit at a run-axis extreme (corner)
     }
@@ -3014,15 +3147,27 @@ fn aniso_comb_chain(
     let sv_hi = mid_v >= (v_lo + v_hi) * 0.5;
     // s_0: far along c0's axis, near along the other.
     let s0 = if c0_axis_u {
-        Point2d::new(if su_hi { u_lo } else { u_hi }, if sv_hi { v_hi } else { v_lo })
+        Point2d::new(
+            if su_hi { u_lo } else { u_hi },
+            if sv_hi { v_hi } else { v_lo },
+        )
     } else {
-        Point2d::new(if su_hi { u_hi } else { u_lo }, if sv_hi { v_lo } else { v_hi })
+        Point2d::new(
+            if su_hi { u_hi } else { u_lo },
+            if sv_hi { v_lo } else { v_hi },
+        )
     };
     // s_end: far along c1's axis, near along the other.
     let send = if c1_axis_u {
-        Point2d::new(if su_hi { u_lo } else { u_hi }, if sv_hi { v_hi } else { v_lo })
+        Point2d::new(
+            if su_hi { u_lo } else { u_hi },
+            if sv_hi { v_hi } else { v_lo },
+        )
     } else {
-        Point2d::new(if su_hi { u_hi } else { u_lo }, if sv_hi { v_lo } else { v_hi })
+        Point2d::new(
+            if su_hi { u_hi } else { u_lo },
+            if sv_hi { v_lo } else { v_hi },
+        )
     };
 
     // ── Comb orientation: runs (and therefore the P2 strips, which
@@ -3035,8 +3180,16 @@ fn aniso_comb_chain(
     // T-junction cascades). Strips along the sweep axis (R+r=4.1) stay
     // under the chord tolerance — the f199 row-comb fill measured clean
     // (bnd 276→6, NM ≈ baseline) with the same 1-v-step strip width.
-    let u_radius = if u_step_uv > 0.0 { u_step3d / u_step_uv } else { f64::INFINITY };
-    let v_radius = if v_step_uv > 0.0 { v_step3d / v_step_uv } else { f64::INFINITY };
+    let u_radius = if u_step_uv > 0.0 {
+        u_step3d / u_step_uv
+    } else {
+        f64::INFINITY
+    };
+    let v_radius = if v_step_uv > 0.0 {
+        v_step3d / v_step_uv
+    } else {
+        f64::INFINITY
+    };
     let runs_along_v = v_radius > u_radius; // columns (runs along v)
 
     // Build the comb in a space where runs go along the SECOND
@@ -3059,8 +3212,7 @@ fn aniso_comb_chain(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.v.partial_cmp(&b.v).unwrap_or(std::cmp::Ordering::Equal))
     });
-    let x_u_span = pts.last().map(|p| p.u).unwrap_or(0.0)
-        - pts.first().map(|p| p.u).unwrap_or(0.0);
+    let x_u_span = pts.last().map(|p| p.u).unwrap_or(0.0) - pts.first().map(|p| p.u).unwrap_or(0.0);
     let x_tol = (x_u_span.abs() * 1e-9).max(1e-12);
     let mut columns: Vec<Vec<Point2d>> = Vec::new();
     for p in pts.into_iter() {
@@ -3074,9 +3226,7 @@ fn aniso_comb_chain(
         return interior.to_vec();
     }
     for col in columns.iter_mut() {
-        col.sort_by(|a, b| {
-            a.v.partial_cmp(&b.v).unwrap_or(std::cmp::Ordering::Equal)
-        });
+        col.sort_by(|a, b| a.v.partial_cmp(&b.v).unwrap_or(std::cmp::Ordering::Equal));
     }
 
     // Column order: from s_0's u side toward s_end's u side. First
@@ -3144,9 +3294,9 @@ fn serpentine_chain(interior: &[Point2d], attach: &Point2d) -> Vec<Point2d> {
     // Compute the first point of each variant and pick the nearest to
     // `attach`.
     let first_pts = [
-        rows[0][0],                          // v asc, u asc
-        rows[0][rows[0].len() - 1],          // v asc, u desc
-        rows[rows.len() - 1][0],             // v desc, u asc
+        rows[0][0],                                           // v asc, u asc
+        rows[0][rows[0].len() - 1],                           // v asc, u desc
+        rows[rows.len() - 1][0],                              // v desc, u asc
         rows[rows.len() - 1][rows[rows.len() - 1].len() - 1], // v desc, u desc
     ];
     let mut best = 0usize;
@@ -3223,20 +3373,19 @@ fn hamiltonian_chain(
             v_axis.push(y);
         }
     }
-    let is_full_grid = u_axis.len() * v_axis.len() == n
-        && {
-            // Every (u_axis, v_axis) combination must exist.
-            let mut seen = vec![false; u_axis.len() * v_axis.len()];
-            for p in interior {
-                let cu = u_axis.iter().position(|&x| (x - p.u).abs() <= u_tol);
-                let cv = v_axis.iter().position(|&y| (y - p.v).abs() <= v_tol);
-                match (cu, cv) {
-                    (Some(a), Some(b)) => seen[b * u_axis.len() + a] = true,
-                    _ => return None,
-                }
+    let is_full_grid = u_axis.len() * v_axis.len() == n && {
+        // Every (u_axis, v_axis) combination must exist.
+        let mut seen = vec![false; u_axis.len() * v_axis.len()];
+        for p in interior {
+            let cu = u_axis.iter().position(|&x| (x - p.u).abs() <= u_tol);
+            let cv = v_axis.iter().position(|&y| (y - p.v).abs() <= v_tol);
+            match (cu, cv) {
+                (Some(a), Some(b)) => seen[b * u_axis.len() + a] = true,
+                _ => return None,
             }
-            seen.iter().all(|&s| s)
-        };
+        }
+        seen.iter().all(|&s| s)
+    };
     if !is_full_grid {
         return None;
     }
@@ -3244,8 +3393,14 @@ fn hamiltonian_chain(
     let grid_color: Vec<u32> = interior
         .iter()
         .map(|p| {
-            let cu = u_axis.iter().position(|&x| (x - p.u).abs() <= u_tol).unwrap();
-            let cv = v_axis.iter().position(|&y| (y - p.v).abs() <= v_tol).unwrap();
+            let cu = u_axis
+                .iter()
+                .position(|&x| (x - p.u).abs() <= u_tol)
+                .unwrap();
+            let cv = v_axis
+                .iter()
+                .position(|&y| (y - p.v).abs() <= v_tol)
+                .unwrap();
             ((cu + cv) % 2) as u32
         })
         .collect();
@@ -3332,8 +3487,7 @@ fn hamiltonian_chain(
         if j == start {
             continue;
         }
-        let two_hop = adj[start].contains(&j)
-            || adj[start].iter().any(|&k| adj[k].contains(&j));
+        let two_hop = adj[start].contains(&j) || adj[start].iter().any(|&k| adj[k].contains(&j));
         if two_hop && grid_color[j] == grid_color[start] {
             let d = (interior[j].u - interior[start].u).powi(2)
                 + (interior[j].v - interior[start].v).powi(2);
@@ -3421,9 +3575,7 @@ fn hamiltonian_chain(
                 let mut cands: Vec<usize> = adj[cur]
                     .iter()
                     .copied()
-                    .filter(|&k| {
-                        !visited[k] && (if final_step { k == end } else { k != end })
-                    })
+                    .filter(|&k| !visited[k] && (if final_step { k == end } else { k != end }))
                     .collect();
                 if cands.is_empty() {
                     // Single-level undo.
@@ -3465,7 +3617,10 @@ fn hamiltonian_chain(
     if std::env::var("DRAPPER_STEINER_CHAIN_DEBUG").is_ok() {
         eprintln!(
             "HAMDBG-DONE: n={} start={} spent={} solved={}",
-            n, start, spent, solved_path.is_some()
+            n,
+            start,
+            spent,
+            solved_path.is_some()
         );
     }
     if let Some(p) = solved_path {
@@ -3616,7 +3771,9 @@ pub(crate) fn is_degenerate_uv(surface: &Surface, u: f64, v: f64) -> bool {
                 let py = dvy - d * axis.y;
                 let pz = dvz - d * axis.z;
                 let dist = (px * px + py * py + pz * pz).sqrt();
-                if dist > max_r { max_r = dist; }
+                if dist > max_r {
+                    max_r = dist;
+                }
             }
             let axis_degen_threshold = (max_r * 0.02).max(1e-4);
             perp_dist < axis_degen_threshold
@@ -3720,7 +3877,9 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
     let max_u_cap = profile.max_u_cyl();
     let max_v_cap = profile.max_v_cyl();
     let min_u_floor = profile.min_u_cyl();
-    let n_u_raw = ((u_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
+    let n_u_raw = ((u_span / du_max).ceil() as usize)
+        .max(min_u_floor)
+        .min(max_u_cap);
 
     // Determine n_v (axial subdivisions) from desired aspect ratio.
     // Target: quad size in v ≈ arc length per angular quad.
@@ -3799,7 +3958,9 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
             continue;
         }
 
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -3809,7 +3970,8 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
 
     log::debug!(
         "cylinder/cone steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
@@ -3920,8 +4082,12 @@ pub(crate) fn generate_sphere_steiner_grid(
     let max_v_cap = profile.max_v_sphere();
     let min_u_floor = profile.min_u_sphere();
     let min_v_floor = profile.min_v_sphere();
-    let n_u_raw = ((u_span / d_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
-    let n_v_raw = ((v_span / d_max).ceil() as usize).max(min_v_floor).min(max_v_cap);
+    let n_u_raw = ((u_span / d_max).ceil() as usize)
+        .max(min_u_floor)
+        .min(max_u_cap);
+    let n_v_raw = ((v_span / d_max).ceil() as usize)
+        .max(min_v_floor)
+        .min(max_v_cap);
 
     // BUDGET-AWARE CAP: same as cylinder/cone grid — don't generate more
     // candidates than profile.candidate_multiplier() × budget.
@@ -3937,7 +4103,12 @@ pub(crate) fn generate_sphere_steiner_grid(
 
     log::debug!(
         "sphere steiner grid: n_u={}, n_v={}, radius={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
-        n_u, n_v, radius, u_span, v_span, max_budget
+        n_u,
+        n_v,
+        radius,
+        u_span,
+        v_span,
+        max_budget
     );
 
     // Pole threshold: matches `at_north_pole` / `at_south_pole` in
@@ -3991,7 +4162,9 @@ pub(crate) fn generate_sphere_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -4001,7 +4174,8 @@ pub(crate) fn generate_sphere_steiner_grid(
 
     log::debug!(
         "sphere steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
@@ -4125,8 +4299,12 @@ pub(crate) fn generate_torus_steiner_grid(
     let max_v_cap = profile.max_v_torus();
     let min_u_floor = profile.min_u_torus();
     let min_v_floor = profile.min_v_torus();
-    let n_u_raw = ((u_span / d_u_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
-    let n_v_raw = ((v_span / d_v_max).ceil() as usize).max(min_v_floor).min(max_v_cap);
+    let n_u_raw = ((u_span / d_u_max).ceil() as usize)
+        .max(min_u_floor)
+        .min(max_u_cap);
+    let n_v_raw = ((v_span / d_v_max).ceil() as usize)
+        .max(min_v_floor)
+        .min(max_v_cap);
 
     // BUDGET-AWARE CAP: same as cylinder/sphere grid.
     let max_candidates = (max_budget as f64 * profile.candidate_multiplier()).ceil() as usize;
@@ -4173,7 +4351,9 @@ pub(crate) fn generate_torus_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -4183,7 +4363,8 @@ pub(crate) fn generate_torus_steiner_grid(
 
     log::debug!(
         "torus steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
@@ -4307,7 +4488,9 @@ pub(crate) fn generate_revolution_steiner_grid(
     let min_u_floor = profile_budget.min_u_revolution();
     let min_v_floor = profile_budget.min_v_revolution();
 
-    let n_u_raw = ((u_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap);
+    let n_u_raw = ((u_span / du_max).ceil() as usize)
+        .max(min_u_floor)
+        .min(max_u_cap);
 
     // ── Step 3: Compute n_v from profile curve type ────────────────
     //
@@ -4328,7 +4511,9 @@ pub(crate) fn generate_revolution_steiner_grid(
             // Target near-square cells: dv ≈ arc_per_quad.
             let arc_per_quad = u_span * max_rev_radius / n_u_raw as f64;
             let target_dv = arc_per_quad.max(v_span / max_v_cap as f64);
-            ((v_span / target_dv).ceil() as usize).max(min_v_floor).min(max_v_cap)
+            ((v_span / target_dv).ceil() as usize)
+                .max(min_v_floor)
+                .min(max_v_cap)
         }
         Curve3d::Circle(c) => {
             // Circular profile → torus-like v subdivision.
@@ -4339,7 +4524,9 @@ pub(crate) fn generate_revolution_steiner_grid(
             } else {
                 std::f64::consts::PI / 8.0
             };
-            ((v_span / dv_max).ceil() as usize).max(min_v_floor).min(max_v_cap)
+            ((v_span / dv_max).ceil() as usize)
+                .max(min_v_floor)
+                .min(max_v_cap)
         }
         Curve3d::Arc(arc) => {
             // Arc profile → same as circle but with arc's parent radius.
@@ -4349,7 +4536,9 @@ pub(crate) fn generate_revolution_steiner_grid(
             } else {
                 std::f64::consts::PI / 8.0
             };
-            ((v_span / dv_max).ceil() as usize).max(min_v_floor).min(max_v_cap)
+            ((v_span / dv_max).ceil() as usize)
+                .max(min_v_floor)
+                .min(max_v_cap)
         }
         _ => {
             // General profile (NURBS, ellipse, composite, etc.).
@@ -4366,7 +4555,8 @@ pub(crate) fn generate_revolution_steiner_grid(
     };
 
     // ── Step 4: Budget-aware cap ────────────────────────────────────
-    let max_candidates = (max_budget as f64 * profile_budget.candidate_multiplier()).ceil() as usize;
+    let max_candidates =
+        (max_budget as f64 * profile_budget.candidate_multiplier()).ceil() as usize;
     let mut n_u = n_u_raw;
     let mut n_v = n_v_raw;
     while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
@@ -4419,7 +4609,9 @@ pub(crate) fn generate_revolution_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -4429,7 +4621,8 @@ pub(crate) fn generate_revolution_steiner_grid(
 
     log::debug!(
         "revolution steiner grid: {} grid pts → {} after domain + axis filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // ── Step 7: Downsample to budget if needed ──────────────────────
@@ -4516,7 +4709,9 @@ pub(crate) fn generate_extrusion_steiner_grid(
             } else {
                 std::f64::consts::PI / 8.0
             };
-            ((circle_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap)
+            ((circle_span / du_max).ceil() as usize)
+                .max(min_u_floor)
+                .min(max_u_cap)
         }
         Curve3d::Arc(arc) => {
             // Arc profile → chord-error with the circle radius.
@@ -4526,7 +4721,9 @@ pub(crate) fn generate_extrusion_steiner_grid(
             } else {
                 std::f64::consts::PI / 8.0
             };
-            ((u_span / du_max).ceil() as usize).max(min_u_floor).min(max_u_cap)
+            ((u_span / du_max).ceil() as usize)
+                .max(min_u_floor)
+                .min(max_u_cap)
         }
         _ => {
             // General profile (NURBS, ellipse, composite, etc.).
@@ -4583,10 +4780,13 @@ pub(crate) fn generate_extrusion_steiner_grid(
     } else {
         v_span / max_v_cap as f64
     };
-    let n_v_raw = ((v_span / target_dv).ceil() as usize).max(min_v_floor).min(max_v_cap);
+    let n_v_raw = ((v_span / target_dv).ceil() as usize)
+        .max(min_v_floor)
+        .min(max_v_cap);
 
     // ── Step 3: Budget-aware cap ────────────────────────────────────
-    let max_candidates = (max_budget as f64 * profile_budget.candidate_multiplier()).ceil() as usize;
+    let max_candidates =
+        (max_budget as f64 * profile_budget.candidate_multiplier()).ceil() as usize;
     let mut n_u = n_u_raw;
     let mut n_v = n_v_raw;
     while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
@@ -4598,7 +4798,11 @@ pub(crate) fn generate_extrusion_steiner_grid(
 
     log::debug!(
         "extrusion steiner grid: n_u={}, n_v={}, u_span={:.4}, v_span={:.4}, budget={}",
-        n_u, n_v, u_span, v_span, max_budget
+        n_u,
+        n_v,
+        u_span,
+        v_span,
+        max_budget
     );
 
     // ── Step 4: Generate grid points (excluding boundaries) ─────────
@@ -4628,7 +4832,9 @@ pub(crate) fn generate_extrusion_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -4638,7 +4844,8 @@ pub(crate) fn generate_extrusion_steiner_grid(
 
     log::debug!(
         "extrusion steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // ── Step 6: Downsample to budget if needed ──────────────────────
@@ -4729,8 +4936,8 @@ pub(crate) fn generate_nurbs_steiner_grid(
         return Vec::new();
     }
 
-    let is_ruled_u = nurbs.u_degree <= 1;  // linear in u, curved in v
-    let is_ruled_v = nurbs.v_degree <= 1;  // linear in v, curved in u
+    let is_ruled_u = nurbs.u_degree <= 1; // linear in u, curved in v
+    let is_ruled_v = nurbs.v_degree <= 1; // linear in v, curved in u
     let is_ruled = is_ruled_u || is_ruled_v;
 
     let budget_profile = params.steiner_profile;
@@ -4771,7 +4978,12 @@ pub(crate) fn generate_nurbs_steiner_grid(
 
     log::debug!(
         "NURBS steiner grid: base grid {}×{} (u_deg={}, v_deg={}, ruled_u={}, ruled_v={})",
-        base_n_u, base_n_v, nurbs.u_degree, nurbs.v_degree, is_ruled_u, is_ruled_v
+        base_n_u,
+        base_n_v,
+        nurbs.u_degree,
+        nurbs.v_degree,
+        is_ruled_u,
+        is_ruled_v
     );
 
     // ── Step 3: Densify — ensure minimum grid density ─────────────
@@ -4852,10 +5064,7 @@ pub(crate) fn generate_nurbs_steiner_grid(
                     // For very high curvature, also add quarter points
                     // (4 points at 1/4 and 3/4 positions within the sub-rect)
                     if k_abs > k_threshold * 4.0 {
-                        let offsets = [
-                            (0.25, 0.25), (0.75, 0.25),
-                            (0.25, 0.75), (0.75, 0.75),
-                        ];
+                        let offsets = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
                         for (ou, ov) in &offsets {
                             let up = u_min + du * (i as f64 + ou);
                             let vp = v_min + dv * (j as f64 + ov);
@@ -4879,7 +5088,8 @@ pub(crate) fn generate_nurbs_steiner_grid(
     }
 
     // ── Step 5: Budget-aware cap ───────────────────────────────────
-    let max_candidates = (max_budget as f64 * budget_profile.candidate_multiplier()).ceil() as usize;
+    let max_candidates =
+        (max_budget as f64 * budget_profile.candidate_multiplier()).ceil() as usize;
     while n_u > min_u_floor && (n_u - 1) * (n_v - 1) > max_candidates {
         n_u -= 1;
     }
@@ -4889,7 +5099,12 @@ pub(crate) fn generate_nurbs_steiner_grid(
 
     log::debug!(
         "NURBS steiner grid: n_u={}, n_v={}, u_span={:.4}, v_span={:.4}, budget={}, extra_curv={}",
-        n_u, n_v, u_span, v_span, max_budget, extra_points.len()
+        n_u,
+        n_v,
+        u_span,
+        v_span,
+        max_budget,
+        extra_points.len()
     );
 
     // ── Step 6: Generate grid points (excluding boundaries) ─────────
@@ -4935,7 +5150,9 @@ pub(crate) fn generate_nurbs_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -4945,7 +5162,8 @@ pub(crate) fn generate_nurbs_steiner_grid(
 
     log::debug!(
         "NURBS steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // ── Step 8: Downsample to budget if needed ──────────────────────
@@ -5044,8 +5262,12 @@ pub(crate) fn generate_planar_steiner_grid(
     // regression on planar faces with holes (notably on drill_top.stp
     // where the user reported "сильно хуже чем было раньше").
     let max_uv_cap = profile.max_uv_plane();
-    let n_u_raw = ((u_span / target_edge).ceil() as usize).max(4).min(max_uv_cap);
-    let n_v_raw = ((v_span / target_edge).ceil() as usize).max(4).min(max_uv_cap);
+    let n_u_raw = ((u_span / target_edge).ceil() as usize)
+        .max(4)
+        .min(max_uv_cap);
+    let n_v_raw = ((v_span / target_edge).ceil() as usize)
+        .max(4)
+        .min(max_uv_cap);
 
     // BUDGET-AWARE CAP: same as cylinder/cone grid — don't generate more
     // candidates than profile.candidate_multiplier() × budget.
@@ -5088,7 +5310,9 @@ pub(crate) fn generate_planar_steiner_grid(
         if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
             continue;
         }
-        let on_hole = domain.holes.iter()
+        let on_hole = domain
+            .holes
+            .iter()
             .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
         if on_hole {
             continue;
@@ -5098,7 +5322,8 @@ pub(crate) fn generate_planar_steiner_grid(
 
     log::debug!(
         "planar steiner grid: {} grid pts → {} after domain filter",
-        grid.len(), filtered.len()
+        grid.len(),
+        filtered.len()
     );
 
     // Downsample to budget if needed (preserving grid structure via coarse_grid_sample,
@@ -5139,7 +5364,8 @@ pub fn triangulate_surface_uv_cdt(
 
     // Also downsample hole polylines
     let max_hole_points = 50;
-    let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines.iter()
+    let hole_polylines_downsampled: Vec<Vec<Point3d>> = hole_polylines
+        .iter()
         .map(|hole| {
             if hole.len() > max_hole_points {
                 let step = hole.len() as f64 / max_hole_points as f64;
@@ -5178,7 +5404,11 @@ pub fn triangulate_surface_uv_cdt(
                 let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
                 let bf_p = surface.point_at(ub, vb);
                 let bf_err = p.distance_to(&bf_p);
-                uvs.push(if bf_err < err { Point2d::new(ub, vb) } else { Point2d::new(u, v) });
+                uvs.push(if bf_err < err {
+                    Point2d::new(ub, vb)
+                } else {
+                    Point2d::new(u, v)
+                });
             } else {
                 uvs.push(Point2d::new(u, v));
             }
@@ -5195,8 +5425,16 @@ pub fn triangulate_surface_uv_cdt(
     };
 
     // Normalize UV for periodic surfaces
-    let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
-    let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
+    let u_period = if surface.is_u_periodic() {
+        Some(2.0 * PI)
+    } else {
+        None
+    };
+    let v_period = if surface.is_v_periodic() {
+        Some(2.0 * PI)
+    } else {
+        None
+    };
     crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
 
     // Compute UV range
@@ -5236,10 +5474,15 @@ pub fn triangulate_surface_uv_cdt(
                     let err = p.distance_to(&proj_p);
                     if err > 1e-4 {
                         let grid_size = crate::edge_cache::adaptive_grid_size(u_range, v_range);
-                        let (ub, vb) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                        let (ub, vb) =
+                            crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
                         let bf_p = surface.point_at(ub, vb);
                         let bf_err = p.distance_to(&bf_p);
-                        uvs.push(if bf_err < err { Point2d::new(ub, vb) } else { Point2d::new(u, v) });
+                        uvs.push(if bf_err < err {
+                            Point2d::new(ub, vb)
+                        } else {
+                            Point2d::new(u, v)
+                        });
                     } else {
                         uvs.push(Point2d::new(u, v));
                     }
@@ -5273,8 +5516,12 @@ pub fn triangulate_surface_uv_cdt(
     let (n_u, n_v) = if params.adaptive {
         crate::adaptive::required_samples_capped(
             surface,
-            u_min, u_max, v_min, v_max,
-            params.max_deviation, params.detail_level,
+            u_min,
+            u_max,
+            v_min,
+            v_max,
+            params.max_deviation,
+            params.detail_level,
             params.max_face_triangles,
         )
     } else {
@@ -5503,9 +5750,7 @@ fn cylinder_ruled_band_strip(
         b_walk.push(i);
     }
     let b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
-    let mono = |c: &[usize]| -> bool {
-        c.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u)
-    };
+    let mono = |c: &[usize]| -> bool { c.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u) };
     if !mono(&a_chain) || !mono(&b_chain) {
         return Vec::new();
     }
@@ -5561,9 +5806,7 @@ fn cylinder_ruled_band_strip(
                 }
             }
         }
-        let rim = |a: usize, b: usize| -> bool {
-            (a + 1) % n == b || (b + 1) % n == a
-        };
+        let rim = |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
         let all_rim_once = (0..n).all(|k| {
             let j = (k + 1) % n;
             ecount.get(&(k.min(j), k.max(j))).copied() == Some(1)
@@ -5596,11 +5839,9 @@ fn cylinder_ruled_band_strip(
         .sum::<f64>()
         * 0.5;
     let area_ok = if poly_area >= 0.0 {
-        strip_area >= poly_area * 0.995 - 1e-12
-            && strip_area <= poly_area * 1.005 + 1e-12
+        strip_area >= poly_area * 0.995 - 1e-12 && strip_area <= poly_area * 1.005 + 1e-12
     } else {
-        strip_area <= poly_area * 0.995 + 1e-12
-            && strip_area >= poly_area * 1.005 - 1e-12
+        strip_area <= poly_area * 0.995 + 1e-12 && strip_area >= poly_area * 1.005 - 1e-12
     };
     if !area_ok {
         return Vec::new();
@@ -5627,15 +5868,14 @@ fn cylinder_ruled_band_strip(
             let l1 = v1[0].hypot(v1[1]);
             let l2 = v2[0].hypot(v2[1]);
             if l1 > 1e-15 && l2 > 1e-15 {
-                let cosang =
-                    ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
+                let cosang = ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
                 min_ang = min_ang.min(cosang.acos().to_degrees());
             } else {
                 min_ang = 0.0;
             }
         }
-        let tri_u = pts[0][0].max(pts[1][0]).max(pts[2][0])
-            - pts[0][0].min(pts[1][0]).min(pts[2][0]);
+        let tri_u =
+            pts[0][0].max(pts[1][0]).max(pts[2][0]) - pts[0][0].min(pts[1][0]).min(pts[2][0]);
         if min_ang < 2.0 && tri_u > 0.10 * u_arc_span {
             return Vec::new();
         }
@@ -5644,9 +5884,7 @@ fn cylinder_ruled_band_strip(
     // Chord sagitta for an edge spanning Δu: R·(1 − cos(Δu/2)) ≤ max_dev.
     if max_dev > 0.0 && max_dev < 2.0 * cyl_radius {
         let du_max = 2.0 * (1.0 - max_dev / cyl_radius).acos() * cyl_radius;
-        let rim = |a: usize, b: usize| -> bool {
-            (a + 1) % n == b || (b + 1) % n == a
-        };
+        let rim = |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
         let chord_ok = tris.chunks_exact(3).all(|c| {
             (0..3).all(|k| {
                 let a = c[k];
@@ -5671,9 +5909,7 @@ fn cylinder_ruled_band_strip(
         // 3D positions via the cylinder parametrization (the cached
         // rim points lie on the surface within edge tolerance; the
         // unwrapped u is 2π-periodic so point_at is unaffected).
-        let p3 = |k: usize| -> Point3d {
-            cyl.point_at(us[k], boundary_2d[k][1])
-        };
+        let p3 = |k: usize| -> Point3d { cyl.point_at(us[k], boundary_2d[k][1]) };
         let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
             let a = p3(c[0]);
             let b = p3(c[1]);
@@ -5710,8 +5946,7 @@ fn cylinder_ruled_band_strip(
             let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
             let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
             if let (Some(n1), Some(n2)) = (n1, n2) {
-                let dot =
-                    (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
                 if dot.acos().to_degrees() > 170.0 {
                     folds += 1;
                 }
@@ -5944,7 +6179,11 @@ pub fn torus_fillet_band_strip(
             .chain(p2)
             .filter(|k| seen.insert(*k))
             .collect();
-        all.sort_by(|&x, &y| us[x].partial_cmp(&us[y]).unwrap_or(std::cmp::Ordering::Equal));
+        all.sort_by(|&x, &y| {
+            us[x]
+                .partial_cmp(&us[y])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         for w in all.windows(2) {
             if us[w[1]] - us[w[0]] < -eps_u {
                 return None;
@@ -6096,11 +6335,10 @@ pub fn torus_fillet_band_strip(
                     worst_band = Some(j);
                 }
             }
-            let is_pinch = (j == 0 && bottom.len() == 1)
-                || (j == anchors_l.len() - 2 && top.len() == 1);
+            let is_pinch =
+                (j == 0 && bottom.len() == 1) || (j == anchors_l.len() - 2 && top.len() == 1);
             if is_pinch {
-                let width =
-                    (us[w_r[br]] - us[w_l[bl]]).max(us[w_r[ar]] - us[w_l[al]]);
+                let width = (us[w_r[br]] - us[w_l[bl]]).max(us[w_r[ar]] - us[w_l[al]]);
                 if width > worst {
                     worst = width;
                     worst_band = Some(j);
@@ -6282,9 +6520,7 @@ pub fn torus_fillet_band_strip(
                 }
             }
         }
-        let rim = |a: usize, b: usize| -> bool {
-            (a + 1) % n == b || (b + 1) % n == a
-        };
+        let rim = |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
         let mut missing = 0usize;
         let mut bad_nonrim = 0usize;
         for k in 0..n {
@@ -6300,7 +6536,10 @@ pub fn torus_fillet_band_strip(
         }
         if missing > 0 || bad_nonrim > 0 {
             if std::env::var("DRAPPER_TFB_DEBUG").is_ok() {
-                eprintln!("[TFB reject] audit: {} rim edges not-1x, {} non-rim edges not-2x", missing, bad_nonrim);
+                eprintln!(
+                    "[TFB reject] audit: {} rim edges not-1x, {} non-rim edges not-2x",
+                    missing, bad_nonrim
+                );
             }
             return (Vec::new(), Vec::new());
         }
@@ -6372,9 +6611,7 @@ pub fn torus_fillet_band_strip(
     // and tolerance nets.
     // ── chord guards on NEW edges (rim edges are contract-fixed) ──
     if max_dev > 0.0 {
-        let rim = |x: usize, y: usize| -> bool {
-            (x + 1) % n == y || (y + 1) % n == x
-        };
+        let rim = |x: usize, y: usize| -> bool { (x + 1) % n == y || (y + 1) % n == x };
         for c in tris.chunks_exact(3) {
             for k in 0..3 {
                 let x = c[k];
@@ -6452,8 +6689,7 @@ pub fn torus_fillet_band_strip(
             let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
             let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
             if let (Some(n1), Some(n2)) = (n1, n2) {
-                let dot =
-                    (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
                 if dot.acos().to_degrees() > 170.0 {
                     folds += 1;
                 }
@@ -6479,6 +6715,1101 @@ pub fn torus_fillet_band_strip(
             }
             s * 0.5
         };
+        let poly_s = signed(&poly_uv);
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                    + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                    + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                    * 0.5
+            })
+            .sum();
+        if strip_s * poly_s < 0.0 {
+            for c in tris.chunks_exact_mut(3) {
+                c.swap(1, 2);
+            }
+        }
+    }
+    (tris, new_pts)
+}
+
+/// session-70: NURBS_FILLET_BAND — few-level band grid for Nurbs
+/// fillet faces (the drill HOUSING Nurbs debt class: 97 faces,
+/// 9943 boundary edges post-s69; families f240/f235/f254/f68/f131 …).
+///
+/// Class (measured, s70 forensics on the post-s69 dumps): a single
+/// boundary loop, no holes, a partial v-range (parametric v-span
+/// 0.013..1.0 of the normalized [0,1] box) and a partial u-sector
+/// (u-span 0.25..1.0). The ring splits at the v-extremes into two
+/// v-rising "walls" plus flat rim runs at v-min / v-max (the
+/// constant-v arcs shared with the neighboring faces — the
+/// cross-face contract), same two flavors as the torus class
+/// (s69): QUAD (2 constant-v arcs + 2 constant-u side lines —
+/// f131/f9/f17/f121/f133) and LUNE (both walls run the full
+/// v-range and meet at pinch corners — f240; the flat runs
+/// degenerate to the corner points).
+///
+/// The legacy mesh appends an interior Steiner lattice whose
+/// spike-chain seams are the debt (s67 root cause, same as the
+/// cylinder/torus classes). The Nurbs is not ruled, so a single
+/// band between the walls would fold; instead a FEW-LEVEL grid:
+/// K+1 "connectors" between the walls (K = ceil(v-span / dv_max),
+/// dv_max from the corridor midline arc-chord bound — 3-point
+/// circumradii on 9 midline samples, c ≤ √(8·r·tol)):
+///  - connector ends ANCHORED AT CACHED wall points (a level line
+///    never splits a ring run — every ring edge survives verbatim,
+///    the cross-face edge-cache contract is preserved);
+///  - connector interiors analytic at the union-u grid of the rim
+///    (no density discontinuity, s68 lesson);
+///  - bands between consecutive connectors = two-pointer zipper
+///    (s65/s68 machinery) + side fans through the cached wall
+///    points of the band's v-slice.
+/// Every ring edge appears exactly once, every other edge exactly
+/// twice — watertight by construction (the edge-accounting audit
+/// rejects anything else).
+///
+/// Nurbs specifics vs the s69 torus version:
+///  - the UV domain is a plain rectangle (no seam) — u/v are
+///    unwrapped ONLY when the surface is u/v-closed;
+///  - v is normalized (the v-span is parametric, not radians) —
+///    all tolerance formulas are replaced by the DIRECT arc-chord
+///    deviation |S(mid-uv) − chord-mid| ≤ tol, measured through
+///    nurbs.point_at (the exact criterion; s69 lesson 5: no radius
+///    shape assumptions, no parametric-unit conversions);
+///  - the area guard is the plain 2D signed-UV-area equality (the
+///    edge-audit already implies exact coverage; there is no
+///    closed-form metric integral for a Nurbs — the torus H(v)
+///    does not generalize).
+///
+/// Returns (triangle indices over [ring | new interior points],
+/// the new interior UV points); empty triangles = reject.
+/// Debug: DRAPPER_NFB_DEBUG=1 prints the reject reason.
+pub fn nurbs_fillet_band_strip(
+    nurbs: &draper_geometry::NurbsSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+) -> (Vec<usize>, Vec<[f64; 2]>) {
+    macro_rules! nfb_fail {
+        ($reason:expr) => {{
+            if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                eprintln!("[NFB reject] {}", $reason);
+            }
+            return (Vec::new(), Vec::new());
+        }};
+    }
+    let n = boundary_2d.len();
+    if n < 6 {
+        nfb_fail!("tiny ring");
+    }
+    if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
+        nfb_fail!("empty control grid");
+    }
+    // ── unwrap u and v along the ring walk when the surface is ────
+    // closed in that direction (seam-crossing); a plain patch keeps
+    // its raw parameters (the rectangular domain is continuous).
+    let (u0d, u1d) = nurbs.u_range();
+    let (v0d, v1d) = nurbs.v_range();
+    let u_period = if nurbs.u_closed && u1d > u0d {
+        u1d - u0d
+    } else {
+        0.0
+    };
+    let v_period = if nurbs.v_closed && v1d > v0d {
+        v1d - v0d
+    } else {
+        0.0
+    };
+    let mut us = Vec::with_capacity(n);
+    let mut vs = Vec::with_capacity(n);
+    us.push(boundary_2d[0][0]);
+    vs.push(boundary_2d[0][1]);
+    for k in 1..n {
+        let mut u = boundary_2d[k][0];
+        let mut v = boundary_2d[k][1];
+        if u_period > 0.0 {
+            while u - us[k - 1] > u_period * 0.5 {
+                u -= u_period;
+            }
+            while us[k - 1] - u > u_period * 0.5 {
+                u += u_period;
+            }
+        }
+        if v_period > 0.0 {
+            while v - vs[k - 1] > v_period * 0.5 {
+                v -= v_period;
+            }
+            while vs[k - 1] - v > v_period * 0.5 {
+                v += v_period;
+            }
+        }
+        us.push(u);
+        vs.push(v);
+    }
+    let vmin = vs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let vmax = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let vspan = vmax - vmin;
+    let umin = us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let umax = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let uspan = umax - umin;
+    if !(vspan > 1e-9) || !(uspan > 0.0) {
+        nfb_fail!("flat ring");
+    }
+    // ── v-extremes + the two chains (both walk vmin→vmax) ─────────
+    let mut vmin_i = 0usize;
+    let mut vmax_i = 0usize;
+    for k in 1..n {
+        if vs[k] < vs[vmin_i] {
+            vmin_i = k;
+        }
+        if vs[k] > vs[vmax_i] {
+            vmax_i = k;
+        }
+    }
+    if vmin_i == vmax_i {
+        nfb_fail!("degenerate extremes");
+    }
+    let mut a: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            a.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + 1) % n;
+        }
+    }
+    let mut b: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            b.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + n - 1) % n;
+        }
+    }
+    // ── decompose a chain into [flat@vmin][wall][flat@vmax] ───────
+    // The flat runs are the constant-v rim arcs (the cross-face
+    // contract). pre/mid share the boundary point, mid/suf share
+    // theirs, so the ring-edge partition is exact (s69 form).
+    let flat_eps = 1e-7 * vspan.max(1e-6);
+    let decompose = |chain: &[usize]| -> Option<(Vec<usize>, Vec<usize>, Vec<usize>)> {
+        let m = chain.len();
+        let mut e1 = 0usize;
+        while e1 + 1 < m && vs[chain[e1 + 1]] <= vmin + flat_eps {
+            e1 += 1;
+        }
+        let mut e2 = m - 1usize;
+        while e2 > e1 + 1 && vs[chain[e2 - 1]] >= vmax - flat_eps {
+            e2 -= 1;
+        }
+        if e2 <= e1 {
+            return None; // no rising section at all
+        }
+        Some((
+            chain[0..=e1].to_vec(),
+            chain[e1..=e2].to_vec(),
+            chain[e2..].to_vec(),
+        ))
+    };
+    let (a_pre, a_mid, a_suf) = match decompose(&a) {
+        Some(x) => x,
+        None => nfb_fail!("chain A has no rising section"),
+    };
+    let (b_pre, b_mid, b_suf) = match decompose(&b) {
+        Some(x) => x,
+        None => nfb_fail!("chain B has no rising section"),
+    };
+    if a_mid.len() < 2 || b_mid.len() < 2 {
+        nfb_fail!("wall too short");
+    }
+    // ── merge flat runs into the bottom / top edges (u-ascending) ─
+    // Each piece must be u-monotone; the pieces' u-ranges may only
+    // meet at the shared extreme point (vmin_i / vmax_i) — s69 form.
+    let eps_u = uspan * 1e-9;
+    let sort_u = |mut pts: Vec<usize>| -> Option<Vec<usize>> {
+        let asc = pts.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u);
+        let desc = pts.windows(2).all(|w| us[w[0]] >= us[w[1]] - eps_u);
+        if !asc && !desc {
+            return None;
+        }
+        if !asc {
+            pts.reverse();
+        }
+        Some(pts)
+    };
+    let merge_edges = |p1: Vec<usize>, p2: Vec<usize>| -> Option<Vec<usize>> {
+        let p1 = sort_u(p1)?;
+        let p2 = sort_u(p2)?;
+        let lo1 = us[p1[0]];
+        let hi1 = us[*p1.last()?];
+        let lo2 = us[p2[0]];
+        let hi2 = us[*p2.last()?];
+        let ov_lo = lo1.max(lo2);
+        let ov_hi = hi1.min(hi2);
+        if ov_lo < ov_hi - eps_u {
+            let shared: Vec<usize> = p1.iter().copied().filter(|k| p2.contains(k)).collect();
+            if shared.len() != 1 {
+                return None;
+            }
+            let su = us[shared[0]];
+            if !(su >= ov_lo - eps_u && su <= ov_hi + eps_u) {
+                return None;
+            }
+            let at_end = (*p1.last()? == shared[0] && p2[0] == shared[0])
+                || (*p2.last()? == shared[0] && p1[0] == shared[0]);
+            if !at_end {
+                return None;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut all: Vec<usize> = p1
+            .into_iter()
+            .chain(p2)
+            .filter(|k| seen.insert(*k))
+            .collect();
+        all.sort_by(|&x, &y| {
+            us[x]
+                .partial_cmp(&us[y])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for w in all.windows(2) {
+            if us[w[1]] - us[w[0]] < -eps_u {
+                return None;
+            }
+        }
+        if all.is_empty() {
+            return None;
+        }
+        Some(all)
+    };
+    let bottom = match merge_edges(b_pre.clone(), a_pre.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => nfb_fail!("bottom edge merge failed"),
+    };
+    let top = match merge_edges(a_suf.clone(), b_suf.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => nfb_fail!("top edge merge failed"),
+    };
+    // ── walls: left = smaller mean u, right = larger ──────────────
+    let mean_u =
+        |pts: &[usize]| -> f64 { pts.iter().map(|&k| us[k]).sum::<f64>() / pts.len() as f64 };
+    let (mut w_l, mut w_r) = if mean_u(&b_mid) <= mean_u(&a_mid) {
+        (b_mid.clone(), a_mid.clone())
+    } else {
+        (a_mid.clone(), b_mid.clone())
+    };
+    // extend walls to the top edge's ends (covers the junction ring
+    // edges when the opposite chain's suffix is a single point)
+    if *w_l.last().unwrap() != top[0] {
+        w_l.push(top[0]);
+    }
+    if *w_r.last().unwrap() != top[top.len() - 1] {
+        w_r.push(top[top.len() - 1]);
+    }
+    // topology consistency: the walls' feet must be the bottom ends
+    if w_l[0] != bottom[0] || w_r[0] != bottom[bottom.len() - 1] {
+        nfb_fail!("wall feet do not match the bottom edge ends");
+    }
+    // walls must not be u-degenerate (a corridor needs width)
+    let u_max_r = w_r.iter().map(|&k| us[k]).fold(f64::NEG_INFINITY, f64::max);
+    let u_min_l = w_l.iter().map(|&k| us[k]).fold(f64::INFINITY, f64::min);
+    if !(u_max_r - u_min_l > 1e-9) {
+        nfb_fail!("corridor has no width");
+    }
+    // ── direct arc-chord sag (the exact tolerance criterion) ──────
+    // |S(mid-uv) − chord-mid|: measured, never derived from radius
+    // formulas (s69 lesson 5 — no parametric-unit conversions for
+    // the normalized Nurbs box).
+    let uv_sag = |pa: [f64; 2], pb: [f64; 2]| -> f64 {
+        let mid_uv = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5];
+        let pm = nurbs.point_at(mid_uv[0], mid_uv[1]);
+        let px = nurbs.point_at(pa[0], pa[1]);
+        let py = nurbs.point_at(pb[0], pb[1]);
+        let cx = (px.x + py.x) * 0.5;
+        let cy = (px.y + py.y) * 0.5;
+        let cz = (px.z + py.z) * 0.5;
+        ((pm.x - cx) * (pm.x - cx) + (pm.y - cy) * (pm.y - cy) + (pm.z - cz) * (pm.z - cz)).sqrt()
+    };
+    let ring_uv = |idx: usize| -> [f64; 2] { [us[idx], vs[idx]] };
+    // ── dv_max: corridor midline arc-chord bound (level count) ────
+    // 9 midline samples (u = mean of the two walls' u at that v);
+    // per-segment 3-point circumradius r → chord bound c ≤ √(8·r·tol)
+    // → parametric step Δv ≤ c·Δv_seg/|P1−P0|. The exact backstop is
+    // the direct chord audit at the end; this estimate only picks K.
+    let dv_max = {
+        let mut bound = vspan * 0.5; // tol<=0 default (K=2)
+        if max_dev > 0.0 {
+            let wall_u_at = |wall: &[usize], vv: f64| -> Option<f64> {
+                if wall.is_empty() {
+                    return None;
+                }
+                if vv <= vs[wall[0]] {
+                    return Some(us[wall[0]]);
+                }
+                let last = wall[wall.len() - 1];
+                if vv >= vs[last] {
+                    return Some(us[last]);
+                }
+                for w in wall.windows(2) {
+                    let (i0, i1) = (w[0], w[1]);
+                    let (v0, v1) = (vs[i0], vs[i1]);
+                    if vv >= v0 && vv <= v1 && v1 > v0 {
+                        let t = (vv - v0) / (v1 - v0);
+                        return Some(us[i0] + (us[i1] - us[i0]) * t);
+                    }
+                }
+                None
+            };
+            const M: usize = 9;
+            let mut samp: Vec<(f64, f64, Point3d)> = Vec::with_capacity(M);
+            for i in 0..M {
+                let vv = vmin + vspan * i as f64 / (M - 1) as f64;
+                let ul = wall_u_at(&w_l, vv);
+                let ur = wall_u_at(&w_r, vv);
+                // s70 fix: pinch levels (lune corners — the corridor
+                // has zero width there) and interpolation misses are
+                // SKIPPED, not failed: the fan zones own them; the
+                // curvature estimate only needs the open corridor.
+                let (ul, ur) = match (ul, ur) {
+                    (Some(x), Some(y)) => (x, y),
+                    _ => continue,
+                };
+                if !(ur > ul + 1e-12) {
+                    continue;
+                }
+                let um = (ul + ur) * 0.5;
+                samp.push((vv, um, nurbs.point_at(um, vv)));
+            }
+            // (fewer than 2 usable samples → the K=2 default applies)
+            let dist = |p: &Point3d, q: &Point3d| -> f64 {
+                ((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y) + (p.z - q.z) * (p.z - q.z))
+                    .sqrt()
+            };
+            let mm = samp.len();
+            let scale = {
+                let mut s = 1e-12f64;
+                for i in 0..mm {
+                    for j in i + 1..mm {
+                        s = s.max(dist(&samp[i].2, &samp[j].2));
+                    }
+                }
+                s
+            };
+            // circumradius of the 3-point circle through samples
+            // (i, i+1, i+2); collinear → INF (unconstraining)
+            let circum = |i: usize| -> f64 {
+                if i + 2 >= mm {
+                    return f64::INFINITY;
+                }
+                let p0 = samp[i].2;
+                let p1 = samp[i + 1].2;
+                let p2 = samp[i + 2].2;
+                let a = dist(&p0, &p1);
+                let bx = dist(&p1, &p2);
+                let cx = dist(&p0, &p2);
+                let ab = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+                let ac = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
+                let cr = [
+                    ab[1] * ac[2] - ab[2] * ac[1],
+                    ab[2] * ac[0] - ab[0] * ac[2],
+                    ab[0] * ac[1] - ab[1] * ac[0],
+                ];
+                let area2 = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+                if area2 <= 1e-14 * scale * scale || a * bx * cx <= 0.0 {
+                    return f64::INFINITY;
+                }
+                a * bx * cx / (2.0 * area2)
+            };
+            let mut min_dv = f64::INFINITY;
+            for i in 0..mm.saturating_sub(1) {
+                let d = dist(&samp[i].2, &samp[i + 1].2);
+                let dv = samp[i + 1].0 - samp[i].0;
+                if d <= 1e-12 || dv <= 0.0 {
+                    continue;
+                }
+                let lo = if i > 0 { circum(i - 1) } else { f64::INFINITY };
+                let r = lo.min(circum(i));
+                if !r.is_finite() {
+                    continue;
+                }
+                let c_max = (8.0 * r * max_dev).sqrt();
+                if !c_max.is_finite() || c_max <= 0.0 {
+                    continue;
+                }
+                let dv_ok = c_max * dv / d;
+                if dv_ok < min_dv {
+                    min_dv = dv_ok;
+                }
+            }
+            if min_dv.is_finite() {
+                bound = min_dv;
+            }
+        }
+        bound.min(vspan).max(vspan * 1e-6)
+    };
+    // ── union-u grid of the whole rim (dense, no discontinuity) ──
+    let dedup_tol = (uspan * 1e-6).max(1e-9);
+    let mut grid: Vec<f64> = us.clone();
+    grid.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    grid.dedup_by(|a, &mut b| (*a - b).abs() <= dedup_tol);
+    // ── choose connectors: anchors on BOTH walls per level ────────
+    // (s69 form: monotone advancement + reserve room; per-band
+    // v-gap ≤ dv_max·1.05 → K+1 on failure, up to 8)
+    let p = w_l.len();
+    let q = w_r.len();
+    let pick_anchors = |k_bands: usize| -> Option<(Vec<usize>, Vec<usize>)> {
+        let mut av = vec![0usize; k_bands + 1];
+        let mut bv = vec![0usize; k_bands + 1];
+        av[k_bands] = p - 1;
+        bv[k_bands] = q - 1;
+        for j in 1..k_bands {
+            let t = vmin + vspan * (j as f64) / (k_bands as f64);
+            let mut aj = av[j - 1];
+            let room = k_bands - j;
+            let lim = p - 1 - room.min(p - 1 - av[j - 1]);
+            for idx in av[j - 1]..=lim {
+                if vs[w_l[idx]] <= t + 1e-12 {
+                    aj = idx;
+                }
+            }
+            av[j] = aj;
+            let mut bj = bv[j - 1];
+            let lim_b = q - 1 - room.min(q - 1 - bv[j - 1]);
+            for idx in bv[j - 1]..=lim_b {
+                if vs[w_r[idx]] <= t + 1e-12 {
+                    bj = idx;
+                }
+            }
+            bv[j] = bj;
+        }
+        // s70 v2: NO v-gap pre-check here — the direct chord audit in
+        // the 'levels retry loop below is the exact criterion (the
+        // parametric v-gap bound misfired: circumcircles through
+        // samples straddling a skipped pinch measure the pinch TURN,
+        // not the open corridor — 104 spurious K=8 rejects).
+        Some((av, bv))
+    };
+    // ── level retry: the direct chord audit drives K (s70 v2) ──────
+    // The midline curvature estimate only picks the STARTING level
+    // count (clamped 2..8); on guard violation K+1, up to 8.
+    let start_k = ((vspan / dv_max).ceil() as usize).clamp(2, 8);
+    if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+        eprintln!(
+            "[NFB] vspan={:.5} uspan={:.5} dv_max={:.6} start_k={} walls l={} r={} bottom={} top={}",
+            vspan, uspan, dv_max, start_k, w_l.len(), w_r.len(), bottom.len(), top.len()
+        );
+    }
+    let mut accepted: Option<(
+        Vec<usize>,
+        Vec<usize>,
+        Vec<Vec<usize>>,
+        Vec<[f64; 2]>,
+        Vec<usize>,
+    )> = None;
+    'levels: for kk in start_k..=8 {
+        let (mut anchors_l, mut anchors_r) = match pick_anchors(kk) {
+            Some(x) => x,
+            None => continue 'levels,
+        };
+        // ── adaptive anchor-stress refinement (direct sag) ────────────
+        // A band is "stressed" when an emitted edge would exceed the
+        // direct chord tolerance: (a) a wall-fan spoke from the band's
+        // anchor to a far wall point of the slice, or (b) a PINCH band
+        // (a 1-point connector = the lune wedge) whose chord reaches
+        // across the corridor. Cure: insert the midpoint anchor on BOTH
+        // walls of the stressed band, re-check, up to 16 rounds (s69
+        // form; the direct chord audit below is the exact backstop).
+        if max_dev > 0.0 {
+            for _round in 0..24 {
+                let mut worst = 0.0f64;
+                let mut worst_band = None;
+                let tol_edge = max_dev * 1.05;
+                for j in 0..anchors_l.len() - 1 {
+                    let al = anchors_l[j];
+                    let bl = anchors_l[j + 1];
+                    let anch = w_l[al];
+                    for &pidx in &w_l[al..=bl] {
+                        let s = uv_sag(ring_uv(anch), ring_uv(pidx));
+                        if s > worst {
+                            worst = s;
+                            worst_band = Some(j);
+                        }
+                    }
+                    let ar = anchors_r[j];
+                    let br = anchors_r[j + 1];
+                    let anch_r = w_r[ar];
+                    for &pidx in &w_r[ar..=br] {
+                        let s = uv_sag(ring_uv(anch_r), ring_uv(pidx));
+                        if s > worst {
+                            worst = s;
+                            worst_band = Some(j);
+                        }
+                    }
+                    // s70 v3: QUASI-PINCH — a tiny bottom/top arc (u-span
+                    // < 25% of the corridor) is geometrically a pinch: the
+                    // first/last band is emitted as a full-width fan from
+                    // the arc to the ceiling connector. The worst emitted
+                    // edges are the CROSS chords (arc end → the opposite
+                    // wall's far anchor) and the mid-to-mid spoke; the
+                    // plain wall-fan measurement above never sees them
+                    // (measured: K=8 rejects with du=1.0, dv=vspan/K).
+                    let bottom_span = us[bottom[bottom.len() - 1]] - us[bottom[0]];
+                    let top_span = us[top[top.len() - 1]] - us[top[0]];
+                    let first_quasi = j == 0 && bottom_span < 0.25 * uspan;
+                    let last_quasi = j == anchors_l.len() - 2 && top_span < 0.25 * uspan;
+                    if first_quasi || last_quasi {
+                        // the arc's two ends + its middle as the fan
+                        // centers; the far end = this band's ceiling
+                        // anchors (bl/br for the first, al/ar for the last)
+                        let (arc, fl, fr) = if first_quasi {
+                            (&bottom, w_l[bl], w_r[br])
+                        } else {
+                            (&top, w_l[al], w_r[ar])
+                        };
+                        let pa = arc[0];
+                        let pb = arc[arc.len() - 1];
+                        let pm = arc[arc.len() / 2];
+                        // cross chords: left arc end → right far anchor
+                        // and vice versa (the widest fan spokes), plus
+                        // arc-mid → corridor-mid
+                        let s1 = uv_sag(ring_uv(pa), ring_uv(fr));
+                        let s2 = uv_sag(ring_uv(pb), ring_uv(fl));
+                        let far_v = (vs[fl] + vs[fr]) * 0.5;
+                        let far_u = (us[fl] + us[fr]) * 0.5;
+                        let mid_v = (vs[pm] + far_v) * 0.5;
+                        let mid_u = (us[pm] + far_u) * 0.5;
+                        let s3 = uv_sag(ring_uv(pm), [mid_u, mid_v]);
+                        let s = s1.max(s2).max(s3);
+                        if s > worst {
+                            worst = s;
+                            worst_band = Some(j);
+                        }
+                    }
+                }
+                if worst <= tol_edge || worst_band.is_none() {
+                    break;
+                }
+                let j = worst_band.unwrap();
+                let (al, bl) = (anchors_l[j], anchors_l[j + 1]);
+                let (ar, br) = (anchors_r[j], anchors_r[j + 1]);
+                if bl - al < 2 && br - ar < 2 {
+                    // s70: this band cannot be split further (no cached
+                    // wall point between its anchors) — skip IT and keep
+                    // refining the other bands (the s69 break abandoned
+                    // the whole loop on one stuck band).
+                    continue;
+                }
+                let a_mid = al + (bl - al) / 2;
+                let b_mid = ar + (br - ar) / 2;
+                anchors_l.insert(j + 1, a_mid);
+                anchors_r.insert(j + 1, b_mid);
+                if anchors_l.len() > 32 {
+                    break;
+                }
+            }
+        }
+        let k_bands = anchors_l.len() - 1;
+        // ── post-build measure-and-split loop (s70 v4) ────────────────
+        // Build the connectors + bands for the current anchors, then
+        // measure EVERY emitted non-rim edge directly (the exact final
+        // guard criterion — no proxies): on the worst violation, split
+        // its owning band (midpoint wall anchors) and rebuild. The
+        // pre-build stress pass above already converged the wide fans;
+        // this pass catches the marginal leftovers (measured: 1.02..1.08
+        // × tol spokes the proxies never saw) and the zipper diagonals.
+        for _pb_round in 0..24 {
+            // recompute per round: the pb splits below grow the anchor
+            // set (a stale k_bands misaligns connectors vs fans —
+            // measured: "46 rim edges not-1x" audit rejects)
+            let k_bands = anchors_l.len() - 1;
+
+            // ── build connectors (index lists) + new interior points ──────
+            // connector 0 = the bottom edge (cached), connector K = the top
+            // edge (cached); interiors = wall anchors + analytic grid pts.
+            // Interior v follows the linear blend of the wall anchors' v
+            // (s69 form); slice gaps refined by the DIRECT chord sag.
+            let mut new_pts: Vec<[f64; 2]> = Vec::new();
+            let mut connectors: Vec<Vec<usize>> = Vec::with_capacity(k_bands + 1);
+            connectors.push(bottom.clone());
+            for j in 1..k_bands {
+                let li = w_l[anchors_l[j]];
+                let ri = w_r[anchors_r[j]];
+                let (u_l, v_l) = (us[li], vs[li]);
+                let (u_r, v_r) = (us[ri], vs[ri]);
+                if !(u_r > u_l + 1e-12) {
+                    nfb_fail!("walls touch mid-face (self-intersection)");
+                }
+                // grid slice strictly inside
+                let mut slice: Vec<f64> = grid
+                    .iter()
+                    .copied()
+                    .filter(|&g| g > u_l + dedup_tol && g < u_r - dedup_tol)
+                    .collect();
+                // refine to the direct chord bound: the v-profile is linear
+                // in u between the anchors (same formula as the point push)
+                if max_dev > 0.0 {
+                    let vprof = |g: f64| -> f64 {
+                        let t = (g - u_l) / (u_r - u_l);
+                        v_l + (v_r - v_l) * t
+                    };
+                    let tol_edge = max_dev * 1.05;
+                    let mut guard = 0usize;
+                    loop {
+                        let mut worst = 0.0f64;
+                        let mut worst_at = 0usize;
+                        let mut prev = u_l;
+                        for (k, &g) in slice.iter().enumerate() {
+                            let s = uv_sag([prev, vprof(prev)], [g, vprof(g)]);
+                            if s > worst {
+                                worst = s;
+                                worst_at = k;
+                            }
+                            prev = g;
+                        }
+                        let s_last = uv_sag([prev, vprof(prev)], [u_r, vprof(u_r)]);
+                        if s_last > worst {
+                            worst = s_last;
+                            worst_at = slice.len();
+                        }
+                        if worst <= tol_edge || guard > 64 || slice.len() + 2 > 4 * n {
+                            break;
+                        }
+                        let mid = if worst_at == 0 {
+                            (u_l + slice[0]) * 0.5
+                        } else if worst_at == slice.len() {
+                            (slice[slice.len() - 1] + u_r) * 0.5
+                        } else {
+                            (slice[worst_at - 1] + slice[worst_at]) * 0.5
+                        };
+                        slice.insert(worst_at, mid);
+                        guard += 1;
+                    }
+                }
+                let mut conn = vec![li];
+                for g in slice {
+                    let t = (g - u_l) / (u_r - u_l);
+                    let v = v_l + (v_r - v_l) * t;
+                    conn.push(n + new_pts.len());
+                    new_pts.push([g, v]);
+                }
+                conn.push(ri);
+                connectors.push(conn);
+            }
+            connectors.push(top.clone());
+            // ── emit bands: left fan + two-pointer + right fan ────────────
+            // The fan slices EXCLUDE the anchor (s69 lesson 4: the first
+            // wall point of the band IS the bottom connector's end; an
+            // included anchor gives a degenerate first triangle and a
+            // silently-dropped ring edge).
+            let u_of = |idx: usize| -> f64 {
+                if idx < n {
+                    us[idx]
+                } else {
+                    new_pts[idx - n][0]
+                }
+            };
+            let mut tris: Vec<usize> = Vec::with_capacity(8 * n);
+            let mut tri_band: Vec<usize> = Vec::with_capacity(8 * n + 8);
+            for j in 0..k_bands {
+                let cbtm = &connectors[j];
+                let ctop = &connectors[j + 1];
+                // left fan: anchor = the bottom connector's left end; CCW
+                // winding = DESCENDING wall order (s69 form).
+                let anchor_l = cbtm[0];
+                if anchors_l[j] < anchors_l[j + 1] {
+                    let lw = &w_l[(anchors_l[j] + 1)..=anchors_l[j + 1]];
+                    for k in 1..lw.len() {
+                        let tri = [anchor_l, lw[k], lw[k - 1]];
+                        if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                            tris.extend_from_slice(&tri);
+                            tri_band.push(j);
+                        }
+                    }
+                }
+                // right fan: anchor = the bottom connector's right end; CCW
+                // winding = ASCENDING wall order (s69 form).
+                let anchor_r = cbtm[cbtm.len() - 1];
+                if anchors_r[j] < anchors_r[j + 1] {
+                    let rw = &w_r[(anchors_r[j] + 1)..=anchors_r[j + 1]];
+                    for k in 1..rw.len() {
+                        let tri = [anchor_r, rw[k - 1], rw[k]];
+                        if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                            tris.extend_from_slice(&tri);
+                            tri_band.push(j);
+                        }
+                    }
+                }
+                // two-pointer zipper between the connectors (s65/s68 form)
+                let na = cbtm.len();
+                let nb = ctop.len();
+                let mut ia = 0usize;
+                let mut ib = 0usize;
+                while ia < na - 1 || ib < nb - 1 {
+                    let tri: [usize; 3] = if ia >= na - 1 {
+                        let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                        ib += 1;
+                        t
+                    } else if ib >= nb - 1 {
+                        let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                        ia += 1;
+                        t
+                    } else if u_of(cbtm[ia + 1]) <= u_of(ctop[ib + 1]) {
+                        let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                        ia += 1;
+                        t
+                    } else {
+                        let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                        ib += 1;
+                        t
+                    };
+                    if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                        tris.extend_from_slice(&tri);
+                        tri_band.push(j);
+                    }
+                }
+            }
+            if tris.len() < 3 || new_pts.len() > 16 * n {
+                nfb_fail!("empty strip or too many new points");
+            }
+            let uv_of = |idx: usize| -> [f64; 2] {
+                if idx < n {
+                    [us[idx], vs[idx]]
+                } else {
+                    new_pts[idx - n]
+                }
+            };
+            // ── measure every non-rim edge; split the worst band ──
+            let tol_edge = max_dev * 1.05;
+            let mut viol_band: Option<(f64, usize)> = None; // best SPLITTABLE
+            let mut viol_any = false;
+            {
+                use std::collections::HashMap;
+                let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+                for c in tris.chunks_exact(3) {
+                    for k in 0..3 {
+                        let x = c[k];
+                        let y = c[(k + 1) % 3];
+                        if x != y {
+                            *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                        }
+                    }
+                }
+                let rim = |x: usize, y: usize| -> bool { (x + 1) % n == y || (y + 1) % n == x };
+                // band attribution: the owning band of the FIRST
+                // triangle that carries the edge
+                let mut edge_band: HashMap<(usize, usize), usize> = HashMap::new();
+                for (ti, c) in tris.chunks_exact(3).enumerate() {
+                    for k in 0..3 {
+                        let x = c[k];
+                        let y = c[(k + 1) % 3];
+                        if x != y {
+                            edge_band
+                                .entry((x.min(y), y.max(x)))
+                                .or_insert(tri_band[ti]);
+                        }
+                    }
+                }
+                for (&e, &cnt) in ecount.iter() {
+                    if cnt == 2 && !rim(e.0, e.1) {
+                        let sg = uv_sag(uv_of(e.0), uv_of(e.1));
+                        if sg > tol_edge + 1e-12 {
+                            viol_any = true;
+                            let bnd = *edge_band.get(&e).unwrap_or(&0);
+                            // only SPLITTABLE bands are split candidates
+                            // (a stuck worst band must not abandon the
+                            // pass while a splittable band still violates)
+                            let (jal, jbl) = (anchors_l[bnd], anchors_l[bnd + 1]);
+                            let (jar, jbr) = (anchors_r[bnd], anchors_r[bnd + 1]);
+                            if !(jbl - jal >= 2 && jbr - jar >= 2) {
+                                continue;
+                            }
+                            let better = match viol_band {
+                                None => true,
+                                Some((s0, _)) => sg > s0,
+                            };
+                            if better {
+                                viol_band = Some((sg, bnd));
+                            }
+                        }
+                    }
+                }
+                if viol_any && viol_band.is_none() {
+                    // violations exist but no band can be split further —
+                    // only K+1 can help now
+                    if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                        eprintln!("[NFB] pb: violations but no splittable band, next K");
+                    }
+                    break;
+                }
+                if !viol_any {
+                    viol_band = None;
+                }
+            }
+            match viol_band {
+                None => {
+                    // no violations — run the structural guards on THIS
+                    // build; on pass, accept and leave the K loop.
+                    // ── edge-accounting audit: ring edges 1×, everything else 2× ─
+                    {
+                        use std::collections::HashMap;
+                        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+                        for c in tris.chunks_exact(3) {
+                            for k in 0..3 {
+                                let x = c[k];
+                                let y = c[(k + 1) % 3];
+                                if x != y {
+                                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                                }
+                            }
+                        }
+                        let rim =
+                            |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
+                        let mut missing = 0usize;
+                        let mut bad_nonrim = 0usize;
+                        for k in 0..n {
+                            let j = (k + 1) % n;
+                            if ecount.get(&(k.min(j), k.max(j))).copied() != Some(1) {
+                                missing += 1;
+                            }
+                        }
+                        for (&(x, y), &c) in ecount.iter() {
+                            if !rim(x, y) && c != 2 {
+                                bad_nonrim += 1;
+                            }
+                        }
+                        if missing > 0 || bad_nonrim > 0 {
+                            if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                                eprintln!(
+                        "[NFB reject] audit: {} rim edges not-1x, {} non-rim edges not-2x",
+                        missing, bad_nonrim
+                    );
+                            }
+                            return (Vec::new(), Vec::new());
+                        }
+                    }
+                    // ── 2D signed-area guard (±0.5%) ──────────────────────────────
+                    // The edge-audit already implies exact single coverage; this is
+                    // the numeric belt-and-braces check (the torus closed-form H(v)
+                    // integral does not generalize to a Nurbs — s69 §area).
+                    {
+                        let signed = |ring: &[[f64; 2]]| -> f64 {
+                            let mut s = 0.0;
+                            for w in ring.windows(2) {
+                                s += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+                            }
+                            if ring.len() > 1 {
+                                let (a, b) = (ring[ring.len() - 1], ring[0]);
+                                s += a[0] * b[1] - b[0] * a[1];
+                            }
+                            s * 0.5
+                        };
+                        let poly_uv: Vec<[f64; 2]> = (0..n).map(|k| [us[k], vs[k]]).collect();
+                        let poly_s = signed(&poly_uv);
+                        let strip_s: f64 = tris
+                            .chunks_exact(3)
+                            .map(|c| {
+                                (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                                    + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                                    + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                                    * 0.5
+                            })
+                            .sum();
+                        if poly_s.abs() <= 1e-15 {
+                            nfb_fail!("degenerate polygon area");
+                        }
+                        let ratio = strip_s.abs() / poly_s.abs();
+                        if !(ratio >= 0.995 && ratio <= 1.005) {
+                            if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                                eprintln!(
+                                    "[NFB reject] area ratio {} out of [0.995, 1.005]",
+                                    ratio
+                                );
+                            }
+                            return (Vec::new(), Vec::new());
+                        }
+                    }
+                    // ── fold guard: same-face fold pairs (>170°) in 3D = 0 ────────
+                    {
+                        use std::collections::HashMap;
+                        let p3 = |idx: usize| -> Point3d {
+                            let uv = uv_of(idx);
+                            nurbs.point_at(uv[0], uv[1])
+                        };
+                        let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+                            let a = p3(c[0]);
+                            let b = p3(c[1]);
+                            let d = p3(c[2]);
+                            let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+                            let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+                            let nn = [
+                                ab[1] * ad[2] - ab[2] * ad[1],
+                                ab[2] * ad[0] - ab[0] * ad[2],
+                                ab[0] * ad[1] - ab[1] * ad[0],
+                            ];
+                            let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                            if l > 1e-18 {
+                                Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                            } else {
+                                None
+                            }
+                        };
+                        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+                        for (ti, c) in tris.chunks_exact(3).enumerate() {
+                            for k in 0..3 {
+                                let x = c[k];
+                                let y = c[(k + 1) % 3];
+                                if x != y {
+                                    // s70 bug fix: the .push was lost in an early
+                                    // paren fix — the guard was a NO-OP (empty Vecs,
+                                    // ts.len()!=2, folds always 0)
+                                    edge_tris.entry((x.min(y), y.max(x))).or_default().push(ti);
+                                }
+                            }
+                        }
+                        let mut folds = 0usize;
+                        for ts in edge_tris.values() {
+                            if ts.len() != 2 {
+                                continue;
+                            }
+                            let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                            let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                            if let (Some(n1), Some(n2)) = (n1, n2) {
+                                let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+                                    .clamp(-1.0, 1.0);
+                                if dot.acos().to_degrees() > 170.0 {
+                                    folds += 1;
+                                }
+                            }
+                        }
+                        if folds > 0 {
+                            if std::env::var("DRAPPER_NFB_DEBUG2").is_ok() {
+                                for ts in edge_tris.values() {
+                                    if ts.len() != 2 {
+                                        continue;
+                                    }
+                                    let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                                    let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                                    if let (Some(n1), Some(n2)) = (n1, n2) {
+                                        let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+                                            .clamp(-1.0, 1.0);
+                                        let ang = dot.acos().to_degrees();
+                                        if ang > 170.0 {
+                                            let e0 = tris[ts[0] * 3];
+                                            let e1 = tris[ts[0] * 3 + 1];
+                                            let e2 = tris[ts[0] * 3 + 2];
+                                            let uv0 = uv_of(e0);
+                                            let uv1 = uv_of(e1);
+                                            let uv2 = uv_of(e2);
+                                            let f0 = tris[ts[1] * 3];
+                                            let f1 = tris[ts[1] * 3 + 1];
+                                            let f2 = tris[ts[1] * 3 + 2];
+                                            let fv0 = uv_of(f0);
+                                            let fv1 = uv_of(f1);
+                                            let fv2 = uv_of(f2);
+                                            // 3D positions + surface-normal comparison:
+                                            // which of the two is wound against du×dv
+                                            let p0 = nurbs.point_at(uv0[0], uv0[1]);
+                                            let p1 = nurbs.point_at(uv1[0], uv1[1]);
+                                            let p2 = nurbs.point_at(uv2[0], uv2[1]);
+                                            let q0 = nurbs.point_at(fv0[0], fv0[1]);
+                                            let q1 = nurbs.point_at(fv1[0], fv1[1]);
+                                            let q2 = nurbs.point_at(fv2[0], fv2[1]);
+                                            let d1 = nurbs.derivatives_at(uv0[0], uv0[1]);
+                                            let sn = [
+                                                d1.du.y * d1.dv.z - d1.du.z * d1.dv.y,
+                                                d1.du.z * d1.dv.x - d1.du.x * d1.dv.z,
+                                                d1.du.x * d1.dv.y - d1.du.y * d1.dv.x,
+                                            ];
+                                            let sl =
+                                                (sn[0] * sn[0] + sn[1] * sn[1] + sn[2] * sn[2])
+                                                    .sqrt();
+                                            let dot_sn = n1[0] * sn[0] / sl
+                                                + n1[1] * sn[1] / sl
+                                                + n1[2] * sn[2] / sl;
+                                            let dot_sn2 = n2[0] * sn[0] / sl
+                                                + n2[1] * sn[1] / sl
+                                                + n2[2] * sn[2] / sl;
+                                            eprintln!(
+                                    "[NFB fold] ang={:.2} tri1=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3}) tri2=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3}) sn1={:.2} sn2={:.2} | 3d1=({:.3},{:.3},{:.3})({:.3},{:.3},{:.3})({:.3},{:.3},{:.3}) 3d2=({:.3},{:.3},{:.3})({:.3},{:.3},{:.3})({:.3},{:.3},{:.3})",
+                                    ang, uv0[0], uv0[1], uv1[0], uv1[1], uv2[0], uv2[1],
+                                    fv0[0], fv0[1], fv1[0], fv1[1], fv2[0], fv2[1],
+                                    dot_sn, dot_sn2,
+                                    p0.x, p0.y, p0.z, p1.x, p1.y, p1.z, p2.x, p2.y, p2.z,
+                                    q0.x, q0.y, q0.z, q1.x, q1.y, q1.z, q2.x, q2.y, q2.z
+                                );
+                                        }
+                                    }
+                                }
+                            }
+                            if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                                eprintln!("[NFB] K={}: {} same-face fold pairs (retry)", kk, folds);
+                            }
+                            continue 'levels;
+                        }
+                    }
+                    // structural guards passed
+                    accepted = Some((anchors_l, anchors_r, connectors, new_pts, tris));
+                    break 'levels;
+                }
+                Some((_sg, j)) => {
+                    // split the owning band; if it cannot be split, try
+                    // K+1 (the next 'levels iteration)
+                    let (al, bl) = (anchors_l[j], anchors_l[j + 1]);
+                    let (ar, br) = (anchors_r[j], anchors_r[j + 1]);
+                    let splittable = (bl - al >= 2) && (br - ar >= 2);
+                    if !splittable {
+                        if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                            eprintln!(
+                                "[NFB] pb: band j={} not splittable ({} {} {} {}), next K",
+                                j, al, bl, ar, br
+                            );
+                        }
+                        break; // leave pb loop -> next kk
+                    }
+                    let a_mid = al + (bl - al) / 2;
+                    let b_mid = ar + (br - ar) / 2;
+                    if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                        eprintln!("[NFB] pb: split band j={}", j);
+                    }
+                    anchors_l.insert(j + 1, a_mid);
+                    anchors_r.insert(j + 1, b_mid);
+                    if anchors_l.len() > 64 {
+                        break;
+                    }
+                }
+            }
+        }
+    } // 'levels
+    let (_al, _ar, _conn, mut new_pts, mut tris) = match accepted {
+        Some(x) => x,
+        None => nfb_fail!("no level count passes the guards (K up to 8)"),
+    };
+    let _ = (&_al, &_ar, _conn);
+    let uv_of = |idx: usize| -> [f64; 2] {
+        if idx < n {
+            [us[idx], vs[idx]]
+        } else {
+            new_pts[idx - n]
+        }
+    };
+    // ── winding: match the polygon's UV signed area ───────────────
+    {
+        let signed = |ring: &[[f64; 2]]| -> f64 {
+            let mut s = 0.0;
+            for w in ring.windows(2) {
+                s += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+            }
+            if ring.len() > 1 {
+                let (a, b) = (ring[ring.len() - 1], ring[0]);
+                s += a[0] * b[1] - b[0] * a[1];
+            }
+            s * 0.5
+        };
+        let poly_uv: Vec<[f64; 2]> = (0..n).map(|k| [us[k], vs[k]]).collect();
         let poly_s = signed(&poly_uv);
         let strip_s: f64 = tris
             .chunks_exact(3)
@@ -6546,7 +7877,9 @@ pub fn triangulate_surface_consistent(
         // We do this by setting a flag that the seam-split block checks.
     }
     SEAM_SPLIT_DEPTH.with(|d| d.set(depth + 1));
-    let _guard = DropGuard(core::mem::ManuallyDrop::new(|| SEAM_SPLIT_DEPTH.with(|d| d.set(depth))));
+    let _guard = DropGuard(core::mem::ManuallyDrop::new(|| {
+        SEAM_SPLIT_DEPTH.with(|d| d.set(depth))
+    }));
 
     let allow_seam_split = depth <= 2;
 
@@ -6591,20 +7924,27 @@ pub fn triangulate_surface_consistent(
         let margin = (nurb_u_max - nurb_u_min).max(1e-6) * 0.1;
         let v_margin = (nurb_v_max - nurb_v_min).max(1e-6) * 0.1;
         let has_invalid_uv = outer_uv.iter().any(|uv| {
-            !uv.u.is_finite() || !uv.v.is_finite()
-            || uv.u < nurb_u_min - margin || uv.u > nurb_u_max + margin
-            || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin
+            !uv.u.is_finite()
+                || !uv.v.is_finite()
+                || uv.u < nurb_u_min - margin
+                || uv.u > nurb_u_max + margin
+                || uv.v < nurb_v_min - v_margin
+                || uv.v > nurb_v_max + v_margin
         });
 
         if has_invalid_uv {
             // Some UVs are wildly off — try clamping them as a best effort.
             // If too many are bad, the triangulation will be wrong anyway.
-            let bad_count = outer_uv.iter().filter(|uv| {
-                !uv.u.is_finite() || !uv.v.is_finite()
-            }).count();
-            let clamped_count = outer_uv.iter().filter(|uv| {
-                uv.u < nurb_u_min || uv.u > nurb_u_max || uv.v < nurb_v_min || uv.v > nurb_v_max
-            }).count();
+            let bad_count = outer_uv
+                .iter()
+                .filter(|uv| !uv.u.is_finite() || !uv.v.is_finite())
+                .count();
+            let clamped_count = outer_uv
+                .iter()
+                .filter(|uv| {
+                    uv.u < nurb_u_min || uv.u > nurb_u_max || uv.v < nurb_v_min || uv.v > nurb_v_max
+                })
+                .count();
             if clamped_count > 0 || bad_count > 0 {
                 log::warn!(
                     "NURBS UV clamp: {} of {} UVs out of range, {} NaN/Inf (u=[{:.4},{:.4}] v=[{:.4},{:.4}])",
@@ -6630,16 +7970,18 @@ pub fn triangulate_surface_consistent(
             let grid_size = crate::edge_cache::adaptive_grid_size(u_range_nurbs, v_range_nurbs);
             let mut reprojected_count = 0usize;
             for (i, uv) in outer_uv.iter_mut().enumerate() {
-                let needs_reproject = !uv.u.is_finite() || !uv.v.is_finite()
-                    || uv.u < nurb_u_min - margin || uv.u > nurb_u_max + margin
-                    || uv.v < nurb_v_min - v_margin || uv.v > nurb_v_max + v_margin;
+                let needs_reproject = !uv.u.is_finite()
+                    || !uv.v.is_finite()
+                    || uv.u < nurb_u_min - margin
+                    || uv.u > nurb_u_max + margin
+                    || uv.v < nurb_v_min - v_margin
+                    || uv.v > nurb_v_max + v_margin;
 
                 if needs_reproject {
                     // UV is out of range — reproject from 3D point using brute-force
                     if let Some(p3d) = boundary_points_3d.get(i) {
-                        let (new_u, new_v) = crate::edge_cache::brute_force_project_point(
-                            nurbs, p3d, grid_size,
-                        );
+                        let (new_u, new_v) =
+                            crate::edge_cache::brute_force_project_point(nurbs, p3d, grid_size);
 
                         // Check if reprojected UV is valid
                         if new_u.is_finite() && new_v.is_finite() {
@@ -6741,8 +8083,16 @@ pub fn triangulate_surface_consistent(
     // ============================================================
     // Step 1: Normalize UV for periodic surfaces
     // ============================================================
-    let u_period = if surface.is_u_periodic() { Some(2.0 * PI) } else { None };
-    let v_period = if surface.is_v_periodic() { Some(2.0 * PI) } else { None };
+    let u_period = if surface.is_u_periodic() {
+        Some(2.0 * PI)
+    } else {
+        None
+    };
+    let v_period = if surface.is_v_periodic() {
+        Some(2.0 * PI)
+    } else {
+        None
+    };
 
     crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
 
@@ -6781,16 +8131,23 @@ pub fn triangulate_surface_consistent(
     if !matches!(surface, Surface::Nurbs(_)) {
         let uv_area = polygon_area_2d(&outer_uv);
         let boundary_3d_area = polygon_area_3d(&boundary_points_3d);
-        let area_ratio = if boundary_3d_area > 1e-20 { uv_area / boundary_3d_area } else { 1.0 };
+        let area_ratio = if boundary_3d_area > 1e-20 {
+            uv_area / boundary_3d_area
+        } else {
+            1.0
+        };
         if area_ratio < 0.001 && boundary_3d_area > 1e-10 {
             log::warn!(
                 "triangulate_surface_consistent: UV polygon area ({:.6}) much smaller than 3D area ({:.6}), ratio={:.6} — re-projecting UVs from scratch",
                 uv_area, boundary_3d_area, area_ratio
             );
-            outer_uv = boundary_points_3d.iter().map(|p| {
-                let (u, v) = surface.project_point(p);
-                Point2d::new(u, v)
-            }).collect();
+            outer_uv = boundary_points_3d
+                .iter()
+                .map(|p| {
+                    let (u, v) = surface.project_point(p);
+                    Point2d::new(u, v)
+                })
+                .collect();
             // Re-normalize
             crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
             if outer_uv.len() < 3 {
@@ -6804,7 +8161,10 @@ pub fn triangulate_surface_consistent(
     {
         let errors = validate_uv_periodicity(&outer_uv, surface);
         for err in &errors {
-            log::warn!("triangulate_surface_consistent: UV periodicity issue — {}", err);
+            log::warn!(
+                "triangulate_surface_consistent: UV periodicity issue — {}",
+                err
+            );
         }
     }
 
@@ -6908,7 +8268,9 @@ pub fn triangulate_surface_consistent(
         {
             log::info!(
                 "Proactive seam-split: sub1={} pts, sub2={} pts (depth={})",
-                sub1_uv.len(), sub2_uv.len(), depth + 1,
+                sub1_uv.len(),
+                sub2_uv.len(),
+                depth + 1,
             );
 
             let sub1_holes_3d: Vec<Vec<Point3d>> = Vec::new();
@@ -6917,14 +8279,22 @@ pub fn triangulate_surface_consistent(
             let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
 
             let mesh1 = triangulate_surface_consistent(
-                surface, &sub1_3d, &sub1_uv,
-                &sub1_holes_3d, &sub1_holes_uv,
-                forward, params,
+                surface,
+                &sub1_3d,
+                &sub1_uv,
+                &sub1_holes_3d,
+                &sub1_holes_uv,
+                forward,
+                params,
             );
             let mesh2 = triangulate_surface_consistent(
-                surface, &sub2_3d, &sub2_uv,
-                &sub2_holes_3d, &sub2_holes_uv,
-                forward, params,
+                surface,
+                &sub2_3d,
+                &sub2_uv,
+                &sub2_holes_3d,
+                &sub2_holes_uv,
+                forward,
+                params,
             );
 
             // Merge with seam-vertex deduplication.
@@ -7024,14 +8394,22 @@ pub fn triangulate_surface_consistent(
                         let sub2_holes_uv: Vec<Vec<Point2d>> = Vec::new();
 
                         let mesh1 = triangulate_surface_consistent(
-                            surface, &sub1_3d, &sub1_uv,
-                            &sub1_holes_3d, &sub1_holes_uv,
-                            forward, params,
+                            surface,
+                            &sub1_3d,
+                            &sub1_uv,
+                            &sub1_holes_3d,
+                            &sub1_holes_uv,
+                            forward,
+                            params,
                         );
                         let mesh2 = triangulate_surface_consistent(
-                            surface, &sub2_3d, &sub2_uv,
-                            &sub2_holes_3d, &sub2_holes_uv,
-                            forward, params,
+                            surface,
+                            &sub2_3d,
+                            &sub2_uv,
+                            &sub2_holes_3d,
+                            &sub2_holes_uv,
+                            forward,
+                            params,
                         );
 
                         let mut result = mesh1;
@@ -7047,15 +8425,15 @@ pub fn triangulate_surface_consistent(
                 // Only used when seam splitting is not applicable (no seam detected)
                 // or when we've exceeded the seam-split recursion depth limit.
                 log::info!("UV self-intersection: seam-split not applicable (depth={}, allow={}), trying re-projection", depth, allow_seam_split);
-                outer_uv = boundary_points_3d.iter().map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    let (su_min, su_max) = get_surface_u_range(surface);
-                    let (sv_min, sv_max) = get_surface_v_range(surface);
-                    Point2d::new(
-                        u.clamp(su_min, su_max),
-                        v.clamp(sv_min, sv_max),
-                    )
-                }).collect();
+                outer_uv = boundary_points_3d
+                    .iter()
+                    .map(|p| {
+                        let (u, v) = surface.project_point(p);
+                        let (su_min, su_max) = get_surface_u_range(surface);
+                        let (sv_min, sv_max) = get_surface_v_range(surface);
+                        Point2d::new(u.clamp(su_min, su_max), v.clamp(sv_min, sv_max))
+                    })
+                    .collect();
                 // Re-normalize
                 crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
                 if outer_uv.len() < 3 {
@@ -7169,8 +8547,12 @@ pub fn triangulate_surface_consistent(
             let (mut bx, mut by, mut bz) = (f64::MAX, f64::MAX, f64::MAX);
             let (mut BX, mut BY, mut BZ) = (f64::MIN, f64::MIN, f64::MIN);
             for p in boundary_points_3d {
-                bx = bx.min(p.x); by = by.min(p.y); bz = bz.min(p.z);
-                BX = BX.max(p.x); BY = BY.max(p.y); BZ = BZ.max(p.z);
+                bx = bx.min(p.x);
+                by = by.min(p.y);
+                bz = bz.min(p.z);
+                BX = BX.max(p.x);
+                BY = BY.max(p.y);
+                BZ = BZ.max(p.z);
             }
             eprintln!(
                 "DEGENFAN: surface={} kind={} n_bnd={} n_holes={} uv=[{:.6},{:.6}]x[{:.6},{:.6}] forward={} bbox=({:.3}..{:.3}, {:.3}..{:.3}, {:.3}..{:.3})",
@@ -7189,9 +8571,13 @@ pub fn triangulate_surface_consistent(
             return mesh;
         }
         // Compute centroid for fan triangulation
-        let mut cx = 0.0_f64; let mut cy = 0.0_f64; let mut cz = 0.0_f64;
+        let mut cx = 0.0_f64;
+        let mut cy = 0.0_f64;
+        let mut cz = 0.0_f64;
         for p in boundary_points_3d {
-            cx += p.x; cy += p.y; cz += p.z;
+            cx += p.x;
+            cy += p.y;
+            cz += p.z;
         }
         let inv_n = 1.0 / n as f64;
         let centroid = draper_geometry::Point3d::new(cx * inv_n, cy * inv_n, cz * inv_n);
@@ -7237,7 +8623,8 @@ pub fn triangulate_surface_consistent(
     // touches the apex) are handled correctly by earcutr with the
     // degenerate-UV filter in the Steiner grid generators.
     let n_boundary = outer_uv.len();
-    let n_degenerate_boundary = outer_uv.iter()
+    let n_degenerate_boundary = outer_uv
+        .iter()
         .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
         .count();
     let degenerate_fraction = if n_boundary > 0 {
@@ -7248,7 +8635,8 @@ pub fn triangulate_surface_consistent(
 
     if degenerate_fraction > 0.5 && n_boundary >= 3 {
         // Add non-degenerate boundary points
-        let non_degenerate_3d: Vec<Point3d> = outer_uv.iter()
+        let non_degenerate_3d: Vec<Point3d> = outer_uv
+            .iter()
             .zip(boundary_points_3d.iter())
             .filter(|(uv, _)| !is_degenerate_uv(&surface, uv.u, uv.v))
             .map(|(_, p3d)| *p3d)
@@ -7269,7 +8657,8 @@ pub fn triangulate_surface_consistent(
             // Find the degenerate apex/pole point — the 3D point that most
             // boundary points converge to. We evaluate the surface at the
             // average UV of the degenerate boundary points.
-            let (avg_u, avg_v) = outer_uv.iter()
+            let (avg_u, avg_v) = outer_uv
+                .iter()
                 .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
                 .fold((0.0_f64, 0.0_f64), |(au, av), pt| (au + pt.u, av + pt.v));
             let n_deg = n_degenerate_boundary.max(1);
@@ -7320,7 +8709,8 @@ pub fn triangulate_surface_consistent(
         outer_uv.clone(),
         (u_min - margin_u, u_max + margin_u),
         (v_min - margin_v, v_max + margin_v),
-    ).with_holes_from(normalized_holes_uv.iter().cloned());
+    )
+    .with_holes_from(normalized_holes_uv.iter().cloned());
     domain.init_containment_grid();
 
     // ============================================================
@@ -7343,7 +8733,8 @@ pub fn triangulate_surface_consistent(
     let mut outer_uv = outer_uv; // Already a Vec, no downsampling
 
     // Keep all hole points too — holes define where NOT to triangulate
-    let hole_polylines_3d_capped: Vec<Vec<Point3d>> = hole_polylines_3d.iter().map(|h| h.clone()).collect();
+    let hole_polylines_3d_capped: Vec<Vec<Point3d>> =
+        hole_polylines_3d.iter().map(|h| h.clone()).collect();
     let mut normalized_holes_uv_capped: Vec<Vec<Point2d>> = normalized_holes_uv;
 
     // ============================================================
@@ -7482,7 +8873,10 @@ pub fn triangulate_surface_consistent(
     // for curved surface approximation quality. We compute the interior budget
     // separately to ensure curved surfaces always get enough interior Steiner points.
     let n_boundary_and_holes = boundary_points_3d.len()
-        + hole_polylines_3d_capped.iter().map(|h| h.len()).sum::<usize>();
+        + hole_polylines_3d_capped
+            .iter()
+            .map(|h| h.len())
+            .sum::<usize>();
 
     // Minimum interior points for curved surfaces based on the number of
     // boundary vertices. A curved surface needs at least ~1/3 as many interior
@@ -7513,7 +8907,9 @@ pub fn triangulate_surface_consistent(
     } else {
         (n_boundary_and_holes / 3).max(20)
     };
-    let max_interior_budget = max_total_points.saturating_sub(n_boundary_and_holes).max(min_interior_for_curved);
+    let max_interior_budget = max_total_points
+        .saturating_sub(n_boundary_and_holes)
+        .max(min_interior_for_curved);
 
     // ============================================================
     // Step 3a: Adaptive UV subdivision via ParameterDivision2D
@@ -7803,7 +9199,9 @@ pub fn triangulate_surface_consistent(
                 if is_point_on_boundary(&domain.outer_boundary, pt, boundary_tol) {
                     continue;
                 }
-                let on_hole = domain.holes.iter()
+                let on_hole = domain
+                    .holes
+                    .iter()
                     .any(|hole| is_point_on_boundary(hole, pt, boundary_tol));
                 if on_hole {
                     continue;
@@ -7818,39 +9216,41 @@ pub fn triangulate_surface_consistent(
 
             log::debug!(
                 "NURBS shared grid: {} shared → {} in-domain (budget={})",
-                shared.len(), filtered.len(), max_interior_budget
+                shared.len(),
+                filtered.len(),
+                max_interior_budget
             );
             filtered
         } else {
             // No shared grid — fall back to per-face generation
             // (existing behavior, may break watertightness for multi-face
             // NURBS surfaces if chord-error refinement is enabled)
-        //
-        // WHY: The generic `parameter_division_2d` branch recursively
-        // subdivides the UV bbox by chord error. For NURBS surfaces,
-        // this has several problems:
-        //
-        // 1. Too coarse for faces with holes — the recursion may
-        //    produce only 4×4 or 6×6 grids. earcutr needs at least
-        //    8×8 interior Steiner points for well-shaped triangles
-        //    around holes.
-        //
-        // 2. No curvature-adaptive refinement — the chord-error
-        //    subdivision treats the surface uniformly, producing too
-        //    few points in high-curvature regions and too many in
-        //    flat regions.
-        //
-        // 3. No special-case handling — bilinear NURBS (deg 1×1)
-        //    need no interior points, ruled NURBS (one degree = 1)
-        //    need refinement only in the nonlinear direction, and
-        //    periodic NURBS must not add Steiner points on the seam.
-        //
-        // `generate_nurbs_steiner_grid` addresses all of these:
-        // - Bilinear → empty Vec (falls back to no interior points)
-        // - Ruled → densify only the nonlinear direction
-        // - General → densify both directions + curvature refinement
-        // - Periodic → skip seam points
-        let nurbs_budget = max_interior_budget.max(8);
+            //
+            // WHY: The generic `parameter_division_2d` branch recursively
+            // subdivides the UV bbox by chord error. For NURBS surfaces,
+            // this has several problems:
+            //
+            // 1. Too coarse for faces with holes — the recursion may
+            //    produce only 4×4 or 6×6 grids. earcutr needs at least
+            //    8×8 interior Steiner points for well-shaped triangles
+            //    around holes.
+            //
+            // 2. No curvature-adaptive refinement — the chord-error
+            //    subdivision treats the surface uniformly, producing too
+            //    few points in high-curvature regions and too many in
+            //    flat regions.
+            //
+            // 3. No special-case handling — bilinear NURBS (deg 1×1)
+            //    need no interior points, ruled NURBS (one degree = 1)
+            //    need refinement only in the nonlinear direction, and
+            //    periodic NURBS must not add Steiner points on the seam.
+            //
+            // `generate_nurbs_steiner_grid` addresses all of these:
+            // - Bilinear → empty Vec (falls back to no interior points)
+            // - Ruled → densify only the nonlinear direction
+            // - General → densify both directions + curvature refinement
+            // - Periodic → skip seam points
+            let nurbs_budget = max_interior_budget.max(8);
             generate_nurbs_steiner_grid(
                 surface,
                 &domain,
@@ -7883,7 +9283,8 @@ pub fn triangulate_surface_consistent(
         let boundary_tol = (u_span.max(v_span) * 1e-6).max(1e-9);
 
         let steiner_pts = crate::parametric_division_2d::interior_steiner_points(
-            &u_knots, &v_knots,
+            &u_knots,
+            &v_knots,
             (u_min_s, u_max_s),
             (v_min_s, v_max_s),
             boundary_tol,
@@ -7901,7 +9302,9 @@ pub fn triangulate_surface_consistent(
             if is_point_on_boundary(&domain.outer_boundary, &pt, boundary_tol) {
                 continue;
             }
-            let on_hole = domain.holes.iter()
+            let on_hole = domain
+                .holes
+                .iter()
                 .any(|hole| is_point_on_boundary(hole, &pt, boundary_tol));
             if on_hole {
                 continue;
@@ -8001,13 +9404,13 @@ pub fn triangulate_surface_consistent(
                 grid_size
             );
 
-            outer_uv = boundary_points_3d.iter().map(|p| {
-                let (u, v) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
-                Point2d::new(
-                    u.clamp(nu_min, nu_max),
-                    v.clamp(nv_min, nv_max),
-                )
-            }).collect();
+            outer_uv = boundary_points_3d
+                .iter()
+                .map(|p| {
+                    let (u, v) = crate::edge_cache::brute_force_project_point(nurbs, p, grid_size);
+                    Point2d::new(u.clamp(nu_min, nu_max), v.clamp(nv_min, nv_max))
+                })
+                .collect();
 
             crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
 
@@ -8094,7 +9497,13 @@ pub fn triangulate_surface_consistent(
         if !label.is_empty() && label.contains(&want) {
             let safe: String = label
                 .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' {
+                        c
+                    } else {
+                        '-'
+                    }
+                })
                 .collect();
             let path = format!("/tmp/ring_{}.tsv", safe);
             let mut out = String::with_capacity(1 << 16);
@@ -8117,8 +9526,13 @@ pub fn triangulate_surface_consistent(
                 out.push_str(&format!("lat\t{:.9}\t{:.9}\n", p.u, p.v));
             }
             let _ = std::fs::write(&path, out);
-            log::warn!("[{}] ring dumped: {} ring pts, {} lattice pts → {}",
-                label, outer_uv.len(), interior_uv_points.len(), path);
+            log::warn!(
+                "[{}] ring dumped: {} ring pts, {} lattice pts → {}",
+                label,
+                outer_uv.len(),
+                interior_uv_points.len(),
+                path
+            );
         }
     }
     // session-61 (env-gated, default OFF): cone-slab path for the
@@ -8190,70 +9604,61 @@ pub fn triangulate_surface_consistent(
     // CCW orientation), only the starting index changes; Step 5's
     // position-based dedup and the shared-edge rim chords are
     // index-agnostic.
-    let interior_uv_points: Vec<Point2d> =
-        if let Some(mode) = SteinerChainOrder::from_env() {
-            let (ring_end, ring_start) = match (
-                outer_uv.last().copied(),
-                outer_uv.first().copied(),
-            ) {
-                (Some(e), Some(s)) => (e, s),
-                _ => return TriangleMesh::new(),
-            };
-            // session-54: the aniso comb needs the median 3D lattice
-            // step per axis (through the surface) to pick the run
-            // direction — UV steps misclassify compressed
-            // parameterizations (f226 is 3D-isotropic at UV 1:5.9).
-            // session-55: the brick mode needs the same axes for the
-            // tower's run orientation and the 3D isotropy gate.
-            // Computed lazily: only in the experimental modes.
-            let aniso_axes = if matches!(
-                mode,
-                SteinerChainOrder::Aniso | SteinerChainOrder::Brick
-            ) && !interior_uv_points.is_empty()
-            {
-                let (u3, v3) =
-                    compute_axis_steps_3d(&interior_uv_points, surface);
-                if u3 > 0.0 && v3 > 0.0 {
-                    Some((u3, v3))
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            // session-55: the brick mode's routing pre-checks — the
-            // NURBS flag (the comb breaks on NURBS closures) and the
-            // legacy fill eligibility (P2 simple + aspect <= gate).
-            let chain_ctx = if mode == SteinerChainOrder::Brick
-                && !interior_uv_points.is_empty()
-            {
-                let nurbs = matches!(surface, Surface::Nurbs(_));
-                let legacy_fill_ok = !nurbs
-                    && legacy_p2_fill_eligible(
-                        &interior_uv_points,
-                        &ring_end,
-                        &ring_start,
-                        surface,
-                        aniso_axes,
-                    );
-                Some(ChainRoutingCtx {
-                    nurbs,
-                    legacy_fill_ok,
-                })
-            } else {
-                None
-            };
-            order_interior_steiner_chain(
-                &interior_uv_points,
-                &ring_end,
-                &ring_start,
-                mode,
-                aniso_axes,
-                chain_ctx,
-            )
-        } else {
-            interior_uv_points
+    let interior_uv_points: Vec<Point2d> = if let Some(mode) = SteinerChainOrder::from_env() {
+        let (ring_end, ring_start) = match (outer_uv.last().copied(), outer_uv.first().copied()) {
+            (Some(e), Some(s)) => (e, s),
+            _ => return TriangleMesh::new(),
         };
+        // session-54: the aniso comb needs the median 3D lattice
+        // step per axis (through the surface) to pick the run
+        // direction — UV steps misclassify compressed
+        // parameterizations (f226 is 3D-isotropic at UV 1:5.9).
+        // session-55: the brick mode needs the same axes for the
+        // tower's run orientation and the 3D isotropy gate.
+        // Computed lazily: only in the experimental modes.
+        let aniso_axes = if matches!(mode, SteinerChainOrder::Aniso | SteinerChainOrder::Brick)
+            && !interior_uv_points.is_empty()
+        {
+            let (u3, v3) = compute_axis_steps_3d(&interior_uv_points, surface);
+            if u3 > 0.0 && v3 > 0.0 {
+                Some((u3, v3))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        // session-55: the brick mode's routing pre-checks — the
+        // NURBS flag (the comb breaks on NURBS closures) and the
+        // legacy fill eligibility (P2 simple + aspect <= gate).
+        let chain_ctx = if mode == SteinerChainOrder::Brick && !interior_uv_points.is_empty() {
+            let nurbs = matches!(surface, Surface::Nurbs(_));
+            let legacy_fill_ok = !nurbs
+                && legacy_p2_fill_eligible(
+                    &interior_uv_points,
+                    &ring_end,
+                    &ring_start,
+                    surface,
+                    aniso_axes,
+                );
+            Some(ChainRoutingCtx {
+                nurbs,
+                legacy_fill_ok,
+            })
+        } else {
+            None
+        };
+        order_interior_steiner_chain(
+            &interior_uv_points,
+            &ring_end,
+            &ring_start,
+            mode,
+            aniso_axes,
+            chain_ctx,
+        )
+    } else {
+        interior_uv_points
+    };
 
     // Build combined point array: [boundary_uv...][valid_hole_uv...][interior_uv...]
     // CRITICAL: Only include holes with >= 3 points. Small holes are degenerate
@@ -8317,20 +9722,28 @@ pub fn triangulate_surface_consistent(
             }
             for swap in [false, true] {
                 let key = |p: &[f64; 2]| -> f64 {
-                    if swap { p[1] } else { p[0] }
+                    if swap {
+                        p[1]
+                    } else {
+                        p[0]
+                    }
                 };
-                let umin_i = (0..n).min_by(|&a, &b| {
-                    key(&boundary_2d[a])
-                        .partial_cmp(&key(&boundary_2d[b]))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.cmp(&b))
-                }).unwrap_or(0);
-                let umax_i = (0..n).min_by(|&a, &b| {
-                    key(&boundary_2d[b])
-                        .partial_cmp(&key(&boundary_2d[a]))
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                        .then(a.cmp(&b))
-                }).unwrap_or(0);
+                let umin_i = (0..n)
+                    .min_by(|&a, &b| {
+                        key(&boundary_2d[a])
+                            .partial_cmp(&key(&boundary_2d[b]))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.cmp(&b))
+                    })
+                    .unwrap_or(0);
+                let umax_i = (0..n)
+                    .min_by(|&a, &b| {
+                        key(&boundary_2d[b])
+                            .partial_cmp(&key(&boundary_2d[a]))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.cmp(&b))
+                    })
+                    .unwrap_or(0);
                 if umin_i == umax_i {
                     continue;
                 }
@@ -8352,15 +9765,15 @@ pub fn triangulate_surface_consistent(
                 let mut b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
                 // both chains must be non-decreasing in the key
                 let mono = |c: &[usize]| -> bool {
-                    c.windows(2).all(|w| {
-                        key(&boundary_2d[w[0]]) <= key(&boundary_2d[w[1]]) + 1e-12
-                    })
+                    c.windows(2)
+                        .all(|w| key(&boundary_2d[w[0]]) <= key(&boundary_2d[w[1]]) + 1e-12)
                 };
                 if !mono(&a_chain) || !mono(&b_chain) {
                     continue;
                 }
                 // the crescent class: chains share both endpoint indices
-                if a_chain[0] != b_chain[0] || *a_chain.last().unwrap() != *b_chain.last().unwrap() {
+                if a_chain[0] != b_chain[0] || *a_chain.last().unwrap() != *b_chain.last().unwrap()
+                {
                     continue;
                 }
                 if a_chain.len() < 2 || b_chain.len() < 2 {
@@ -8412,11 +9825,7 @@ pub fn triangulate_surface_consistent(
                 let strip_area: f64 = tris
                     .chunks_exact(3)
                     .map(|c| {
-                        let (a, b, cc) = (
-                            boundary_2d[c[0]],
-                            boundary_2d[c[1]],
-                            boundary_2d[c[2]],
-                        );
+                        let (a, b, cc) = (boundary_2d[c[0]], boundary_2d[c[1]], boundary_2d[c[2]]);
                         (b[0] - a[0]) * (cc[1] - a[1]) - (cc[0] - a[0]) * (b[1] - a[1])
                     })
                     .sum::<f64>()
@@ -8440,23 +9849,20 @@ pub fn triangulate_surface_consistent(
                 // triangles at the deduped corners, longest edge ~4% of
                 // the bbox diagonal) are allowed; a thin triangle that
                 // spans a large fraction of the domain is not.
-                let (min_u, max_u) = boundary_2d.iter()
+                let (min_u, max_u) = boundary_2d
+                    .iter()
                     .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
                         (lo.min(p[0]), hi.max(p[0]))
                     });
-                let (min_v, max_v) = boundary_2d.iter()
+                let (min_v, max_v) = boundary_2d
+                    .iter()
                     .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
                         (lo.min(p[1]), hi.max(p[1]))
                     });
-                let bbox_diag =
-                    ((max_u - min_u).max(1e-12)).hypot((max_v - min_v).max(1e-12));
+                let bbox_diag = ((max_u - min_u).max(1e-12)).hypot((max_v - min_v).max(1e-12));
                 let mut strip_ok = true;
                 for c in tris.chunks_exact(3) {
-                    let pts = [
-                        boundary_2d[c[0]],
-                        boundary_2d[c[1]],
-                        boundary_2d[c[2]],
-                    ];
+                    let pts = [boundary_2d[c[0]], boundary_2d[c[1]], boundary_2d[c[2]]];
                     // min angle over the three vertices
                     let mut min_ang = f64::INFINITY;
                     let mut longest = 0.0f64;
@@ -8473,8 +9879,8 @@ pub fn triangulate_surface_consistent(
                             .max(l2)
                             .max((p2[0] - p1[0]).hypot(p2[1] - p1[1]));
                         if l1 > 1e-15 && l2 > 1e-15 {
-                            let cosang = ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2))
-                                .clamp(-1.0, 1.0);
+                            let cosang =
+                                ((v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)).clamp(-1.0, 1.0);
                             let ang = cosang.acos().to_degrees();
                             min_ang = min_ang.min(ang);
                         } else {
@@ -8500,8 +9906,7 @@ pub fn triangulate_surface_consistent(
             Vec::new()
         }
 
-        let boundary_2d: Vec<[f64; 2]> =
-            outer_uv.iter().map(|p| [p.u, p.v]).collect();
+        let boundary_2d: Vec<[f64; 2]> = outer_uv.iter().map(|p| [p.u, p.v]).collect();
         let holes_2d: Vec<Vec<[f64; 2]>> = valid_hole_indices
             .iter()
             .map(|&hi| {
@@ -8511,8 +9916,7 @@ pub fn triangulate_surface_consistent(
                     .collect()
             })
             .collect();
-        let interior_2d: Vec<[f64; 2]> =
-            interior_uv_points.iter().map(|p| [p.u, p.v]).collect();
+        let interior_2d: Vec<[f64; 2]> = interior_uv_points.iter().map(|p| [p.u, p.v]).collect();
         // session-51 note: routing Torus faces through the per-face CDT
         // (Bowyer-Watson Steiner insertion, DRAPPER_TORUS_CDT experiment)
         // was tried and REJECTED — Delaunay near the rim creates MORE
@@ -8525,10 +9929,8 @@ pub fn triangulate_surface_consistent(
             Vec::new()
         };
         if cdt.is_empty() {
-            let mut tris = crate::earcut_adapter::triangulate_polygon_with_holes(
-                &coords,
-                &hole_start_indices,
-            );
+            let mut tris =
+                crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
             // session-64: unused-ring-vertex rescue (CDT re-route).
             //
@@ -8558,11 +9960,13 @@ pub fn triangulate_surface_consistent(
             // come back bit-exact, preserving the cross-face edge-cache
             // contract.
             //
-            // NOT routed: Nurbs (faces sharing one NURBS surface would
-            // build different per-face CDT connectivity over the same
-            // shared Steiner points — the documented s50/s51 regression,
-            // HOUSING 6035→14292 bnd) and Torus (s51: Delaunay near the
-            // rim creates more fold pairs, drill HM 4105→5470).
+            // NOT routed (kept excluded below): the s64 CDT fallback
+            // and the s65 crescent stay OFF Nurbs (faces sharing one
+            // NURBS surface would build different per-face CDT
+            // connectivity over the same shared Steiner points — the
+            // documented s50/s51 regression, HOUSING 6035→14292 bnd)
+            // and OFF Torus (s51: Delaunay near the rim creates more
+            // fold pairs, drill HM 4105→5470).
             // Kill-switch: DRAPPER_UNUSED_CDT_RESCUE=0.
             let mut rescued_by_cdt = false;
             if !tris.is_empty() {
@@ -8574,8 +9978,15 @@ pub fn triangulate_surface_consistent(
                 // below stay Torus-excluded (bit-identical legacy
                 // behavior); only the s69 TORUS_FILLET_BAND — a
                 // structural band, fold-guarded — is new for tori.
-                let rescue_ok = !matches!(surface, Surface::Nurbs(_))
-                    && std::env::var("DRAPPER_UNUSED_CDT_RESCUE").as_deref() != Ok("0");
+                //
+                // session-70: Nurbs faces now ENTER this block too
+                // (same restructure as s69 did for tori — the blanket
+                // exclusion also blocked the structural strips). The
+                // s65 crescent and the s64 CDT fallback below stay
+                // Nurbs-excluded (bit-identical legacy behavior);
+                // only the s70 NURBS_FILLET_BAND — a structural band,
+                // fold-guarded — is new for Nurbs.
+                let rescue_ok = std::env::var("DRAPPER_UNUSED_CDT_RESCUE").as_deref() != Ok("0");
                 if rescue_ok {
                     let mut used = vec![false; all_uv.len()];
                     for &i in &tris {
@@ -8599,7 +10010,7 @@ pub fn triangulate_surface_consistent(
                     // region breaks the cross-face contract the same way:
                     // its rim edges have no partner in the neighbor's
                     // cached chain.
-                    let rim_edge_set = |() : ()| -> std::collections::HashSet<(usize, usize)> {
+                    let rim_edge_set = |(): ()| -> std::collections::HashSet<(usize, usize)> {
                         let mut rims = std::collections::HashSet::new();
                         for i in 0..n_boundary {
                             let j = (i + 1) % n_boundary;
@@ -8657,6 +10068,10 @@ pub fn triangulate_surface_consistent(
                         // block before — keep the crescent off them
                         // (bit-identity; no fold guard in s65)
                         && !matches!(surface, Surface::Torus(_))
+                        // s70: same for Nurbs — the s65 crescent has no
+                        // fold guard; the s50/s51 Nurbs regression was
+                        // measured (HOUSING 6035→14292 bnd)
+                        && !matches!(surface, Surface::Nurbs(_))
                     {
                         two_chain_monotone_strip(&boundary_2d)
                     } else {
@@ -8672,25 +10087,19 @@ pub fn triangulate_surface_consistent(
                     // accepted only through the never-worsen gate below
                     // (bit-identical when the legacy is already clean).
                     // Kill-switch: DRAPPER_CYL_RULED_BAND=0.
-                    let cyl_band_strip: Vec<usize> =
-                        if holes_2d.is_empty()
-                            && (n_unused > 0 || legacy_extra_bnd > 0)
-                            && std::env::var("DRAPPER_CYL_RULED_BAND").as_deref()
-                                != Ok("0")
-                        {
-                            match surface {
-                                Surface::Cylinder(cyl) if cyl.radius > 0.0 => {
-                                    cylinder_ruled_band_strip(
-                                        cyl,
-                                        &boundary_2d,
-                                        params.max_deviation,
-                                    )
-                                }
-                                _ => Vec::new(),
+                    let cyl_band_strip: Vec<usize> = if holes_2d.is_empty()
+                        && (n_unused > 0 || legacy_extra_bnd > 0)
+                        && std::env::var("DRAPPER_CYL_RULED_BAND").as_deref() != Ok("0")
+                    {
+                        match surface {
+                            Surface::Cylinder(cyl) if cyl.radius > 0.0 => {
+                                cylinder_ruled_band_strip(cyl, &boundary_2d, params.max_deviation)
                             }
-                        } else {
-                            Vec::new()
-                        };
+                            _ => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
                     // session-69: TORUS_FILLET_BAND candidate — the torus
                     // fillet class (single loop, partial tube arc; the
                     // ring = 2 v-rising walls + flat rim arcs). Same
@@ -8705,35 +10114,64 @@ pub fn triangulate_surface_consistent(
                         if let Surface::Torus(_) = surface {
                             eprintln!(
                                 "[TFB hook] face reached: n_unused={} extra_bnd={} holes={} nb={}",
-                                n_unused, legacy_extra_bnd, holes_2d.len(), boundary_2d.len()
+                                n_unused,
+                                legacy_extra_bnd,
+                                holes_2d.len(),
+                                boundary_2d.len()
                             );
                         }
                     }
-                    let torus_band_strip: (Vec<usize>, Vec<[f64; 2]>) =
-                        if holes_2d.is_empty()
-                            && (n_unused > 0 || legacy_extra_bnd > 0)
-                            && std::env::var("DRAPPER_TORUS_FILLET_BAND").as_deref()
-                                != Ok("0")
-                        {
-                            match surface {
-                                Surface::Torus(t)
-                                    if t.minor_radius > 0.0 && t.major_radius > 0.0 =>
-                                {
-                                    torus_fillet_band_strip(
-                                        t,
-                                        &boundary_2d,
-                                        params.max_deviation,
-                                    )
-                                }
-                                _ => (Vec::new(), Vec::new()),
+                    let torus_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
+                        && (n_unused > 0 || legacy_extra_bnd > 0)
+                        && std::env::var("DRAPPER_TORUS_FILLET_BAND").as_deref() != Ok("0")
+                    {
+                        match surface {
+                            Surface::Torus(t) if t.minor_radius > 0.0 && t.major_radius > 0.0 => {
+                                torus_fillet_band_strip(t, &boundary_2d, params.max_deviation)
                             }
-                        } else {
-                            (Vec::new(), Vec::new())
-                        };
+                            _ => (Vec::new(), Vec::new()),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    // session-70: NURBS_FILLET_BAND candidate — the Nurbs
+                    // fillet class (the post-s69 HOUSING debt: 97 faces,
+                    // 9943 bnd; families f240/f235/f254/f68/f131 — same
+                    // s67 spike-chain root, same trigger as s68/s69,
+                    // disjoint by surface type). Returns index triples
+                    // over [ring | NEW analytic level points] — appended
+                    // to all_uv ON ACCEPTANCE (the gate below) and
+                    // resolved through point_at in Step 5 (the interior
+                    // path). Kill-switch: DRAPPER_NURBS_FILLET_BAND=0.
+                    if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                        if let Surface::Nurbs(_) = surface {
+                            eprintln!(
+                                "[NFB hook] face reached: n_unused={} extra_bnd={} holes={} nb={}",
+                                n_unused,
+                                legacy_extra_bnd,
+                                holes_2d.len(),
+                                boundary_2d.len()
+                            );
+                        }
+                    }
+                    let nurbs_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
+                        && (n_unused > 0 || legacy_extra_bnd > 0)
+                        && std::env::var("DRAPPER_NURBS_FILLET_BAND").as_deref() != Ok("0")
+                    {
+                        match surface {
+                            Surface::Nurbs(nr) => {
+                                nurbs_fillet_band_strip(nr, &boundary_2d, params.max_deviation)
+                            }
+                            _ => (Vec::new(), Vec::new()),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     if n_unused > 0
                         || !crescent_strip.is_empty()
                         || !cyl_band_strip.is_empty()
                         || !torus_band_strip.0.is_empty()
+                        || !nurbs_band_strip.0.is_empty()
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -8856,8 +10294,7 @@ pub fn triangulate_surface_consistent(
                             let strip_extra = extra_boundary_edges(&strip);
                             let never_worse = strip_rim >= legacy_rim_count
                                 && strip_extra <= legacy_extra_bnd
-                                && (strip_rim > legacy_rim_count
-                                    || strip_extra < legacy_extra_bnd);
+                                && (strip_rim > legacy_rim_count || strip_extra < legacy_extra_bnd);
                             if never_worse {
                                 log::warn!(
                                     "[f{}] CYL_RULED_BAND rescue: ruled band between cached rim chains accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, interior Steiners dropped)",
@@ -8935,8 +10372,7 @@ pub fn triangulate_surface_consistent(
                             let strip_extra = extra_boundary_edges(&strip);
                             let never_worse = strip_rim >= legacy_rim_count
                                 && strip_extra <= legacy_extra_bnd
-                                && (strip_rim > legacy_rim_count
-                                    || strip_extra < legacy_extra_bnd);
+                                && (strip_rim > legacy_rim_count || strip_extra < legacy_extra_bnd);
                             if never_worse {
                                 // remap [ring 0..n | new n..n+m] →
                                 // [ring | …all_uv tail… | appended]
@@ -8974,95 +10410,190 @@ pub fn triangulate_surface_consistent(
                                 );
                             }
                         }
+                        // session-70: NURBS_FILLET_BAND acceptance (after
+                        // s65/s68/s69 — disjoint by surface type). The
+                        // strip is edge-audited (ring edges 1×, interior
+                        // 2×) + 2D-area + fold-guarded inside; it wins
+                        // through the same never-worsen gate; its NEW
+                        // analytic level points are appended to all_uv
+                        // here (Step 5 resolves them through point_at —
+                        // the interior path) and the indices remapped.
+                        if !strip_accepted && !nurbs_band_strip.0.is_empty() {
+                            let mut strip = nurbs_band_strip.0.clone();
+                            let strip_new = &nurbs_band_strip.1;
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let never_worse = strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count || strip_extra < legacy_extra_bnd);
+                            if never_worse {
+                                // remap [ring 0..n | new n..n+m] →
+                                // [ring | …all_uv tail… | appended]
+                                let base = all_uv.len();
+                                for p in strip_new.iter() {
+                                    all_uv.push(Point2d::new(p[0], p[1]));
+                                }
+                                for idx in strip.iter_mut() {
+                                    if *idx >= n_boundary {
+                                        *idx = base + (*idx - n_boundary);
+                                    }
+                                }
+                                log::warn!(
+                                    "[f{}] NURBS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, {} analytic level pts, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3,
+                                    strip_new.len(),
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] NURBS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
+                            }
+                        }
+                        // s70: the CDT fallback now reaches Nurbs faces:
+                        // the s51 blanket exclusion predated the s64
+                        // ring-edge gate; measured on this corpus the
+                        // GATED CDT is a net win for Nurbs rejects
+                        // (drill HOUSING pairs −140, bnd −2700 on the
+                        // strip-reject population). The s65 crescent
+                        // stays Nurbs-excluded (no fold guard).
                         // s69: the CDT fallback stays Torus-excluded
                         // (s51: Delaunay near the torus rim creates more
                         // fold pairs, drill HM 4105→5470 — measured).
-                        if !strip_accepted
-                            && !matches!(surface, Surface::Torus(_))
-                        {
-                        let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
-                            &boundary_2d,
-                            &holes_2d,
-                            &interior_2d,
-                        );
-                        // session-64 acceptance gate: the rescue exists to
-                        // restore RING coverage — accept the CDT result
-                        // only when it actually carries MORE ring edges
-                        // (consecutive (i, i+1) pairs of the outer rim
-                        // and of every hole rim appearing as triangle
-                        // edges — the cross-face watertight contract)
-                        // than the legacy spike-chain pass. Degenerate
-                        // inputs (e.g. seam-wrap polygons with a
-                        // zero-length closing edge —
-                        // test_cylinder_seam_watertight_two_holes) can
-                        // make the clean-polygon earcutr produce a tiny
-                        // garbage triangulation; the ring-edge
-                        // comparison rejects it and keeps the legacy
-                        // result (never-worsen).
-                        let ring_edges_present = |flat: &[usize]| -> usize {
-                            use std::collections::HashSet;
-                            let mut edges: HashSet<(usize, usize)> = HashSet::new();
-                            for c in flat.chunks_exact(3) {
-                                for k in 0..3 {
-                                    let a = c[k];
-                                    let b = c[(k + 1) % 3];
-                                    edges.insert((a.min(b), a.max(b)));
+                        if !strip_accepted && !matches!(surface, Surface::Torus(_)) {
+                            let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
+                                &boundary_2d,
+                                &holes_2d,
+                                &interior_2d,
+                            );
+                            // session-64 acceptance gate: the rescue exists to
+                            // restore RING coverage — accept the CDT result
+                            // only when it actually carries MORE ring edges
+                            // (consecutive (i, i+1) pairs of the outer rim
+                            // and of every hole rim appearing as triangle
+                            // edges — the cross-face watertight contract)
+                            // than the legacy spike-chain pass. Degenerate
+                            // inputs (e.g. seam-wrap polygons with a
+                            // zero-length closing edge —
+                            // test_cylinder_seam_watertight_two_holes) can
+                            // make the clean-polygon earcutr produce a tiny
+                            // garbage triangulation; the ring-edge
+                            // comparison rejects it and keeps the legacy
+                            // result (never-worsen).
+                            let ring_edges_present = |flat: &[usize]| -> usize {
+                                use std::collections::HashSet;
+                                let mut edges: HashSet<(usize, usize)> = HashSet::new();
+                                for c in flat.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
                                 }
-                            }
-                            let mut n = 0usize;
-                            // outer rim edges: (i, i+1 mod n_boundary)
-                            for i in 0..n_boundary {
-                                let j = (i + 1) % n_boundary;
-                                if edges.contains(&(i.min(j), i.max(j))) {
-                                    n += 1;
-                                }
-                            }
-                            // hole rim edges: hole k spans
-                            // [hole_start_indices[k], next_start) where the
-                            // next start is the following hole's start or
-                            // n_boundary_and_holes_actual
-                            for (k, &hs) in hole_start_indices.iter().enumerate() {
-                                let he = if k + 1 < hole_start_indices.len() {
-                                    hole_start_indices[k + 1]
-                                } else {
-                                    n_boundary_and_holes_actual
-                                };
-                                let hlen = he - hs;
-                                for i in 0..hlen {
-                                    let a = hs + i;
-                                    let b = hs + (i + 1) % hlen;
-                                    if edges.contains(&(a.min(b), a.max(b))) {
+                                let mut n = 0usize;
+                                // outer rim edges: (i, i+1 mod n_boundary)
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
                                         n += 1;
                                     }
                                 }
-                            }
-                            n
-                        };
-                        let legacy_ring_edges = ring_edges_present(&tris);
-                        let cdt_flat: Vec<usize> = cdt2
-                            .iter()
-                            .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
-                            .collect();
-                        let cdt_ring_edges = ring_edges_present(&cdt_flat);
-                        // session-65 gate extension: for REGION-DROP cases
-                        // (all ring verts used, extra boundary edges > 0)
-                        // the CDT wins when it covers the same rim edges
-                        // AND leaves FEWER non-rim boundary edges (the
-                        // crescent hole disappears). Never-worsen: ring
-                        // edges must not decrease in either branch.
-                        let cdt_extra_bnd = extra_boundary_edges(&cdt_flat);
-                        // s64 semantics for n_unused cases (strictly more
-                        // ring edges — bit-identical to the session-64
-                        // gate); the extended equal-rim/fewer-extra branch
-                        // applies ONLY to the crescent region-drop class.
-                        let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
-                        let cdt_improves = !cdt2.is_empty()
-                            && (cdt_ring_edges > legacy_ring_edges
-                                || (crescent_fallback
-                                    && cdt_ring_edges == legacy_ring_edges
-                                    && cdt_extra_bnd < legacy_extra_bnd));
-                        if cdt_improves {
-                            log::warn!(
+                                // hole rim edges: hole k spans
+                                // [hole_start_indices[k], next_start) where the
+                                // next start is the following hole's start or
+                                // n_boundary_and_holes_actual
+                                for (k, &hs) in hole_start_indices.iter().enumerate() {
+                                    let he = if k + 1 < hole_start_indices.len() {
+                                        hole_start_indices[k + 1]
+                                    } else {
+                                        n_boundary_and_holes_actual
+                                    };
+                                    let hlen = he - hs;
+                                    for i in 0..hlen {
+                                        let a = hs + i;
+                                        let b = hs + (i + 1) % hlen;
+                                        if edges.contains(&(a.min(b), a.max(b))) {
+                                            n += 1;
+                                        }
+                                    }
+                                }
+                                n
+                            };
+                            let legacy_ring_edges = ring_edges_present(&tris);
+                            let cdt_flat: Vec<usize> = cdt2
+                                .iter()
+                                .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+                                .collect();
+                            let cdt_ring_edges = ring_edges_present(&cdt_flat);
+                            // session-65 gate extension: for REGION-DROP cases
+                            // (all ring verts used, extra boundary edges > 0)
+                            // the CDT wins when it covers the same rim edges
+                            // AND leaves FEWER non-rim boundary edges (the
+                            // crescent hole disappears). Never-worsen: ring
+                            // edges must not decrease in either branch.
+                            let cdt_extra_bnd = extra_boundary_edges(&cdt_flat);
+                            // s64 semantics for n_unused cases (strictly more
+                            // ring edges — bit-identical to the session-64
+                            // gate); the extended equal-rim/fewer-extra branch
+                            // applies ONLY to the crescent region-drop class.
+                            let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
+                            let cdt_improves = !cdt2.is_empty()
+                                && (cdt_ring_edges > legacy_ring_edges
+                                    || (crescent_fallback
+                                        && cdt_ring_edges == legacy_ring_edges
+                                        && cdt_extra_bnd < legacy_extra_bnd));
+                            if cdt_improves {
+                                log::warn!(
                                 "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris)",
                                 current_face_label(),
                                 n_unused,
@@ -9074,10 +10605,10 @@ pub fn triangulate_surface_consistent(
                                 tris.len() / 3,
                                 cdt2.len()
                             );
-                            tris = cdt_flat;
-                            rescued_by_cdt = true;
-                        } else {
-                            log::warn!(
+                                tris = cdt_flat;
+                                rescued_by_cdt = true;
+                            } else {
+                                log::warn!(
                                 "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}) — keeping legacy spike-chain result",
                                 current_face_label(),
                                 n_unused,
@@ -9087,48 +10618,54 @@ pub fn triangulate_surface_consistent(
                                 legacy_extra_bnd,
                                 cdt_extra_bnd
                             );
-                            // session-65 diagnostics: dump the failing CDT
-                            // inputs + both triangulations for offline
-                            // analysis (DRAPPER_DUMP_CDT_FAIL=<dir>).
-                            if let Ok(dir) = std::env::var("DRAPPER_DUMP_CDT_FAIL") {
-                                let _ = std::fs::create_dir_all(&dir);
-                                let label: String = current_face_label()
-                                    .chars()
-                                    .map(|c| if c.is_alphanumeric() || c == '_' { c } else { '_' })
-                                    .collect();
-                                let path = format!("{}/{}.cdtfail.txt", dir, label);
-                                let mut out = String::new();
-                                out.push_str(&format!(
+                                // session-65 diagnostics: dump the failing CDT
+                                // inputs + both triangulations for offline
+                                // analysis (DRAPPER_DUMP_CDT_FAIL=<dir>).
+                                if let Ok(dir) = std::env::var("DRAPPER_DUMP_CDT_FAIL") {
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let label: String = current_face_label()
+                                        .chars()
+                                        .map(|c| {
+                                            if c.is_alphanumeric() || c == '_' {
+                                                c
+                                            } else {
+                                                '_'
+                                            }
+                                        })
+                                        .collect();
+                                    let path = format!("{}/{}.cdtfail.txt", dir, label);
+                                    let mut out = String::new();
+                                    out.push_str(&format!(
                                     "n_boundary={} n_holes={} n_interior={} legacy_tris={} cdt_tris={}\n",
                                     n_boundary, holes_2d.len(), interior_2d.len(),
                                     tris.len() / 3, cdt2.len()
                                 ));
-                                out.push_str("BOUNDARY\n");
-                                for p in boundary_2d.iter() {
-                                    out.push_str(&format!("{} {}\n", p[0], p[1]));
-                                }
-                                out.push_str("HOLES\n");
-                                for h in holes_2d.iter() {
-                                    out.push_str(&format!("HOLE {}\n", h.len()));
-                                    for p in h.iter() {
+                                    out.push_str("BOUNDARY\n");
+                                    for p in boundary_2d.iter() {
                                         out.push_str(&format!("{} {}\n", p[0], p[1]));
                                     }
+                                    out.push_str("HOLES\n");
+                                    for h in holes_2d.iter() {
+                                        out.push_str(&format!("HOLE {}\n", h.len()));
+                                        for p in h.iter() {
+                                            out.push_str(&format!("{} {}\n", p[0], p[1]));
+                                        }
+                                    }
+                                    out.push_str("INTERIOR\n");
+                                    for p in interior_2d.iter() {
+                                        out.push_str(&format!("{} {}\n", p[0], p[1]));
+                                    }
+                                    out.push_str("LEGACY\n");
+                                    for c in tris.chunks(3) {
+                                        out.push_str(&format!("{} {} {}\n", c[0], c[1], c[2]));
+                                    }
+                                    out.push_str("CDT\n");
+                                    for t in cdt2.iter() {
+                                        out.push_str(&format!("{} {} {}\n", t[0], t[1], t[2]));
+                                    }
+                                    let _ = std::fs::write(path, out);
                                 }
-                                out.push_str("INTERIOR\n");
-                                for p in interior_2d.iter() {
-                                    out.push_str(&format!("{} {}\n", p[0], p[1]));
-                                }
-                                out.push_str("LEGACY\n");
-                                for c in tris.chunks(3) {
-                                    out.push_str(&format!("{} {} {}\n", c[0], c[1], c[2]));
-                                }
-                                out.push_str("CDT\n");
-                                for t in cdt2.iter() {
-                                    out.push_str(&format!("{} {} {}\n", t[0], t[1], t[2]));
-                                }
-                                let _ = std::fs::write(path, out);
                             }
-                        }
                         } // !strip_accepted (CDT fallback)
                     }
                 }
@@ -9178,9 +10715,7 @@ pub fn triangulate_surface_consistent(
                 // holes are present, else the last hole ring.
                 let (ring_start_idx, ring_last_idx) = match hole_start_indices.last() {
                     None => (0usize, n_boundary - 1),
-                    Some(&last_hole_start) => {
-                        (last_hole_start, n_boundary_and_holes_actual - 1)
-                    }
+                    Some(&last_hole_start) => (last_hole_start, n_boundary_and_holes_actual - 1),
                 };
                 // Valid hole rings as (start, end) ranges into all_uv.
                 // hole_start_indices[i] ↔ valid_hole_indices[i] (built in
@@ -9213,9 +10748,7 @@ pub fn triangulate_surface_consistent(
                         .map(|i| {
                             let uv = &all_uv[i];
                             if let Surface::Nurbs(ref nurbs) = surface {
-                                deterministic_round_point(
-                                    nurbs.derivatives_at(uv.u, uv.v).point,
-                                )
+                                deterministic_round_point(nurbs.derivatives_at(uv.u, uv.v).point)
                             } else {
                                 deterministic_round_point(surface.point_at(uv.u, uv.v))
                             }
@@ -9238,12 +10771,10 @@ pub fn triangulate_surface_consistent(
                             // Ring endpoint 3D positions (outer ring:
                             // cached boundary 3D; hole ring: the hole's
                             // 3D polyline — parallel arrays).
-                            let (rs3, rl3): (&Point3d, &Point3d) = match hole_start_indices.last()
-                            {
-                                None => (
-                                    &boundary_points_3d[0],
-                                    &boundary_points_3d[n_boundary - 1],
-                                ),
+                            let (rs3, rl3): (&Point3d, &Point3d) = match hole_start_indices.last() {
+                                None => {
+                                    (&boundary_points_3d[0], &boundary_points_3d[n_boundary - 1])
+                                }
                                 Some(_) => {
                                     let vi = valid_hole_indices.last().unwrap();
                                     let poly = &hole_polylines_3d_capped[*vi];
@@ -9268,12 +10799,10 @@ pub fn triangulate_surface_consistent(
                             // NM each. Default 0.0 = gate OFF (s52
                             // semantics); the knob is kept for future
                             // calibration experiments only.
-                            let max_ratio: f64 = std::env::var(
-                                "DRAPPER_CHAIN_COMPLEMENT_MAXCHORD",
-                            )
-                            .ok()
-                            .and_then(|s| s.parse().ok())
-                            .unwrap_or(0.0);
+                            let max_ratio: f64 = std::env::var("DRAPPER_CHAIN_COMPLEMENT_MAXCHORD")
+                                .ok()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(0.0);
                             if max_ratio > 0.0 && (r0 > max_ratio || r1 > max_ratio) {
                                 chord_gate_skip = true;
                                 log::warn!(
@@ -9311,47 +10840,75 @@ pub fn triangulate_surface_consistent(
                                 let (u_lo, u_hi, v_lo, v_hi) = {
                                     let mut it = outer_uv.iter();
                                     let p0 = it.next().copied().unwrap_or(Point2d::new(0.0, 0.0));
-                                    let mut u_lo = p0.u; let mut u_hi = p0.u;
-                                    let mut v_lo = p0.v; let mut v_hi = p0.v;
+                                    let mut u_lo = p0.u;
+                                    let mut u_hi = p0.u;
+                                    let mut v_lo = p0.v;
+                                    let mut v_hi = p0.v;
                                     for p in it {
-                                        u_lo = u_lo.min(p.u); u_hi = u_hi.max(p.u);
-                                        v_lo = v_lo.min(p.v); v_hi = v_hi.max(p.v);
+                                        u_lo = u_lo.min(p.u);
+                                        u_hi = u_hi.max(p.u);
+                                        v_lo = v_lo.min(p.v);
+                                        v_hi = v_hi.max(p.v);
                                     }
                                     (u_lo, u_hi, v_lo, v_hi)
                                 };
                                 // Lattice dims: distinct u / v coordinate
                                 // clusters among the interior points.
                                 let cluster_count = |vals: &mut Vec<f64>| -> usize {
-                                    if vals.is_empty() { return 0; }
-                                    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                    if vals.is_empty() {
+                                        return 0;
+                                    }
+                                    vals.sort_by(|a, b| {
+                                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                    });
                                     let span = (vals[vals.len() - 1] - vals[0]).abs();
                                     let tol = (span * 1e-9).max(1e-12);
                                     let mut n = 1usize;
                                     for w in vals.windows(2) {
-                                        if (w[1] - w[0]).abs() > tol { n += 1; }
+                                        if (w[1] - w[0]).abs() > tol {
+                                            n += 1;
+                                        }
                                     }
                                     n
                                 };
-                                let n_u_lat = cluster_count(&mut interior_uv_points.iter().map(|p| p.u).collect());
-                                let n_v_lat = cluster_count(&mut interior_uv_points.iter().map(|p| p.v).collect());
+                                let n_u_lat = cluster_count(
+                                    &mut interior_uv_points.iter().map(|p| p.u).collect(),
+                                );
+                                let n_v_lat = cluster_count(
+                                    &mut interior_uv_points.iter().map(|p| p.v).collect(),
+                                );
                                 // Median 3D step per axis: classify each
                                 // chain step by UV-delta dominance.
                                 let med_of = |v: &mut Vec<f64>| -> f64 {
-                                    if v.is_empty() { return 0.0; }
-                                    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                                    if v.is_empty() {
+                                        return 0.0;
+                                    }
+                                    v.sort_by(|a, b| {
+                                        a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                                    });
                                     v[v.len() / 2]
                                 };
                                 let mut u_steps3d: Vec<f64> = Vec::new();
                                 let mut v_steps3d: Vec<f64> = Vec::new();
                                 for k in 0..chain_3d.len().saturating_sub(1) {
-                                    let du = (interior_uv_points[k + 1].u - interior_uv_points[k].u).abs();
-                                    let dv = (interior_uv_points[k + 1].v - interior_uv_points[k].v).abs();
+                                    let du = (interior_uv_points[k + 1].u
+                                        - interior_uv_points[k].u)
+                                        .abs();
+                                    let dv = (interior_uv_points[k + 1].v
+                                        - interior_uv_points[k].v)
+                                        .abs();
                                     let dx = chain_3d[k].x - chain_3d[k + 1].x;
                                     let dy = chain_3d[k].y - chain_3d[k + 1].y;
                                     let dz = chain_3d[k].z - chain_3d[k + 1].z;
                                     let len = (dx * dx + dy * dy + dz * dz).sqrt();
-                                    if !len.is_finite() || len <= 0.0 { continue; }
-                                    if du > dv { u_steps3d.push(len); } else { v_steps3d.push(len); }
+                                    if !len.is_finite() || len <= 0.0 {
+                                        continue;
+                                    }
+                                    if du > dv {
+                                        u_steps3d.push(len);
+                                    } else {
+                                        v_steps3d.push(len);
+                                    }
                                 }
                                 let med_u3 = med_of(&mut u_steps3d);
                                 let med_v3 = med_of(&mut v_steps3d);
@@ -9391,12 +10948,11 @@ pub fn triangulate_surface_consistent(
                                 // every turn step), so the brick tower's
                                 // short slab runs pass while full-span
                                 // comb teeth fail.
-                                let max_aspect: f64 = std::env::var(
-                                    "DRAPPER_CHAIN_COMPLEMENT_MAXASPECT",
-                                )
-                                .ok()
-                                .and_then(|s| s.parse().ok())
-                                .unwrap_or(40.0);
+                                let max_aspect: f64 =
+                                    std::env::var("DRAPPER_CHAIN_COMPLEMENT_MAXASPECT")
+                                        .ok()
+                                        .and_then(|s| s.parse().ok())
+                                        .unwrap_or(40.0);
                                 if max_aspect > 0.0 && chain_len_3d > 0.0 {
                                     let u_step_uv_g = if n_u_lat > 1 {
                                         (u_hi - u_lo) / (n_u_lat - 1) as f64
@@ -9426,29 +10982,22 @@ pub fn triangulate_surface_consistent(
                                         && lat_v3 > 0.0
                                     {
                                         // run axis = larger effective radius
-                                        let runs_along_u = (lat_u3 / u_step_uv_g)
-                                            >= (lat_v3 / v_step_uv_g);
+                                        let runs_along_u =
+                                            (lat_u3 / u_step_uv_g) >= (lat_v3 / v_step_uv_g);
                                         let n_runs = 1 + interior_uv_points
                                             .windows(2)
                                             .filter(|w| {
                                                 let du = (w[1].u - w[0].u).abs();
                                                 let dv = (w[1].v - w[0].v).abs();
                                                 if runs_along_u {
-                                                    dv > 0.5 * v_step_uv_g
-                                                        || du > 1.5 * u_step_uv_g
+                                                    dv > 0.5 * v_step_uv_g || du > 1.5 * u_step_uv_g
                                                 } else {
-                                                    du > 0.5 * u_step_uv_g
-                                                        || dv > 1.5 * v_step_uv_g
+                                                    du > 0.5 * u_step_uv_g || dv > 1.5 * v_step_uv_g
                                                 }
                                             })
                                             .count();
-                                        let width3d = if runs_along_u {
-                                            lat_v3
-                                        } else {
-                                            lat_u3
-                                        };
-                                        let run_len =
-                                            chain_len_3d / n_runs as f64;
+                                        let width3d = if runs_along_u { lat_v3 } else { lat_u3 };
+                                        let run_len = chain_len_3d / n_runs as f64;
                                         let aspect = if width3d > 0.0 {
                                             run_len / width3d
                                         } else {
@@ -9468,102 +11017,101 @@ pub fn triangulate_surface_consistent(
                     }
                 }
                 if !chord_gate_skip {
-                let complement = triangulate_spike_chain_complement(
-                    &all_uv,
-                    ring_start_idx,
-                    ring_last_idx,
-                    n_boundary_and_holes_actual,
-                    interior_uv_points.len(),
-                    &hole_ranges,
-                );
-                if !complement.is_empty() {
-                    // session-52 definitive overlap guard: no complement
-                    // edge may already be INTERIOR (usage ≥ 2) in the
-                    // primary triangulation. Chain/chord edges legitimately
-                    // appear once in P1 (the complement supplies the second
-                    // side → usage 2 in the union); an edge already at
-                    // usage 2 in P1 means earcutr's clipped-spike fans
-                    // covered the far side too, and adding P2 duplicates
-                    // coverage (drill HM anisotropic tori f198–206:
-                    // usage-4 same-face edges, +976 NM). Simplicity checks
-                    // alone do NOT catch this — a serpentine chain arc can
-                    // divide the ring region into 3+ regions even when both
-                    // P1 and P2 are simple polygons.
-                    let mut primary_edge_count: std::collections::HashMap<(usize, usize), u32> =
-                        std::collections::HashMap::new();
-                    for tri in tris.chunks_exact(3) {
-                        for k in 0..3 {
-                            let a = tri[k];
-                            let b = tri[(k + 1) % 3];
-                            let key = if a < b { (a, b) } else { (b, a) };
-                            *primary_edge_count.entry(key).or_insert(0) += 1;
+                    let complement = triangulate_spike_chain_complement(
+                        &all_uv,
+                        ring_start_idx,
+                        ring_last_idx,
+                        n_boundary_and_holes_actual,
+                        interior_uv_points.len(),
+                        &hole_ranges,
+                    );
+                    if !complement.is_empty() {
+                        // session-52 definitive overlap guard: no complement
+                        // edge may already be INTERIOR (usage ≥ 2) in the
+                        // primary triangulation. Chain/chord edges legitimately
+                        // appear once in P1 (the complement supplies the second
+                        // side → usage 2 in the union); an edge already at
+                        // usage 2 in P1 means earcutr's clipped-spike fans
+                        // covered the far side too, and adding P2 duplicates
+                        // coverage (drill HM anisotropic tori f198–206:
+                        // usage-4 same-face edges, +976 NM). Simplicity checks
+                        // alone do NOT catch this — a serpentine chain arc can
+                        // divide the ring region into 3+ regions even when both
+                        // P1 and P2 are simple polygons.
+                        let mut primary_edge_count: std::collections::HashMap<(usize, usize), u32> =
+                            std::collections::HashMap::new();
+                        for tri in tris.chunks_exact(3) {
+                            for k in 0..3 {
+                                let a = tri[k];
+                                let b = tri[(k + 1) % 3];
+                                let key = if a < b { (a, b) } else { (b, a) };
+                                *primary_edge_count.entry(key).or_insert(0) += 1;
+                            }
                         }
-                    }
-                    let overlap = complement.chunks_exact(3).any(|tri| {
-                        (0..3).any(|k| {
-                            let a = tri[k];
-                            let b = tri[(k + 1) % 3];
-                            let key = if a < b { (a, b) } else { (b, a) };
-                            primary_edge_count.get(&key).copied().unwrap_or(0) >= 2
-                        })
-                    });
-                    if overlap {
-                        log::warn!(
+                        let overlap = complement.chunks_exact(3).any(|tri| {
+                            (0..3).any(|k| {
+                                let a = tri[k];
+                                let b = tri[(k + 1) % 3];
+                                let key = if a < b { (a, b) } else { (b, a) };
+                                primary_edge_count.get(&key).copied().unwrap_or(0) >= 2
+                            })
+                        });
+                        if overlap {
+                            log::warn!(
                             "[f{}] spike-chain complement: overlap with primary coverage detected (chain len {}) — skipping second pass",
                             current_face_label(),
                             interior_uv_points.len(),
                         );
-                    } else {
-                        // session-54: P2 ribbon statistics on the applied
-                        // line — UV area, 3D area (through the surface,
-                        // same evaluation as Step 5) and ribbon width
-                        // (3D area / 3D chain length). The s53-④ root
-                        // cause placed the damage at late repair stages
-                        // where weld tol = 2–4x lattice steps; ribbon
-                        // width vs step is the quantity to watch.
-                        let p2_uv_area = {
-                            let mut ring: Vec<Point2d> =
-                                Vec::with_capacity(interior_uv_points.len() + 2);
-                            ring.push(all_uv[ring_start_idx]);
-                            for p in interior_uv_points.iter().rev() {
-                                ring.push(*p);
-                            }
-                            ring.push(all_uv[ring_last_idx]);
-                            polygon_area_2d(&ring).abs()
-                        };
-                        let ev3 = |i: usize| -> Point3d {
-                            let uv = &all_uv[i];
-                            if let Surface::Nurbs(ref nurbs) = surface {
-                                deterministic_round_point(
-                                    nurbs.derivatives_at(uv.u, uv.v).point,
-                                )
-                            } else {
-                                deterministic_round_point(surface.point_at(uv.u, uv.v))
-                            }
-                        };
-                        let mut p2_3d_area = 0.0f64;
-                        for tri in complement.chunks_exact(3) {
-                            let a = ev3(tri[0]);
-                            let b = ev3(tri[1]);
-                            let c = ev3(tri[2]);
-                            let ux = b.x - a.x;
-                            let uy = b.y - a.y;
-                            let uz = b.z - a.z;
-                            let vx = c.x - a.x;
-                            let vy = c.y - a.y;
-                            let vz = c.z - a.z;
-                            let cx = uy * vz - uz * vy;
-                            let cy = uz * vx - ux * vz;
-                            let cz = ux * vy - uy * vx;
-                            p2_3d_area +=
-                                0.5 * (cx * cx + cy * cy + cz * cz).sqrt();
-                        }
-                        let ribbon_w = if chain_len_3d > 0.0 {
-                            p2_3d_area / chain_len_3d
                         } else {
-                            0.0
-                        };
-                        log::warn!(
+                            // session-54: P2 ribbon statistics on the applied
+                            // line — UV area, 3D area (through the surface,
+                            // same evaluation as Step 5) and ribbon width
+                            // (3D area / 3D chain length). The s53-④ root
+                            // cause placed the damage at late repair stages
+                            // where weld tol = 2–4x lattice steps; ribbon
+                            // width vs step is the quantity to watch.
+                            let p2_uv_area = {
+                                let mut ring: Vec<Point2d> =
+                                    Vec::with_capacity(interior_uv_points.len() + 2);
+                                ring.push(all_uv[ring_start_idx]);
+                                for p in interior_uv_points.iter().rev() {
+                                    ring.push(*p);
+                                }
+                                ring.push(all_uv[ring_last_idx]);
+                                polygon_area_2d(&ring).abs()
+                            };
+                            let ev3 = |i: usize| -> Point3d {
+                                let uv = &all_uv[i];
+                                if let Surface::Nurbs(ref nurbs) = surface {
+                                    deterministic_round_point(
+                                        nurbs.derivatives_at(uv.u, uv.v).point,
+                                    )
+                                } else {
+                                    deterministic_round_point(surface.point_at(uv.u, uv.v))
+                                }
+                            };
+                            let mut p2_3d_area = 0.0f64;
+                            for tri in complement.chunks_exact(3) {
+                                let a = ev3(tri[0]);
+                                let b = ev3(tri[1]);
+                                let c = ev3(tri[2]);
+                                let ux = b.x - a.x;
+                                let uy = b.y - a.y;
+                                let uz = b.z - a.z;
+                                let vx = c.x - a.x;
+                                let vy = c.y - a.y;
+                                let vz = c.z - a.z;
+                                let cx = uy * vz - uz * vy;
+                                let cy = uz * vx - ux * vz;
+                                let cz = ux * vy - uy * vx;
+                                p2_3d_area += 0.5 * (cx * cx + cy * cy + cz * cz).sqrt();
+                            }
+                            let ribbon_w = if chain_len_3d > 0.0 {
+                                p2_3d_area / chain_len_3d
+                            } else {
+                                0.0
+                            };
+                            log::warn!(
                             "[f{}] spike-chain complement: added {} triangles (chain len {}) p2_uv_area={:.3e} p2_3d_area={:.3e} ribbon_w={:.2e} chain_len_3d={:.3e}",
                             current_face_label(),
                             complement.len() / 3,
@@ -9573,9 +11121,9 @@ pub fn triangulate_surface_consistent(
                             ribbon_w,
                             chain_len_3d,
                         );
-                        tris.extend(complement);
+                            tris.extend(complement);
+                        }
                     }
-                }
                 }
             }
 
@@ -9618,8 +11166,11 @@ pub fn triangulate_surface_consistent(
             let mut out = String::with_capacity(1 << 16);
             out.push_str(&format!(
                 "type={} forward={} n_boundary={} n_holes={} n_interior={} n_tris={} label={}\n",
-                stype, forward, outer_uv.len(),
-                valid_hole_indices.len(), interior_uv_points.len(),
+                stype,
+                forward,
+                outer_uv.len(),
+                valid_hole_indices.len(),
+                interior_uv_points.len(),
                 triangle_indices.len() / 3,
                 current_face_label(),
             ));
@@ -9650,11 +11201,15 @@ pub fn triangulate_surface_consistent(
     // Collect triangles, filtering degenerate ones
     let mut result_triangles: Vec<[u32; 3]> = Vec::with_capacity(triangle_indices.len() / 3);
     for chunk in triangle_indices.chunks(3) {
-        if chunk.len() < 3 { break; }
+        if chunk.len() < 3 {
+            break;
+        }
         let a = chunk[0] as u32;
         let b = chunk[1] as u32;
         let c = chunk[2] as u32;
-        if a == b || b == c || a == c { continue; }
+        if a == b || b == c || a == c {
+            continue;
+        }
         result_triangles.push([a, b, c]);
     }
 
@@ -9683,7 +11238,8 @@ pub fn triangulate_surface_consistent(
     // Position-based dedup map: maps 3D position (rounded) → mesh vertex index.
     // This ensures that two UV indices mapping to the same 3D position get the
     // same mesh vertex, preventing position-degenerate triangles.
-    let mut position_map: std::collections::HashMap<[u64; 3], u32> = std::collections::HashMap::new();
+    let mut position_map: std::collections::HashMap<[u64; 3], u32> =
+        std::collections::HashMap::new();
 
     for tri in &result_triangles {
         // Bounds check
@@ -9699,7 +11255,9 @@ pub fn triangulate_surface_consistent(
         for (k, &idx) in tri.iter().enumerate() {
             let idx_usize = idx as usize;
             let entry = vertex_map.entry(idx).or_insert_with(|| {
-                let (p3d, n) = if idx_usize < n_boundary_and_holes_actual && idx_usize < all_boundary_3d.len() {
+                let (p3d, n) = if idx_usize < n_boundary_and_holes_actual
+                    && idx_usize < all_boundary_3d.len()
+                {
                     // Boundary/hole vertex: use cached 3D point directly
                     // This is what makes the mesh watertight — shared edge
                     // vertices have bit-identical 3D positions
@@ -9727,12 +11285,19 @@ pub fn triangulate_surface_consistent(
                         let derivs = nurbs.derivatives_at(uv.u, uv.v);
                         (deterministic_round_point(derivs.point), derivs.normal())
                     } else {
-                        (deterministic_round_point(surface.point_at(uv.u, uv.v)), surface.normal_at(uv.u, uv.v))
+                        (
+                            deterministic_round_point(surface.point_at(uv.u, uv.v)),
+                            surface.normal_at(uv.u, uv.v),
+                        )
                     }
                 };
                 // Bug B fix (8.2.1/8.2.2): for forward:false faces, negate the
                 // geometric normal so it points inward (toward the solid).
-                let n = if forward { n } else { draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n) };
+                let n = if forward {
+                    n
+                } else {
+                    draper_geometry::Direction3d::new(-n.x, -n.y, -n.z).unwrap_or(n)
+                };
                 // Position-based dedup: if a vertex with the same 3D position
                 // already exists in the face mesh, reuse it. This prevents
                 // position-degenerate triangles when two UV indices map to the
@@ -9787,7 +11352,8 @@ pub fn triangulate_surface_consistent(
     {
         let n_bnd = n_boundary_and_holes_actual;
         // Count boundary edges in the mesh (edges between consecutive boundary vertices)
-        let mut boundary_edges_in_mesh: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        let mut boundary_edges_in_mesh: std::collections::HashSet<(u32, u32)> =
+            std::collections::HashSet::new();
         for tri in &mesh.triangles {
             for k in 0..3 {
                 let a = tri[k];
@@ -9824,13 +11390,18 @@ pub fn triangulate_surface_consistent(
             for &(va, vb) in &missing_edges_list {
                 let pa = mesh.vertices[va as usize];
                 let pb = mesh.vertices[vb as usize];
-                let dist = ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
+                let dist =
+                    ((pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2)).sqrt();
                 log::warn!(
                     "  MISSING boundary edge: mesh_idx {}→{} dist={:.6}",
-                    va, vb, dist
+                    va,
+                    vb,
+                    dist
                 );
                 logged += 1;
-                if logged >= 5 { break; }
+                if logged >= 5 {
+                    break;
+                }
             }
 
             // GAP FILLING: for each missing edge (va, vb), find the best vertex
@@ -9840,14 +11411,20 @@ pub fn triangulate_surface_consistent(
             let mut filled = 0usize;
             for &(va, vb) in &missing_edges_list {
                 // Find vertices connected to both va and vb
-                let mut connected_to_a: std::collections::HashSet<u32> = std::collections::HashSet::new();
-                let mut connected_to_b: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                let mut connected_to_a: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
+                let mut connected_to_b: std::collections::HashSet<u32> =
+                    std::collections::HashSet::new();
                 for tri in &mesh.triangles {
                     for k in 0..3 {
                         let a = tri[k];
                         let b = tri[(k + 1) % 3];
-                        if a == va || b == va { connected_to_a.insert(if a == va { b } else { a }); }
-                        if a == vb || b == vb { connected_to_b.insert(if a == vb { b } else { a }); }
+                        if a == va || b == va {
+                            connected_to_a.insert(if a == va { b } else { a });
+                        }
+                        if a == vb || b == vb {
+                            connected_to_b.insert(if a == vb { b } else { a });
+                        }
                     }
                 }
                 // Find common neighbors (connected to both va and vb).
@@ -9857,8 +11434,10 @@ pub fn triangulate_surface_consistent(
                 // — the gap-fill vertex choice (and hence the mesh) was
                 // different on every run. Sort the candidates by vertex
                 // index so the choice below is a pure function of the mesh.
-                let mut common: Vec<u32> =
-                    connected_to_a.intersection(&connected_to_b).copied().collect();
+                let mut common: Vec<u32> = connected_to_a
+                    .intersection(&connected_to_b)
+                    .copied()
+                    .collect();
                 common.sort_unstable();
 
                 // CRITICAL: For faces with holes, verify that the fill triangle's
@@ -9906,7 +11485,7 @@ pub fn triangulate_surface_consistent(
                         let area2 = ((uy * vz - uz * vy).powi(2)
                             + (uz * vx - ux * vz).powi(2)
                             + (ux * vy - uy * vx).powi(2))
-                            .sqrt();
+                        .sqrt();
                         if best_vc.map_or(true, |(best, _)| area2 < best) {
                             best_vc = Some((area2, vc));
                         }
@@ -9949,8 +11528,11 @@ pub fn triangulate_surface_consistent(
                     let mut best_d = f64::MAX;
                     let mut best_vi: Option<u32> = None;
                     for (vi, v) in mesh.vertices.iter().enumerate() {
-                        if vi == va as usize || vi == vb as usize { continue; }
-                        let d = (v.x - mid.x).powi(2) + (v.y - mid.y).powi(2) + (v.z - mid.z).powi(2);
+                        if vi == va as usize || vi == vb as usize {
+                            continue;
+                        }
+                        let d =
+                            (v.x - mid.x).powi(2) + (v.y - mid.y).powi(2) + (v.z - mid.z).powi(2);
                         if d < best_d {
                             best_d = d;
                             best_vi = Some(vi as u32);
@@ -9959,9 +11541,12 @@ pub fn triangulate_surface_consistent(
                     if let Some(vc) = best_vi {
                         // Check this triangle is not degenerate
                         let pc = mesh.vertices[vc as usize];
-                        let ab = (pa.x-pb.x).powi(2)+(pa.y-pb.y).powi(2)+(pa.z-pb.z).powi(2);
-                        let bc = (pb.x-pc.x).powi(2)+(pb.y-pc.y).powi(2)+(pb.z-pc.z).powi(2);
-                        let ac = (pa.x-pc.x).powi(2)+(pa.y-pc.y).powi(2)+(pa.z-pc.z).powi(2);
+                        let ab =
+                            (pa.x - pb.x).powi(2) + (pa.y - pb.y).powi(2) + (pa.z - pb.z).powi(2);
+                        let bc =
+                            (pb.x - pc.x).powi(2) + (pb.y - pc.y).powi(2) + (pb.z - pc.z).powi(2);
+                        let ac =
+                            (pa.x - pc.x).powi(2) + (pa.y - pc.y).powi(2) + (pa.z - pc.z).powi(2);
                         if ab > 1e-20 && bc > 1e-20 && ac > 1e-20 {
                             // Verify centroid is inside domain
                             let centroid_3d = Point3d::new(
@@ -9989,7 +11574,8 @@ pub fn triangulate_surface_consistent(
             if filled > 0 {
                 log::info!(
                     "GAP_FILL: filled {}/{} missing boundary edges for surface {:?}",
-                    filled, missing_boundary_edges,
+                    filled,
+                    missing_boundary_edges,
                     std::mem::discriminant(surface),
                 );
             }
@@ -10047,7 +11633,11 @@ pub fn triangulate_surface_consistent(
         //    (since the surface evaluation is deterministic and the surfaces
         //    are shared between faces via STEP's SURFACE entity)
         // 3. The refinement creates vertices that ARE bit-identical across faces
-        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) { 0 } else { 2 };
+        let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) {
+            0
+        } else {
+            2
+        };
 
         // Build vertex UV array — maps mesh vertex index to UV coordinate.
         // This enables O(1) midpoint UV computation instead of O(1000) project_point().
@@ -10072,8 +11662,14 @@ pub fn triangulate_surface_consistent(
         }
 
         refine_mesh_chord_error_uv(
-            &mut mesh, surface, forward, params.max_deviation, max_refine_iters,
-            &mut vertex_uvs, &mut is_boundary_vertex, &domain,
+            &mut mesh,
+            surface,
+            forward,
+            params.max_deviation,
+            max_refine_iters,
+            &mut vertex_uvs,
+            &mut is_boundary_vertex,
+            &domain,
         );
     }
 
@@ -10166,7 +11762,11 @@ fn monotone_strip_band(
     let mono = |idx: &[usize], get: fn(&Point2d) -> f64, incr: bool| -> bool {
         idx.windows(2).all(|w| {
             let d = get(&vertex_uvs[w[1]]) - get(&vertex_uvs[w[0]]);
-            if incr { d >= -tol } else { d <= tol }
+            if incr {
+                d >= -tol
+            } else {
+                d <= tol
+            }
         })
     };
 
@@ -10366,19 +11966,16 @@ fn monotone_strip_band(
             let pos_eq = |a: &Point2d, b: &Point2d| -> bool {
                 (a.u - b.u).abs() <= tol && (a.v - b.v).abs() <= tol
             };
-            let push_fan = |fans: &mut Vec<(usize, usize, usize)>,
-                            apex: usize,
-                            j: usize,
-                            k: usize| {
-                let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
-                let cr = (pj.u - pa.u) * (pk.v - pa.v)
-                    - (pj.v - pa.v) * (pk.u - pa.u);
-                if cr >= 0.0 {
-                    fans.push((apex, j, k));
-                } else {
-                    fans.push((apex, k, j));
-                }
-            };
+            let push_fan =
+                |fans: &mut Vec<(usize, usize, usize)>, apex: usize, j: usize, k: usize| {
+                    let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
+                    let cr = (pj.u - pa.u) * (pk.v - pa.v) - (pj.v - pa.v) * (pk.u - pa.u);
+                    if cr >= 0.0 {
+                        fans.push((apex, j, k));
+                    } else {
+                        fans.push((apex, k, j));
+                    }
+                };
             // ret-track fans are wound CW ON PURPOSE: the ret track is
             // the bit-identical reverse of the out track, so the CW
             // ret fan's signed area cancels the out fan's EXACTLY —
@@ -10388,19 +11985,16 @@ fn monotone_strip_band(
             // skip); if the skip is winding-sensitive the surviving
             // CW membranes only add flat CURVED-180 pairs (the class
             // the legacy earcutr micro-triangles already produce).
-            let push_fan_cw = |fans: &mut Vec<(usize, usize, usize)>,
-                               apex: usize,
-                               j: usize,
-                               k: usize| {
-                let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
-                let cr = (pj.u - pa.u) * (pk.v - pa.v)
-                    - (pj.v - pa.v) * (pk.u - pa.u);
-                if cr >= 0.0 {
-                    fans.push((apex, k, j));
-                } else {
-                    fans.push((apex, j, k));
-                }
-            };
+            let push_fan_cw =
+                |fans: &mut Vec<(usize, usize, usize)>, apex: usize, j: usize, k: usize| {
+                    let (pa, pj, pk) = (vertex_uvs[apex], vertex_uvs[j], vertex_uvs[k]);
+                    let cr = (pj.u - pa.u) * (pk.v - pa.v) - (pj.v - pa.v) * (pk.u - pa.u);
+                    if cr >= 0.0 {
+                        fans.push((apex, k, j));
+                    } else {
+                        fans.push((apex, j, k));
+                    }
+                };
             let mut strip_chain: Vec<usize> = Vec::with_capacity(wavy_raw.len());
             let mut fans: Vec<(usize, usize, usize)> = Vec::new();
             let m = wavy_raw.len();
@@ -10408,9 +12002,7 @@ fn monotone_strip_band(
             while a < m {
                 // forward run a..=b (u non-decreasing)
                 let mut b = a;
-                while b + 1 < m
-                    && rim[wavy_raw[b + 1]].u >= rim[wavy_raw[b]].u - tol
-                {
+                while b + 1 < m && rim[wavy_raw[b + 1]].u >= rim[wavy_raw[b]].u - tol {
                     b += 1;
                 }
                 if b + 1 >= m {
@@ -10420,9 +12012,7 @@ fn monotone_strip_band(
                 }
                 // turnaround at b: backward run b..=c (u decreasing)
                 let mut c = b;
-                while c + 1 < m
-                    && rim[wavy_raw[c + 1]].u < rim[wavy_raw[c]].u - tol
-                {
+                while c + 1 < m && rim[wavy_raw[c + 1]].u < rim[wavy_raw[c]].u - tol {
                     c += 1;
                 }
                 // the backward run must retrace the forward run
@@ -10444,18 +12034,15 @@ fn monotone_strip_band(
                     // the tooth base. The tail is a palindrome around
                     // the peak: pos[c+k] == pos[c−k].
                     let mut d = c;
-                    while d + 1 < m
-                        && rim[wavy_raw[d + 1]].u >= rim[wavy_raw[d]].u - tol
-                    {
+                    while d + 1 < m && rim[wavy_raw[d + 1]].u >= rim[wavy_raw[d]].u - tol {
                         d += 1;
                     }
                     let pal_ok = d == m - 1
                         && c - b >= 2
                         && d - c == c - b
                         && pos_eq(&rim[wavy_raw[m - 1]], &rim[wavy_raw[b]])
-                        && (1..=(c - b)).all(|k| {
-                            pos_eq(&rim[wavy_raw[c + k]], &rim[wavy_raw[c - k]])
-                        });
+                        && (1..=(c - b))
+                            .all(|k| pos_eq(&rim[wavy_raw[c + k]], &rim[wavy_raw[c - k]]));
                     if !pal_ok {
                         return None;
                     }
@@ -10559,14 +12146,7 @@ fn monotone_strip_band(
             if !mono(&strip_chain, |p| p.u, true) {
                 return None;
             }
-            (
-                strip_chain,
-                right,
-                top,
-                left,
-                fans,
-                true,
-            )
+            (strip_chain, right, top, left, fans, true)
         }
     };
     // lattice mesh vertex index at row r, column c
@@ -10665,9 +12245,7 @@ fn collapse_doubled_rim_passes(
     if n < 2 * MIN_RUN || outer_uv.len() != n {
         return 0;
     }
-    let key = |p: &Point3d| -> [u64; 3] {
-        [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
-    };
+    let key = |p: &Point3d| -> [u64; 3] { [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()] };
     // next-occurrence index by bit-exact 3D key
     use std::collections::HashMap;
     let mut last: HashMap<[u64; 3], usize> = HashMap::with_capacity(n);
@@ -10878,10 +12456,7 @@ fn try_cone_slab_triangulate(
     if nb < 4 {
         bail!("nb < 4");
     }
-    let bottom_mono = uv
-        .windows(2)
-        .take(nb - 1)
-        .all(|w| w[1].u >= w[0].u - eps_u);
+    let bottom_mono = uv.windows(2).take(nb - 1).all(|w| w[1].u >= w[0].u - eps_u);
     if !bottom_mono {
         bail!("bottom not u-monotone");
     }
@@ -10921,10 +12496,7 @@ fn try_cone_slab_triangulate(
     // 3e. L side: walk back from the ring end — points at u≈u_lo
     //     clearly below the base level; stop at the L-valley.
     let mut j = n;
-    while j > 0
-        && (uv[j - 1].u - u_lo).abs() <= eps_u
-        && uv[j - 1].v < v_base - eps_v * 10.0
-    {
+    while j > 0 && (uv[j - 1].u - u_lo).abs() <= eps_u && uv[j - 1].v < v_base - eps_v * 10.0 {
         j -= 1;
     }
     let l_side_start = j; // uv[l_side_start..n] = L side (descends to BL)
@@ -11057,37 +12629,35 @@ fn try_cone_slab_triangulate(
     //     (BL,L-valley) and (BR,R-valley); split the cap-edge
     //     triangle into a fan through them so their rim edges stay
     //     manifold against the neighbouring face.
-    let cap_split = |raw: &mut Vec<(usize, usize, usize)>,
-                     cap_a: usize,
-                     cap_b: usize,
-                     side_pts: &[usize]| {
-        if side_pts.is_empty() {
-            return;
-        }
-        let pos = raw.iter().position(|t| {
-            let edges = [(t.0, t.1), (t.1, t.2), (t.2, t.0)];
-            edges.iter().any(|&(e0, e1)| {
-                (e0 == cap_a && e1 == cap_b) || (e0 == cap_b && e1 == cap_a)
-            })
-        });
-        let Some(ti) = pos else { return };
-        let t = raw[ti];
-        let apex = if t.0 != cap_a && t.0 != cap_b {
-            t.0
-        } else if t.1 != cap_a && t.1 != cap_b {
-            t.1
-        } else {
-            t.2
+    let cap_split =
+        |raw: &mut Vec<(usize, usize, usize)>, cap_a: usize, cap_b: usize, side_pts: &[usize]| {
+            if side_pts.is_empty() {
+                return;
+            }
+            let pos = raw.iter().position(|t| {
+                let edges = [(t.0, t.1), (t.1, t.2), (t.2, t.0)];
+                edges
+                    .iter()
+                    .any(|&(e0, e1)| (e0 == cap_a && e1 == cap_b) || (e0 == cap_b && e1 == cap_a))
+            });
+            let Some(ti) = pos else { return };
+            let t = raw[ti];
+            let apex = if t.0 != cap_a && t.0 != cap_b {
+                t.0
+            } else if t.1 != cap_a && t.1 != cap_b {
+                t.1
+            } else {
+                t.2
+            };
+            raw.remove(ti);
+            let mut chain: Vec<usize> = Vec::with_capacity(side_pts.len() + 2);
+            chain.push(cap_a);
+            chain.extend_from_slice(side_pts);
+            chain.push(cap_b);
+            for w in chain.windows(2) {
+                emit(raw, w[0], w[1], apex);
+            }
         };
-        raw.remove(ti);
-        let mut chain: Vec<usize> = Vec::with_capacity(side_pts.len() + 2);
-        chain.push(cap_a);
-        chain.extend_from_slice(side_pts);
-        chain.push(cap_b);
-        for w in chain.windows(2) {
-            emit(raw, w[0], w[1], apex);
-        }
-    };
     // L-side chain order: from BL (lowest, adjacent to the wrap)
     // up to the L-valley — the REVERSE of ring order.
     let l_side: Vec<usize> = (l_side_start..n).rev().collect();
@@ -11219,8 +12789,7 @@ fn try_cone_slab_triangulate(
         (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u)
     };
     let signed_sum: f64 = raw.iter().map(tri_area2).sum();
-    let area_ok =
-        (signed_sum - ring_area2).abs() <= 1e-4 * ring_area2.abs().max(1e-12);
+    let area_ok = (signed_sum - ring_area2).abs() <= 1e-4 * ring_area2.abs().max(1e-12);
     if !(rim_ok && chords_ok && area_ok) {
         log::warn!(
             "[{}] cone-slab: INVARIANT FAIL (rim_ok={} chords_ok={} area {:.3e} vs {:.3e}) — falling back to legacy",
@@ -11400,8 +12969,16 @@ fn try_grid_band_triangulate(
             Ok(i) => return Some(i),
             Err(i) => i,
         };
-        let d_prev = if k > 0 { (vals[k - 1] - x).abs() } else { f64::MAX };
-        let d_next = if k < vals.len() { (vals[k] - x).abs() } else { f64::MAX };
+        let d_prev = if k > 0 {
+            (vals[k - 1] - x).abs()
+        } else {
+            f64::MAX
+        };
+        let d_next = if k < vals.len() {
+            (vals[k] - x).abs()
+        } else {
+            f64::MAX
+        };
         if d_prev <= tol && d_prev <= d_next {
             Some(k - 1)
         } else if d_next <= tol {
@@ -11455,9 +13032,8 @@ fn try_grid_band_triangulate(
     let g = |r: usize, c: usize| -> usize { n_b + grid[r * n_u + c] };
 
     // ── triangles (CCW in UV; mirrored for !forward at emit) ──────
-    let mut raw_tris: Vec<(usize, usize, usize)> = Vec::with_capacity(
-        (n_u - 1) * (n_v - 1) * 2 + n_b + 2 * (n_u + n_v),
-    );
+    let mut raw_tris: Vec<(usize, usize, usize)> =
+        Vec::with_capacity((n_u - 1) * (n_v - 1) * 2 + n_b + 2 * (n_u + n_v));
     // 1) grid cells
     for r in 0..n_v - 1 {
         for c in 0..n_u - 1 {
@@ -11508,94 +13084,99 @@ fn try_grid_band_triangulate(
         // star-shaped contract would be violated; bail to legacy.
         return None;
     } else {
-    // angular zipper between the rim ring and the lattice
-    // perimeter ring, both CCW and star-shaped around the lattice
-    // rect center O.
-    let o_u = 0.5 * (us[0] + us[n_u - 1]);
-    let o_v = 0.5 * (vs[0] + vs[n_v - 1]);
-    let angle = |p: &Point2d| -> f64 { (p.v - o_v).atan2(p.u - o_u) }
+        // angular zipper between the rim ring and the lattice
+        // perimeter ring, both CCW and star-shaped around the lattice
+        // rect center O.
+        let o_u = 0.5 * (us[0] + us[n_u - 1]);
+        let o_v = 0.5 * (vs[0] + vs[n_v - 1]);
+        let angle = |p: &Point2d| -> f64 { (p.v - o_v).atan2(p.u - o_u) }
     // note: atan2 in (-π, π]; both rings start at their angle-minimum
     // vertex so the sequences are non-decreasing;
     ;
-    let start_min = |pts: &[Point2d]| -> usize {
-        let mut best = 0usize;
-        let mut best_a = f64::MAX;
-        for (i, p) in pts.iter().enumerate() {
-            let a = angle(p);
-            if a < best_a {
-                best_a = a;
-                best = i;
+        let start_min = |pts: &[Point2d]| -> usize {
+            let mut best = 0usize;
+            let mut best_a = f64::MAX;
+            for (i, p) in pts.iter().enumerate() {
+                let a = angle(p);
+                if a < best_a {
+                    best_a = a;
+                    best = i;
+                }
             }
-        }
-        best
-    };
-    let rim0 = start_min(outer_uv);
-    let rim_idx: Vec<usize> = (0..n_b).map(|k| (rim0 + k) % n_b).collect();
-    let perim_pts: Vec<Point2d> = perim.iter().map(|&vi| vertex_uvs[vi]).collect();
-    let per0 = start_min(&perim_pts);
-    let per_idx: Vec<usize> = (0..n_p).map(|k| (per0 + k) % n_p).collect();
-    let rim_ang: Vec<f64> = rim_idx.iter().map(|&i| angle(&outer_uv[i])).collect();
-    let per_ang: Vec<f64> = per_idx.iter().map(|&k| angle(&perim_pts[k])).collect();
-    // Branch-cut unwrap: raw atan2 jumps by −2π when the CCW walk
-    // crosses the +π→−π cut. The unwrapped sequences are strictly
-    // increasing (convex rings + O strictly inside ⇒ per-step angle
-    // increments in (0, π)), starting at the global angle minimum.
-    let unwrap = |raw: &mut Vec<f64>| {
-        for k in 1..raw.len() {
-            while raw[k] < raw[k - 1] {
-                raw[k] += 2.0 * PI;
-            }
-        }
-    };
-    let mut rim_ang = rim_ang;
-    let mut per_ang = per_ang;
-    unwrap(&mut rim_ang);
-    unwrap(&mut per_ang);
-    let next_rim =
-        |i: usize| -> f64 { if i + 1 < n_b { rim_ang[i + 1] } else { rim_ang[0] + 2.0 * PI } };
-    let next_per =
-        |j: usize| -> f64 { if j + 1 < n_p { per_ang[j + 1] } else { per_ang[0] + 2.0 * PI } };
-
-    let mut i = 0usize;
-    let mut j = 0usize;
-    while i < n_b || j < n_p {
-        let advance_rim = if i >= n_b {
-            false
-        } else if j >= n_p {
-            true
-        } else {
-            next_rim(i) <= next_per(j)
+            best
         };
-        if advance_rim {
-            // (rim_i, rim_{i+1}, lat_j) — lat_j strictly left of the hull edge
-            raw_tris.push((rim_idx[i], rim_idx[(i + 1) % n_b], perim[per_idx[j % n_p]]));
-            i += 1;
-        } else {
-            // (lat_j, rim_i, lat_{j+1}) — CCW annulus winding
-            raw_tris.push((
-                perim[per_idx[j]],
-                rim_idx[i % n_b],
-                perim[per_idx[(j + 1) % n_p]],
-            ));
-            j += 1;
+        let rim0 = start_min(outer_uv);
+        let rim_idx: Vec<usize> = (0..n_b).map(|k| (rim0 + k) % n_b).collect();
+        let perim_pts: Vec<Point2d> = perim.iter().map(|&vi| vertex_uvs[vi]).collect();
+        let per0 = start_min(&perim_pts);
+        let per_idx: Vec<usize> = (0..n_p).map(|k| (per0 + k) % n_p).collect();
+        let rim_ang: Vec<f64> = rim_idx.iter().map(|&i| angle(&outer_uv[i])).collect();
+        let per_ang: Vec<f64> = per_idx.iter().map(|&k| angle(&perim_pts[k])).collect();
+        // Branch-cut unwrap: raw atan2 jumps by −2π when the CCW walk
+        // crosses the +π→−π cut. The unwrapped sequences are strictly
+        // increasing (convex rings + O strictly inside ⇒ per-step angle
+        // increments in (0, π)), starting at the global angle minimum.
+        let unwrap = |raw: &mut Vec<f64>| {
+            for k in 1..raw.len() {
+                while raw[k] < raw[k - 1] {
+                    raw[k] += 2.0 * PI;
+                }
+            }
+        };
+        let mut rim_ang = rim_ang;
+        let mut per_ang = per_ang;
+        unwrap(&mut rim_ang);
+        unwrap(&mut per_ang);
+        let next_rim = |i: usize| -> f64 {
+            if i + 1 < n_b {
+                rim_ang[i + 1]
+            } else {
+                rim_ang[0] + 2.0 * PI
+            }
+        };
+        let next_per = |j: usize| -> f64 {
+            if j + 1 < n_p {
+                per_ang[j + 1]
+            } else {
+                per_ang[0] + 2.0 * PI
+            }
+        };
+
+        let mut i = 0usize;
+        let mut j = 0usize;
+        while i < n_b || j < n_p {
+            let advance_rim = if i >= n_b {
+                false
+            } else if j >= n_p {
+                true
+            } else {
+                next_rim(i) <= next_per(j)
+            };
+            if advance_rim {
+                // (rim_i, rim_{i+1}, lat_j) — lat_j strictly left of the hull edge
+                raw_tris.push((rim_idx[i], rim_idx[(i + 1) % n_b], perim[per_idx[j % n_p]]));
+                i += 1;
+            } else {
+                // (lat_j, rim_i, lat_{j+1}) — CCW annulus winding
+                raw_tris.push((
+                    perim[per_idx[j]],
+                    rim_idx[i % n_b],
+                    perim[per_idx[(j + 1) % n_p]],
+                ));
+                j += 1;
+            }
         }
-    }
     } // end angular-zipper fallback
 
     // ── emit with the Step-5 degenerate filter + winding mirror ───
-    let d2 = |a: &Point3d, b: &Point3d| {
-        (a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2)
-    };
+    let d2 =
+        |a: &Point3d, b: &Point3d| (a.x - b.x).powi(2) + (a.y - b.y).powi(2) + (a.z - b.z).powi(2);
     let mut emitted: Vec<[u32; 3]> = Vec::with_capacity(raw_tris.len());
     for (a, b, c) in &raw_tris {
         if a == b || b == c || a == c {
             continue;
         }
-        let (pa, pb, pc) = (
-            &mesh.vertices[*a],
-            &mesh.vertices[*b],
-            &mesh.vertices[*c],
-        );
+        let (pa, pb, pc) = (&mesh.vertices[*a], &mesh.vertices[*b], &mesh.vertices[*c]);
         if d2(pa, pb) < 1e-20 || d2(pb, pc) < 1e-20 || d2(pa, pc) < 1e-20 {
             continue;
         }
@@ -11651,8 +13232,7 @@ fn try_grid_band_triangulate(
     let signed_sum: f64 = emitted.iter().map(tri_area2).sum();
     let rect_area = (us[n_u - 1] - us[0]) * (vs[n_v - 1] - vs[0]);
     let expect = ring_area2; // shoelace double-area of the rim
-    let area_ok = (signed_sum.abs() - expect.abs()).abs()
-        <= 1e-6 * expect.abs().max(1e-9);
+    let area_ok = (signed_sum.abs() - expect.abs()).abs() <= 1e-6 * expect.abs().max(1e-9);
     if !(rim_ok && perim_ok && area_ok) {
         log::warn!(
             "[f{}] grid-band: INVARIANT FAIL (rim_ok={} perim_ok={} area {:.3e} vs {:.3e}) — falling back to legacy",
@@ -11770,14 +13350,14 @@ fn refine_mesh_chord_error(
                     let dx0 = p_surf.x - mid.x;
                     let dy0 = p_surf.y - mid.y;
                     let dz0 = p_surf.z - mid.z;
-                    let err0 = (dx0*dx0 + dy0*dy0 + dz0*dz0).sqrt();
+                    let err0 = (dx0 * dx0 + dy0 * dy0 + dz0 * dz0).sqrt();
                     if err0 > max_deviation * 0.1 {
                         let (u2, v2) = reproject_nurbs_point(nurbs, &mid, _u, _v);
                         let p2 = surface.point_at(u2, v2);
                         let dx2 = p2.x - mid.x;
                         let dy2 = p2.y - mid.y;
                         let dz2 = p2.z - mid.z;
-                        let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+                        let err2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2).sqrt();
                         if err2 < err0 {
                             (u2, v2, p2)
                         } else {
@@ -11836,7 +13416,7 @@ fn refine_mesh_chord_error(
                 let dx = p_surf.x - mid.x;
                 let dy = p_surf.y - mid.y;
                 let dz = p_surf.z - mid.z;
-                let reproj_err = (dx*dx + dy*dy + dz*dz).sqrt();
+                let reproj_err = (dx * dx + dy * dy + dz * dz).sqrt();
 
                 // If re-projection error is large, try Newton-Raphson refinement
                 if reproj_err > max_deviation * 0.1 {
@@ -11845,7 +13425,7 @@ fn refine_mesh_chord_error(
                     let dx2 = p2.x - mid.x;
                     let dy2 = p2.y - mid.y;
                     let dz2 = p2.z - mid.z;
-                    let err2 = (dx2*dx2 + dy2*dy2 + dz2*dz2).sqrt();
+                    let err2 = (dx2 * dx2 + dy2 * dy2 + dz2 * dz2).sqrt();
                     if err2 < reproj_err {
                         (u2, v2, p2)
                     } else {
@@ -11904,7 +13484,8 @@ fn refine_mesh_chord_error(
                 }
             } else if n_splits == 2 {
                 // Two edges split — triangle becomes 3 triangles
-                let split_edges: Vec<usize> = split_verts.iter()
+                let split_edges: Vec<usize> = split_verts
+                    .iter()
                     .enumerate()
                     .filter(|(_, v)| v.is_some())
                     .map(|(i, _)| i)
@@ -12035,11 +13616,17 @@ fn refine_mesh_chord_error_uv(
     // For NURBS, we might need Newton-Raphson refinement of the midpoint UV.
     // But first, try the simple UV averaging which is correct for well-parameterized surfaces.
     let is_nurbs = matches!(surface, Surface::Nurbs(_));
-    let (nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max) = if let Surface::Nurbs(ref nurbs) = surface {
-        (nurbs.u_range().0, nurbs.u_range().1, nurbs.v_range().0, nurbs.v_range().1)
-    } else {
-        (0.0, 1.0, 0.0, 1.0)
-    };
+    let (nurb_u_min, nurb_u_max, nurb_v_min, nurb_v_max) =
+        if let Surface::Nurbs(ref nurbs) = surface {
+            (
+                nurbs.u_range().0,
+                nurbs.u_range().1,
+                nurbs.v_range().0,
+                nurbs.v_range().1,
+            )
+        } else {
+            (0.0, 1.0, 0.0, 1.0)
+        };
 
     // Compute actual surface periods for periodic surfaces.
     // NURBS periods come from the knot range, while analytic surfaces use 2π.
@@ -12113,8 +13700,14 @@ fn refine_mesh_chord_error_uv(
                 //
                 // The chord-error refinement here only adds density to the
                 // INTERIOR of the face, away from shared boundaries.
-                let v0_is_boundary = is_boundary_vertex.get(v0 as usize).copied().unwrap_or(false);
-                let v1_is_boundary = is_boundary_vertex.get(v1 as usize).copied().unwrap_or(false);
+                let v0_is_boundary = is_boundary_vertex
+                    .get(v0 as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let v1_is_boundary = is_boundary_vertex
+                    .get(v1 as usize)
+                    .copied()
+                    .unwrap_or(false);
                 if v0_is_boundary || v1_is_boundary {
                     continue; // Don't split any edge involving a boundary vertex
                 }
@@ -12140,7 +13733,11 @@ fn refine_mesh_chord_error_uv(
                 let mid_u = if let Some(period) = u_period {
                     let du = (uv1.u - uv0.u).abs();
                     if du > period * 0.5 {
-                        let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+                        let (lo, hi) = if uv0.u < uv1.u {
+                            (uv0.u, uv1.u)
+                        } else {
+                            (uv1.u, uv0.u)
+                        };
                         ((lo + period + hi) * 0.5) % period
                     } else {
                         mid_u
@@ -12152,7 +13749,11 @@ fn refine_mesh_chord_error_uv(
                 let mid_v = if let Some(period) = v_period {
                     let dv = (uv1.v - uv0.v).abs();
                     if dv > period * 0.5 {
-                        let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+                        let (lo, hi) = if uv0.v < uv1.v {
+                            (uv0.v, uv1.v)
+                        } else {
+                            (uv1.v, uv0.v)
+                        };
                         ((lo + period + hi) * 0.5) % period
                     } else {
                         mid_v
@@ -12162,8 +13763,16 @@ fn refine_mesh_chord_error_uv(
                 };
 
                 // Clamp to surface parameter range (important for NURBS)
-                let mid_u_clamped = if is_nurbs { mid_u.clamp(nurb_u_min, nurb_u_max) } else { mid_u };
-                let mid_v_clamped = if is_nurbs { mid_v.clamp(nurb_v_min, nurb_v_max) } else { mid_v };
+                let mid_u_clamped = if is_nurbs {
+                    mid_u.clamp(nurb_u_min, nurb_u_max)
+                } else {
+                    mid_u
+                };
+                let mid_v_clamped = if is_nurbs {
+                    mid_v.clamp(nurb_v_min, nurb_v_max)
+                } else {
+                    mid_v
+                };
 
                 // CRITICAL: Skip splitting if the midpoint UV falls inside a hole
                 // or outside the outer boundary.
@@ -12231,14 +13840,22 @@ fn refine_mesh_chord_error_uv(
             if let Some(period) = u_period {
                 let du = (uv1.u - uv0.u).abs();
                 if du > period * 0.5 {
-                    let (lo, hi) = if uv0.u < uv1.u { (uv0.u, uv1.u) } else { (uv1.u, uv0.u) };
+                    let (lo, hi) = if uv0.u < uv1.u {
+                        (uv0.u, uv1.u)
+                    } else {
+                        (uv1.u, uv0.u)
+                    };
                     mid_u = ((lo + period + hi) * 0.5) % period;
                 }
             }
             if let Some(period) = v_period {
                 let dv = (uv1.v - uv0.v).abs();
                 if dv > period * 0.5 {
-                    let (lo, hi) = if uv0.v < uv1.v { (uv0.v, uv1.v) } else { (uv1.v, uv0.v) };
+                    let (lo, hi) = if uv0.v < uv1.v {
+                        (uv0.v, uv1.v)
+                    } else {
+                        (uv1.v, uv0.v)
+                    };
                     mid_v = ((lo + period + hi) * 0.5) % period;
                 }
             }
@@ -12308,7 +13925,8 @@ fn refine_mesh_chord_error_uv(
                     mesh.triangles.push([vm, v2, v1]);
                 }
             } else if n_splits == 2 {
-                let split_edges: Vec<usize> = split_verts.iter()
+                let split_edges: Vec<usize> = split_verts
+                    .iter()
                     .enumerate()
                     .filter(|(_, v)| v.is_some())
                     .map(|(i, _)| i)
@@ -12469,7 +14087,10 @@ fn merge_coincident_boundary_points(
     if merge_count > 0 {
         log::info!(
             "DegeneracyHandler: merged {} coincident boundary points (tol={:.2e}, {}→{})",
-            merge_count, tolerance, n, merged_3d.len(),
+            merge_count,
+            tolerance,
+            n,
+            merged_3d.len(),
         );
     }
 
@@ -12550,16 +14171,23 @@ mod tests {
 
         let interior = generate_interior_points(&domain, 10, 10, 0.1);
         for p in &interior {
-            assert!(domain.contains(p), "Interior point {:?} should be inside domain", p);
+            assert!(
+                domain.contains(p),
+                "Interior point {:?} should be inside domain",
+                p
+            );
         }
 
         let mesh = triangulate_cdt(&domain, &surface, true, &interior);
-        assert!(!mesh.triangles.is_empty(), "Should generate triangles with holes");
+        assert!(
+            !mesh.triangles.is_empty(),
+            "Should generate triangles with holes"
+        );
     }
 
     #[test]
     fn test_sphere_band() {
-        use draper_geometry::{SphereSurface, Point3d, Surface};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
         let surface = Surface::Sphere(sphere);
@@ -12580,7 +14208,10 @@ mod tests {
         let domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (PI / 4.0, PI / 2.0));
         let interior = generate_interior_points(&domain, 10, 5, 0.01);
         let mesh = triangulate_cdt(&domain, &surface, true, &interior);
-        assert!(!mesh.triangles.is_empty(), "Sphere band should generate triangles");
+        assert!(
+            !mesh.triangles.is_empty(),
+            "Sphere band should generate triangles"
+        );
     }
 
     #[test]
@@ -12598,14 +14229,18 @@ mod tests {
 
         let points = generate_nurbs_interior_points(&domain, &u_knots, &v_knots, 2);
         for p in &points {
-            assert!(domain.contains(p), "NURBS interior point {:?} should be inside domain", p);
+            assert!(
+                domain.contains(p),
+                "NURBS interior point {:?} should be inside domain",
+                p
+            );
         }
         assert!(!points.is_empty(), "Should generate NURBS interior points");
     }
 
     #[test]
     fn test_earclip_with_holes_no_hang() {
-        use draper_geometry::{SphereSurface, Point3d, Surface};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
         let surface = Surface::Sphere(sphere);
@@ -12645,8 +14280,15 @@ mod tests {
         let mesh = triangulate_cdt(&domain, &surface, true, &[]);
         let elapsed = start.elapsed();
 
-        assert!(!mesh.triangles.is_empty(), "Should generate triangles with 3 holes");
-        assert!(elapsed.as_millis() < 100, "Ear-clip should be fast, took {}ms", elapsed.as_millis());
+        assert!(
+            !mesh.triangles.is_empty(),
+            "Should generate triangles with 3 holes"
+        );
+        assert!(
+            elapsed.as_millis() < 100,
+            "Ear-clip should be fast, took {}ms",
+            elapsed.as_millis()
+        );
     }
 
     #[test]
@@ -12689,35 +14331,62 @@ mod tests {
         let params = crate::triangulate::TriangulationParams::default();
 
         let start = std::time::Instant::now();
-        let mesh = triangulate_surface_consistent(
-            &surface, &all_3d, &all_uv, &[], &[], true, &params,
-        );
+        let mesh =
+            triangulate_surface_consistent(&surface, &all_3d, &all_uv, &[], &[], true, &params);
         let elapsed = start.elapsed();
 
         assert!(!mesh.triangles.is_empty(), "Should generate triangles");
-        assert!(elapsed.as_millis() < 200, "Consistent triangulation should be fast, took {}ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 200,
+            "Consistent triangulation should be fast, took {}ms",
+            elapsed.as_millis()
+        );
     }
 
     #[test]
     fn test_nurbs_triangulation_performance() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d as P3, Point2d as P2};
+        use draper_geometry::{NurbsSurface, Point2d as P2, Point3d as P3, Surface};
 
         // Create a bicubic NURBS surface (same as the test button in the app)
         let control_points = vec![
-            vec![P3::new(-50.0, -50.0,  0.0), P3::new(-50.0, -15.0, 10.0), P3::new(-50.0,  15.0, 10.0), P3::new(-50.0,  50.0,  0.0)],
-            vec![P3::new(-15.0, -50.0, 10.0), P3::new(-15.0, -15.0, 30.0), P3::new(-15.0,  15.0, 25.0), P3::new(-15.0,  50.0,  5.0)],
-            vec![P3::new( 15.0, -50.0, 10.0), P3::new( 15.0, -15.0, 25.0), P3::new( 15.0,  15.0, 30.0), P3::new( 15.0,  50.0, 10.0)],
-            vec![P3::new( 50.0, -50.0,  0.0), P3::new( 50.0, -15.0,  5.0), P3::new( 50.0,  15.0, 10.0), P3::new( 50.0,  50.0,  0.0)],
+            vec![
+                P3::new(-50.0, -50.0, 0.0),
+                P3::new(-50.0, -15.0, 10.0),
+                P3::new(-50.0, 15.0, 10.0),
+                P3::new(-50.0, 50.0, 0.0),
+            ],
+            vec![
+                P3::new(-15.0, -50.0, 10.0),
+                P3::new(-15.0, -15.0, 30.0),
+                P3::new(-15.0, 15.0, 25.0),
+                P3::new(-15.0, 50.0, 5.0),
+            ],
+            vec![
+                P3::new(15.0, -50.0, 10.0),
+                P3::new(15.0, -15.0, 25.0),
+                P3::new(15.0, 15.0, 30.0),
+                P3::new(15.0, 50.0, 10.0),
+            ],
+            vec![
+                P3::new(50.0, -50.0, 0.0),
+                P3::new(50.0, -15.0, 5.0),
+                P3::new(50.0, 15.0, 10.0),
+                P3::new(50.0, 50.0, 0.0),
+            ],
         ];
         let weights = vec![vec![1.0; 4]; 4];
         let u_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
         let v_knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
 
         let nurbs = NurbsSurface {
-            u_degree: 3, v_degree: 3,
-            control_points, weights,
-            u_knots, v_knots,
-            u_closed: false, v_closed: false,
+            u_degree: 3,
+            v_degree: 3,
+            control_points,
+            weights,
+            u_knots,
+            v_knots,
+            u_closed: false,
+            v_closed: false,
         };
 
         let (u_min, u_max) = nurbs.u_range();
@@ -12754,21 +14423,43 @@ mod tests {
         let start = std::time::Instant::now();
         // Use the public API that routes NURBS through the grid-based path
         let mesh = crate::triangulate::triangulate_face_with_boundary_and_holes_uv(
-            &surface, &boundary_3d, &boundary_uv, &[], &[], true, &params,
+            &surface,
+            &boundary_3d,
+            &boundary_uv,
+            &[],
+            &[],
+            true,
+            &params,
         );
         let elapsed = start.elapsed();
 
         assert!(!mesh.triangles.is_empty(), "Should generate triangles");
-        assert!(elapsed.as_millis() < 5000, "NURBS triangulation should be fast (was hanging before), took {}ms", elapsed.as_millis());
+        assert!(
+            elapsed.as_millis() < 5000,
+            "NURBS triangulation should be fast (was hanging before), took {}ms",
+            elapsed.as_millis()
+        );
 
         // Quality checks
-        let nan_count = mesh.vertices.iter().filter(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite()).count();
+        let nan_count = mesh
+            .vertices
+            .iter()
+            .filter(|v| !v.x.is_finite() || !v.y.is_finite() || !v.z.is_finite())
+            .count();
         assert_eq!(nan_count, 0, "No NaN vertices");
 
-        let degen = mesh.triangles.iter().filter(|t| t[0] == t[1] || t[1] == t[2] || t[0] == t[2]).count();
+        let degen = mesh
+            .triangles
+            .iter()
+            .filter(|t| t[0] == t[1] || t[1] == t[2] || t[0] == t[2])
+            .count();
         assert_eq!(degen, 0, "No degenerate triangles");
 
-        assert!(mesh.triangles.len() >= 50, "Should have at least 50 triangles, got {}", mesh.triangles.len());
+        assert!(
+            mesh.triangles.len() >= 50,
+            "Should have at least 50 triangles, got {}",
+            mesh.triangles.len()
+        );
     }
 
     // ============================================================
@@ -12806,14 +14497,23 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 5.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 5.0),
+            &params,
+            4096,
         );
 
         // Should have multiple interior points (regular grid in v direction).
         // The bug being fixed: parameter_division_2d returns 0 interior points
         // for cylinders because they have zero chord error in v. Our new
         // generator should produce many.
-        assert!(pts.len() >= 10, "Expected ≥10 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 10,
+            "Expected ≥10 Steiner points, got {}",
+            pts.len()
+        );
 
         // All points should be strictly inside the domain (not on boundary).
         for p in &pts {
@@ -12827,7 +14527,12 @@ mod tests {
         let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
         v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(v_values.len() >= 3, "Expected ≥3 distinct v values, got {}: {:?}", v_values.len(), v_values);
+        assert!(
+            v_values.len() >= 3,
+            "Expected ≥3 distinct v values, got {}: {:?}",
+            v_values.len(),
+            v_values
+        );
     }
 
     #[test]
@@ -12851,13 +14556,17 @@ mod tests {
             Point2d::new(4.0, 6.0),
             Point2d::new(2.0, 6.0),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0))
-            .with_hole(hole);
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0)).with_hole(hole);
         domain.init_containment_grid();
 
         let params = make_test_params(0.05);
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 10.0),
+            &params,
+            4096,
         );
 
         assert!(!pts.is_empty(), "Should have Steiner points");
@@ -12889,11 +14598,25 @@ mod tests {
         let params = make_test_params(0.01); // tight tolerance → many points
         let budget = 50usize;
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, budget,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 10.0),
+            &params,
+            budget,
         );
 
-        assert!(pts.len() <= budget, "Budget exceeded: {} > {}", pts.len(), budget);
-        assert!(pts.len() >= 10, "Should still have meaningful points: {}", pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget exceeded: {} > {}",
+            pts.len(),
+            budget
+        );
+        assert!(
+            pts.len() >= 10,
+            "Should still have meaningful points: {}",
+            pts.len()
+        );
     }
 
     #[test]
@@ -12916,13 +14639,22 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 3.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 3.0),
+            &params,
+            4096,
         );
 
         // Cone also has zero chord error in the axial direction, so the
         // old path produced 0 Steiner points. The new generator should
         // produce interior points on a regular grid.
-        assert!(pts.len() >= 4, "Expected ≥4 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 4,
+            "Expected ≥4 Steiner points, got {}",
+            pts.len()
+        );
 
         for p in &pts {
             assert!(domain.contains_ray(p), "point {:?} outside domain", p);
@@ -12932,7 +14664,12 @@ mod tests {
         let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
         v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(v_values.len() >= 2, "Expected ≥2 distinct v values, got {}: {:?}", v_values.len(), v_values);
+        assert!(
+            v_values.len() >= 2,
+            "Expected ≥2 distinct v values, got {}: {:?}",
+            v_values.len(),
+            v_values
+        );
     }
 
     #[test]
@@ -12955,7 +14692,12 @@ mod tests {
 
         let params = make_test_params(0.1);
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 5.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 5.0),
+            &params,
+            4096,
         );
 
         // Recover unique u and v values.
@@ -12982,7 +14724,13 @@ mod tests {
         for p in &pts {
             let u_ok = u_unique.iter().any(|&u| (u - p.u).abs() < tol);
             let v_ok = v_unique.iter().any(|&v| (v - p.v).abs() < tol);
-            assert!(u_ok && v_ok, "point {:?} not on grid (u_unique={}, v_unique={})", p, u_unique.len(), v_unique.len());
+            assert!(
+                u_ok && v_ok,
+                "point {:?} not on grid (u_unique={}, v_unique={})",
+                p,
+                u_unique.len(),
+                v_unique.len()
+            );
         }
 
         // Should have multiple points in both u and v directions.
@@ -13014,11 +14762,19 @@ mod tests {
         // n_u = ceil(10/10) = 1 → clamped to 4. Same for n_v.
         // Interior points: (4-1) × (4-1) = 9 points.
         let pts = generate_planar_steiner_grid(
-            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            &domain,
+            &outer_uv,
+            (0.0, 10.0),
+            (0.0, 10.0),
+            4096,
             crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
-        assert!(pts.len() >= 4, "Expected ≥4 interior points, got {}", pts.len());
+        assert!(
+            pts.len() >= 4,
+            "Expected ≥4 interior points, got {}",
+            pts.len()
+        );
 
         // All points must be strictly inside (0, 10) × (0, 10).
         for p in &pts {
@@ -13042,8 +14798,7 @@ mod tests {
             Point2d::new(6.0, 6.0),
             Point2d::new(4.0, 6.0),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 10.0), (0.0, 10.0))
-            .with_hole(hole);
+        let mut domain = ParametricDomain::new(outer, (0.0, 10.0), (0.0, 10.0)).with_hole(hole);
         domain.init_containment_grid();
 
         let outer_uv = vec![
@@ -13053,7 +14808,11 @@ mod tests {
             Point2d::new(0.0, 10.0),
         ];
         let pts = generate_planar_steiner_grid(
-            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            &domain,
+            &outer_uv,
+            (0.0, 10.0),
+            (0.0, 10.0),
+            4096,
             crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
@@ -13063,7 +14822,11 @@ mod tests {
             assert!(!in_hole, "point {:?} falls inside the hole", p);
         }
         // Should still produce multiple interior points.
-        assert!(pts.len() >= 4, "Expected ≥4 interior points, got {}", pts.len());
+        assert!(
+            pts.len() >= 4,
+            "Expected ≥4 interior points, got {}",
+            pts.len()
+        );
     }
 
     #[test]
@@ -13086,36 +14849,54 @@ mod tests {
         ];
         let budget = 5;
         let pts = generate_planar_steiner_grid(
-            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), budget,
+            &domain,
+            &outer_uv,
+            (0.0, 10.0),
+            (0.0, 10.0),
+            budget,
             crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
-        assert!(pts.len() <= budget, "Expected ≤{} points, got {}", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Expected ≤{} points, got {}",
+            budget,
+            pts.len()
+        );
     }
 
     #[test]
     fn test_planar_steiner_grid_preserves_grid_structure() {
         // Verify the generated points form a Cartesian product of u-values × v-values.
         // Use many boundary points so n_u, n_v are larger than the minimum clamp.
-        let outer_uv: Vec<Point2d> = (0..20).map(|i| {
-            let t = i as f64 / 19.0;
-            Point2d::new(t * 10.0, 0.0)
-        }).chain((0..20).map(|i| {
-            let t = i as f64 / 19.0;
-            Point2d::new(10.0, t * 10.0)
-        })).chain((0..20).map(|i| {
-            let t = i as f64 / 19.0;
-            Point2d::new(10.0 - t * 10.0, 10.0)
-        })).chain((0..20).map(|i| {
-            let t = i as f64 / 19.0;
-            Point2d::new(0.0, 10.0 - t * 10.0)
-        })).collect();
+        let outer_uv: Vec<Point2d> = (0..20)
+            .map(|i| {
+                let t = i as f64 / 19.0;
+                Point2d::new(t * 10.0, 0.0)
+            })
+            .chain((0..20).map(|i| {
+                let t = i as f64 / 19.0;
+                Point2d::new(10.0, t * 10.0)
+            }))
+            .chain((0..20).map(|i| {
+                let t = i as f64 / 19.0;
+                Point2d::new(10.0 - t * 10.0, 10.0)
+            }))
+            .chain((0..20).map(|i| {
+                let t = i as f64 / 19.0;
+                Point2d::new(0.0, 10.0 - t * 10.0)
+            }))
+            .collect();
 
         let mut domain = ParametricDomain::new(outer_uv.clone(), (0.0, 10.0), (0.0, 10.0));
         domain.init_containment_grid();
 
         let pts = generate_planar_steiner_grid(
-            &domain, &outer_uv, (0.0, 10.0), (0.0, 10.0), 4096,
+            &domain,
+            &outer_uv,
+            (0.0, 10.0),
+            (0.0, 10.0),
+            4096,
             crate::triangulate::SteinerBudgetProfile::Desktop,
         );
 
@@ -13154,7 +14935,7 @@ mod tests {
 
     #[test]
     fn test_sphere_steiner_grid_basic() {
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         // Sphere radius=10, full U range [0, 2π], V range [0, π] (full sphere).
         let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
@@ -13172,11 +14953,20 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_sphere_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, PI),
+            &params,
+            4096,
         );
 
         // Should have multiple interior points (regular grid in both u and v).
-        assert!(pts.len() >= 10, "Expected ≥10 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 10,
+            "Expected ≥10 Steiner points, got {}",
+            pts.len()
+        );
 
         // All points should be strictly inside the domain (not on boundary).
         for p in &pts {
@@ -13194,18 +14984,26 @@ mod tests {
 
         // Equator (v = π/2) should be present (full-sphere case).
         let has_equator = pts.iter().any(|p| (p.v - PI / 2.0).abs() < 1e-6);
-        assert!(has_equator, "Equator ring missing in full-sphere Steiner grid");
+        assert!(
+            has_equator,
+            "Equator ring missing in full-sphere Steiner grid"
+        );
 
         // The V coordinates should form a regular grid (multiple distinct v values).
         let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
         v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(v_values.len() >= 3, "Expected ≥3 distinct v values, got {}: {:?}", v_values.len(), v_values);
+        assert!(
+            v_values.len() >= 3,
+            "Expected ≥3 distinct v values, got {}: {:?}",
+            v_values.len(),
+            v_values
+        );
     }
 
     #[test]
     fn test_sphere_steiner_grid_excludes_holes() {
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
         let surface = Surface::Sphere(sph);
@@ -13224,13 +15022,17 @@ mod tests {
             Point2d::new(4.0, 2.0),
             Point2d::new(2.0, 2.0),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, PI))
-            .with_hole(hole);
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, PI)).with_hole(hole);
         domain.init_containment_grid();
 
         let params = make_test_params(0.05);
         let pts = generate_sphere_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, PI),
+            &params,
+            4096,
         );
 
         assert!(!pts.is_empty(), "Should have Steiner points");
@@ -13245,7 +15047,7 @@ mod tests {
 
     #[test]
     fn test_sphere_steiner_grid_respects_budget() {
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sph = SphereSurface::new(Point3d::new(0.0, 0.0, 0.0), 10.0);
         let surface = Surface::Sphere(sph);
@@ -13263,16 +15065,26 @@ mod tests {
         let params = make_test_params(0.01);
         let budget = 50;
         let pts = generate_sphere_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, PI), &params, budget,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, PI),
+            &params,
+            budget,
         );
 
-        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget {} exceeded: {} points",
+            budget,
+            pts.len()
+        );
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 
     #[test]
     fn test_sphere_steiner_grid_band_skips_poles() {
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         // Partial sphere band: v ∈ [0.02, π - 0.02] — includes both pole
         // neighborhoods but does NOT include the poles themselves.
@@ -13294,7 +15106,12 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_sphere_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (v_min, v_max), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (v_min, v_max),
+            &params,
+            4096,
         );
 
         const POLE_EPS: f64 = 0.05;
@@ -13302,7 +15119,11 @@ mod tests {
             // Even though the domain includes v=0.02, no Steiner point
             // should land in the pole-degenerate zone [0, 0.05) or (π-0.05, π].
             assert!(p.v > POLE_EPS, "v={} too close to north pole", p.v);
-            assert!(p.v < std::f64::consts::PI - POLE_EPS, "v={} too close to south pole", p.v);
+            assert!(
+                p.v < std::f64::consts::PI - POLE_EPS,
+                "v={} too close to south pole",
+                p.v
+            );
         }
     }
 
@@ -13312,7 +15133,7 @@ mod tests {
 
     #[test]
     fn test_torus_steiner_grid_basic() {
-        use draper_geometry::{TorusSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, Surface, TorusSurface};
 
         // Torus R=2, r=0.5 (typical fillet size), full U/V range.
         let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
@@ -13329,13 +15150,22 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_torus_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            4096,
         );
 
         // Should have multiple interior points (regular grid in both u and v).
         // The bug being fixed: parameter_division_2d returns only 4×4 or 6×6
         // for small torus fillet faces. Our new generator should produce many.
-        assert!(pts.len() >= 50, "Expected ≥50 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 50,
+            "Expected ≥50 Steiner points, got {}",
+            pts.len()
+        );
 
         // All points should be strictly inside the domain (not on boundary).
         for p in &pts {
@@ -13349,18 +15179,28 @@ mod tests {
         let mut u_values: Vec<f64> = pts.iter().map(|p| p.u).collect();
         u_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         u_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(u_values.len() >= 10, "Expected ≥10 distinct u values, got {}: {:?}", u_values.len(), u_values);
+        assert!(
+            u_values.len() >= 10,
+            "Expected ≥10 distinct u values, got {}: {:?}",
+            u_values.len(),
+            u_values
+        );
 
         // n_v floor is 24 on desktop — should have at least 10 distinct v values.
         let mut v_values: Vec<f64> = pts.iter().map(|p| p.v).collect();
         v_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         v_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(v_values.len() >= 10, "Expected ≥10 distinct v values, got {}: {:?}", v_values.len(), v_values);
+        assert!(
+            v_values.len() >= 10,
+            "Expected ≥10 distinct v values, got {}: {:?}",
+            v_values.len(),
+            v_values
+        );
     }
 
     #[test]
     fn test_torus_steiner_grid_excludes_holes() {
-        use draper_geometry::{TorusSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, Surface, TorusSurface};
 
         let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
         let surface = Surface::Torus(torus);
@@ -13378,13 +15218,18 @@ mod tests {
             Point2d::new(4.0, 4.0),
             Point2d::new(2.0, 4.0),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI))
-            .with_hole(hole);
+        let mut domain =
+            ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 2.0 * PI)).with_hole(hole);
         domain.init_containment_grid();
 
         let params = make_test_params(0.05);
         let pts = generate_torus_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            4096,
         );
 
         assert!(!pts.is_empty(), "Should have Steiner points");
@@ -13399,7 +15244,7 @@ mod tests {
 
     #[test]
     fn test_torus_steiner_grid_respects_budget() {
-        use draper_geometry::{TorusSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, Surface, TorusSurface};
 
         let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 2.0, 0.5);
         let surface = Surface::Torus(torus);
@@ -13417,16 +15262,26 @@ mod tests {
         let params = make_test_params(0.01);
         let budget = 100;
         let pts = generate_torus_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, budget,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            budget,
         );
 
-        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget {} exceeded: {} points",
+            budget,
+            pts.len()
+        );
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 
     #[test]
     fn test_torus_steiner_grid_partial_band() {
-        use draper_geometry::{TorusSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, Surface, TorusSurface};
 
         // Partial torus band: u ∈ [0, π] (half torus), v ∈ [0, 2π] (full tube).
         // The grid should be naturally bounded by the u_range / v_range
@@ -13449,15 +15304,30 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_torus_steiner_grid(
-            &surface, &domain, (u_min, u_max), (v_min, v_max), &params, 4096,
+            &surface,
+            &domain,
+            (u_min, u_max),
+            (v_min, v_max),
+            &params,
+            4096,
         );
 
         // All points should be within the partial u range [0, π].
         for p in &pts {
-            assert!(p.u >= u_min - 1e-9 && p.u <= u_max + 1e-9,
-                    "u={} outside partial range [{}, {}]", p.u, u_min, u_max);
-            assert!(p.v >= v_min - 1e-9 && p.v <= v_max + 1e-9,
-                    "v={} outside full v range [{}, {}]", p.v, v_min, v_max);
+            assert!(
+                p.u >= u_min - 1e-9 && p.u <= u_max + 1e-9,
+                "u={} outside partial range [{}, {}]",
+                p.u,
+                u_min,
+                u_max
+            );
+            assert!(
+                p.v >= v_min - 1e-9 && p.v <= v_max + 1e-9,
+                "v={} outside full v range [{}, {}]",
+                p.v,
+                v_min,
+                v_max
+            );
             assert!(domain.contains_ray(p), "point {:?} outside domain", p);
         }
 
@@ -13465,12 +15335,16 @@ mod tests {
         let mut u_values: Vec<f64> = pts.iter().map(|p| p.u).collect();
         u_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
         u_values.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
-        assert!(u_values.len() >= 5, "Expected ≥5 distinct u values, got {}", u_values.len());
+        assert!(
+            u_values.len() >= 5,
+            "Expected ≥5 distinct u values, got {}",
+            u_values.len()
+        );
     }
 
     #[test]
     fn test_torus_steiner_grid_degenerate_returns_empty() {
-        use draper_geometry::{TorusSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, Surface, TorusSurface};
 
         // Degenerate torus: minor_radius ≈ 0 → circle-like.
         // Should return empty Vec (no Steiner points).
@@ -13488,10 +15362,19 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_torus_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            4096,
         );
 
-        assert!(pts.is_empty(), "Degenerate torus should return empty Vec, got {} points", pts.len());
+        assert!(
+            pts.is_empty(),
+            "Degenerate torus should return empty Vec, got {} points",
+            pts.len()
+        );
     }
 
     // ============================================================
@@ -13500,7 +15383,7 @@ mod tests {
 
     #[test]
     fn test_revolution_steiner_grid_line_profile() {
-        use draper_geometry::{RevolutionSurface, Surface, Point3d, Direction3d, Curve3d, Line};
+        use draper_geometry::{Curve3d, Direction3d, Line, Point3d, RevolutionSurface, Surface};
 
         // Linear profile revolved around Z axis → equivalent to a cylinder.
         // Profile: line from (5, 0, 0) to (5, 0, 10) — parallel to axis at radius 5.
@@ -13520,10 +15403,18 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_revolution_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 1.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 1.0),
+            &params,
+            4096,
         );
 
-        assert!(!pts.is_empty(), "Line profile revolution should have Steiner points");
+        assert!(
+            !pts.is_empty(),
+            "Line profile revolution should have Steiner points"
+        );
         // All points should be inside the domain.
         for p in &pts {
             assert!(domain.contains_ray(p), "point {:?} outside domain", p);
@@ -13532,7 +15423,7 @@ mod tests {
 
     #[test]
     fn test_revolution_steiner_grid_excludes_holes() {
-        use draper_geometry::{RevolutionSurface, Surface, Point3d, Direction3d, Curve3d, Line};
+        use draper_geometry::{Curve3d, Direction3d, Line, Point3d, RevolutionSurface, Surface};
 
         let line = Line::new(Point3d::new(5.0, 0.0, 0.0), Direction3d::Z);
         let rev = RevolutionSurface::new(Curve3d::Line(line), Direction3d::Z, Point3d::ORIGIN);
@@ -13551,13 +15442,17 @@ mod tests {
             Point2d::new(2.0, 0.7),
             Point2d::new(1.0, 0.7),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 1.0))
-            .with_hole(hole);
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 1.0)).with_hole(hole);
         domain.init_containment_grid();
 
         let params = make_test_params(0.05);
         let pts = generate_revolution_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 1.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 1.0),
+            &params,
+            4096,
         );
 
         // No Steiner point should land inside the hole.
@@ -13565,12 +15460,15 @@ mod tests {
             let in_hole = p.u > 1.0 && p.u < 2.0 && p.v > 0.3 && p.v < 0.7;
             assert!(!in_hole, "Steiner point {:?} is inside hole", p);
         }
-        assert!(!pts.is_empty(), "Should have Steiner points outside the hole");
+        assert!(
+            !pts.is_empty(),
+            "Should have Steiner points outside the hole"
+        );
     }
 
     #[test]
     fn test_revolution_steiner_grid_respects_budget() {
-        use draper_geometry::{RevolutionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+        use draper_geometry::{Circle, Curve3d, Direction3d, Point3d, RevolutionSurface, Surface};
 
         // Circle profile → torus-like revolution. Many candidates expected.
         let circle = Circle::new_xy(Point3d::new(5.0, 0.0, 0.0), 2.0);
@@ -13589,16 +15487,26 @@ mod tests {
         let params = make_test_params(0.01);
         let budget = 100;
         let pts = generate_revolution_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, budget,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            budget,
         );
 
-        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget {} exceeded: {} points",
+            budget,
+            pts.len()
+        );
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 
     #[test]
     fn test_revolution_steiner_grid_axis_degenerate() {
-        use draper_geometry::{RevolutionSurface, Surface, Point3d, Direction3d, Curve3d, Line};
+        use draper_geometry::{Curve3d, Direction3d, Line, Point3d, RevolutionSurface, Surface};
 
         // Profile line that passes THROUGH the axis: from (0, 0, 0) to (0, 0, 10).
         // At v = 0 the profile is ON the axis (perp distance = 0), so the surface
@@ -13621,7 +15529,12 @@ mod tests {
 
         let params = make_test_params(0.05);
         let _pts = generate_revolution_steiner_grid(
-            &surface, &domain, (0.0, u_max), (0.0, 1.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, u_max),
+            (0.0, 1.0),
+            &params,
+            4096,
         );
 
         // With a line profile through the axis, all profile points are on the
@@ -13639,7 +15552,7 @@ mod tests {
 
     #[test]
     fn test_revolution_steiner_grid_circle_profile() {
-        use draper_geometry::{RevolutionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+        use draper_geometry::{Circle, Curve3d, Direction3d, Point3d, RevolutionSurface, Surface};
 
         // Circle profile at radius 5 from axis → creates a torus-like surface.
         let circle = Circle::new_xy(Point3d::new(5.0, 0.0, 0.0), 2.0);
@@ -13657,10 +15570,18 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_revolution_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 2.0 * PI), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 2.0 * PI),
+            &params,
+            4096,
         );
 
-        assert!(!pts.is_empty(), "Circle profile revolution should have Steiner points");
+        assert!(
+            !pts.is_empty(),
+            "Circle profile revolution should have Steiner points"
+        );
         // Should have multiple distinct u and v values (rich grid).
         let n_distinct_u = {
             let mut u_vals: Vec<f64> = pts.iter().map(|p| p.u).collect();
@@ -13668,7 +15589,11 @@ mod tests {
             u_vals.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             u_vals.len()
         };
-        assert!(n_distinct_u >= 6, "Expected ≥6 distinct u values, got {}", n_distinct_u);
+        assert!(
+            n_distinct_u >= 6,
+            "Expected ≥6 distinct u values, got {}",
+            n_distinct_u
+        );
     }
 
     // ============================================================
@@ -13677,7 +15602,7 @@ mod tests {
 
     #[test]
     fn test_extrusion_steiner_grid_line_profile() {
-        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Line};
+        use draper_geometry::{Curve3d, Direction3d, ExtrusionSurface, Line, Point3d, Surface};
 
         // Linear profile extruded along Z → flat rectangular surface.
         let line = Line::new(Point3d::new(0.0, 0.0, 0.0), Direction3d::X);
@@ -13696,7 +15621,12 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_extrusion_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 10.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 1.0),
+            (0.0, 10.0),
+            &params,
+            4096,
         );
 
         // Linear profile → few u-samples. Should have some interior points.
@@ -13707,7 +15637,7 @@ mod tests {
 
     #[test]
     fn test_extrusion_steiner_grid_circle_profile() {
-        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+        use draper_geometry::{Circle, Curve3d, Direction3d, ExtrusionSurface, Point3d, Surface};
 
         // Circular profile extruded along Z → cylindrical surface.
         let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
@@ -13726,10 +15656,18 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_extrusion_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 10.0),
+            &params,
+            4096,
         );
 
-        assert!(!pts.is_empty(), "Circle profile extrusion should have Steiner points");
+        assert!(
+            !pts.is_empty(),
+            "Circle profile extrusion should have Steiner points"
+        );
         // Should have multiple distinct u values (from circle chord-error).
         let n_distinct_u = {
             let mut u_vals: Vec<f64> = pts.iter().map(|p| p.u).collect();
@@ -13737,12 +15675,16 @@ mod tests {
             u_vals.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
             u_vals.len()
         };
-        assert!(n_distinct_u >= 4, "Expected ≥4 distinct u values, got {}", n_distinct_u);
+        assert!(
+            n_distinct_u >= 4,
+            "Expected ≥4 distinct u values, got {}",
+            n_distinct_u
+        );
     }
 
     #[test]
     fn test_extrusion_steiner_grid_excludes_holes() {
-        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+        use draper_geometry::{Circle, Curve3d, Direction3d, ExtrusionSurface, Point3d, Surface};
 
         let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
         let ext = ExtrusionSurface::new(Curve3d::Circle(circle), Direction3d::Z);
@@ -13761,13 +15703,17 @@ mod tests {
             Point2d::new(3.0, 7.0),
             Point2d::new(1.0, 7.0),
         ];
-        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0))
-            .with_hole(hole);
+        let mut domain = ParametricDomain::new(outer, (0.0, 2.0 * PI), (0.0, 10.0)).with_hole(hole);
         domain.init_containment_grid();
 
         let params = make_test_params(0.05);
         let pts = generate_extrusion_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 10.0),
+            &params,
+            4096,
         );
 
         // No Steiner point should land inside the hole.
@@ -13775,12 +15721,15 @@ mod tests {
             let in_hole = p.u > 1.0 && p.u < 3.0 && p.v > 3.0 && p.v < 7.0;
             assert!(!in_hole, "Steiner point {:?} is inside hole", p);
         }
-        assert!(!pts.is_empty(), "Should have Steiner points outside the hole");
+        assert!(
+            !pts.is_empty(),
+            "Should have Steiner points outside the hole"
+        );
     }
 
     #[test]
     fn test_extrusion_steiner_grid_respects_budget() {
-        use draper_geometry::{ExtrusionSurface, Surface, Point3d, Direction3d, Curve3d, Circle};
+        use draper_geometry::{Circle, Curve3d, Direction3d, ExtrusionSurface, Point3d, Surface};
 
         let circle = Circle::new_xy(Point3d::ORIGIN, 5.0);
         let ext = ExtrusionSurface::new(Curve3d::Circle(circle), Direction3d::Z);
@@ -13798,10 +15747,20 @@ mod tests {
         let params = make_test_params(0.01);
         let budget = 50;
         let pts = generate_extrusion_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 10.0), &params, budget,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 10.0),
+            &params,
+            budget,
         );
 
-        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget {} exceeded: {} points",
+            budget,
+            pts.len()
+        );
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 
@@ -13809,11 +15768,12 @@ mod tests {
 
     #[test]
     fn test_nurbs_steiner_grid_bilinear_returns_empty() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d};
+        use draper_geometry::{NurbsSurface, Point3d, Surface};
 
         // Bilinear NURBS (degree 1×1): flat surface, no interior points needed.
         let nurbs = NurbsSurface::from_v_rows(
-            1, 1,
+            1,
+            1,
             vec![
                 vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(1.0, 0.0, 0.0)],
                 vec![Point3d::new(0.0, 1.0, 0.0), Point3d::new(1.0, 1.0, 0.0)],
@@ -13821,7 +15781,8 @@ mod tests {
             vec![vec![1.0, 1.0], vec![1.0, 1.0]],
             vec![0.0, 0.0, 1.0, 1.0],
             vec![0.0, 0.0, 1.0, 1.0],
-            false, false,
+            false,
+            false,
         );
         let surface = Surface::Nurbs(nurbs);
 
@@ -13835,16 +15796,19 @@ mod tests {
         domain.init_containment_grid();
 
         let params = make_test_params(0.01);
-        let pts = generate_nurbs_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 200,
-        );
+        let pts =
+            generate_nurbs_steiner_grid(&surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 200);
 
-        assert!(pts.is_empty(), "Bilinear NURBS should have no interior points, got {}", pts.len());
+        assert!(
+            pts.is_empty(),
+            "Bilinear NURBS should have no interior points, got {}",
+            pts.len()
+        );
     }
 
     #[test]
     fn test_nurbs_steiner_grid_high_degree_produces_points() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d};
+        use draper_geometry::{NurbsSurface, Point3d, Surface};
 
         // Degree 3×3 NURBS surface — should produce interior Steiner points.
         let n = 6;
@@ -13869,14 +15833,8 @@ mod tests {
         let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
         let v_knots: Vec<f64> = u_knots.clone();
 
-        let nurbs = NurbsSurface::from_v_rows(
-            3, 3,
-            v_rows_cp,
-            v_rows_w,
-            u_knots,
-            v_knots,
-            false, false,
-        );
+        let nurbs =
+            NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
         let surface = Surface::Nurbs(nurbs);
 
         let outer = vec![
@@ -13889,17 +15847,20 @@ mod tests {
         domain.init_containment_grid();
 
         let params = make_test_params(0.01);
-        let pts = generate_nurbs_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
-        );
+        let pts =
+            generate_nurbs_steiner_grid(&surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500);
 
         // Should have multiple interior points (at least 8×8 = 64 minus boundary)
-        assert!(pts.len() >= 20, "Expected ≥20 Steiner points for deg-3 NURBS, got {}", pts.len());
+        assert!(
+            pts.len() >= 20,
+            "Expected ≥20 Steiner points for deg-3 NURBS, got {}",
+            pts.len()
+        );
     }
 
     #[test]
     fn test_nurbs_steiner_grid_excludes_holes() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d};
+        use draper_geometry::{NurbsSurface, Point3d, Surface};
 
         // Degree 3×3 NURBS with a rectangular hole in the middle
         let n = 6;
@@ -13922,7 +15883,8 @@ mod tests {
         let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
         let v_knots: Vec<f64> = u_knots.clone();
 
-        let nurbs = NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let nurbs =
+            NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
         let surface = Surface::Nurbs(nurbs);
 
         let outer = vec![
@@ -13942,20 +15904,23 @@ mod tests {
         // in the test, but we can still verify the filter logic.
 
         let params = make_test_params(0.01);
-        let pts = generate_nurbs_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
-        );
+        let pts =
+            generate_nurbs_steiner_grid(&surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500);
 
         // No Steiner point should fall inside the hole
         for pt in &pts {
             let in_hole = pt.u > 0.3 && pt.u < 0.7 && pt.v > 0.3 && pt.v < 0.7;
-            assert!(!in_hole, "Steiner point {:?} should not be inside the hole", pt);
+            assert!(
+                !in_hole,
+                "Steiner point {:?} should not be inside the hole",
+                pt
+            );
         }
     }
 
     #[test]
     fn test_nurbs_steiner_grid_respects_budget() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d};
+        use draper_geometry::{NurbsSurface, Point3d, Surface};
 
         let n = 6;
         let mut v_rows_cp = Vec::new();
@@ -13977,7 +15942,8 @@ mod tests {
         let u_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
         let v_knots: Vec<f64> = u_knots.clone();
 
-        let nurbs = NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let nurbs =
+            NurbsSurface::from_v_rows(3, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
         let surface = Surface::Nurbs(nurbs);
 
         let outer = vec![
@@ -13991,17 +15957,21 @@ mod tests {
 
         let params = make_test_params(0.01);
         let budget = 30;
-        let pts = generate_nurbs_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, budget,
-        );
+        let pts =
+            generate_nurbs_steiner_grid(&surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, budget);
 
-        assert!(pts.len() <= budget, "Budget {} exceeded: {} points", budget, pts.len());
+        assert!(
+            pts.len() <= budget,
+            "Budget {} exceeded: {} points",
+            budget,
+            pts.len()
+        );
         assert!(!pts.is_empty(), "Should have at least some Steiner points");
     }
 
     #[test]
     fn test_nurbs_steiner_grid_ruled_densifies_nonlinear() {
-        use draper_geometry::{NurbsSurface, Surface, Point3d};
+        use draper_geometry::{NurbsSurface, Point3d, Surface};
 
         // Ruled NURBS: degree 1 in u, degree 3 in v.
         // Should densify in v (nonlinear direction) but keep u minimal.
@@ -14028,7 +15998,8 @@ mod tests {
         // Degree 3 in v
         let v_knots: Vec<f64> = vec![0.0, 0.0, 0.0, 0.0, 0.333, 0.667, 1.0, 1.0, 1.0, 1.0];
 
-        let nurbs = NurbsSurface::from_v_rows(1, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
+        let nurbs =
+            NurbsSurface::from_v_rows(1, 3, v_rows_cp, v_rows_w, u_knots, v_knots, false, false);
         let surface = Surface::Nurbs(nurbs);
 
         let outer = vec![
@@ -14041,12 +16012,14 @@ mod tests {
         domain.init_containment_grid();
 
         let params = make_test_params(0.01);
-        let pts = generate_nurbs_steiner_grid(
-            &surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500,
-        );
+        let pts =
+            generate_nurbs_steiner_grid(&surface, &domain, (0.0, 1.0), (0.0, 1.0), &params, 500);
 
         // Should have Steiner points (ruled in u, curved in v)
-        assert!(!pts.is_empty(), "Ruled NURBS should produce interior points, got 0");
+        assert!(
+            !pts.is_empty(),
+            "Ruled NURBS should produce interior points, got 0"
+        );
     }
 
     // ============================================================
@@ -14055,26 +16028,34 @@ mod tests {
 
     #[test]
     fn test_is_degenerate_uv_sphere_poles() {
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sphere = SphereSurface::new(Point3d::ORIGIN, 5.0);
         let surface = Surface::Sphere(sphere);
 
         // North pole (v ≈ 0) — degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, 0.01),
-                "v=0.01 near north pole should be degenerate");
+        assert!(
+            is_degenerate_uv(&surface, 0.0, 0.01),
+            "v=0.01 near north pole should be degenerate"
+        );
 
         // South pole (v ≈ π) — degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, PI - 0.01),
-                "v=π-0.01 near south pole should be degenerate");
+        assert!(
+            is_degenerate_uv(&surface, 0.0, PI - 0.01),
+            "v=π-0.01 near south pole should be degenerate"
+        );
 
         // Equator (v = π/2) — NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, PI / 2.0),
-                "v=π/2 at equator should NOT be degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, PI / 2.0),
+            "v=π/2 at equator should NOT be degenerate"
+        );
 
         // Mid-latitude — NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 1.0, 1.0),
-                "v=1.0 mid-latitude should NOT be degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 1.0, 1.0),
+            "v=1.0 mid-latitude should NOT be degenerate"
+        );
     }
 
     #[test]
@@ -14087,19 +16068,25 @@ mod tests {
         let surface = Surface::Cone(cone);
 
         // At v=0 (base) — NOT degenerate (full radius)
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
-                "v=0 at cone base should NOT be degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, 0.0),
+            "v=0 at cone base should NOT be degenerate"
+        );
 
         // At v=-8.0 — close to apex but not yet degenerate
         // radius at v=-8: 5 + (-8)*tan(30°) = 5 - 4.62 = 0.38
         // threshold = max(5 * 0.02, 1e-9) = 0.1 → 0.38 > 0.1 → not degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, -8.0),
-                "v=-8.0 should NOT be degenerate yet");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, -8.0),
+            "v=-8.0 should NOT be degenerate yet"
+        );
 
         // At v=-8.66 — near apex (radius ≈ 0)
         // radius at v=-8.66: 5 + (-8.66)*0.577 ≈ 5 - 5.0 = 0.0 → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, -8.66),
-                "v=-8.66 near apex should be degenerate");
+        assert!(
+            is_degenerate_uv(&surface, 0.0, -8.66),
+            "v=-8.66 near apex should be degenerate"
+        );
     }
 
     #[test]
@@ -14119,16 +16106,22 @@ mod tests {
         let surface = Surface::Cone(cone);
 
         // v=0 → r = 0.01 = full base radius → NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
-                "v=0 at tiny-cone base (r = R) must NOT be flagged degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, 0.0),
+            "v=0 at tiny-cone base (r = R) must NOT be flagged degenerate"
+        );
 
         // v=-0.005 → r = 0.01 - 0.005·tan(45°) = 0.005 = 50% of R → NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, -0.005),
-                "v=-0.005 (r = 50% of R) must NOT be flagged degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, -0.005),
+            "v=-0.005 (r = 50% of R) must NOT be flagged degenerate"
+        );
 
         // v=-0.01 → r = 0 (apex) → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, -0.01),
-                "v=-0.01 at tiny-cone apex (r = 0) must be flagged degenerate");
+        assert!(
+            is_degenerate_uv(&surface, 0.0, -0.01),
+            "v=-0.01 at tiny-cone apex (r = 0) must be flagged degenerate"
+        );
     }
 
     #[test]
@@ -14155,11 +16148,16 @@ mod tests {
         let params = make_test_params(0.01);
 
         let mesh = triangulate_surface_consistent(
-            &surface, &boundary_3d, &boundary_uvs, &[], &[], true, &params,
+            &surface,
+            &boundary_3d,
+            &boundary_uvs,
+            &[],
+            &[],
+            true,
+            &params,
         );
 
-        let is_phantom_hole =
-            mesh.vertices.len() == 1 && mesh.triangles.is_empty();
+        let is_phantom_hole = mesh.vertices.len() == 1 && mesh.triangles.is_empty();
         assert!(
             !is_phantom_hole,
             "fully-degenerate boundary must not produce the 1-vertex/0-triangle \
@@ -14177,10 +16175,14 @@ mod tests {
         let surface = Surface::Cylinder(cyl);
 
         // Cylinder has no degeneracy anywhere
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.0),
-                "Cylinder should have no degeneracy");
-        assert!(!is_degenerate_uv(&surface, PI, 2.5),
-                "Cylinder should have no degeneracy");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, 0.0),
+            "Cylinder should have no degeneracy"
+        );
+        assert!(
+            !is_degenerate_uv(&surface, PI, 2.5),
+            "Cylinder should have no degeneracy"
+        );
     }
 
     #[test]
@@ -14204,14 +16206,23 @@ mod tests {
 
         let params = make_test_params(0.05);
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 9.0), &params, 4096,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 9.0),
+            &params,
+            4096,
         );
 
         // All Steiner points should be far from the apex
         for pt in &pts {
             // Check that the point is not in the degenerate zone
-            assert!(!is_degenerate_uv(&surface, pt.u, pt.v),
-                    "Steiner point at ({:.4}, {:.4}) is in degenerate zone near cone apex", pt.u, pt.v);
+            assert!(
+                !is_degenerate_uv(&surface, pt.u, pt.v),
+                "Steiner point at ({:.4}, {:.4}) is in degenerate zone near cone apex",
+                pt.u,
+                pt.v
+            );
         }
     }
 
@@ -14224,7 +16235,7 @@ mod tests {
         // should skip all points near the pole (v < 0.05), leaving only
         // boundary points. The degenerate-boundary pre-check should then
         // trigger fan triangulation from the pole.
-        use draper_geometry::{SphereSurface, Surface, Point3d};
+        use draper_geometry::{Point3d, SphereSurface, Surface};
 
         let sphere = SphereSurface::new(Point3d::ORIGIN, 10.0);
         let surface = Surface::Sphere(sphere);
@@ -14252,7 +16263,8 @@ mod tests {
         }
 
         // Check that most boundary points are degenerate near the pole
-        let n_degenerate = outer_uv.iter()
+        let n_degenerate = outer_uv
+            .iter()
             .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
             .count();
         // The bottom ring (n_u points at v=π/4) should NOT be degenerate.
@@ -14274,39 +16286,52 @@ mod tests {
                 cap_uv.push(Point2d::new(u, v));
             }
         }
-        let n_deg_small = cap_uv.iter()
+        let n_deg_small = cap_uv
+            .iter()
             .filter(|pt| is_degenerate_uv(&surface, pt.u, pt.v))
             .count();
         // All points with v < 0.05 are degenerate
-        assert!(n_deg_small > cap_uv.len() / 2,
-                "More than 50% of small cap boundary should be degenerate, got {}/{}",
-                n_deg_small, cap_uv.len());
+        assert!(
+            n_deg_small > cap_uv.len() / 2,
+            "More than 50% of small cap boundary should be degenerate, got {}/{}",
+            n_deg_small,
+            cap_uv.len()
+        );
     }
 
     #[test]
     fn test_is_degenerate_uv_revolution_axis() {
-        use draper_geometry::{RevolutionSurface, Surface, Direction3d, Point3d};
+        use draper_geometry::{Direction3d, Point3d, RevolutionSurface, Surface};
 
         // Profile: line from (0, 0, 0) to (5, 0, 5) — crosses the axis at v=0
-        let profile = Curve3d::Line(draper_geometry::Line::through_points(
-            Point3d::new(0.0, 0.0, 0.0),
-            Point3d::new(5.0, 0.0, 5.0),
-        ).unwrap());
+        let profile = Curve3d::Line(
+            draper_geometry::Line::through_points(
+                Point3d::new(0.0, 0.0, 0.0),
+                Point3d::new(5.0, 0.0, 5.0),
+            )
+            .unwrap(),
+        );
         let rev = RevolutionSurface::new(profile, Direction3d::Z, Point3d::ORIGIN);
         let surface = Surface::Revolution(rev);
 
         // At v=0: profile at (0, 0, 0) — ON the axis → degenerate
-        assert!(is_degenerate_uv(&surface, 0.0, 0.0),
-                "v=0 on revolution axis should be degenerate");
+        assert!(
+            is_degenerate_uv(&surface, 0.0, 0.0),
+            "v=0 on revolution axis should be degenerate"
+        );
 
         // At v=0.5: profile at (2.5, 0, 2.5) — perpendicular dist = 2.5
         // threshold ≈ max(5*0.02, 1e-4) = 0.1 → 2.5 > 0.1 → NOT degenerate
-        assert!(!is_degenerate_uv(&surface, 0.0, 0.5),
-                "v=0.5 away from axis should NOT be degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, 0.5),
+            "v=0.5 away from axis should NOT be degenerate"
+        );
 
         // At v=1.0: profile at (5, 0, 5) — perpendicular dist = 5
-        assert!(!is_degenerate_uv(&surface, 0.0, 1.0),
-                "v=1.0 away from axis should NOT be degenerate");
+        assert!(
+            !is_degenerate_uv(&surface, 0.0, 1.0),
+            "v=1.0 away from axis should NOT be degenerate"
+        );
     }
 
     // ── task 1.1.5: cylinder R=10, H=50, 3 holes — grid resolution test ──
@@ -14355,8 +16380,8 @@ mod tests {
 
     #[test]
     fn test_cylinder_r10_h50_3holes_desktop_grid_resolution() {
-        use draper_geometry::{CylinderSurface, Surface};
         use crate::triangulate::SteinerBudgetProfile;
+        use draper_geometry::{CylinderSurface, Surface};
 
         // Cylinder R=10, H=50 — a large face that should get high grid resolution
         // on the Desktop profile.
@@ -14404,7 +16429,12 @@ mod tests {
         params.adaptive = true;
 
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 50.0),
+            &params,
+            8000,
         );
 
         let (n_u, n_v) = extract_grid_dims(&pts);
@@ -14413,21 +16443,30 @@ mod tests {
         // For R=10 with max_deviation=0.01, the chord-error formula gives
         // n_u ≈ 71 (clamped to [12, 96]) and n_v ≈ 57 (clamped to [2, 64]).
         // Both comfortably exceed the minimums.
-        assert!(n_u >= 48,
-            "Desktop: n_u = {} < 48 minimum for cylinder R=10 H=50", n_u);
-        assert!(n_v >= 24,
-            "Desktop: n_v = {} < 24 minimum for cylinder R=10 H=50", n_v);
+        assert!(
+            n_u >= 48,
+            "Desktop: n_u = {} < 48 minimum for cylinder R=10 H=50",
+            n_u
+        );
+        assert!(
+            n_v >= 24,
+            "Desktop: n_v = {} < 24 minimum for cylinder R=10 H=50",
+            n_v
+        );
 
         // Additionally, the total number of Steiner points should be substantial
         // (at least (48-1)*(24-1) = 1081 minus the 3 holes' worth of points)
-        assert!(pts.len() >= 1000,
-            "Desktop: expected ≥1000 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 1000,
+            "Desktop: expected ≥1000 Steiner points, got {}",
+            pts.len()
+        );
     }
 
     #[test]
     fn test_cylinder_r10_h50_3holes_mobile_grid_resolution() {
-        use draper_geometry::{CylinderSurface, Surface};
         use crate::triangulate::SteinerBudgetProfile;
+        use draper_geometry::{CylinderSurface, Surface};
 
         let cyl = CylinderSurface::new_z(10.0);
         let surface = Surface::Cylinder(cyl);
@@ -14471,7 +16510,12 @@ mod tests {
         params.adaptive = true;
 
         let pts = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 50.0),
+            &params,
+            8000,
         );
 
         let (n_u, n_v) = extract_grid_dims(&pts);
@@ -14480,20 +16524,29 @@ mod tests {
         // For R=10 with max_deviation=0.01, the chord-error formula gives n_u ≈ 71,
         // but Mobile caps at max_u_cyl=32, and n_v capped at max_v_cyl=16.
         // Both exceed the minimums.
-        assert!(n_u >= 16,
-            "Mobile: n_u = {} < 16 minimum for cylinder R=10 H=50", n_u);
-        assert!(n_v >= 8,
-            "Mobile: n_v = {} < 8 minimum for cylinder R=10 H=50", n_v);
+        assert!(
+            n_u >= 16,
+            "Mobile: n_u = {} < 16 minimum for cylinder R=10 H=50",
+            n_u
+        );
+        assert!(
+            n_v >= 8,
+            "Mobile: n_v = {} < 8 minimum for cylinder R=10 H=50",
+            n_v
+        );
 
         // Mobile should also produce a meaningful number of points
-        assert!(pts.len() >= 100,
-            "Mobile: expected ≥100 Steiner points, got {}", pts.len());
+        assert!(
+            pts.len() >= 100,
+            "Mobile: expected ≥100 Steiner points, got {}",
+            pts.len()
+        );
     }
 
     #[test]
     fn test_cylinder_r10_h50_budget_scaling_effect() {
-        use draper_geometry::{CylinderSurface, Surface};
         use crate::triangulate::SteinerBudgetProfile;
+        use draper_geometry::{CylinderSurface, Surface};
 
         // Verify that the adaptive budget scaling from task 1.1.4 affects the
         // grid resolution: a large face (high area fraction of bbox) should get
@@ -14518,13 +16571,23 @@ mod tests {
         // With base budget (8000)
         params.max_face_triangles = 8000;
         let pts_base = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 8000,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 50.0),
+            &params,
+            8000,
         );
 
         // With doubled budget (16000) — simulating the 2.0× multiplier for
         // a very large face (area fraction = 100% of bbox)
         let pts_doubled = generate_cylinder_or_cone_steiner_grid(
-            &surface, &domain, (0.0, 2.0 * PI), (0.0, 50.0), &params, 16000,
+            &surface,
+            &domain,
+            (0.0, 2.0 * PI),
+            (0.0, 50.0),
+            &params,
+            16000,
         );
 
         // The doubled budget should produce at least as many Steiner points
@@ -14532,9 +16595,12 @@ mod tests {
         // max_v_cyl=64), the base budget of 8000 may not be the limiting
         // factor for this particular geometry, so the counts may be equal.
         // But the test ensures the budget cap mechanism doesn't regress.
-        assert!(pts_doubled.len() >= pts_base.len(),
+        assert!(
+            pts_doubled.len() >= pts_base.len(),
             "Doubled budget should produce ≥ base points: {} < {}",
-            pts_doubled.len(), pts_base.len());
+            pts_doubled.len(),
+            pts_base.len()
+        );
 
         // Both should produce meaningful grids
         let (n_u_base, n_v_base) = extract_grid_dims(&pts_base);
@@ -14549,8 +16615,8 @@ mod tests {
 
     #[test]
     fn test_cylinder_seam_watertight_two_holes() {
-        use draper_geometry::{CylinderSurface, Surface};
         use crate::watertight::validate_watertight;
+        use draper_geometry::{CylinderSurface, Surface};
 
         // Full cylinder R=5, H=10 with boundary wrapping the full 2π
         let cyl = CylinderSurface::new_z(5.0);
@@ -14590,42 +16656,49 @@ mod tests {
 
         // Hole 1 at u=π/2, v=5
         let hole1_3d = vec![
-            surface.point_at(PI/2.0 - hole_half_u, 5.0 - hole_half_v),
-            surface.point_at(PI/2.0 + hole_half_u, 5.0 - hole_half_v),
-            surface.point_at(PI/2.0 + hole_half_u, 5.0 + hole_half_v),
-            surface.point_at(PI/2.0 - hole_half_u, 5.0 + hole_half_v),
+            surface.point_at(PI / 2.0 - hole_half_u, 5.0 - hole_half_v),
+            surface.point_at(PI / 2.0 + hole_half_u, 5.0 - hole_half_v),
+            surface.point_at(PI / 2.0 + hole_half_u, 5.0 + hole_half_v),
+            surface.point_at(PI / 2.0 - hole_half_u, 5.0 + hole_half_v),
         ];
         let hole1_uv = vec![
-            Point2d::new(PI/2.0 - hole_half_u, 5.0 - hole_half_v),
-            Point2d::new(PI/2.0 + hole_half_u, 5.0 - hole_half_v),
-            Point2d::new(PI/2.0 + hole_half_u, 5.0 + hole_half_v),
-            Point2d::new(PI/2.0 - hole_half_u, 5.0 + hole_half_v),
+            Point2d::new(PI / 2.0 - hole_half_u, 5.0 - hole_half_v),
+            Point2d::new(PI / 2.0 + hole_half_u, 5.0 - hole_half_v),
+            Point2d::new(PI / 2.0 + hole_half_u, 5.0 + hole_half_v),
+            Point2d::new(PI / 2.0 - hole_half_u, 5.0 + hole_half_v),
         ];
 
         // Hole 2 at u=3π/2, v=5 (symmetric relative to seam)
         let hole2_3d = vec![
-            surface.point_at(3.0*PI/2.0 - hole_half_u, 5.0 - hole_half_v),
-            surface.point_at(3.0*PI/2.0 + hole_half_u, 5.0 - hole_half_v),
-            surface.point_at(3.0*PI/2.0 + hole_half_u, 5.0 + hole_half_v),
-            surface.point_at(3.0*PI/2.0 - hole_half_u, 5.0 + hole_half_v),
+            surface.point_at(3.0 * PI / 2.0 - hole_half_u, 5.0 - hole_half_v),
+            surface.point_at(3.0 * PI / 2.0 + hole_half_u, 5.0 - hole_half_v),
+            surface.point_at(3.0 * PI / 2.0 + hole_half_u, 5.0 + hole_half_v),
+            surface.point_at(3.0 * PI / 2.0 - hole_half_u, 5.0 + hole_half_v),
         ];
         let hole2_uv = vec![
-            Point2d::new(3.0*PI/2.0 - hole_half_u, 5.0 - hole_half_v),
-            Point2d::new(3.0*PI/2.0 + hole_half_u, 5.0 - hole_half_v),
-            Point2d::new(3.0*PI/2.0 + hole_half_u, 5.0 + hole_half_v),
-            Point2d::new(3.0*PI/2.0 - hole_half_u, 5.0 + hole_half_v),
+            Point2d::new(3.0 * PI / 2.0 - hole_half_u, 5.0 - hole_half_v),
+            Point2d::new(3.0 * PI / 2.0 + hole_half_u, 5.0 - hole_half_v),
+            Point2d::new(3.0 * PI / 2.0 + hole_half_u, 5.0 + hole_half_v),
+            Point2d::new(3.0 * PI / 2.0 - hole_half_u, 5.0 + hole_half_v),
         ];
 
         let params = make_test_params(0.1);
         let mesh = triangulate_surface_consistent(
-            &surface, &all_3d, &all_uv,
+            &surface,
+            &all_3d,
+            &all_uv,
             &[hole1_3d, hole2_3d],
             &[hole1_uv, hole2_uv],
-            true, &params,
+            true,
+            &params,
         );
 
         assert!(!mesh.triangles.is_empty(), "Should produce triangles");
-        assert!(mesh.triangles.len() >= 5, "Should have at least 5 triangles, got {}", mesh.triangles.len());
+        assert!(
+            mesh.triangles.len() >= 5,
+            "Should have at least 5 triangles, got {}",
+            mesh.triangles.len()
+        );
 
         // Check watertightness
         let report = validate_watertight(&mesh, false);
@@ -14637,9 +16710,13 @@ mod tests {
         // Note: a single-face mesh will always have boundary edges on the outer boundary.
         // The seam-split ensures the INTERNAL seam edge is watertight.
         // We check that boundary % is reasonable (not 100% which would mean no shared edges).
-        assert!(boundary_pct < 80.0,
+        assert!(
+            boundary_pct < 80.0,
             "Cylinder with 2 holes: {:.2}% boundary edges ({} of {}), expected < 80%",
-            boundary_pct, report.boundary_edge_count, report.edge_count);
+            boundary_pct,
+            report.boundary_edge_count,
+            report.edge_count
+        );
     }
 
     // ============================================================
@@ -14648,8 +16725,8 @@ mod tests {
 
     #[test]
     fn test_torus_seam_watertight_full() {
-        use draper_geometry::{TorusSurface, Surface};
         use crate::watertight::validate_watertight;
+        use draper_geometry::{Surface, TorusSurface};
 
         // Full torus R=10, r=2
         let torus = TorusSurface::new_z(Point3d::new(0.0, 0.0, 0.0), 10.0, 2.0);
@@ -14687,12 +16764,15 @@ mod tests {
         }
 
         let params = make_test_params(0.5);
-        let mesh = triangulate_surface_consistent(
-            &surface, &all_3d, &all_uv, &[], &[], true, &params,
-        );
+        let mesh =
+            triangulate_surface_consistent(&surface, &all_3d, &all_uv, &[], &[], true, &params);
 
         assert!(!mesh.triangles.is_empty(), "Should produce triangles");
-        assert!(mesh.triangles.len() >= 10, "Should have at least 10 triangles, got {}", mesh.triangles.len());
+        assert!(
+            mesh.triangles.len() >= 10,
+            "Should have at least 10 triangles, got {}",
+            mesh.triangles.len()
+        );
 
         // Check watertightness
         let report = validate_watertight(&mesh, false);
@@ -14704,7 +16784,11 @@ mod tests {
         // Full torus is challenging — both U and V are periodic.
         // A single-face mesh always has boundary edges on the outer boundary.
         // We just verify it produces a reasonable mesh.
-        assert!(mesh.triangles.len() >= 5, "Should produce at least 5 triangles, got {}", mesh.triangles.len());
+        assert!(
+            mesh.triangles.len() >= 5,
+            "Should produce at least 5 triangles, got {}",
+            mesh.triangles.len()
+        );
     }
 
     // ============================================================
@@ -14744,7 +16828,10 @@ mod tests {
 
         // The polygon spans > 90% of the U period → proactive split should work
         let result = proactive_seam_split(&polygon, &points_3d, &surface);
-        assert!(result.is_some(), "Proactive seam-split should succeed for full cylinder");
+        assert!(
+            result.is_some(),
+            "Proactive seam-split should succeed for full cylinder"
+        );
 
         let (sub1_uv, sub2_uv, sub1_3d, sub2_3d) = result.unwrap();
         assert!(sub1_uv.len() >= 3, "Sub-polygon 1 should have ≥ 3 points");
@@ -14776,7 +16863,7 @@ mod tests {
         // Build a partial cylinder boundary (only spans 50% of U range)
         let polygon = vec![
             Point2d::new(0.0, 0.0),
-            Point2d::new(PI, 0.0),  // Only spans half the period
+            Point2d::new(PI, 0.0), // Only spans half the period
             Point2d::new(PI, 10.0),
             Point2d::new(0.0, 10.0),
         ];
@@ -14784,7 +16871,10 @@ mod tests {
 
         // The polygon spans only 50% of the U period → no proactive split
         let result = proactive_seam_split(&polygon, &points_3d, &surface);
-        assert!(result.is_none(), "Proactive seam-split should NOT activate for partial cylinder");
+        assert!(
+            result.is_none(),
+            "Proactive seam-split should NOT activate for partial cylinder"
+        );
     }
 
     // ── session-68: CYL_RULED_BAND unit tests ─────────────────────
@@ -14867,8 +16957,7 @@ mod tests {
         let r = 0.125f64;
         let max_dev = 0.01f64;
         let u_hi = std::f64::consts::PI / 2.0;
-        let v_top =
-            |u: f64| -> f64 { 1.2 + 0.6 * (2.0 * u / u_hi - 1.0) + 0.1 * (3.0 * u).sin() };
+        let v_top = |u: f64| -> f64 { 1.2 + 0.6 * (2.0 * u / u_hi - 1.0) + 0.1 * (3.0 * u).sin() };
         let v_tl = v_top(0.0);
         let v_tr = v_top(u_hi);
         let mut ring: Vec<[f64; 2]> = Vec::new();
@@ -14892,7 +16981,11 @@ mod tests {
         );
         assert_band_invariants(&ring, &tris, r);
         // ~56 triangles expected (na + nb − 2 − degenerate skips)
-        assert!(tris.len() / 3 < 80, "band must be small ({} tris)", tris.len() / 3);
+        assert!(
+            tris.len() / 3 < 80,
+            "band must be small ({} tris)",
+            tris.len() / 3
+        );
     }
 
     /// Seam-crossing patch: raw u jumps by ±2π at the seam (350°→100°
@@ -15006,13 +17099,7 @@ mod tests {
     /// Detector rejects: too few points (n < 6).
     #[test]
     fn cyl_ruled_band_rejects_tiny_ring() {
-        let ring: Vec<[f64; 2]> = vec![
-            [0.0, 0.0],
-            [0.5, 0.0],
-            [0.5, 1.0],
-            [0.25, 1.0],
-            [0.0, 1.0],
-        ];
+        let ring: Vec<[f64; 2]> = vec![[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.25, 1.0], [0.0, 1.0]];
         let tris = cylinder_ruled_band_strip(&CylinderSurface::new_z(0.5), &ring, 0.01);
         assert!(tris.is_empty(), "tiny ring must be rejected");
     }
@@ -15287,6 +17374,329 @@ mod tests {
         let (tris, _new) = torus_fillet_band_strip(&torus, &ring, 0.01);
         assert!(tris.is_empty(), "notched bottom arc must be rejected");
     }
+
+    // ═══ session-70: NURBS_FILLET_BAND unit tests ═════════════════
+    // Fixture: a blend fillet Nurbs — degree (3,1): cubic Bezier arc
+    // in u (quarter-ish, radius ~1), linearly blended in v between
+    // the z=-0.5 row (R=1) and the z=+0.5 row (R=1.3, same shape).
+    // point_at gives the machinery's ground truth; all guards run
+    // against the same object.
+    fn fillet_nurbs_fixture() -> draper_geometry::NurbsSurface {
+        use draper_geometry::NurbsSurface;
+        // control_points[u_index][v_index]: 4 u points (degree 3,
+        // the arc control polygon) x 3 v points (degree 2, a CURVED
+        // profile: R = 1 at v=0, 1.15 at v=0.5, 1.3 at v=1, with
+        // z = -0.5 → 0 → +0.5). The v-curvature matters: a v-ruled
+        // surface makes the u=const walls straight 3D lines — the
+        // wall fans degenerate to zero area and their noise normals
+        // fire the fold guard (measured on the first fixture).
+        let arc = [
+            Point3d::new(1.00, 0.00, 0.0),
+            Point3d::new(1.08, 0.60, 0.0),
+            Point3d::new(0.60, 1.08, 0.0),
+            Point3d::new(0.00, 1.00, 0.0),
+        ];
+        // middle row 1.05 (NOT the linear 1.15): R(v) = Bezier2 of
+        // (1, 1.05, 1.3) — genuinely curved in v (collinear control
+        // rows make the u=const walls straight 3D lines and the wall
+        // fans degenerate; measured: fold-guard noise rejections)
+        let rows: Vec<Vec<Point3d>> = (0..4)
+            .map(|i| {
+                let p = arc[i];
+                vec![
+                    Point3d::new(p.x, p.y, -0.5),
+                    Point3d::new(1.05 * p.x, 1.05 * p.y, 0.0),
+                    Point3d::new(1.3 * p.x, 1.3 * p.y, 0.5),
+                ]
+            })
+            .collect();
+        NurbsSurface {
+            u_degree: 3,
+            v_degree: 2,
+            control_points: rows,
+            weights: vec![vec![1.0; 3]; 4],
+            u_knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            u_closed: false,
+            v_closed: false,
+        }
+    }
+
+    /// invariants: rim edges exactly 1×, non-rim exactly 2×, 2D
+    /// signed-area ratio within ±1%, winding matches the polygon,
+    /// zero same-face fold pairs (>170°).
+    fn assert_nurbs_band_invariants(
+        nurbs: &draper_geometry::NurbsSurface,
+        ring: &[[f64; 2]],
+        tris: &[usize],
+        new_pts: &[[f64; 2]],
+    ) {
+        let n = ring.len();
+        assert!(!tris.is_empty(), "strip must be non-empty");
+        let uv_of = |idx: usize| -> [f64; 2] {
+            if idx < n {
+                ring[idx]
+            } else {
+                new_pts[idx - n]
+            }
+        };
+        // edge accounting
+        {
+            use std::collections::HashMap;
+            let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+            for c in tris.chunks_exact(3) {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                    }
+                }
+            }
+            let rim = |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
+            for k in 0..n {
+                let j = (k + 1) % n;
+                assert_eq!(
+                    ecount.get(&(k.min(j), k.max(j))).copied(),
+                    Some(1),
+                    "rim edge ({}, {}) must be exactly 1x",
+                    k,
+                    j
+                );
+            }
+            for (&(x, y), &c) in ecount.iter() {
+                if !rim(x, y) {
+                    assert_eq!(c, 2usize, "non-rim edge ({}, {}) must be 2x", x, y);
+                }
+            }
+        }
+        // 2D signed-area ratio
+        {
+            let signed = |r: &[[f64; 2]]| -> f64 {
+                let mut sacc = 0.0;
+                for w in r.windows(2) {
+                    sacc += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+                }
+                if r.len() > 1 {
+                    let (a, b) = (r[r.len() - 1], r[0]);
+                    sacc += a[0] * b[1] - b[0] * a[1];
+                }
+                sacc * 0.5
+            };
+            let poly_s = signed(ring);
+            let strip_s: f64 = tris
+                .chunks_exact(3)
+                .map(|c| {
+                    (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                        + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                        + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                        * 0.5
+                })
+                .sum();
+            let ratio = strip_s.abs() / poly_s.abs();
+            assert!(
+                (0.99..=1.01).contains(&ratio),
+                "2D area ratio {} out of [0.99, 1.01]",
+                ratio
+            );
+            assert!(
+                strip_s * poly_s > 0.0,
+                "strip winding must match the polygon"
+            );
+        }
+        // fold guard parity: zero >170° same-face pairs
+        {
+            use std::collections::HashMap;
+            let p3 = |idx: usize| -> Point3d {
+                let uv = uv_of(idx);
+                nurbs.point_at(uv[0], uv[1])
+            };
+            let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+                let a = p3(c[0]);
+                let b = p3(c[1]);
+                let d = p3(c[2]);
+                let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+                let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+                let nn = [
+                    ab[1] * ad[2] - ab[2] * ad[1],
+                    ab[2] * ad[0] - ab[0] * ad[2],
+                    ab[0] * ad[1] - ab[1] * ad[0],
+                ];
+                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                if l > 1e-18 {
+                    Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                } else {
+                    None
+                }
+            };
+            let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+            for (ti, c) in tris.chunks_exact(3).enumerate() {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        edge_tris.entry((x.min(y), y.max(x))).or_default().push(ti);
+                    }
+                }
+            }
+            for ts in edge_tris.values() {
+                if ts.len() != 2 {
+                    continue;
+                }
+                let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                if let (Some(n1), Some(n2)) = (n1, n2) {
+                    let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                    assert!(
+                        dot.acos().to_degrees() <= 170.0,
+                        "fold pair >170deg in the strip"
+                    );
+                }
+            }
+        }
+    }
+
+    /// QUAD fillet (f131-like): 2 constant-v arcs + 2 constant-u
+    /// side lines on the blend fixture, u-sector [0.12, 0.88].
+    #[test]
+    fn nurbs_fillet_band_quad_f131_like() {
+        let nurbs = fillet_nurbs_fixture();
+        let (u0, u1) = (0.12f64, 0.88f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom arc v=0, u ascending (25 pts)
+        for k in 0..25 {
+            ring.push([u0 + (u1 - u0) * k as f64 / 24.0, 0.0]);
+        }
+        // right side u=u1, v ascending (23 pts)
+        for k in 1..=23 {
+            ring.push([u1, k as f64 / 23.0]);
+        }
+        // top arc v=1, u descending (23 pts; starts strictly below
+        // u1 — no duplicate of the right wall's last point)
+        for k in (0..23).rev() {
+            ring.push([u0 + (u1 - u0) * k as f64 / 23.0, 1.0]);
+        }
+        // left side u=u0, v descending (22 pts, no closing dup)
+        for k in (1..23).rev() {
+            ring.push([u0, k as f64 / 23.0]);
+        }
+        let (tris, new_pts) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(!tris.is_empty(), "quad fillet must qualify");
+        assert_nurbs_band_invariants(&nurbs, &ring, &tris, &new_pts);
+        // ruled in v → the v-sag bound is loose; interior levels from
+        // the start_k=2 default are expected
+        assert!(!new_pts.is_empty(), "interior level points expected");
+    }
+
+    /// LUNE fillet (f240-like): straight left wall (u=0.12) + a
+    /// bulging right wall meeting it at pinch corners in both
+    /// v-extremes (the full-pinch corridor: bottom=top=1 point).
+    #[test]
+    fn nurbs_fillet_band_lune_f240_like() {
+        let nurbs = fillet_nurbs_fixture();
+        let u_l = 0.12f64;
+        let m = 40usize;
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // left wall up: (u_l, v), v 0→1 (m pts, starts at the bottom pinch)
+        for k in 0..m {
+            ring.push([u_l, k as f64 / (m - 1) as f64]);
+        }
+        // bulging wall down: u = u_l + 0.5·sin(π·t), v = 1−t,
+        // t ∈ (0, 1) — ends NEAR the bottom pinch without duplicating
+        // the start point (the closing ring edge stays non-zero)
+        for k in 1..m - 1 {
+            let t = k as f64 / (m - 1) as f64;
+            ring.push([u_l + 0.5 * (std::f64::consts::PI * t).sin(), 1.0 - t]);
+        }
+        let (tris, new_pts) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(!tris.is_empty(), "lune fillet must qualify");
+        assert_nurbs_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// WIGGLY wall (f236-adjacent class): left wall straight, right
+    /// wall = sag arc + meridian + sag arc (the near-flat sag runs
+    /// must stay wall fan points, not edges — s69 f158 analog).
+    #[test]
+    fn nurbs_fillet_band_wiggly_wall() {
+        let nurbs = fillet_nurbs_fixture();
+        let (u_l, u_r) = (0.10f64, 0.80f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom arc v=0 (u asc, 17 pts)
+        for k in 0..17 {
+            ring.push([u_l + (u_r - u_l) * k as f64 / 16.0, 0.0]);
+        }
+        // right wall up: sag arc (12 pts) + meridian u=u_r (21 pts)
+        // + sag arc (12 pts) — v rises monotonically throughout
+        for k in 1..=12 {
+            let t = k as f64 / 12.0;
+            ring.push([u_r + 0.06 * (std::f64::consts::PI * t).sin(), t * 0.25]);
+        }
+        for k in 1..=21 {
+            ring.push([u_r, 0.25 + 0.5 * k as f64 / 21.0]);
+        }
+        for k in 1..=12 {
+            let t = k as f64 / 12.0;
+            ring.push([
+                u_r + 0.06 * (std::f64::consts::PI * t).sin(),
+                0.75 + t * 0.25,
+            ]);
+        }
+        // top arc v=1 (u desc, 16 pts; starts strictly below u_r)
+        for k in (0..16).rev() {
+            ring.push([u_l + (u_r - u_l) * k as f64 / 16.0, 1.0]);
+        }
+        // left wall down (u desc, 23 pts, no closing dup)
+        for k in (1..24).rev() {
+            ring.push([u_l, k as f64 / 24.0]);
+        }
+        let (tris, new_pts) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(!tris.is_empty(), "wiggly fillet must qualify");
+        assert_nurbs_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// reject: notched bottom arc (non-monotone flat run)
+    #[test]
+    fn nurbs_fillet_band_rejects_notched_arc() {
+        let nurbs = fillet_nurbs_fixture();
+        let (u0, u1) = (0.12f64, 0.88f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        let notched = [0.0f64, 0.1, 0.2, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0];
+        for t in notched {
+            ring.push([u0 + (u1 - u0) * t, 0.0]);
+        }
+        for k in 1..=15 {
+            ring.push([u1, k as f64 / 15.0]);
+        }
+        for k in (0..15).rev() {
+            ring.push([u0 + (u1 - u0) * k as f64 / 14.0, 1.0]);
+        }
+        for k in (1..15).rev() {
+            ring.push([u0, k as f64 / 15.0]);
+        }
+        let (tris, _new) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(tris.is_empty(), "notched bottom arc must be rejected");
+    }
+
+    /// reject: tiny ring (n < 6)
+    #[test]
+    fn nurbs_fillet_band_rejects_tiny_ring() {
+        let nurbs = fillet_nurbs_fixture();
+        let ring: Vec<[f64; 2]> = vec![[0.1, 0.0], [0.5, 0.0], [0.9, 0.0], [0.9, 1.0], [0.1, 1.0]];
+        let (tris, _new) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(tris.is_empty(), "tiny ring must be rejected");
+    }
+
+    /// reject: chain without a rising section (flat ring, vspan 0)
+    #[test]
+    fn nurbs_fillet_band_rejects_flat_ring() {
+        let nurbs = fillet_nurbs_fixture();
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..24 {
+            ring.push([0.1 + 0.8 * k as f64 / 23.0, 0.5]);
+        }
+        let (tris, _new) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
+        assert!(tris.is_empty(), "flat ring must be rejected");
+    }
 }
 
 // ============================================================
@@ -15446,7 +17856,8 @@ fn triangulate_3d_polygon_fallback(
     }
 
     // Step 5: Run triangulation via adapter (tries earcut int, i_triangle, earcutr)
-    let mut triangle_indices: Vec<usize> = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
+    let mut triangle_indices: Vec<usize> =
+        crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &hole_start_indices);
 
     // If adapter returned 0 triangles with holes, retry without holes.
     // This happens when a "hole" is geometrically identical to the outer
@@ -15475,7 +17886,8 @@ fn triangulate_3d_polygon_fallback(
             .flat_map(|&(u, v)| [u, v])
             .collect();
         let empty_holes: Vec<usize> = Vec::new();
-        triangle_indices = crate::earcut_adapter::triangulate_polygon_with_holes(&outer_only_coords, &empty_holes);
+        triangle_indices =
+            crate::earcut_adapter::triangulate_polygon_with_holes(&outer_only_coords, &empty_holes);
         outer_only_mode = true;
     }
 
@@ -15517,8 +17929,8 @@ fn triangulate_3d_polygon_fallback(
         triangle_indices.reserve(n_outer * 3);
         for i in 0..n_outer {
             let i_next = (i + 1) % n_outer;
-            triangle_indices.push(0);          // centroid
-            triangle_indices.push(1 + i);      // outer[i]
+            triangle_indices.push(0); // centroid
+            triangle_indices.push(1 + i); // outer[i]
             triangle_indices.push(1 + i_next); // outer[i_next]
         }
         outer_only_mode = true; // fan uses only outer + centroid, no hole vertices
@@ -15609,7 +18021,9 @@ fn triangulate_3d_polygon_fallback(
     let expected_sign: f64 = 1.0; // CCW = positive signed area
     let face_normal_3d = (nx, ny, nz);
     for chunk in triangle_indices.chunks(3) {
-        if chunk.len() < 3 { break; }
+        if chunk.len() < 3 {
+            break;
+        }
         let a = chunk[0] as usize;
         let b = chunk[1] as usize;
         let c = chunk[2] as usize;
