@@ -7686,6 +7686,57 @@ pub fn nurbs_fillet_band_strip(
                             }
                         }
                         if folds > 0 {
+                            // s71 forensics: full state dump on fold failure
+                            // (DRAPPER_NFB_DUMP=<dir>) — ring, walls, anchors,
+                            // connectors, new points, triangles, fold pairs.
+                            if let Ok(dir) = std::env::var("DRAPPER_NFB_DUMP") {
+                                use std::sync::atomic::{AtomicUsize, Ordering};
+                                static DUMP_SEQ: AtomicUsize = AtomicUsize::new(0);
+                                let seq =
+                                    DUMP_SEQ.fetch_add(1, Ordering::Relaxed);
+                                let _ = std::fs::create_dir_all(&dir);
+                                let path = format!("{}/nfb_{:03}.txt", dir, seq);
+                                let mut s = String::with_capacity(1 << 16);
+                                s.push_str(&format!(
+                                    "n={} k={} w_l={} w_r={} bottom={} top={}\n",
+                                    n, kk, w_l.len(), w_r.len(), bottom.len(), top.len()
+                                ));
+                                s.push_str("ring\n");
+                                for k in 0..n {
+                                    s.push_str(&format!(
+                                        "r {} {:.12} {:.12}\n",
+                                        k, us[k], vs[k]
+                                    ));
+                                }
+                                s.push_str(&format!(
+                                    "walls w_l {:?} w_r {:?}\n",
+                                    w_l, w_r
+                                ));
+                                s.push_str(&format!(
+                                    "anchors l {:?} r {:?}\n",
+                                    anchors_l, anchors_r
+                                ));
+                                s.push_str("bottom\n");
+                                for &k in &bottom {
+                                    s.push_str(&format!("b {} {:.12} {:.12}\n", k, us[k], vs[k]));
+                                }
+                                s.push_str("top\n");
+                                for &k in &top {
+                                    s.push_str(&format!("t {} {:.12} {:.12}\n", k, us[k], vs[k]));
+                                }
+                                s.push_str("new_pts\n");
+                                for (k, p) in new_pts.iter().enumerate() {
+                                    s.push_str(&format!(
+                                        "p {} {:.12} {:.12}\n",
+                                        n + k, p[0], p[1]
+                                    ));
+                                }
+                                s.push_str("tris\n");
+                                for c in tris.chunks_exact(3) {
+                                    s.push_str(&format!("f {} {} {}\n", c[0], c[1], c[2]));
+                                }
+                                let _ = std::fs::write(&path, s);
+                            }
                             if std::env::var("DRAPPER_NFB_DEBUG2").is_ok() {
                                 for ts in edge_tris.values() {
                                     if ts.len() != 2 {
@@ -7827,6 +7878,1118 @@ pub fn nurbs_fillet_band_strip(
         }
     }
     (tris, new_pts)
+}
+
+/// session-71: LUNE_FILLET_BAND — the Nurbs lune class (the post-s70
+/// debt: SLEEVE 316 pairs / ~72 faces + HOUSING/HM curved-wall
+/// families, all "no level count passes" rejects of the s70 strip).
+///
+/// Root causes measured on SLEEVE f49 (BREP#32629, nb=222):
+///  1. the cached ring carries BIT-IDENTICAL consecutive duplicates
+///     (4 copies of the bottom-left corner) — the flat-run merge
+///     makes a degenerate bottom connector and the zipper emits
+///     zero-area triangles (noise normals → false >170° folds);
+///  2. the s70 corner-anchored wall fans: on a locally u=const wall
+///     every needle [anchor, w_k, w_{k+1}] is UV-COLLINEAR (all
+///     three points on the wall line) → degenerate slivers → folds
+///     (+1 fold pair per K level — the signature of the rejects);
+///  3. the C-shaped wall (micro-arc at u=0 + horizontal step to
+///     u=0.144 + straight wall) and the horizontal-ish bottom edge
+///     were mis-assigned to the "wall" chains, so the fans had to
+///     eat long horizontal rim edges.
+///
+/// Structure (all interior edges exactly 2×, rim edges exactly 1×,
+/// by construction — see the s71 worklog for the paper derivation):
+///  - ring dedup (consecutive identical points collapse);
+///  - boundary assembly: the bottom/top chains = the v-extreme flat
+///    runs EXTENDED over horizontal-ish rim edges (|dv| ≤ 0.5·|du|),
+///    so the walls keep only the v-rising part;
+///  - anchors by v-levels + BEND-FORCED anchors (|du| > 15% uspan);
+///  - per level j an OFF-WALL column point g_j (u_wall ± δ, v_j),
+///    δ ≈ the local band height (clamped into the corridor);
+///  - side LADDERS: the v-two-pointer between the wall chain
+///    w[a_j..a_{j+1}] and the 2-point column [g_j, g_{j+1}] — every
+///    wall edge gets ONE triangle with the apex at the nearer
+///    column point (never collinear: the apex is off the wall);
+///  - middle: the u-two-pointer zipper between the connectors
+///    [g_j^L, grid…, g_j^R] (band 0 / the last band use the cached
+///    rim chains);
+///  - corner triangles at band 0 / the last band tie the rim-chain
+///    ends to the two column points;
+///  - the pb retry loop (measure EVERY emitted non-rim edge directly
+///    via point_at; split the worst band) + the edge audit + the
+///    fold guard + the 2D-area guard + winding normalization.
+///
+/// Returns (triangle indices over [ring | new interior points], the
+/// new points); empty triangles = reject. Debug: DRAPPER_LUNE_DEBUG.
+pub fn nurbs_lune_band_strip(
+    nurbs: &draper_geometry::NurbsSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+) -> (Vec<usize>, Vec<[f64; 2]>) {
+    macro_rules! lune_fail {
+        ($reason:expr) => {{
+            if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                eprintln!("[LUNE reject] {}", $reason);
+            }
+            return (Vec::new(), Vec::new());
+        }};
+    }
+    let n_raw = boundary_2d.len();
+    if n_raw < 6 {
+        lune_fail!("tiny ring");
+    }
+    if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
+        lune_fail!("empty control grid");
+    }
+    // ── 1. dedup consecutive identical ring points ────────────────
+    // Zero-length rim edges carry no geometry; the duplicates would
+    // otherwise produce degenerate connectors/triangles (SLEEVE f49:
+    // 4 copies of the corner). Tolerance: relative to the raw span.
+    let (ru0, ru1) = nurbs.u_range();
+    let (rv0, rv1) = nurbs.v_range();
+    let raw_us: Vec<f64> = boundary_2d.iter().map(|p| p[0]).collect();
+    let raw_vs: Vec<f64> = boundary_2d.iter().map(|p| p[1]).collect();
+    let ruspan = raw_us.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - raw_us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let rvspan = raw_vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        - raw_vs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let dup_tol_u = 1e-9 * ruspan.abs().max(1e-6);
+    let dup_tol_v = 1e-9 * rvspan.abs().max(1e-6);
+    let mut ring_idx: Vec<usize> = Vec::with_capacity(n_raw);
+    for k in 0..n_raw {
+        if let Some(&last) = ring_idx.last() {
+            let (a, b) = (boundary_2d[last], boundary_2d[k]);
+            if (a[0] - b[0]).abs() <= dup_tol_u && (a[1] - b[1]).abs() <= dup_tol_v {
+                continue; // collapse onto the previous representative
+            }
+        }
+        ring_idx.push(k);
+    }
+    // wrap pair: if the last is a duplicate of the first, drop it
+    while ring_idx.len() > 3 {
+        let (a, b) = (
+            boundary_2d[*ring_idx.last().unwrap()],
+            boundary_2d[ring_idx[0]],
+        );
+        if (a[0] - b[0]).abs() <= dup_tol_u && (a[1] - b[1]).abs() <= dup_tol_v {
+            ring_idx.pop();
+        } else {
+            break;
+        }
+    }
+    let n = ring_idx.len();
+    if n < 6 {
+        lune_fail!("tiny ring after dedup");
+    }
+    let _ = (ru0, ru1, rv0, rv1);
+    // ── 2. unwrap u/v along the walk when closed (seam crossing) ──
+    let (u0d, u1d) = nurbs.u_range();
+    let (v0d, v1d) = nurbs.v_range();
+    let u_period = if nurbs.u_closed && u1d > u0d { u1d - u0d } else { 0.0 };
+    let v_period = if nurbs.v_closed && v1d > v0d { v1d - v0d } else { 0.0 };
+    let mut us = Vec::with_capacity(n);
+    let mut vs = Vec::with_capacity(n);
+    us.push(boundary_2d[ring_idx[0]][0]);
+    vs.push(boundary_2d[ring_idx[0]][1]);
+    for k in 1..n {
+        let mut u = boundary_2d[ring_idx[k]][0];
+        let mut v = boundary_2d[ring_idx[k]][1];
+        if u_period > 0.0 {
+            while u - us[k - 1] > u_period * 0.5 {
+                u -= u_period;
+            }
+            while us[k - 1] - u > u_period * 0.5 {
+                u += u_period;
+            }
+        }
+        if v_period > 0.0 {
+            while v - vs[k - 1] > v_period * 0.5 {
+                v -= v_period;
+            }
+            while vs[k - 1] - v > v_period * 0.5 {
+                v += v_period;
+            }
+        }
+        us.push(u);
+        vs.push(v);
+    }
+    let vmin = vs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let vmax = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let vspan = vmax - vmin;
+    let umin = us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let umax = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let uspan = umax - umin;
+    if !(vspan > 1e-9) || !(uspan > 0.0) {
+        lune_fail!("flat ring");
+    }
+    // ── 3. extremes + the two chains (both walk vmin→vmax) ────────
+    let mut vmin_i = 0usize;
+    let mut vmax_i = 0usize;
+    for k in 1..n {
+        if vs[k] < vs[vmin_i] {
+            vmin_i = k;
+        }
+        if vs[k] > vs[vmax_i] {
+            vmax_i = k;
+        }
+    }
+    if vmin_i == vmax_i {
+        lune_fail!("degenerate extremes");
+    }
+    let mut a: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            a.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + 1) % n;
+        }
+    }
+    let mut b: Vec<usize> = Vec::with_capacity(n);
+    {
+        let mut i = vmin_i;
+        loop {
+            b.push(i);
+            if i == vmax_i {
+                break;
+            }
+            i = (i + n - 1) % n;
+        }
+    }
+    // ── 4. flat runs + HORIZONTAL-ISH extension ───────────────────
+    // decompose a chain into [flat@vmin][wall][flat@vmax]; the flat
+    // runs then EXTEND over horizontal-ish edges (|dv| ≤ 0.5·|du|)
+    // so that rim edges like the SLEEVE bottom chord (u 0→0.856 at
+    // v≈vmin) land in the bottom connector, not in a wall fan.
+    let flat_eps = 1e-7 * vspan.max(1e-6);
+    let horiz = |i0: usize, i1: usize| -> bool {
+        let (du, dv) = ((us[i1] - us[i0]).abs(), (vs[i1] - vs[i0]).abs());
+        du > 1e-12 && dv <= 0.5 * du
+    };
+    // returns (pre, mid, suf) with pre/suf = the EXTENDED flat runs
+    let decompose = |chain: &[usize]| -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        let m = chain.len();
+        let mut e1 = 0usize;
+        while e1 + 1 < m && vs[chain[e1 + 1]] <= vmin + flat_eps {
+            e1 += 1;
+        }
+        // horizontal-ish extension forward (keeps u-monotone)
+        while e1 + 1 < m && horiz(chain[e1], chain[e1 + 1]) {
+            let nu = us[chain[e1 + 1]];
+            if us[chain[0]] <= us[chain[e1]] && nu >= us[chain[e1]] - 1e-12 {
+                e1 += 1;
+            } else if us[chain[0]] >= us[chain[e1]] && nu <= us[chain[e1]] + 1e-12 {
+                e1 += 1;
+            } else {
+                break;
+            }
+        }
+        let mut e2 = m - 1usize;
+        while e2 > e1 + 1 && vs[chain[e2 - 1]] >= vmax - flat_eps {
+            e2 -= 1;
+        }
+        while e2 > e1 + 1 && horiz(chain[e2], chain[e2 - 1]) {
+            let pu = us[chain[e2 - 1]];
+            if us[chain[m - 1]] >= us[chain[e2]] && pu <= us[chain[e2]] + 1e-12 {
+                e2 -= 1;
+            } else if us[chain[m - 1]] <= us[chain[e2]] && pu >= us[chain[e2]] - 1e-12 {
+                e2 -= 1;
+            } else {
+                break;
+            }
+        }
+        (
+            chain[0..=e1].to_vec(),
+            chain[e1..=e2].to_vec(),
+            chain[e2..].to_vec(),
+        )
+    };
+    let (a_pre, a_mid, a_suf) = decompose(&a);
+    let (b_pre, b_mid, b_suf) = decompose(&b);
+    if a_mid.len() < 2 || b_mid.len() < 2 {
+        lune_fail!("wall too short");
+    }
+    // merge the flat runs into the bottom/top edges (u-ascending)
+    let eps_u = uspan * 1e-9;
+    let sort_u = |mut pts: Vec<usize>| -> Option<Vec<usize>> {
+        let asc = pts.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u);
+        let desc = pts.windows(2).all(|w| us[w[0]] >= us[w[1]] - eps_u);
+        if !asc && !desc {
+            return None;
+        }
+        if !asc {
+            pts.reverse();
+        }
+        Some(pts)
+    };
+    let merge_edges = |p1: Vec<usize>, p2: Vec<usize>| -> Option<Vec<usize>> {
+        let p1 = sort_u(p1)?;
+        let p2 = sort_u(p2)?;
+        let lo1 = us[p1[0]];
+        let hi1 = us[*p1.last()?];
+        let lo2 = us[p2[0]];
+        let hi2 = us[*p2.last()?];
+        let ov_lo = lo1.max(lo2);
+        let ov_hi = hi1.min(hi2);
+        if ov_lo < ov_hi - eps_u {
+            let shared: Vec<usize> = p1.iter().copied().filter(|k| p2.contains(k)).collect();
+            if shared.len() != 1 {
+                return None;
+            }
+            let su = us[shared[0]];
+            if !(su >= ov_lo - eps_u && su <= ov_hi + eps_u) {
+                return None;
+            }
+            let at_end = (*p1.last()? == shared[0] && p2[0] == shared[0])
+                || (*p2.last()? == shared[0] && p1[0] == shared[0]);
+            if !at_end {
+                return None;
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        let mut all: Vec<usize> = p1
+            .into_iter()
+            .chain(p2)
+            .filter(|k| seen.insert(*k))
+            .collect();
+        all.sort_by(|&x, &y| {
+            us[x]
+                .partial_cmp(&us[y])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for w in all.windows(2) {
+            if us[w[1]] - us[w[0]] < -eps_u {
+                return None;
+            }
+        }
+        if all.is_empty() {
+            return None;
+        }
+        Some(all)
+    };
+    let bottom = match merge_edges(b_pre.clone(), a_pre.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => lune_fail!("bottom edge merge failed"),
+    };
+    let top = match merge_edges(a_suf.clone(), b_suf.clone()) {
+        Some(x) if x.len() >= 1 => x,
+        _ => lune_fail!("top edge merge failed"),
+    };
+    // walls: left = smaller mean u; the feet/heads must be the
+    // bottom/top ends (the flat-run extensions moved the horizontal
+    // rim edges into the connectors, so the walls start/end there).
+    let mean_u =
+        |pts: &[usize]| -> f64 { pts.iter().map(|&k| us[k]).sum::<f64>() / pts.len() as f64 };
+    let (mut w_l, mut w_r) = if mean_u(&b_mid) <= mean_u(&a_mid) {
+        (b_mid.clone(), a_mid.clone())
+    } else {
+        (a_mid.clone(), b_mid.clone())
+    };
+    // The wall chains as decomposed start at the flat-run end (the
+    // shared extreme point) — pull the feet/heads onto the connector
+    // ends so the junction rim edges live in the connectors.
+    if *w_l.last().unwrap() != top[0] {
+        w_l.push(top[0]);
+    }
+    if *w_r.last().unwrap() != top[top.len() - 1] {
+        w_r.push(top[top.len() - 1]);
+    }
+    if w_l[0] != bottom[0] {
+        w_l.insert(0, bottom[0]);
+    }
+    if w_r[0] != bottom[bottom.len() - 1] {
+        w_r.insert(0, bottom[bottom.len() - 1]);
+    }
+    // walls must be v-monotone (the ladders rely on it)
+    {
+        let mono = |w: &[usize]| -> bool {
+            w.windows(2).all(|x| vs[x[1]] >= vs[x[0]] - flat_eps)
+        };
+        if !mono(&w_l) || !mono(&w_r) {
+            lune_fail!("wall not v-monotone after assembly");
+        }
+    }
+    let u_max_r = w_r.iter().map(|&k| us[k]).fold(f64::NEG_INFINITY, f64::max);
+    let u_min_l = w_l.iter().map(|&k| us[k]).fold(f64::INFINITY, f64::min);
+    if !(u_max_r - u_min_l > 1e-9) {
+        lune_fail!("corridor has no width");
+    }
+    if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+        eprintln!(
+            "[LUNE] n={} (raw {}) vspan={:.5} uspan={:.5} walls l={} r={} bottom={} top={}",
+            n,
+            n_raw,
+            vspan,
+            uspan,
+            w_l.len(),
+            w_r.len(),
+            bottom.len(),
+            top.len()
+        );
+    }
+    // ── 5. anchors: v-levels + BEND-FORCED (|du| > 15% uspan) ─────
+    let p = w_l.len();
+    let q = w_r.len();
+    let start_k: usize = 4usize.clamp(2, 8);
+    let mut anchors_l: Vec<usize> = Vec::new();
+    let mut anchors_r: Vec<usize> = Vec::new();
+    {
+        // bend points on each wall (index k = the point AFTER the bend
+        // edge): a horizontal jump inside a wall chain must become a
+        // level boundary or the ladder would span it with one apex.
+        let bend_l: Vec<usize> = (1..p)
+            .filter(|&k| (us[w_l[k]] - us[w_l[k - 1]]).abs() > 0.15 * uspan)
+            .collect();
+        let bend_r: Vec<usize> = (1..q)
+            .filter(|&k| (us[w_r[k]] - us[w_r[k - 1]]).abs() > 0.15 * uspan)
+            .collect();
+        let mut targets: Vec<f64> = Vec::new();
+        for j in 1..start_k {
+            targets.push(vmin + vspan * (j as f64) / (start_k as f64));
+        }
+        for &k in bend_l.iter().chain(bend_r.iter()) {
+            // the v of the bend point on ITS wall (take the wall it
+            // came from: check membership)
+            let v_b = if k < p && w_l.contains(&w_l[k]) && bend_l.contains(&k) {
+                vs[w_l[k]]
+            } else {
+                vs[w_r[k.min(q - 1)]]
+            };
+            targets.push(v_b);
+        }
+        targets.retain(|t| *t > vmin + 1e-9 && *t < vmax - 1e-9);
+        targets.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        targets.dedup_by(|a, b| (*a - *b).abs() < 1e-9 * vspan.max(1e-6));
+        if targets.len() + 1 > 24 {
+            // too many bends — not a lune corridor; reject
+            lune_fail!("too many wall bends");
+        }
+        // pick the anchor indices by the target v's — STRICTLY
+        // PARALLEL lists: each level advances BOTH walls as far as
+        // their v allows (a wall that cannot advance repeats its
+        // previous anchor = a zero-width band on that side, which
+        // the ladder handles: the slice is a single point).
+        let pick = |wall: &[usize], tg: &[f64]| -> Vec<usize> {
+            let m = wall.len();
+            let mut out = vec![0usize];
+            let mut cur = 0usize;
+            for (i, &t) in tg.iter().enumerate() {
+                let room = tg.len() - i;
+                let lim = m - 1 - room.min(m - 1 - cur);
+                let mut aj = cur;
+                let mut idx = cur;
+                while idx <= lim {
+                    if vs[wall[idx]] <= t + 1e-12 {
+                        aj = idx;
+                    }
+                    idx += 1;
+                }
+                out.push(aj);
+                cur = aj;
+            }
+            out.push(m - 1);
+            // STRICT monotone interior: a repeated anchor would leave
+            // the wall rim edges between two levels uncovered (the
+            // SLEEVE step target vs the right wall's first point).
+            for i in 1..out.len() - 1 {
+                if out[i] <= out[i - 1] {
+                    out[i] = (out[i - 1] + 1).min(m - 2);
+                }
+            }
+            // drop trailing interior levels that collided with the head
+            while out.len() > 2 && out[out.len() - 1] <= out[out.len() - 2] {
+                out.pop();
+            }
+            out
+        };
+        anchors_l = pick(&w_l, &targets);
+        anchors_r = pick(&w_r, &targets);
+        // parallel by construction (same target list); sanity only
+        if anchors_l.len() != anchors_r.len() {
+            lune_fail!("anchor level counts diverge");
+        }
+        // dedup fully-collapsed levels on BOTH walls (keep the lists
+        // parallel): a level where NEITHER wall advanced is a no-op
+        {
+            let mut i = 1;
+            while i < anchors_l.len() - 1 {
+                if anchors_l[i] == anchors_l[i - 1] && anchors_r[i] == anchors_r[i - 1] {
+                    anchors_l.remove(i);
+                    anchors_r.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    let k_bands = anchors_l.len() - 1;
+    if k_bands == 0 {
+        lune_fail!("no bands");
+    }
+    // ── 6. sag helpers + the union-u grid ─────────────────────────
+    let uv_sag = |pa: [f64; 2], pb: [f64; 2]| -> f64 {
+        let mid_uv = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5];
+        let pm = nurbs.point_at(mid_uv[0], mid_uv[1]);
+        let px = nurbs.point_at(pa[0], pa[1]);
+        let py = nurbs.point_at(pb[0], pb[1]);
+        let cx = (px.x + py.x) * 0.5;
+        let cy = (px.y + py.y) * 0.5;
+        let cz = (px.z + py.z) * 0.5;
+        ((pm.x - cx) * (pm.x - cx) + (pm.y - cy) * (pm.y - cy) + (pm.z - cz) * (pm.z - cz))
+            .sqrt()
+    };
+    let dedup_tol = (uspan * 1e-6).max(1e-9);
+    let mut grid: Vec<f64> = us.clone();
+    grid.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+    grid.dedup_by(|a, &mut b| (*a - b).abs() <= dedup_tol);
+    // v of a rim chain (u-monotone) at a given u (linear interp)
+    let chain_v_at = |chain: &[usize], uq: f64| -> Option<f64> {
+        if chain.is_empty() {
+            return None;
+        }
+        if uq <= us[chain[0]] {
+            return Some(vs[chain[0]]);
+        }
+        let last = chain[chain.len() - 1];
+        if uq >= us[last] {
+            return Some(vs[last]);
+        }
+        for w in chain.windows(2) {
+            let (i0, i1) = (w[0], w[1]);
+            let (u0, u1) = (us[i0], us[i1]);
+            if uq >= u0 - 1e-12 && uq <= u1 + 1e-12 && u1 > u0 {
+                let t = ((uq - u0) / (u1 - u0)).clamp(0.0, 1.0);
+                return Some(vs[i0] + (vs[i1] - vs[i0]) * t);
+            }
+        }
+        None
+    };
+    // ── 7. the build (pure fn of the anchors) + the pb retry loop ─
+    let tol_edge = if max_dev > 0.0 { max_dev * 1.05 } else { f64::INFINITY };
+    let mut anchors_l = anchors_l;
+    let mut anchors_r = anchors_r;
+    let mut accepted: Option<(Vec<usize>, Vec<[f64; 2]>)> = None;
+    for _pb_round in 0..32 {
+        let k_bands = anchors_l.len() - 1;
+        let mut new_pts: Vec<[f64; 2]> = Vec::new();
+        let mut new_pt = |u: f64, v: f64, new_pts: &mut Vec<[f64; 2]>| -> usize {
+            new_pts.push([u, v]);
+            n + new_pts.len() - 1
+        };
+        // column point per connector level (g_j^L, g_j^R), j=0..K-1.
+        // v2 architecture: band 0 = pure zipper (bottom rim × C_0);
+        // bands 1..K = ladders + zipper; the walls' bottom segments
+        // (the arc/step of the SLEEVE class) live in band 1 where the
+        // column feet provide near apexes.
+        let mut gl: Vec<usize> = Vec::with_capacity(k_bands);
+        let mut gr: Vec<usize> = Vec::with_capacity(k_bands);
+        for j in 0..k_bands {
+            let il = w_l[anchors_l[j]];
+            let ir = w_r[anchors_r[j]];
+            let (ul, vl) = (us[il], vs[il]);
+            let (ur, vr) = (us[ir], vs[ir]);
+            // δ_j ≈ the adjacent band heights (min), clamped
+            let h_below = if j > 0 {
+                (vs[w_l[anchors_l[j]]] - vs[w_l[anchors_l[j - 1]]])
+                    .abs()
+                    .max(1e-6)
+            } else {
+                vspan
+            };
+            let h_above = if j + 1 <= k_bands {
+                (vs[w_l[anchors_l[(j + 1).min(k_bands)]]] - vs[w_l[anchors_l[j]]])
+                    .abs()
+                    .max(1e-6)
+            } else {
+                h_below
+            };
+            let h = h_below.min(h_above);
+            let width = (ur - ul).abs().max(1e-9);
+            let dl = h.min(0.35 * width).max(1e-4 * uspan);
+            let dr = h.min(0.35 * width).max(1e-4 * uspan);
+            let gl_u = ul + dl;
+            let gr_u = ur - dr;
+            if gl_u >= gr_u - 1e-9 {
+                // corridor too narrow at this level: pinch — collapse
+                // the column onto the midline
+                let mid = 0.5 * (ul + ur);
+                let gv = 0.5 * (vl + vr);
+                let g0 = new_pt(mid, gv, &mut new_pts);
+                gl.push(g0);
+                gr.push(g0);
+                continue;
+            }
+            if j == 0 {
+                // the level-0 connector runs at a REAL offset above the
+                // bottom rim (0.02·vspan): an ε-hug makes razor-thin
+                // band-0 triangles whose noise normals fire the fold
+                // guard on curved feet (measured on the fixture); a
+                // real offset adds no sag on flat feet.
+                let h0 = (0.02 * vspan).max(1e-9);
+                let vbtm = chain_v_at(&bottom, gl_u).unwrap_or(vmin);
+                let vtop_ = chain_v_at(&top, gl_u).unwrap_or(vmax);
+                let gv = (vbtm + h0).min(vtop_ - 1e-6 * vspan).max(vbtm);
+                gl.push(new_pt(gl_u, gv, &mut new_pts));
+                let vbtm2 = chain_v_at(&bottom, gr_u).unwrap_or(vmin);
+                let vtop2 = chain_v_at(&top, gr_u).unwrap_or(vmax);
+                let gv2 = (vbtm2 + h0).min(vtop2 - 1e-6 * vspan).max(vbtm2);
+                gr.push(new_pt(gr_u, gv2, &mut new_pts));
+            } else {
+                gl.push(new_pt(gl_u, vl, &mut new_pts));
+                gr.push(new_pt(gr_u, vr, &mut new_pts));
+            }
+        }
+        // connectors[0] = bottom (rim), [1..=K] = C_0..C_{K-1}
+        // (interior u-lines), [K+1] = top (rim)
+        let mut connectors: Vec<Vec<usize>> = Vec::with_capacity(k_bands + 2);
+        connectors.push(bottom.clone());
+        for j in 0..k_bands {
+            let glj = gl[j];
+            let grj = gr[j];
+            let (u_l, v_l) = (new_pts[glj - n][0], new_pts[glj - n][1]);
+            let (u_r, v_r) = (new_pts[grj - n][0], new_pts[grj - n][1]);
+            let mut slice: Vec<f64> = grid
+                .iter()
+                .copied()
+                .filter(|&g| g > u_l + dedup_tol && g < u_r - dedup_tol)
+                .collect();
+            if max_dev > 0.0 {
+                let vprof = |g: f64| -> f64 {
+                    let t = ((g - u_l) / (u_r - u_l)).clamp(0.0, 1.0);
+                    v_l + (v_r - v_l) * t
+                };
+                let mut guard = 0usize;
+                loop {
+                    let mut worst = 0.0f64;
+                    let mut worst_at = 0usize;
+                    let mut prev = u_l;
+                    for (k, &g) in slice.iter().enumerate() {
+                        let s = uv_sag([prev, vprof(prev)], [g, vprof(g)]);
+                        if s > worst {
+                            worst = s;
+                            worst_at = k;
+                        }
+                        prev = g;
+                    }
+                    let s_last = uv_sag([prev, vprof(prev)], [u_r, vprof(u_r)]);
+                    if s_last > worst {
+                        worst = s_last;
+                        worst_at = slice.len();
+                    }
+                    if worst <= tol_edge || guard > 64 || slice.len() + 2 > 4 * n {
+                        break;
+                    }
+                    let mid = if slice.is_empty() {
+                        (u_l + u_r) * 0.5
+                    } else if worst_at == 0 {
+                        (u_l + slice[0]) * 0.5
+                    } else if worst_at == slice.len() {
+                        (slice[slice.len() - 1] + u_r) * 0.5
+                    } else {
+                        (slice[worst_at - 1] + slice[worst_at]) * 0.5
+                    };
+                    slice.insert(worst_at, mid);
+                    guard += 1;
+                }
+            }
+            let mut conn = vec![glj];
+            for g in slice {
+                let t = ((g - u_l) / (u_r - u_l)).clamp(0.0, 1.0);
+                let v = v_l + (v_r - v_l) * t;
+                conn.push(n + new_pts.len());
+                new_pts.push([g, v]);
+            }
+            conn.push(grj);
+            connectors.push(conn);
+        }
+        connectors.push(top.clone());
+        // ── emit: ladders + zipper + corner triangles ──────────────
+        let u_of = |idx: usize| -> f64 {
+            if idx < n {
+                us[idx]
+            } else {
+                new_pts[idx - n][0]
+            }
+        };
+        let v_of = |idx: usize| -> f64 {
+            if idx < n {
+                vs[idx]
+            } else {
+                new_pts[idx - n][1]
+            }
+        };
+        let mut tris: Vec<usize> = Vec::with_capacity(8 * n);
+        let mut tri_band: Vec<usize> = Vec::with_capacity(8 * n + 8);
+        let mut push3 = |x: usize, y: usize, z: usize, band: usize, tris: &mut Vec<usize>, tb: &mut Vec<usize>| {
+            if x != y && y != z && x != z {
+                tris.extend_from_slice(&[x, y, z]);
+                tb.push(band);
+            }
+        };
+        for j in 0..=k_bands {
+            // ladders: bands 1..=k_bands own the wall segments
+            // w[a_{j-1}..a_j] × the column [g_{j-1}, g_j] (the last
+            // band's column top = the top rim's end)
+            if j >= 1 {
+                let coltop_l = if j < k_bands { gl[j] } else { top[0] };
+                let coltop_r = if j < k_bands {
+                    gr[j]
+                } else {
+                    top[top.len() - 1]
+                };
+                // left ladder: chain A = wall (v-asc), chain B = column
+                {
+                    let a_chain = &w_l[anchors_l[j - 1]..=anchors_l[j]];
+                    let b_chain = [gl[j - 1], coltop_l];
+                    let mut ia = 0usize;
+                    let mut ib = 0usize;
+                    while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
+                        let adv_a = if ib >= b_chain.len() - 1 {
+                            true
+                        } else if ia >= a_chain.len() - 1 {
+                            false
+                        } else {
+                            v_of(a_chain[ia + 1]) <= v_of(b_chain[ib + 1]) + 1e-12
+                        };
+                        if adv_a {
+                            push3(
+                                a_chain[ia],
+                                b_chain[ib],
+                                a_chain[ia + 1],
+                                j,
+                                &mut tris,
+                                &mut tri_band,
+                            );
+                            ia += 1;
+                        } else {
+                            push3(
+                                a_chain[ia],
+                                b_chain[ib],
+                                b_chain[ib + 1],
+                                j,
+                                &mut tris,
+                                &mut tri_band,
+                            );
+                            ib += 1;
+                        }
+                    }
+                }
+                // right ladder (mirror: the column is LEFT of the wall)
+                {
+                    let a_chain = &w_r[anchors_r[j - 1]..=anchors_r[j]];
+                    let b_chain = [gr[j - 1], coltop_r];
+                    let mut ia = 0usize;
+                    let mut ib = 0usize;
+                    while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
+                        let adv_a = if ib >= b_chain.len() - 1 {
+                            true
+                        } else if ia >= a_chain.len() - 1 {
+                            false
+                        } else {
+                            v_of(a_chain[ia + 1]) <= v_of(b_chain[ib + 1]) + 1e-12
+                        };
+                        if adv_a {
+                            push3(
+                                a_chain[ia],
+                                a_chain[ia + 1],
+                                b_chain[ib],
+                                j,
+                                &mut tris,
+                                &mut tri_band,
+                            );
+                            ia += 1;
+                        } else {
+                            push3(
+                                a_chain[ia],
+                                b_chain[ib + 1],
+                                b_chain[ib],
+                                j,
+                                &mut tris,
+                                &mut tri_band,
+                            );
+                            ib += 1;
+                        }
+                    }
+                }
+            }
+            // middle zipper between connectors[j] and connectors[j+1]
+            // (band 0: bottom rim × C_0; band K: C_{K-1} × top rim)
+            {
+                let cbtm = &connectors[j];
+                let ctop = &connectors[j + 1];
+                let na = cbtm.len();
+                let nb = ctop.len();
+                let mut ia = 0usize;
+                let mut ib = 0usize;
+                while ia < na - 1 || ib < nb - 1 {
+                    let tri: [usize; 3] = if ia >= na - 1 {
+                        let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                        ib += 1;
+                        t
+                    } else if ib >= nb - 1 {
+                        let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                        ia += 1;
+                        t
+                    } else if u_of(cbtm[ia + 1]) <= u_of(ctop[ib + 1]) {
+                        let t = [cbtm[ia], cbtm[ia + 1], ctop[ib]];
+                        ia += 1;
+                        t
+                    } else {
+                        let t = [cbtm[ia], ctop[ib + 1], ctop[ib]];
+                        ib += 1;
+                        t
+                    };
+                    push3(tri[0], tri[1], tri[2], j, &mut tris, &mut tri_band);
+                }
+            }
+        }
+        if tris.len() < 3 || new_pts.len() > 16 * n {
+            lune_fail!("empty strip or too many new points");
+        }
+        let uv_of = |idx: usize| -> [f64; 2] {
+            if idx < n {
+                [us[idx], vs[idx]]
+            } else {
+                new_pts[idx - n]
+            }
+        };
+        // ── measure every non-rim edge; split the worst band ──────
+        let mut viol_band: Option<(f64, usize)> = None;
+        let mut viol_any = false;
+        {
+            use std::collections::HashMap;
+            let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+            for c in tris.chunks_exact(3) {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                    }
+                }
+            }
+            let rim = |x: usize, y: usize| -> bool { (x + 1) % n == y || (y + 1) % n == x };
+            let mut edge_band: HashMap<(usize, usize), usize> = HashMap::new();
+            for (ti, c) in tris.chunks_exact(3).enumerate() {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        edge_band
+                            .entry((x.min(y), y.max(x)))
+                            .or_insert(tri_band[ti]);
+                    }
+                }
+            }
+            for (&e, &cnt) in ecount.iter() {
+                if cnt >= 2 && !rim(e.0, e.1) {
+                    let sg = uv_sag(uv_of(e.0), uv_of(e.1));
+                    if sg > tol_edge + 1e-12 {
+                        viol_any = true;
+                        let bnd = *edge_band.get(&e).unwrap_or(&0);
+                        // band 0 has no wall segment (pure zipper — the
+                        // bottom strip); bands 1..=K own w[a_{j-1}..a_j]
+                        if bnd == 0 {
+                            continue;
+                        }
+                        let (jal, jbl) = (anchors_l[bnd - 1], anchors_l[bnd]);
+                        let (jar, jbr) = (anchors_r[bnd - 1], anchors_r[bnd]);
+                        if !(jbl - jal >= 2 && jbr - jar >= 2) {
+                            continue;
+                        }
+                        let better = match viol_band {
+                            None => true,
+                            Some((s0, _)) => sg > s0,
+                        };
+                        if better {
+                            viol_band = Some((sg, bnd));
+                        }
+                    }
+                }
+            }
+        }
+        if viol_any && viol_band.is_none() {
+            if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                eprintln!("[LUNE] pb: violations but no splittable band");
+            }
+            break;
+        }
+        if !viol_any {
+            // ── edge-accounting audit ─────────────────────────────
+            {
+                use std::collections::HashMap;
+                let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+                for c in tris.chunks_exact(3) {
+                    for k in 0..3 {
+                        let x = c[k];
+                        let y = c[(k + 1) % 3];
+                        if x != y {
+                            *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                        }
+                    }
+                }
+                let rim =
+                    |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
+                let mut missing = 0usize;
+                let mut bad_nonrim = 0usize;
+                for k in 0..n {
+                    let j = (k + 1) % n;
+                    if ecount.get(&(k.min(j), k.max(j))).copied() != Some(1) {
+                        missing += 1;
+                    }
+                }
+                for (&(x, y), &c) in ecount.iter() {
+                    if !rim(x, y) && c != 2 {
+                        bad_nonrim += 1;
+                    }
+                }
+                if missing > 0 || bad_nonrim > 0 {
+                    if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                        eprintln!(
+                            "[LUNE reject] audit: {} rim not-1x, {} non-rim not-2x",
+                            missing, bad_nonrim
+                        );
+                        // dump the offending edges with their owners
+                        if std::env::var("DRAPPER_LUNE_DUMP").is_ok() {
+                            let rim2 = |a: usize, b: usize| -> bool {
+                                (a + 1) % n == b || (b + 1) % n == a
+                            };
+                            for (&(x, y), &c) in ecount.iter() {
+                                if !rim2(x, y) && c != 2 {
+                                    let pa = uv_of(x);
+                                    let pb = uv_of(y);
+                                    eprintln!(
+                                        "[LUNE edge] ({:.4},{:.4})({:.4},{:.4}) cnt={} x={} y={}",
+                                        pa[0], pa[1], pb[0], pb[1], c, x, y
+                                    );
+                                    // owners
+                                    for (ti, c3) in tris.chunks_exact(3).enumerate() {
+                                        let has = |e: (usize, usize)| -> bool {
+                                            let mut hit = false;
+                                            for k in 0..3 {
+                                                let (u1, v1) = (c3[k], c3[(k + 1) % 3]);
+                                                if (u1.min(v1), u1.max(v1)) == e {
+                                                    hit = true;
+                                                }
+                                            }
+                                            hit
+                                        };
+                                        if has((x, y)) {
+                                            let q = [
+                                                uv_of(c3[0]),
+                                                uv_of(c3[1]),
+                                                uv_of(c3[2]),
+                                            ];
+                                            eprintln!(
+                                                "    tri#{} ({:.4},{:.4})({:.4},{:.4})({:.4},{:.4})",
+                                                ti, q[0][0], q[0][1], q[1][0], q[1][1],
+                                                q[2][0], q[2][1]
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    break; // leave pb loop; reject below
+                }
+            }
+            // ── fold guard (same-face >170° = 0) ───────────────────
+            {
+                use std::collections::HashMap;
+                let p3 = |idx: usize| -> Point3d {
+                    let uv = uv_of(idx);
+                    nurbs.point_at(uv[0], uv[1])
+                };
+                let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+                    let a = p3(c[0]);
+                    let b = p3(c[1]);
+                    let d = p3(c[2]);
+                    let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+                    let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+                    let nn = [
+                        ab[1] * ad[2] - ab[2] * ad[1],
+                        ab[2] * ad[0] - ab[0] * ad[2],
+                        ab[0] * ad[1] - ab[1] * ad[0],
+                    ];
+                    let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                    if l > 1e-18 {
+                        Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                    } else {
+                        None
+                    }
+                };
+                let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+                for (ti, c) in tris.chunks_exact(3).enumerate() {
+                    for k in 0..3 {
+                        let x = c[k];
+                        let y = c[(k + 1) % 3];
+                        if x != y {
+                            edge_tris
+                                .entry((x.min(y), y.max(x)))
+                                .or_default()
+                                .push(ti);
+                        }
+                    }
+                }
+                let mut folds = 0usize;
+                for ts in edge_tris.values() {
+                    if ts.len() != 2 {
+                        continue;
+                    }
+                    let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                    let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                    if let (Some(n1), Some(n2)) = (n1, n2) {
+                        let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+                            .clamp(-1.0, 1.0);
+                        if dot.acos().to_degrees() > 170.0 {
+                            folds += 1;
+                        }
+                    }
+                }
+                if folds > 0 {
+                    if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                        eprintln!("[LUNE] fold guard: {} pairs, splitting", folds);
+                        if std::env::var("DRAPPER_LUNE_DUMP2").is_ok() {
+                            for ts in edge_tris.values() {
+                                if ts.len() != 2 {
+                                    continue;
+                                }
+                                let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                                let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                                if let (Some(n1), Some(n2)) = (n1, n2) {
+                                    let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+                                        .clamp(-1.0, 1.0);
+                                    let ang = dot.acos().to_degrees();
+                                    if ang > 170.0 {
+                                        let q = [
+                                            uv_of(tris[ts[0] * 3]),
+                                            uv_of(tris[ts[0] * 3 + 1]),
+                                            uv_of(tris[ts[0] * 3 + 2]),
+                                            uv_of(tris[ts[1] * 3]),
+                                            uv_of(tris[ts[1] * 3 + 1]),
+                                            uv_of(tris[ts[1] * 3 + 2]),
+                                        ];
+                                        eprintln!(
+                                            "[LUNE fold] ang={:.2} t1=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3}) t2=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3})",
+                                            ang,
+                                            q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1],
+                                            q[3][0], q[3][1], q[4][0], q[4][1], q[5][0], q[5][1]
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // try a split of the worst band anyway; if no band
+                    // remains splittable, reject
+                    let splittable = (1..=k_bands).any(|j| {
+                        anchors_l[j] - anchors_l[j - 1] >= 2
+                            && anchors_r[j] - anchors_r[j - 1] >= 2
+                    });
+                    if !splittable {
+                        break;
+                    }
+                    // split the band with the most wall points
+                    let mut worst = 1usize;
+                    let mut wpts = 0usize;
+                    for j in 1..=k_bands {
+                        let c = (anchors_l[j] - anchors_l[j - 1])
+                            + (anchors_r[j] - anchors_r[j - 1]);
+                        if (anchors_l[j] - anchors_l[j - 1] >= 2
+                            && anchors_r[j] - anchors_r[j - 1] >= 2)
+                            && c > wpts
+                        {
+                            wpts = c;
+                            worst = j;
+                        }
+                    }
+                    let a_mid =
+                        anchors_l[worst - 1] + (anchors_l[worst] - anchors_l[worst - 1]) / 2;
+                    let b_mid =
+                        anchors_r[worst - 1] + (anchors_r[worst] - anchors_r[worst - 1]) / 2;
+                    anchors_l.insert(worst, a_mid);
+                    anchors_r.insert(worst, b_mid);
+                    if anchors_l.len() > 24 {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            // ── 2D area guard (±0.5% of the polygon's |area|) ──────
+            {
+                let signed = |ring: &[[f64; 2]]| -> f64 {
+                    let mut s = 0.0;
+                    for w in ring.windows(2) {
+                        s += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+                    }
+                    if ring.len() > 1 {
+                        let (a, b) = (ring[ring.len() - 1], ring[0]);
+                        s += a[0] * b[1] - b[0] * a[1];
+                    }
+                    s * 0.5
+                };
+                let poly_uv: Vec<[f64; 2]> = (0..n).map(|k| [us[k], vs[k]]).collect();
+                let poly_s = signed(&poly_uv);
+                let strip_s: f64 = tris
+                    .chunks_exact(3)
+                    .map(|c| {
+                        (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                            + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                            + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                            * 0.5
+                    })
+                    .sum();
+                if (strip_s - poly_s).abs() > 0.005 * poly_s.abs().max(1e-12) {
+                    if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                        eprintln!(
+                            "[LUNE reject] area: strip {:.6} vs poly {:.6}",
+                            strip_s, poly_s
+                        );
+                    }
+                    break;
+                }
+                // winding: flip to match the polygon sign
+                if strip_s * poly_s < 0.0 {
+                    for c in tris.chunks_exact_mut(3) {
+                        c.swap(1, 2);
+                    }
+                }
+            }
+            accepted = Some((tris, new_pts));
+            break;
+        }
+        // split the worst violating band and rebuild
+        let (_, j) = viol_band.unwrap();
+        let a_mid = anchors_l[j - 1] + (anchors_l[j] - anchors_l[j - 1]) / 2;
+        let b_mid = anchors_r[j - 1] + (anchors_r[j] - anchors_r[j - 1]) / 2;
+        if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+            eprintln!("[LUNE] pb: split band j={} (anchors {}+)", j, anchors_l.len());
+        }
+        anchors_l.insert(j, a_mid);
+        anchors_r.insert(j, b_mid);
+        if anchors_l.len() > 24 {
+            break;
+        }
+    }
+    let (mut tris, new_pts) = match accepted {
+        Some(x) => x,
+        None => lune_fail!("no build passes the guards"),
+    };
+    let _ = &mut tris;
+    // ── 8. map deduped indices back to the original ring ──────────
+    let mut out: Vec<usize> = Vec::with_capacity(tris.len());
+    for &t in tris.iter() {
+        if t < n {
+            out.push(ring_idx[t]);
+        } else {
+            out.push(n_raw + (t - n));
+        }
+    }
+    (out, new_pts)
 }
 
 pub fn triangulate_surface_consistent(
@@ -10146,11 +11309,12 @@ pub fn triangulate_surface_consistent(
                     if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
                         if let Surface::Nurbs(_) = surface {
                             eprintln!(
-                                "[NFB hook] face reached: n_unused={} extra_bnd={} holes={} nb={}",
+                                "[NFB hook] face reached: n_unused={} extra_bnd={} holes={} nb={} label={}",
                                 n_unused,
                                 legacy_extra_bnd,
                                 holes_2d.len(),
-                                boundary_2d.len()
+                                boundary_2d.len(),
+                                current_face_label()
                             );
                         }
                     }
@@ -10167,11 +11331,34 @@ pub fn triangulate_surface_consistent(
                     } else {
                         (Vec::new(), Vec::new())
                     };
+                    // session-71: LUNE_FILLET_BAND fallback — the curved-
+                    // wall lune class the s70 strip rejects ("no level
+                    // count passes": collinear wall-fan needles + corner
+                    // ring duplicates; SLEEVE ~72 faces + HOUSING/HM
+                    // families). Off-wall column anchors + side ladders
+                    // + bend-forced anchors; same [ring | new] contract,
+                    // same never-worsen gate below. Kill-switch:
+                    // DRAPPER_LUNE_FILLET_BAND=0.
+                    let lune_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
+                        && nurbs_band_strip.0.is_empty()
+                        && (n_unused > 0 || legacy_extra_bnd > 0)
+                        && std::env::var("DRAPPER_LUNE_FILLET_BAND").as_deref() != Ok("0")
+                    {
+                        match surface {
+                            Surface::Nurbs(nr) => {
+                                nurbs_lune_band_strip(nr, &boundary_2d, params.max_deviation)
+                            }
+                            _ => (Vec::new(), Vec::new()),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     if n_unused > 0
                         || !crescent_strip.is_empty()
                         || !cyl_band_strip.is_empty()
                         || !torus_band_strip.0.is_empty()
                         || !nurbs_band_strip.0.is_empty()
+                        || !lune_band_strip.0.is_empty()
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -10492,6 +11679,93 @@ pub fn triangulate_surface_consistent(
                             } else {
                                 log::debug!(
                                     "[f{}] NURBS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
+                            }
+                        }
+                        // s71: LUNE_FILLET_BAND acceptance — the same
+                        // never-worsen gate as the s70 strip (rim ≥,
+                        // extra ≤, strictly better); the lune strip's
+                        // rim edges are the DEDUPED ring (zero-length
+                        // duplicates carry no cross-face contract, so
+                        // the rim count is comparable).
+                        if !strip_accepted && !lune_band_strip.0.is_empty() {
+                            let mut strip = lune_band_strip.0.clone();
+                            let strip_new = &lune_band_strip.1;
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let never_worse = strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count
+                                    || strip_extra < legacy_extra_bnd);
+                            if never_worse {
+                                let base = all_uv.len();
+                                for p in strip_new.iter() {
+                                    all_uv.push(Point2d::new(p[0], p[1]));
+                                }
+                                for idx in strip.iter_mut() {
+                                    if *idx >= n_boundary {
+                                        *idx = base + (*idx - n_boundary);
+                                    }
+                                }
+                                log::warn!(
+                                    "[f{}] LUNE_FILLET_BAND rescue: off-wall ladder grid accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, {} column/level pts, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3,
+                                    strip_new.len(),
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] LUNE_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
                                     current_face_label(),
                                     strip_rim,
                                     legacy_rim_count,
@@ -17675,6 +18949,289 @@ mod tests {
         }
         let (tris, _new) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
         assert!(tris.is_empty(), "notched bottom arc must be rejected");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // session-71: LUNE_FILLET_BAND tests (the SLEEVE boot class)
+    // ─────────────────────────────────────────────────────────────────
+
+    /// lune invariants: like assert_nurbs_band_invariants but with the
+    /// DEDUPED rim (consecutive duplicate ring points collapse; their
+    /// zero-length edges are vacuously covered and must NOT appear).
+    fn assert_lune_band_invariants(
+        nurbs: &draper_geometry::NurbsSurface,
+        ring: &[[f64; 2]],
+        tris: &[usize],
+        new_pts: &[[f64; 2]],
+    ) {
+        let n_raw = ring.len();
+        assert!(!tris.is_empty(), "strip must be non-empty");
+        // dedup replica (must mirror the strip's entry logic)
+        let ruspan = ring.iter().map(|p| p[0]).fold(f64::NEG_INFINITY, f64::max)
+            - ring.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+        let rvspan = ring.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max)
+            - ring.iter().map(|p| p[1]).fold(f64::INFINITY, f64::min);
+        let (tol_u, tol_v) = (1e-9 * ruspan.abs().max(1e-6), 1e-9 * rvspan.abs().max(1e-6));
+        let mut dedup: Vec<usize> = Vec::new();
+        for k in 0..n_raw {
+            if let Some(&last) = dedup.last() {
+                if (ring[last][0] - ring[k][0]).abs() <= tol_u
+                    && (ring[last][1] - ring[k][1]).abs() <= tol_v
+                {
+                    continue;
+                }
+            }
+            dedup.push(k);
+        }
+        while dedup.len() > 3 {
+            let (a, b) = (ring[*dedup.last().unwrap()], ring[dedup[0]]);
+            if (a[0] - b[0]).abs() <= tol_u && (a[1] - b[1]).abs() <= tol_v {
+                dedup.pop();
+            } else {
+                break;
+            }
+        }
+        let uv_of = |idx: usize| -> [f64; 2] {
+            if idx < n_raw {
+                ring[idx]
+            } else {
+                new_pts[idx - n_raw]
+            }
+        };
+        // edge accounting over the DEDUPED rim
+        {
+            use std::collections::HashMap;
+            let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+            for c in tris.chunks_exact(3) {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                    }
+                }
+            }
+            let m = dedup.len();
+            let rim_of = |a: usize, b: usize| -> Option<(usize, usize)> {
+                for w in dedup.windows(2) {
+                    if (w[0] == a && w[1] == b) || (w[0] == b && w[1] == a) {
+                        return Some((w[0].min(w[1]), w[0].max(w[1])));
+                    }
+                }
+                // wrap
+                let (f, l) = (dedup[0], *dedup.last().unwrap());
+                if (f == a && l == b) || (f == b && l == a) {
+                    Some((f.min(l), f.max(l)))
+                } else {
+                    None
+                }
+            };
+            // every deduped rim edge exactly 1x
+            for w in dedup.windows(2) {
+                let e = (w[0].min(w[1]), w[0].max(w[1]));
+                assert_eq!(
+                    ecount.get(&e).copied(),
+                    Some(1),
+                    "deduped rim edge ({}, {}) must be exactly 1x",
+                    w[0],
+                    w[1]
+                );
+            }
+            let (f, l) = (dedup[0], *dedup.last().unwrap());
+            let e = (f.min(l), f.max(l));
+            assert_eq!(
+                ecount.get(&e).copied(),
+                Some(1),
+                "deduped wrap rim edge must be exactly 1x"
+            );
+            // every non-rim edge exactly 2x; no edge may use a
+            // dropped duplicate point
+            let dropped: std::collections::HashSet<usize> =
+                (0..n_raw).filter(|k| !dedup.contains(k)).collect();
+            for (&(x, y), &c) in ecount.iter() {
+                assert!(
+                    !dropped.contains(&x) && !dropped.contains(&y),
+                    "edge ({}, {}) uses a dropped duplicate point",
+                    x,
+                    y
+                );
+                if rim_of(x, y).is_none() {
+                    assert_eq!(c, 2usize, "non-rim edge ({}, {}) must be 2x", x, y);
+                }
+            }
+        }
+        // 2D area within ±0.5%
+        {
+            let signed = |r: &[[f64; 2]]| -> f64 {
+                let mut sacc = 0.0;
+                for w in r.windows(2) {
+                    sacc += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+                }
+                if r.len() > 1 {
+                    let (a, b) = (r[r.len() - 1], r[0]);
+                    sacc += a[0] * b[1] - b[0] * a[1];
+                }
+                sacc * 0.5
+            };
+            let dedup_uv: Vec<[f64; 2]> = dedup.iter().map(|&k| ring[k]).collect();
+            let poly_s = signed(&dedup_uv);
+            let strip_s: f64 = tris
+                .chunks_exact(3)
+                .map(|c| {
+                    (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                        + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                        + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                        * 0.5
+                })
+                .sum();
+            assert!(
+                (strip_s - poly_s).abs() <= 0.005 * poly_s.abs().max(1e-12),
+                "area mismatch: strip {:.6} vs poly {:.6}",
+                strip_s,
+                poly_s
+            );
+            // winding matches
+            assert!(strip_s * poly_s > 0.0, "winding flipped");
+        }
+        // zero same-face folds
+        {
+            use std::collections::HashMap;
+            let p3 = |idx: usize| -> draper_geometry::Point3d {
+                let uv = uv_of(idx);
+                nurbs.point_at(uv[0], uv[1])
+            };
+            let tri_normal = |c: &[usize]| -> Option<[f64; 3]> {
+                let a = p3(c[0]);
+                let b = p3(c[1]);
+                let d = p3(c[2]);
+                let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+                let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+                let nn = [
+                    ab[1] * ad[2] - ab[2] * ad[1],
+                    ab[2] * ad[0] - ab[0] * ad[2],
+                    ab[0] * ad[1] - ab[1] * ad[0],
+                ];
+                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                if l > 1e-18 {
+                    Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                } else {
+                    None
+                }
+            };
+            let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+            for (ti, c) in tris.chunks_exact(3).enumerate() {
+                for k in 0..3 {
+                    let x = c[k];
+                    let y = c[(k + 1) % 3];
+                    if x != y {
+                        edge_tris
+                            .entry((x.min(y), y.max(x)))
+                            .or_default()
+                            .push(ti);
+                    }
+                }
+            }
+            for ts in edge_tris.values() {
+                if ts.len() != 2 {
+                    continue;
+                }
+                let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
+                let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                if let (Some(n1), Some(n2)) = (n1, n2) {
+                    let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                    assert!(
+                        dot.acos().to_degrees() <= 170.0,
+                        "fold pair >170deg in the lune strip"
+                    );
+                }
+            }
+        }
+    }
+
+    /// SLEEVE-like boot (f49-class): 4 duplicate corner copies + a
+    /// dense u=0 micro-arc + a horizontal step to a straight wall +
+    /// a straight right wall + a full-width bottom edge + a top arc.
+    /// The s70 strip rejects it (collinear wall-fan needles + the
+    /// degenerate bottom connector); the lune strip must triangulate
+    /// it with exact deduped-rim coverage.
+    #[test]
+    fn nurbs_lune_band_sleeve_boot() {
+        let nurbs = fillet_nurbs_fixture();
+        let (u_w, u_r, u_arc) = (0.14f64, 0.84f64, 0.0f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // 4 duplicate corner copies at (0, 0)
+        for _ in 0..4 {
+            ring.push([0.0, 0.0]);
+        }
+        // bottom arc: u 0.06 → u_r, v ≈ 0.001..0.004 (17 pts — a
+        // curved surface's cached rim is tessellated; the SLEEVE's
+        // single flat segment is the flat-surface special case)
+        for k in 0..17 {
+            let t = k as f64 / 16.0;
+            ring.push([0.06 + (u_r - 0.06) * t, 0.001 + 0.003 * t]);
+        }
+        // right wall: u≈u_r, v 0.02 → 0.97 (30 pts)
+        for k in 1..=30 {
+            ring.push([u_r - 0.002 * k as f64 / 30.0, 0.02 + 0.95 * k as f64 / 30.0]);
+        }
+        // top arc: v≈0.99..1.0, u u_r → u_w (22 pts)
+        for k in 0..22 {
+            let t = k as f64 / 21.0;
+            ring.push([u_r - (u_r - u_w) * t, 0.99 + 0.01 * (std::f64::consts::PI * t).sin()]);
+        }
+        // left wall: u=u_w, v 0.97 → 0.024 (30 pts)
+        for k in 0..30 {
+            ring.push([u_w, 0.97 - 0.946 * k as f64 / 29.0]);
+        }
+        // the step: (u_w, 0.024) → (u_arc, 0.02)
+        ring.push([u_arc, 0.02]);
+        // micro-arc: u=0, v 0.02 → 0.001 (dense, 24 pts)
+        for k in 1..=24 {
+            ring.push([u_arc, 0.02 - 0.019 * k as f64 / 24.0]);
+        }
+        // (closes back to the corner (0,0))
+        let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(!tris.is_empty(), "SLEEVE boot must qualify for the lune strip");
+        assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// Curved-wall lune (HOUSING f68-like): both walls drift in u
+    /// (no straight u=const segment at all).
+    #[test]
+    fn nurbs_lune_band_curved_walls() {
+        let nurbs = fillet_nurbs_fixture();
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom arc v=0, u 0.10 → 0.72 (17 pts)
+        for k in 0..17 {
+            ring.push([0.10 + 0.62 * k as f64 / 16.0, 0.0]);
+        }
+        // right wall: u = 0.72 − 0.25·sin(π t), v = t (curved, 25 pts)
+        for k in 1..=25 {
+            let t = k as f64 / 25.0;
+            ring.push([0.72 - 0.25 * (std::f64::consts::PI * t).sin(), t]);
+        }
+        // top arc v=1, u 0.72 → 0.10 (17 pts; 0.72 = the right wall's
+        // top end, 0.10 = the left wall's bottom start — closed ring)
+        for k in 0..17 {
+            ring.push([0.72 - 0.62 * k as f64 / 16.0, 1.0]);
+        }
+        // left wall: u = 0.10 + 0.18·sin(π t), v = 1 − t (25 pts)
+        for k in 1..=25 {
+            let t = k as f64 / 25.0;
+            ring.push([0.10 + 0.18 * (std::f64::consts::PI * t).sin(), 1.0 - t]);
+        }
+        let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(!tris.is_empty(), "curved-wall lune must qualify");
+        assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// reject: duplicate-only degenerate ring (6 identical points)
+    #[test]
+    fn nurbs_lune_band_rejects_all_duplicate_ring() {
+        let nurbs = fillet_nurbs_fixture();
+        let ring: Vec<[f64; 2]> = vec![[0.2, 0.5]; 6];
+        let (tris, _new) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(tris.is_empty(), "all-duplicate ring must be rejected");
     }
 
     /// reject: tiny ring (n < 6)
