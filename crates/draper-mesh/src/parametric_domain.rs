@@ -7927,10 +7927,35 @@ pub fn nurbs_lune_band_strip(
     boundary_2d: &[[f64; 2]],
     max_dev: f64,
 ) -> (Vec<usize>, Vec<[f64; 2]>) {
+    // session-72 C (pocket fan-off retry): MEASURED NET-NEGATIVE on
+    // the final mesh — the pocket (3D thickness ~0.003 < merge_tol
+    // 0.0153) collapses in the global weld and its fan triangles
+    // survive as zero-area slivers folding 180° against the Plane
+    // neighbors (SLEEVE pairs 333→367, bnd 1239→1267; nm improved
+    // 1339→1103 but pairs is the gate metric). Retry disabled; the
+    // slit-pocket class is understood (see the s72 scan below) and
+    // needs weld-aware handling instead. Opt-in for reproduction:
+    // DRAPPER_LUNE_POCKET_FAN=1 re-enables the retry.
+    if std::env::var("DRAPPER_LUNE_POCKET_FAN").as_deref() != Ok("1") {
+        return nurbs_lune_band_strip_impl(nurbs, boundary_2d, max_dev, false);
+    }
+    let r = nurbs_lune_band_strip_impl(nurbs, boundary_2d, max_dev, false);
+    if !r.0.is_empty() {
+        return r;
+    }
+    nurbs_lune_band_strip_impl(nurbs, boundary_2d, max_dev, true)
+}
+
+fn nurbs_lune_band_strip_impl(
+    nurbs: &draper_geometry::NurbsSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+    pocket_fan: bool,
+) -> (Vec<usize>, Vec<[f64; 2]>) {
     macro_rules! lune_fail {
         ($reason:expr) => {{
             if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
-                eprintln!("[LUNE reject] {}", $reason);
+                eprintln!("[LUNE reject {}] {}", current_face_label(), $reason);
             }
             return (Vec::new(), Vec::new());
         }};
@@ -8023,6 +8048,102 @@ pub fn nurbs_lune_band_strip(
     if !(vspan > 1e-9) || !(uspan > 0.0) {
         lune_fail!("flat ring");
     }
+    // ── 3.5 session-72 C: SLIT-POCKET detection (retry path only) ─
+    // A thin out-and-back "pocket" at a wall foot (SLEEVE f185
+    // class): the boundary jumps from a corner C horizontally to a
+    // far point F, then returns along a shallow path back to
+    // (nearly) the SAME corner — the sub-path endpoints coincide and
+    // the whole excursion is thin. The jump edge belongs to neither
+    // wall nor rim: left in the wall it makes the first band a thin
+    // "step band" whose top connector sits BELOW the level-0
+    // rim-hugger (C_0 above C_1 = inverted bands = 93 unresolvable
+    // folds, measured). Retry: fan the pocket off its centroid and
+    // collapse the ring walk across it — the walls become the pure
+    // verticals, the rim the direct corner-to-corner edge.
+    let mut pocket: Option<(usize, usize)> = None;
+    let mut fan_centroid: Option<[f64; 2]> = None;
+    let mut nxt: Vec<usize> = (0..n).map(|k| (k + 1) % n).collect();
+    let mut prv: Vec<usize> = (0..n).map(|k| (k + n - 1) % n).collect();
+    if pocket_fan {
+        let tol_c = 1e-4 * (uspan + vspan).max(1e-9);
+        'scan: for i in 0..n {
+            for j in ((i + 2)..(i + 80).min(n)).rev() {
+                if (us[i] - us[j]).abs() > tol_c || (vs[i] - vs[j]).abs() > tol_c {
+                    continue;
+                }
+                // thinness of the sub-path around the out-edge (i, i+1)
+                let (ax, ay) = (us[i], vs[i]);
+                let (bx, by) = (us[i + 1], vs[i + 1]);
+                let (dx, dy) = (bx - ax, by - ay);
+                let len2 = dx * dx + dy * dy;
+                if len2 < 1e-18 {
+                    continue;
+                }
+                let thin_tol = 0.08 * len2.sqrt() + 1e-9;
+                let mut thin = true;
+                for k in i + 1..j {
+                    let t = (((us[k] - ax) * dx + (vs[k] - ay) * dy) / len2).clamp(0.0, 1.0);
+                    let ddx = us[k] - (ax + t * dx);
+                    let ddy = vs[k] - (ay + t * dy);
+                    if (ddx * ddx + ddy * ddy).sqrt() > thin_tol {
+                        thin = false;
+                        break;
+                    }
+                }
+                if !thin {
+                    continue;
+                }
+                // foot/head localization: the pocket must hug vmin or
+                // vmax (a wall-foot appendage, not a mid-face slit)
+                let pmax = (i..=j).map(|k| vs[k]).fold(f64::NEG_INFINITY, f64::max);
+                let pmin = (i..=j).map(|k| vs[k]).fold(f64::INFINITY, f64::min);
+                if !(pmax <= vmin + 0.15 * vspan || pmin >= vmax - 0.15 * vspan) {
+                    continue;
+                }
+                // the v-extremes must not live inside the pocket
+                // (the chain walks start there)
+                let mut ok = true;
+                for k in 1..n {
+                    if k > i && k < j && (vs[k] <= vmin + 1e-12 || vs[k] >= vmax - 1e-12) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if !ok {
+                    continue;
+                }
+                pocket = Some((i, j));
+                break 'scan;
+            }
+        }
+        if let Some((i, j)) = pocket {
+            nxt[i] = j;
+            prv[j] = i;
+            // centroid of the pocket boundary — the thin wedge is
+            // convex (measured), star-shaped w.r.t. it
+            let (mut cx, mut cy, mut cnt) = (0.0f64, 0.0f64, 0usize);
+            for k in i..=j {
+                cx += us[k];
+                cy += vs[k];
+                cnt += 1;
+            }
+            fan_centroid = Some([cx / cnt as f64, cy / cnt as f64]);
+            if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                eprintln!(
+                    "[LUNE s72 pocket {}] i={} j={} ({:.4},{:.4})..({:.4},{:.4}) centroid=({:.4},{:.4})",
+                    current_face_label(),
+                    i,
+                    j,
+                    us[i],
+                    vs[i],
+                    us[j],
+                    vs[j],
+                    cx / cnt as f64,
+                    cy / cnt as f64
+                );
+            }
+        }
+    }
     // ── 3. extremes + the two chains (both walk vmin→vmax) ────────
     let mut vmin_i = 0usize;
     let mut vmax_i = 0usize;
@@ -8045,7 +8166,7 @@ pub fn nurbs_lune_band_strip(
             if i == vmax_i {
                 break;
             }
-            i = (i + 1) % n;
+            i = nxt[i];
         }
     }
     let mut b: Vec<usize> = Vec::with_capacity(n);
@@ -8056,7 +8177,7 @@ pub fn nurbs_lune_band_strip(
             if i == vmax_i {
                 break;
             }
-            i = (i + n - 1) % n;
+            i = prv[i];
         }
     }
     // ── 4. flat runs + HORIZONTAL-ISH extension ───────────────────
@@ -8099,6 +8220,48 @@ pub fn nurbs_lune_band_strip(
                 e2 -= 1;
             } else {
                 break;
+            }
+        }
+        // session-72 A: END-LIP ABSORPTION. A wall foot/head may carry
+        // a shallow "lip" — a micro-arc that descends a hair (SLEEVE
+        // f185 class: the u=0 arc, 24 pts, 0.31% of vspan) before the
+        // wall's real climb. The horizontal extension cannot take it
+        // (the arc is vertical, du=0); left in the wall it breaks
+        // v-monotonicity. Absorb the lip into the flat run: advance e1
+        // to the start of the wall's maximal mono suffix (mirror: pull
+        // e2 back to the end of the maximal mono prefix) when the
+        // absorbed excursion stays within 1% of vspan of the run's
+        // anchor v — real wall geometry (HOUSING f118: the excursion
+        // rises 40% of vspan past the foot) never qualifies, and the
+        // mid-wall descents (f118/f175 classes) are left for the
+        // noise-tolerant gate below.
+        let dip_tol = 0.01 * vspan.max(1e-6);
+        {
+            // maximal mono suffix of [e1..=e2]
+            let mut ks = e2;
+            while ks > e1 + 1 && vs[chain[ks - 1]] <= vs[chain[ks]] + flat_eps {
+                ks -= 1;
+            }
+            if ks > e1 + 1 {
+                let anchor_v = vs[chain[e1]];
+                let shallow = (e1..ks).all(|k| (vs[chain[k]] - anchor_v).abs() <= dip_tol);
+                if shallow {
+                    e1 = ks;
+                }
+            }
+        }
+        {
+            // maximal mono prefix of [e1..=e2] (after the foot pass)
+            let mut ke = e1;
+            while ke + 1 < e2 && vs[chain[ke + 1]] >= vs[chain[ke]] - flat_eps {
+                ke += 1;
+            }
+            if ke + 1 < e2 {
+                let anchor_v = vs[chain[e2]];
+                let shallow = ((ke + 1)..=e2).all(|k| (vs[chain[k]] - anchor_v).abs() <= dip_tol);
+                if shallow {
+                    e2 = ke;
+                }
             }
         }
         (
@@ -8203,12 +8366,85 @@ pub fn nurbs_lune_band_strip(
     if w_r[0] != bottom[bottom.len() - 1] {
         w_r.insert(0, bottom[bottom.len() - 1]);
     }
-    // walls must be v-monotone (the ladders rely on it)
+    // walls must be v-monotone (the ladders rely on it) — session-72 B:
+    // relaxed to a RUNNING-MAX bound. Strict monotonicity misfires on
+    // (a) tessellation noise (HOUSING f118: 56 dips of ~1e-5 = 0.05%
+    // of vspan) and (b) post-peak micro-arcs (f175/f6/f85 classes:
+    // 0.71–0.84% of vspan, mid-wall). A wall qualifies if it never
+    // falls more than 1% of vspan below its running max; the genuine
+    // meanders (f48/f25: 415 dips totaling 330% of vspan) stay
+    // rejected. The end-lip class (SLEEVE f185) was already absorbed
+    // into the rims by the decompose step and arrives here mono.
     {
+        let noise_tol = 0.01 * vspan.max(1e-6);
         let mono = |w: &[usize]| -> bool {
+            let mut run_max = f64::NEG_INFINITY;
+            for &k in w {
+                let v = vs[k];
+                if v > run_max {
+                    run_max = v;
+                }
+                if v < run_max - noise_tol {
+                    return false;
+                }
+            }
+            true
+        };
+        let strict_mono = |w: &[usize]| -> bool {
             w.windows(2).all(|x| vs[x[1]] >= vs[x[0]] - flat_eps)
         };
         if !mono(&w_l) || !mono(&w_r) {
+            // session-72: wavy-bottom forensics — the dip profile of the
+            // offending wall + optional full ring dump for offline replay.
+            if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
+                let profile = |name: &str, w: &[usize]| {
+                    let mut dips = Vec::new();
+                    for x in w.windows(2) {
+                        let d = vs[x[1]] - vs[x[0]];
+                        if d < -flat_eps {
+                            dips.push(format!(
+                                "#{:3}→#{:3} −{:.5} (u {:.4}→{:.4})",
+                                x[0],
+                                x[1],
+                                -d,
+                                us[x[0]],
+                                us[x[1]]
+                            ));
+                        }
+                    }
+                    eprintln!(
+                        "[LUNE s72 {}] {} {}: {} pts, {} dip(s): {}",
+                        current_face_label(),
+                        name,
+                        if strict_mono(w) { "mono" } else { "NON-MONO" },
+                        w.len(),
+                        dips.len(),
+                        if dips.is_empty() {
+                            "-".to_string()
+                        } else {
+                            dips.join("; ")
+                        }
+                    );
+                };
+                profile("w_l", &w_l);
+                profile("w_r", &w_r);
+            }
+            if let Ok(dir) = std::env::var("DRAPPER_LUNE_DUMP_REJECT") {
+                let _ = std::fs::create_dir_all(&dir);
+                let label = current_face_label();
+                let fname = label.replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+                let path = format!("{}/{}.ring", dir, fname);
+                let mut out = String::new();
+                out.push_str(&format!("label={}\n", label));
+                out.push_str(&format!("n_raw={}\n", n_raw));
+                out.push_str(&format!("n={}\n", n));
+                out.push_str(&format!("vspan={:.9}\nuspan={:.9}\n", vspan, uspan));
+                out.push_str("idx u v\n");
+                for k in 0..n {
+                    out.push_str(&format!("{} {:.9} {:.9}\n", k, us[k], vs[k]));
+                }
+                let _ = std::fs::write(&path, out);
+            }
             lune_fail!("wall not v-monotone after assembly");
         }
     }
@@ -8378,6 +8614,29 @@ pub fn nurbs_lune_band_strip(
         let mut new_pt = |u: f64, v: f64, new_pts: &mut Vec<[f64; 2]>| -> usize {
             new_pts.push([u, v]);
             n + new_pts.len() - 1
+        };
+        // session-72 C: the pocket fan (retry path) — the centroid is
+        // created FIRST each round so the fan indices are stable
+        // relative to the round's fresh new_pts; the fan joins the
+        // audit/fold/area guards (and the accepted output) but NOT
+        // the pb sag measurement (the pocket collapses in the global
+        // weld anyway — its rim coverage is what matters).
+        let fan_tris: Vec<usize> = match (&fan_centroid, pocket) {
+            (Some(c), Some((pi, pj))) => {
+                let ps = new_pt(c[0], c[1], &mut new_pts);
+                let mut f = Vec::with_capacity(3 * (pj - pi + 1));
+                for k in pi..pj {
+                    f.extend_from_slice(&[ps, k, k + 1]);
+                }
+                // closing triangle [P*, pj, pi]: pj ≡ pi (the slit
+                // pinch) so it is zero-area, but it closes the fan's
+                // end spokes (P*,pi)/(P*,pj) to 2× and the doubled
+                // ring edge (pi,pj) to 2× — without it the audit
+                // flags all three (measured).
+                f.extend_from_slice(&[ps, pj, pi]);
+                f
+            }
+            _ => Vec::new(),
         };
         // column point per connector level (g_j^L, g_j^R), j=0..K-1.
         // v2 architecture: band 0 = pure zipper (bottom rim × C_0);
@@ -8718,11 +8977,21 @@ pub fn nurbs_lune_band_strip(
             break;
         }
         if !viol_any {
+            // session-72 C: the pocket fan joins the guard pipeline
+            // (audit + fold + area + acceptance); the strip-only
+            // `tris` stays the pb-loop's rebuild substrate.
+            let mut tris_all: Vec<usize> = if fan_tris.is_empty() {
+                tris.clone()
+            } else {
+                let mut v = tris.clone();
+                v.extend_from_slice(&fan_tris);
+                v
+            };
             // ── edge-accounting audit ─────────────────────────────
             {
                 use std::collections::HashMap;
                 let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
-                for c in tris.chunks_exact(3) {
+                for c in tris_all.chunks_exact(3) {
                     for k in 0..3 {
                         let x = c[k];
                         let y = c[(k + 1) % 3];
@@ -8733,6 +9002,17 @@ pub fn nurbs_lune_band_strip(
                 }
                 let rim =
                     |a: usize, b: usize| -> bool { (a + 1) % n == b || (b + 1) % n == a };
+                // session-72 C: a ring edge whose two endpoints COINCIDE
+                // (the slit-pocket's doubled corner visit: the walk passes
+                // through both copies) carries no geometry and no
+                // cross-face contract — exempt from the 2× requirement.
+                let coincident = |x: usize, y: usize| -> bool {
+                    if x >= n || y >= n {
+                        return false;
+                    }
+                    let (du, dv) = ((us[x] - us[y]).abs(), (vs[x] - vs[y]).abs());
+                    du <= 1e-6 * uspan.max(1e-9) && dv <= 1e-6 * vspan.max(1e-9)
+                };
                 let mut missing = 0usize;
                 let mut bad_nonrim = 0usize;
                 for k in 0..n {
@@ -8742,7 +9022,7 @@ pub fn nurbs_lune_band_strip(
                     }
                 }
                 for (&(x, y), &c) in ecount.iter() {
-                    if !rim(x, y) && c != 2 {
+                    if !rim(x, y) && c != 2 && !coincident(x, y) {
                         bad_nonrim += 1;
                     }
                 }
@@ -8823,7 +9103,7 @@ pub fn nurbs_lune_band_strip(
                     }
                 };
                 let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
-                for (ti, c) in tris.chunks_exact(3).enumerate() {
+                for (ti, c) in tris_all.chunks_exact(3).enumerate() {
                     for k in 0..3 {
                         let x = c[k];
                         let y = c[(k + 1) % 3];
@@ -8840,8 +9120,8 @@ pub fn nurbs_lune_band_strip(
                     if ts.len() != 2 {
                         continue;
                     }
-                    let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
-                    let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                    let n1 = tri_normal(&tris_all[ts[0] * 3..ts[0] * 3 + 3]);
+                    let n2 = tri_normal(&tris_all[ts[1] * 3..ts[1] * 3 + 3]);
                     if let (Some(n1), Some(n2)) = (n1, n2) {
                         let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
                             .clamp(-1.0, 1.0);
@@ -8851,6 +9131,67 @@ pub fn nurbs_lune_band_strip(
                     }
                 }
                 if folds > 0 {
+                    if std::env::var("DRAPPER_LUNE_DUMP").is_ok() {
+                        // session-72: one-shot build-state dump (chains,
+                        // anchors, columns) at the first fold hit.
+                        eprintln!(
+                            "[LUNE state {}] n={} k_bands={} anchors_l={:?} anchors_r={:?}",
+                            current_face_label(),
+                            n,
+                            k_bands,
+                            anchors_l,
+                            anchors_r
+                        );
+                        eprintln!(
+                            "  w_l ({}): {}",
+                            w_l.len(),
+                            w_l.iter()
+                                .map(|&k| format!("#{}({:.3},{:.3})", k, us[k], vs[k]))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        eprintln!(
+                            "  w_r ({}): {}",
+                            w_r.len(),
+                            w_r.iter()
+                                .map(|&k| format!("#{}({:.3},{:.3})", k, us[k], vs[k]))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        eprintln!(
+                            "  bottom ({}): {}",
+                            bottom.len(),
+                            bottom
+                                .iter()
+                                .map(|&k| format!("#{}({:.3},{:.3})", k, us[k], vs[k]))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        eprintln!(
+                            "  top ({}): {}",
+                            top.len(),
+                            top.iter()
+                                .map(|&k| format!("#{}({:.3},{:.3})", k, us[k], vs[k]))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                        for (cj, conn) in connectors.iter().enumerate() {
+                            eprintln!(
+                                "  C{} ({}): {}",
+                                cj,
+                                conn.len(),
+                                conn.iter()
+                                    .map(|&k| format!(
+                                        "#{}({:.3},{:.3})",
+                                        k,
+                                        u_of(k),
+                                        v_of(k)
+                                    ))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            );
+                        }
+                    }
                     if std::env::var("DRAPPER_LUNE_DEBUG").is_ok() {
                         eprintln!("[LUNE] fold guard: {} pairs, splitting", folds);
                         if std::env::var("DRAPPER_LUNE_DUMP2").is_ok() {
@@ -8858,26 +9199,33 @@ pub fn nurbs_lune_band_strip(
                                 if ts.len() != 2 {
                                     continue;
                                 }
-                                let n1 = tri_normal(&tris[ts[0] * 3..ts[0] * 3 + 3]);
-                                let n2 = tri_normal(&tris[ts[1] * 3..ts[1] * 3 + 3]);
+                                let n1 = tri_normal(&tris_all[ts[0] * 3..ts[0] * 3 + 3]);
+                                let n2 = tri_normal(&tris_all[ts[1] * 3..ts[1] * 3 + 3]);
                                 if let (Some(n1), Some(n2)) = (n1, n2) {
                                     let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
                                         .clamp(-1.0, 1.0);
                                     let ang = dot.acos().to_degrees();
                                     if ang > 170.0 {
-                                        let q = [
-                                            uv_of(tris[ts[0] * 3]),
-                                            uv_of(tris[ts[0] * 3 + 1]),
-                                            uv_of(tris[ts[0] * 3 + 2]),
-                                            uv_of(tris[ts[1] * 3]),
-                                            uv_of(tris[ts[1] * 3 + 1]),
-                                            uv_of(tris[ts[1] * 3 + 2]),
+                                        let qi = [
+                                            tris_all[ts[0] * 3],
+                                            tris_all[ts[0] * 3 + 1],
+                                            tris_all[ts[0] * 3 + 2],
+                                            tris_all[ts[1] * 3],
+                                            tris_all[ts[1] * 3 + 1],
+                                            tris_all[ts[1] * 3 + 2],
                                         ];
+                                        let q: Vec<[f64; 2]> =
+                                            qi.iter().map(|&i| uv_of(i)).collect();
                                         eprintln!(
-                                            "[LUNE fold] ang={:.2} t1=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3}) t2=({:.3},{:.3})({:.3},{:.3})({:.3},{:.3})",
+                                            "[LUNE fold {}] ang={:.2} t1=({:.3},{:.3})#{}({:.3},{:.3})#{}({:.3},{:.3})#{} t2=({:.3},{:.3})#{}({:.3},{:.3})#{}({:.3},{:.3})#{}",
+                                            current_face_label(),
                                             ang,
-                                            q[0][0], q[0][1], q[1][0], q[1][1], q[2][0], q[2][1],
-                                            q[3][0], q[3][1], q[4][0], q[4][1], q[5][0], q[5][1]
+                                            q[0][0], q[0][1], qi[0],
+                                            q[1][0], q[1][1], qi[1],
+                                            q[2][0], q[2][1], qi[2],
+                                            q[3][0], q[3][1], qi[3],
+                                            q[4][0], q[4][1], qi[4],
+                                            q[5][0], q[5][1], qi[5]
                                         );
                                     }
                                 }
@@ -8934,7 +9282,7 @@ pub fn nurbs_lune_band_strip(
                 };
                 let poly_uv: Vec<[f64; 2]> = (0..n).map(|k| [us[k], vs[k]]).collect();
                 let poly_s = signed(&poly_uv);
-                let strip_s: f64 = tris
+                let strip_s: f64 = tris_all
                     .chunks_exact(3)
                     .map(|c| {
                         (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
@@ -8954,12 +9302,12 @@ pub fn nurbs_lune_band_strip(
                 }
                 // winding: flip to match the polygon sign
                 if strip_s * poly_s < 0.0 {
-                    for c in tris.chunks_exact_mut(3) {
+                    for c in tris_all.chunks_exact_mut(3) {
                         c.swap(1, 2);
                     }
                 }
             }
-            accepted = Some((tris, new_pts));
+            accepted = Some((tris_all, new_pts));
             break;
         }
         // split the worst violating band and rebuild
