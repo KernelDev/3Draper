@@ -154,6 +154,19 @@ fn main() {
         let Some(inst) = ctx.triangulate_pending(p) else {
             continue;
         };
+        // Session-74: per-BREP effective vertex-resolution tolerance
+        // (merge + every weld pass). Fold pairs whose BOTH triangles are
+        // thinner than this live under the mesh's guaranteed resolution —
+        // sub-tolerance weld noise, not triangulation debt. Kill-switch:
+        // DRAPPER_SUBTOL_EXEMPT=0 disables the classification.
+        let subtol_enabled = std::env::var("DRAPPER_SUBTOL_EXEMPT")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let eff_tol = if subtol_enabled {
+            ctx.brep_eff_tol(inst.brep_id)
+        } else {
+            None
+        };
         if std::env::var("DRAPPER_DUMP_SURF_PARAMS").is_ok() {
             match inst.transform {
                 Some(m) => println!(
@@ -266,6 +279,7 @@ fn main() {
 
         let mut brep_pairs = 0usize;
         let mut brep_exempt = 0usize;
+        let mut brep_subtol = 0usize;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -522,10 +536,23 @@ fn main() {
                 (None, _) => "snAng=n/a".to_string(),
             };
             let exempt_str = if tangent_exempt { " TANGENT-EXEMPT" } else { "" };
+            // Session-74: sub-tolerance weld-noise classification. A pair
+            // whose BOTH apex heights are below the BREP's effective
+            // vertex-resolution tolerance (the max of merge_tol and every
+            // weld pass applied) is under the resolution the output mesh
+            // guarantees — the thin lip/tab geometry cannot be represented
+            // at this tolerance, so its 180° folds are weld noise.
+            let subtol =
+                !tangent_exempt && matches!(eff_tol, Some(tol) if h0 < tol && h1 < tol);
+            if subtol {
+                brep_subtol += 1;
+            }
+            let subtol_str = if subtol { " SUBTOL" } else { "" };
             println!(
-                "[{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
+                subtol_str,
                 exempt_str,
                 i,
                 inst.name,
@@ -554,8 +581,9 @@ fn main() {
 
             *hist
                 .entry(format!(
-                    "{}{} | {} | {}",
+                    "{}{}{} | {} | {}",
                     if tangent_exempt { "EXEMPT+" } else { "" },
+                    if subtol { "SUBTOL+" } else { "" },
                     sliver_class,
                     st0,
                     st1
@@ -563,8 +591,9 @@ fn main() {
                 .or_insert(0) += 1;
             *grand
                 .entry(format!(
-                    "{}{}{}+{} | {} | {}",
+                    "{}{}{}{}+{} | {} | {}",
                     if tangent_exempt { "TANGENT-EXEMPT " } else { "" },
+                    if subtol { "SUBTOL " } else { "" },
                     class,
                     if coincide { "+COIN" } else { "" },
                     sliver_class,
@@ -617,8 +646,17 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} real)",
-                i, inst.name, inst.brep_id, brep_pairs, brep_exempt, brep_pairs - brep_exempt
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} real){}",
+                i,
+                inst.name,
+                inst.brep_id,
+                brep_pairs,
+                brep_exempt,
+                brep_subtol,
+                brep_pairs - brep_exempt - brep_subtol,
+                eff_tol
+                    .map(|t| format!(" eff_tol={:.4}", t))
+                    .unwrap_or_default()
             );
             let mut keys: Vec<_> = hist.iter().collect();
             keys.sort_by(|a, b| b.1.cmp(a.1));

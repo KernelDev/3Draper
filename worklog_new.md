@@ -12039,3 +12039,106 @@ s73_pair_diff.py (дифф пар между прогонами), s73_added_h.py
    чистой регрессией.
 
 Конец сессии 73.
+
+## Сессия 74 (2026-10-04): WELD-AWARE МЕТРИКА ДОЛГА — sub-tol weld-noise
+## исключены из подсчёта пар (eff_tol per BREP проброшен из конвертера
+## в гейт-инструменты); drill REAL 3796→1184, SLEEVE-дельта s73 +30→+11,
+## нетто −4; меш бит-идентичен; гейты те же
+
+Контекст входа: 24-й reset sandbox; git pull = 6b90da7 (s73 — remote
+ушёл вперёд на сессии 48–73, локальный бэкап отставал); Rust 1.98.1
+переустановлен; baseline воспроизведён бит-идентично (14/75/363/1594/
+1750 = 3796). План s73 «Осталось» п.1: карман-класс weld-aware —
+sub-merge_tol губа/таб (18/29 добавленных s73 пар) + 11 фолдов
+губы-клина Nurbs×Plane (h 0.06–0.14).
+
+### 1. Форензика: полный цензус 363 пар SLEEVE по h vs merge_tol 0.0153
+
+s74_sleeve_census.py (regex-цензус по классам/граням/гистограмме h).
+
+- s73: 363 пары = 143 SUBTOL (max h < 0.0153; regex занизил на 2 —
+  Nurbs-типы с запятыми рвали паттерн types=; точный счёт инструмента
+  145) + 220 REAL. SUBTOL-семья: same-face Cone|Cone на гранях 51–94
+  (stepped-spokes Cone-соседи, губа/таб тоньше merge_tol) +
+  Nurbs|Nurbs 4x8-пары.
+- s72 (kill-switch H0_CLAMP=0 + COL_CHAIN=0): 333 = 126 SUBTOL + 207
+  REAL. Дельта s73: +18 SUBTOL / +11 REAL / −8 удалённых.
+- Вывод: SUBTOL-фон ХРОНИЧЕСКИЙ (126 уже в s72) — физика тоньше
+  допуска, weld не может её представить. Вариант (а) «покрытие
+  рим-рёбер weld-выживающими треугольниками» = изобретать геометрию
+  (карман-fan s72 измерен NET-NEGATIVE и выключен) → реализован
+  вариант (б): исключение слайдеров из метрики долга.
+
+### 2. Реализация: eff_tol-проброс + классификация (оба инструмента)
+
+- **converter.rs**: `StepConverter.last_brep_eff_tol: Cell<f64>` —
+  max(merge_tol @5762, weld_tol @6066, aggressive mesh_weld_tol @6094);
+  публичный геттер. `StepConversionContext.brep_eff_tol_cache`
+  (brep_id → tol, RefCell, вставка в triangulate_pending при свежем
+  comptе) + `pub fn brep_eff_tol(brep_id)` — стабильно между
+  cache-hit'ами, без кросс-BREP утечек (юнит-тест
+  brep_eff_tol_recorded_per_brep_and_stable_across_cache_hits).
+- **fold_face_probe**: пара SUBTOL если оба апекса < eff_tol и не
+  тангент-экземпт; строка помечается " SUBTOL"; заголовок
+  «N pairs >170° (E tangent-exempt, S sub-tol weld-noise, R real)
+  eff_tol=…» (raw-число сохранено первым — обратная совместимость
+  A/B-скриптов); гистограммы с SUBTOL-префиксами.
+- **angle_check** (release gate): truly-extreme не ставится sub-tol
+  парам (apex_heights helper); колонка SubTol в таблице; outlier-строки
+  помечены [sub-tol weld-noise]; сводка «Sub-tol weld-noise: N».
+- Kill-switch **DRAPPER_SUBTOL_EXEMPT=0** (оба инструмента):
+  воспроизводит старую метрику бит-в-бит (14/75/363/1593/1750).
+
+### 3. Замеры
+
+- **eff_tol per BREP** (drill): SHAFT/GEAR/SLEEVE 0.0153; HOUSING
+  0.0305, HM 0.0300 — second-pass mesh weld поднимает (логи:
+  «second-pass mesh weld with tol=3.06e-2 (was 7.99e-3)»).
+- drill raw 3796 (бит-идентично) = 1 exempt + **2611 sub-tol** +
+  **1184 REAL** (SHAFT 7, GEAR 60, SLEEVE 218, HOUSING 425, HM 474).
+- s72→s73 в REAL-метрике: SLEEVE 207→218 (**+11** = ровно 11 фолдов
+  губы-клина h 0.06–0.14, документированы в s73), HOUSING 440→425
+  (−15), drill нетто **−4** (в raw выглядело «+49», из них +30 —
+  SLEEVE). План-цель «SLEEVE +30 уйдёт» достигнута: шум отделён,
+  цена s73-accept'ов честна (+11 real ↔ nm −228, tris −311, прецедент
+  s71: +17 ↔ −573 nm).
+- Corpus REAL-baseline (s75+): Z/as1/brick_thin/brick_hole **0**;
+  brick_round 13 (0 sub-tol); comp 124 (raw 237, subtol 113);
+  transmission 4326 (raw 10528, exempt 148, subtol 6054).
+- **Меш бит-идентичен** (меш-код не тронут): 3796/3796 FOLD-строк
+  старого и нового бинарника совпали (после sort — HashMap-порядок
+  случаен между прогонами — и снятия SUBTOL-метки).
+- Гейты: те же (Z/as1 PASS, drill 5 FAIL, comp 2 FAIL; brick_round
+  1 FAIL и transmission 71 FAIL — вне гейт-списка, вердикты не
+  изменились: sub-tol исключение не ухуддает ничего by construction).
+- Сьюты: draper-mesh lib **338 — 0 fail** (= s73), draper-step lib
+  **163 (162+1)** — 0 fail, geometry 440, topology 305 — 0 fail.
+
+### Осталось (сессия 75)
+
+1. **HM f30/f74 apex-иглы** (перенос s74-п.2): width-aware якорные
+   цели (уровень на v+w(v), квадратные бэнды) — 20 раундов сплитов не
+   сходятся; клин 0.004 у вершины, иглы стенка-шаг×0.003. Верхняя
+   граница в новой метрике: HM 474 real.
+2. **11 фолдов губы-клина SLEEVE** (Nurbs×Plane h 0.06–0.14):
+   mesh-вариант «покрытие рим-рёбер кармана» — если +11 перестанет
+   быть оправданным (сейчас оправдано nm −228, tris −311).
+3. f236-пентагон Torus 1049 (перенос s69-п.2).
+4. Разбор test_drill стека (debug-only).
+
+### Уроки
+
+1. Raw-метрика смешивала шум и долг: 69% drill-пар (2611/3796) —
+   sub-tol weld-noise. Эталон порога обязан жить там, где живёт
+   толеранс (конвертер), иначе каждый weld-проход невидимо сдвигал бы
+   классификацию.
+2. eff_tol = max(merge, ВСЕ weld-проходы): HOUSING 0.0305 от
+   aggressive-прохода, не merge_tol 0.0153 — ссылаться на merge_tol
+   значило бы зачислять в шум и легитимные ~0.02-фолды.
+3. Regex-цензус по types= с Nurbs(deg=3/3, cps=4x8) рвёт паттерн и
+   занижает счёт (143 vs 145) — точный счёт только инструментом,
+   который печатает строку.
+4. HashMap-порядок случаен между прогонами: бит-идентичность вывода
+   проверяется сортировкой, не прямым diff.
+
+Конец сессии 74.

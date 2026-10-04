@@ -35,6 +35,41 @@ fn dot(a: &Point3d, b: &Point3d) -> f64 {
     a.x*b.x + a.y*b.y + a.z*b.z
 }
 
+/// Session-74: apex heights of the two triangles sharing an interior edge,
+/// measured over the shared-edge base line (3D point-to-line distances).
+/// Used by the sub-tolerance weld-noise classification: a >170° pair whose
+/// BOTH heights are below the BREP's effective vertex-resolution tolerance
+/// lives under the resolution the output mesh guarantees.
+fn apex_heights(
+    mesh: &draper_mesh::TriangleMesh,
+    edge: &(u32, u32),
+    tris: &[usize],
+) -> (f64, f64) {
+    let a = &mesh.vertices[edge.0 as usize];
+    let b = &mesh.vertices[edge.1 as usize];
+    let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+    let ab_len = (ab[0]*ab[0] + ab[1]*ab[1] + ab[2]*ab[2]).sqrt().max(1e-30);
+    let apex = |ti: usize| -> Point3d {
+        let tri = &mesh.triangles[ti];
+        for &v in tri {
+            if v != edge.0 && v != edge.1 {
+                return mesh.vertices[v as usize];
+            }
+        }
+        mesh.vertices[tri[0] as usize]
+    };
+    let dist = |p: &Point3d| -> f64 {
+        let ap = [p.x - a.x, p.y - a.y, p.z - a.z];
+        let cr = [
+            ap[1]*ab[2] - ap[2]*ab[1],
+            ap[2]*ab[0] - ap[0]*ab[2],
+            ap[0]*ab[1] - ap[1]*ab[0],
+        ];
+        (cr[0]*cr[0] + cr[1]*cr[1] + cr[2]*cr[2]).sqrt() / ab_len
+    };
+    (dist(&apex(tris[0])), dist(&apex(tris[1])))
+}
+
 /// Transform a surface from BREP-local space into world space by a 4×4
 /// (assumed rigid: rotation + translation) matrix.
 fn transform_surface(
@@ -119,19 +154,33 @@ fn main() {
     let mut total_sharp_angles = 0; // > 60 degrees
     let mut total_extreme_angles = 0; // > 90 degrees
     let mut total_surf_exempt = 0; // >170° but justified by surface geometry
+    let mut total_subtol = 0; // >170° non-exempt but under the BREP eff_tol (session-74)
 
-    // (name, interior, sharp, extreme, max_angle, exempt>170, max_nonexempt)
-    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, f64)> = Vec::new();
+    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, max_nonexempt)
+    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, f64)> = Vec::new();
 
-    println!("\n{:-<130}", "");
-    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>12}",
-        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "Outliers");
-    println!("{:-<130}", "");
+    println!("\n{:-<139}", "");
+    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>12}",
+        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "Outliers");
+    println!("{:-<139}", "");
 
     for (i, p) in pending.iter().enumerate() {
         if let Some(inst) = ctx.triangulate_pending(p) {
             let mesh = &inst.mesh;
             let face_ids = mesh.triangle_face_ids.as_ref();
+
+            // Session-74: per-BREP effective vertex-resolution tolerance
+            // (merge + every weld pass applied). >170° pairs whose BOTH
+            // triangles are thinner than this are sub-tolerance weld noise,
+            // not triangulation debt. Kill-switch: DRAPPER_SUBTOL_EXEMPT=0.
+            let subtol_enabled = std::env::var("DRAPPER_SUBTOL_EXEMPT")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            let eff_tol = if subtol_enabled {
+                ctx.brep_eff_tol(inst.brep_id)
+            } else {
+                None
+            };
 
             // World-space surface lookup for the surface-justified
             // exemption (FaceInfo.surface is BREP-LOCAL; the mesh is world).
@@ -170,8 +219,9 @@ fn main() {
             let mut sharp_count = 0; // > 60 degrees
             let mut extreme_count = 0; // > 90 degrees
             let mut exempt_count = 0; // >170° justified by surface geometry
+            let mut subtol_count = 0; // >170° non-exempt but under eff_tol (session-74)
             let mut max_angle_nonexempt: f64 = 0.0;
-            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, String)> = Vec::new();
+            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, String)> = Vec::new();
 
             for (edge, tris) in &edge_to_tris {
                 if tris.len() != 2 { continue; }
@@ -192,6 +242,7 @@ fn main() {
                         // faithful mesh NECESSARILY shows ~180° between
                         // raw triangle normals — not a bug (session-46).
                         let mut exempt = false;
+                        let mut subtol = false;
                         let mut reason = String::new();
                         if angle_deg > 170.0 {
                             let fid0 = face_ids.and_then(|ids| ids.get(tris[0]).copied()).unwrap_or(0);
@@ -212,6 +263,18 @@ fn main() {
                             reason = v.reason;
                             if exempt {
                                 exempt_count += 1;
+                            } else if let Some(tol) = eff_tol {
+                                // Session-74: sub-tolerance weld-noise check.
+                                // Both apex heights under the BREP's effective
+                                // vertex-resolution tolerance → the fold lives
+                                // below what the welded mesh can represent.
+                                let (h0, h1) = apex_heights(mesh, edge, tris);
+                                subtol = h0 < tol && h1 < tol;
+                                if subtol {
+                                    subtol_count += 1;
+                                } else {
+                                    max_angle_nonexempt = max_angle_nonexempt.max(angle_deg);
+                                }
                             } else {
                                 max_angle_nonexempt = max_angle_nonexempt.max(angle_deg);
                             }
@@ -224,7 +287,7 @@ fn main() {
                             mesh.triangles[tris[0]],
                             mesh.triangles[tris[1]],
                             fid0, fid1,
-                            exempt, reason,
+                            exempt, subtol, reason,
                         ));
                     }
                 }
@@ -235,6 +298,7 @@ fn main() {
             total_sharp_angles += sharp_count;
             total_extreme_angles += extreme_count;
             total_surf_exempt += exempt_count;
+            total_subtol += subtol_count;
 
             // Use a simple outlier criterion: angles beyond 3σ from the mean
             let mean = if !angles.is_empty() {
@@ -248,12 +312,12 @@ fn main() {
             let outlier_count = angles.iter().filter(|&&a| a > threshold && a > 30.0).count();
             total_outlier_angles += outlier_count;
 
-            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, max_angle_nonexempt));
+            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, max_angle_nonexempt));
 
             let is_wt = interior_count > 0 && extreme_count == 0;
             if is_wt { total_watertight += 1; } else { total_not_watertight += 1; }
 
-            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>12}",
+            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>12}",
                 i + 1,
                 inst.name,
                 interior_count,
@@ -261,13 +325,14 @@ fn main() {
                 extreme_count,
                 max_angle,
                 exempt_count,
+                subtol_count,
                 outlier_count,
             );
 
             // Print details for worst outliers
             if !outlier_edges.is_empty() {
                 outlier_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, reason) in outlier_edges.iter().take(5) {
+                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, reason) in outlier_edges.iter().take(5) {
                     let p0 = &mesh.vertices[*v0 as usize];
                     let p1 = &mesh.vertices[*v1 as usize];
                     let mid = Point3d::new(
@@ -277,10 +342,14 @@ fn main() {
                     );
                     let same_face = if fid0 == fid1 { "SAME-FACE" } else { "cross-face" };
                     // Flag only truly extreme angles (>170°) as "BAD",
-                    // unless the dihedral is justified by surface geometry
+                    // unless the dihedral is justified by surface geometry or
+                    // lives under the BREP's effective resolution (sub-tol
+                    // weld noise, session-74)
                     let flag = if *ang > 170.0 {
                         if *exempt {
                             format!(" [surf-exempt: {}]", reason)
+                        } else if *subtol {
+                            " [sub-tol weld-noise]".to_string()
                         } else {
                             " *** BAD ***".to_string()
                         }
@@ -299,7 +368,7 @@ fn main() {
         }
     }
 
-    println!("{:-<130}", "");
+    println!("{:-<139}", "");
     println!("\nSummary:");
     println!("  Total BREPs:            {}", pending.len());
     println!("  Interior edges total:   {}", total_interior_edges);
@@ -309,12 +378,13 @@ fn main() {
         100.0 * total_extreme_angles as f64 / total_interior_edges.max(1) as f64);
     println!("  Statistical outliers:   {}", total_outlier_angles);
     println!("  Surf-exempt (>170°):    {} (tangency/shallow junctions — not bugs)", total_surf_exempt);
+    println!("  Sub-tol weld-noise:     {} (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)", total_subtol);
 
     // Count truly extreme angles (>170°) NOT justified by surface
     // geometry — these are actual bugs (back-to-back triangles with
     // opposite normals on non-tangent surfaces)
     let mut truly_extreme = 0;
-    for (_, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
+    for (_, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
         if *max_nonexempt > 170.0 { truly_extreme += 1; }
     }
 

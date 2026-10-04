@@ -901,6 +901,11 @@ pub struct StepConversionContext<'a> {
     /// BREP triangulation cache: brep_id → (mesh_in_brep_local_space, face_info).
     /// Uses RefCell for interior mutability since triangulate_pending takes &self.
     brep_detail_cache: std::cell::RefCell<HashMap<i64, (TriangleMesh, Vec<FaceInfo>)>>,
+    /// Session-74: brep_id → effective vertex-resolution tolerance (merge
+    /// + every weld pass applied) recorded when that BREP was triangulated.
+    /// Exposed via [`StepConversionContext::brep_eff_tol`] so the gate
+    /// tools can classify sub-tolerance fold pairs as weld noise.
+    brep_eff_tol_cache: std::cell::RefCell<HashMap<i64, f64>>,
 }
 
 impl<'a> StepConversionContext<'a> {
@@ -928,7 +933,17 @@ impl<'a> StepConversionContext<'a> {
             }
         }
 
-        Self { converter, bbox, params, brep_detail_cache: std::cell::RefCell::new(HashMap::new()) }
+        Self { converter, bbox, params, brep_detail_cache: std::cell::RefCell::new(HashMap::new()), brep_eff_tol_cache: std::cell::RefCell::new(HashMap::new()) }
+    }
+
+    /// Session-74: effective vertex-resolution tolerance of a triangulated
+    /// BREP — the max of its merge tolerance and every weld pass applied.
+    /// Fold pairs whose BOTH triangles' apex heights over the shared edge
+    /// are below this value live under the resolution the output mesh
+    /// guarantees: sub-tolerance weld noise, not triangulation debt.
+    /// Returns None for a BREP that has not been triangulated yet.
+    pub fn brep_eff_tol(&self, brep_id: i64) -> Option<f64> {
+        self.brep_eff_tol_cache.borrow().get(&brep_id).copied()
     }
 
     /// Triangulate a single pending BREP instance.
@@ -953,6 +968,14 @@ impl<'a> StepConversionContext<'a> {
             } else {
                 drop(cache); // Release borrow before mutating
                 let result = self.converter.triangulate_brep_detailed_gated(pending.brep_id, &self.params, &self.bbox)?;
+                // Session-74: snapshot the per-BREP resolution reference
+                // right after the conversion that produced it.
+                let eff_tol = self.converter.last_brep_eff_tol();
+                if eff_tol > 0.0 {
+                    self.brep_eff_tol_cache
+                        .borrow_mut()
+                        .insert(pending.brep_id, eff_tol);
+                }
                 self.brep_detail_cache.borrow_mut().insert(pending.brep_id, result.clone());
                 result
             }
@@ -2749,6 +2772,15 @@ pub struct StepConverter<'a> {
     /// signal (synth_cone.stp) as opposed to the degenerate
     /// center-vertex convention (nist_cylinder.stp).
     junction_index: std::cell::RefCell<Option<HashMap<i64, Vec<(i64, i64)>>>>,
+    /// Session-74: effective per-BREP vertex-resolution tolerance — the
+    /// max of `merge_tol` and every weld pass actually applied — of the
+    /// most recent `triangulate_brep_detailed` call. Read by
+    /// `StepConversionContext` to expose per-BREP fold-noise thresholds
+    /// to the gate tools (angle_check, fold_face_probe): a fold pair
+    /// whose BOTH triangles are thinner than this tolerance lives below
+    /// the resolution the output mesh guarantees — tolerance noise, not
+    /// triangulation debt.
+    last_brep_eff_tol: std::cell::Cell<f64>,
 }
 
 impl<'a> StepConverter<'a> {
@@ -2796,6 +2828,7 @@ impl<'a> StepConverter<'a> {
             bbox_cache: std::cell::RefCell::new(None),
             vertex_canonical_map: std::cell::RefCell::new(None),
             junction_index: std::cell::RefCell::new(None),
+            last_brep_eff_tol: std::cell::Cell::new(0.0),
         }
     }
 
@@ -2898,6 +2931,13 @@ impl<'a> StepConverter<'a> {
         Some(solid)
     }
 
+    /// Session-74: effective vertex-resolution tolerance (merge + every
+    /// weld pass applied) of the most recently converted BREP. See the
+    /// field docs on `StepConverter::last_brep_eff_tol`.
+    pub fn last_brep_eff_tol(&self) -> f64 {
+        self.last_brep_eff_tol.get()
+    }
+
     /// Create a StepConverter from pre-built index maps.
     ///
     /// This is used by `OwnedStepConversionContext::triangulate_pending()` to
@@ -2925,6 +2965,7 @@ impl<'a> StepConverter<'a> {
             bbox_cache: std::cell::RefCell::new(None),
             vertex_canonical_map: std::cell::RefCell::new(None),
             junction_index: std::cell::RefCell::new(None),
+            last_brep_eff_tol: std::cell::Cell::new(0.0),
         }
     }
 
@@ -5760,6 +5801,8 @@ impl<'a> StepConverter<'a> {
         // This ensures we catch both CAD-system-stated precision and empirical
         // vertex gaps from different EDGE_CURVE entities.
         let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
+        // Session-74: record the resolution reference for the gate tools.
+        self.last_brep_eff_tol.set(merge_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
         let mut face_infos = Vec::new();
@@ -6062,6 +6105,9 @@ impl<'a> StepConverter<'a> {
                 let weld_tol = tol_ctx.sewing_tol
                     .max(tol_ctx.weld_tolerance())
                     .max(tol_ctx.absolute * 10.0);
+                // Session-74: the weld pass raises the effective resolution.
+                self.last_brep_eff_tol
+                    .set(self.last_brep_eff_tol.get().max(weld_tol));
                 let pre_weld_tris = mesh.triangle_count();
                 weld_boundary_edge_vertices(&mut mesh, weld_tol);
                 let post_weld_tris = mesh.triangle_count();
@@ -6092,6 +6138,9 @@ impl<'a> StepConverter<'a> {
                             );
                             let pre_weld2_tris = mesh.triangle_count();
                             draper_mesh::weld_boundary_edge_vertices_aggressive(&mut mesh, mesh_weld_tol);
+                            // Session-74: aggressive pass may raise the tol further.
+                            self.last_brep_eff_tol
+                                .set(self.last_brep_eff_tol.get().max(mesh_weld_tol));
                             let post_weld2_tris = mesh.triangle_count();
                             log::debug!(
                                 "BREP #{} detailed: tris after mesh-weld ({} → {})",
@@ -19679,5 +19728,82 @@ mod session46_ellipse_edge_tests {
         let p2 = Point3d::new(-18.0, 27.8284271247462, 44.8284271247462);
         let (t1, t2) = project_points_on_ellipse(&e, &p1, &p2);
         assert!(t1.is_nan() && t2.is_nan());
+    }
+}
+
+/// Session-74 — per-BREP effective vertex-resolution tolerance plumbing.
+///
+/// `StepConversionContext::brep_eff_tol` must expose, per triangulated
+/// BREP, the max of the merge tolerance and every weld pass applied —
+/// the reference the gate tools (angle_check, fold_face_probe) use to
+/// classify sub-tolerance fold pairs as weld noise. Contract:
+///   * None for a BREP that was never triangulated,
+///   * Some(tol > 0) after triangulation,
+///   * stable across cache hits (re-triangulating the same BREP reports
+///     the same tol, with no cross-BREP leakage from the most recent
+///     conversion).
+#[cfg(test)]
+mod eff_tol_plumbing_tests {
+    use crate::parse_step;
+    use crate::converter::{step_structure_lazy, StepConversionContext};
+
+    #[test]
+    fn brep_eff_tol_recorded_per_brep_and_stable_across_cache_hits() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test/as1-oc-214.stp");
+        let Ok(content) = std::fs::read_to_string(path) else {
+            eprintln!("test/as1-oc-214.stp not available — skipping");
+            return;
+        };
+        let step = parse_step(&content).expect("as1-oc-214 parses");
+        let (_tree, pending) = step_structure_lazy(&step);
+
+        // Unknown BREP: never triangulated → None.
+        let ctx = StepConversionContext::new(&step);
+        assert!(
+            ctx.brep_eff_tol(-1).is_none(),
+            "brep_eff_tol must be None for a BREP that was never triangulated"
+        );
+
+        // Triangulate the first BREP; it records its own tol.
+        let Some(first) = ctx.triangulate_pending(&pending[0]) else {
+            eprintln!("first BREP of as1-oc-214 did not triangulate — skipping");
+            return;
+        };
+        let tol0 = ctx
+            .brep_eff_tol(first.brep_id)
+            .expect("eff tol recorded after triangulation");
+        assert!(
+            tol0 > 0.0 && tol0.is_finite(),
+            "eff tol must be positive and finite, got {tol0}"
+        );
+
+        // A distinct second BREP records its own tol.
+        let Some(p1) = pending.iter().skip(1).find(|p| p.brep_id != first.brep_id) else {
+            eprintln!("as1-oc-214 needs two distinct BREPs — skipping");
+            return;
+        };
+        let second = ctx
+            .triangulate_pending(p1)
+            .expect("second distinct BREP triangulates");
+        let tol1 = ctx
+            .brep_eff_tol(second.brep_id)
+            .expect("eff tol recorded for the second BREP");
+        assert!(
+            tol1 > 0.0 && tol1.is_finite(),
+            "second eff tol must be positive and finite, got {tol1}"
+        );
+
+        // Same BREP again → cache hit; the recorded tol must not change
+        // and must not leak the other BREP's value.
+        let again = ctx
+            .triangulate_pending(&pending[0])
+            .expect("cache-hit re-triangulation");
+        let tol0_again = ctx
+            .brep_eff_tol(again.brep_id)
+            .expect("eff tol still recorded after cache hit");
+        assert_eq!(
+            tol0_again, tol0,
+            "cache hit must report the BREP's own eff tol without cross-BREP leakage"
+        );
     }
 }
