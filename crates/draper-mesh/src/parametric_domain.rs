@@ -8688,13 +8688,51 @@ fn nurbs_lune_band_strip_impl(
                 // guard on curved feet (measured on the fixture); a
                 // real offset adds no sag on flat feet.
                 let h0 = (0.02 * vspan).max(1e-9);
+                // s73-A: the h0 line must stay strictly BELOW the
+                // level-1 anchor line. The SLEEVE step foot puts the
+                // bend level only ~0.02·vspan above the bottom; the
+                // unclamped h0 line CROSSES it (f49: C_0 0.010→0.020
+                // vs C_1 0.014→0.018, crossing near u≈0.56) → the
+                // whole band-1 zipper becomes an inverted razor
+                // (~1000 fold pairs/face) and the right column edge
+                // inverts (#164→#220/#222). Both profiles are linear
+                // in u, so clamping the two feet to the level-1 line
+                // (evaluated at the feet) minus a margin bounds the
+                // gap everywhere between them.
+                let h0_cap_l;
+                let h0_cap_r;
+                if std::env::var("DRAPPER_LUNE_H0_CLAMP").as_deref() == Ok("0") {
+                    h0_cap_l = f64::INFINITY;
+                    h0_cap_r = f64::INFINITY;
+                } else if anchors_l.len() >= 2 && anchors_r.len() >= 2 {
+                    let il1 = w_l[anchors_l[1]];
+                    let ir1 = w_r[anchors_r[1]];
+                    let (ul1, vl1) = (us[il1], vs[il1]);
+                    let (ur1, vr1) = (us[ir1], vs[ir1]);
+                    let margin = (0.006 * vspan).max(2e-4 * vspan);
+                    let v1_at = |uq: f64| -> f64 {
+                        let t = ((uq - ul1) / (ur1 - ul1).max(1e-12)).clamp(0.0, 1.0);
+                        vl1 + (vr1 - vl1) * t
+                    };
+                    h0_cap_l = v1_at(gl_u) - margin;
+                    h0_cap_r = v1_at(gr_u) - margin;
+                } else {
+                    h0_cap_l = f64::INFINITY;
+                    h0_cap_r = f64::INFINITY;
+                }
                 let vbtm = chain_v_at(&bottom, gl_u).unwrap_or(vmin);
                 let vtop_ = chain_v_at(&top, gl_u).unwrap_or(vmax);
-                let gv = (vbtm + h0).min(vtop_ - 1e-6 * vspan).max(vbtm);
+                let gv = (vbtm + h0)
+                    .min(h0_cap_l)
+                    .min(vtop_ - 1e-6 * vspan)
+                    .max(vbtm);
                 gl.push(new_pt(gl_u, gv, &mut new_pts));
                 let vbtm2 = chain_v_at(&bottom, gr_u).unwrap_or(vmin);
                 let vtop2 = chain_v_at(&top, gr_u).unwrap_or(vmax);
-                let gv2 = (vbtm2 + h0).min(vtop2 - 1e-6 * vspan).max(vbtm2);
+                let gv2 = (vbtm2 + h0)
+                    .min(h0_cap_r)
+                    .min(vtop2 - 1e-6 * vspan)
+                    .max(vbtm2);
                 gr.push(new_pt(gr_u, gv2, &mut new_pts));
             } else {
                 gl.push(new_pt(gl_u, vl, &mut new_pts));
@@ -8765,6 +8803,68 @@ fn nurbs_lune_band_strip_impl(
             connectors.push(conn);
         }
         connectors.push(top.clone());
+        // s73-C: sag-bounded column chains. A 2-point column edge
+        // spanning a tall band is ONE long chord through curved
+        // surface — the ladder triangles hinging on it fold >170°
+        // (HOUSING/HM apex bands: 0.27-tall chords #85→#148; SLEEVE
+        // lip bridges: 0.14-wide spokes #109→#219). Subdivide each
+        // column edge until every sub-chord's 3D sag fits tol_edge;
+        // the ladder two-pointer is chain-generic already.
+        let col_chain_on =
+            std::env::var("DRAPPER_LUNE_COL_CHAIN").as_deref() != Ok("0");
+        let uv_of_pt = |i: usize, new_pts: &Vec<[f64; 2]>| -> [f64; 2] {
+            if i < n {
+                [us[i], vs[i]]
+            } else {
+                new_pts[i - n]
+            }
+        };
+        let mut col_chain_l: Vec<Vec<usize>> = Vec::with_capacity(k_bands);
+        let mut col_chain_r: Vec<Vec<usize>> = Vec::with_capacity(k_bands);
+        for j in 1..=k_bands {
+            let (top_l, top_r) = if j < k_bands {
+                (gl[j], gr[j])
+            } else {
+                (top[0], top[top.len() - 1])
+            };
+            for (a, b, out) in [
+                (gl[j - 1], top_l, 0usize),
+                (gr[j - 1], top_r, 1usize),
+            ] {
+                let mut chain = vec![a, b];
+                if col_chain_on && max_dev > 0.0 && a != b {
+                    let mut guard = 0usize;
+                    while chain.len() < 24 {
+                        let mut worst = 0.0f64;
+                        let mut worst_at = 0usize;
+                        for k in 0..chain.len() - 1 {
+                            let s = uv_sag(
+                                uv_of_pt(chain[k], &new_pts),
+                                uv_of_pt(chain[k + 1], &new_pts),
+                            );
+                            if s > worst {
+                                worst = s;
+                                worst_at = k;
+                            }
+                        }
+                        if worst <= tol_edge || guard > 24 {
+                            break;
+                        }
+                        let pa = uv_of_pt(chain[worst_at], &new_pts);
+                        let pb = uv_of_pt(chain[worst_at + 1], &new_pts);
+                        let mid = [(pa[0] + pb[0]) * 0.5, (pa[1] + pb[1]) * 0.5];
+                        chain.insert(worst_at + 1, n + new_pts.len());
+                        new_pts.push(mid);
+                        guard += 1;
+                    }
+                }
+                if out == 0 {
+                    col_chain_l.push(chain);
+                } else {
+                    col_chain_r.push(chain);
+                }
+            }
+        }
         // ── emit: ladders + zipper + corner triangles ──────────────
         let u_of = |idx: usize| -> f64 {
             if idx < n {
@@ -8793,16 +8893,11 @@ fn nurbs_lune_band_strip_impl(
             // w[a_{j-1}..a_j] × the column [g_{j-1}, g_j] (the last
             // band's column top = the top rim's end)
             if j >= 1 {
-                let coltop_l = if j < k_bands { gl[j] } else { top[0] };
-                let coltop_r = if j < k_bands {
-                    gr[j]
-                } else {
-                    top[top.len() - 1]
-                };
                 // left ladder: chain A = wall (v-asc), chain B = column
+                // (s73-C: the sag-bounded chain, not the 2-pt edge)
                 {
                     let a_chain = &w_l[anchors_l[j - 1]..=anchors_l[j]];
-                    let b_chain = [gl[j - 1], coltop_l];
+                    let b_chain = &col_chain_l[j - 1];
                     let mut ia = 0usize;
                     let mut ib = 0usize;
                     while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
@@ -8836,10 +8931,11 @@ fn nurbs_lune_band_strip_impl(
                         }
                     }
                 }
-                // right ladder (mirror: the column is LEFT of the wall)
+                // right ladder (mirror: the column is LEFT of the wall;
+                // s73-C: sag-bounded chain)
                 {
                     let a_chain = &w_r[anchors_r[j - 1]..=anchors_r[j]];
-                    let b_chain = [gr[j - 1], coltop_r];
+                    let b_chain = &col_chain_r[j - 1];
                     let mut ia = 0usize;
                     let mut ib = 0usize;
                     while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
@@ -8875,9 +8971,37 @@ fn nurbs_lune_band_strip_impl(
                 }
             }
             // middle zipper between connectors[j] and connectors[j+1]
-            // (band 0: bottom rim × C_0; band K: C_{K-1} × top rim)
+            // (band 0: bottom rim × C_0; band K: C_{K-1} × top rim).
+            // s73-C: for bands ≥1 the column-chain INTERIOR points are
+            // spliced into the bottom connector's head (left) and tail
+            // (right) — the zipper then walks the chain, giving every
+            // chain edge its corridor-side second use (the ladder
+            // provides the wall-side first use). Without the splice
+            // the chain edges dangle 1× and the audit rejects.
             {
-                let cbtm = &connectors[j];
+                let mut cbtm_spliced: Vec<usize>;
+                let cbtm: &[usize] = if j >= 1 {
+                    let chl = &col_chain_l[j - 1];
+                    let chr = &col_chain_r[j - 1];
+                    if chl.len() <= 2 && chr.len() <= 2 {
+                        &connectors[j]
+                    } else {
+                        cbtm_spliced = Vec::with_capacity(
+                            connectors[j].len() + chl.len() + chr.len(),
+                        );
+                        cbtm_spliced.push(connectors[j][0]);
+                        if chl.len() > 2 {
+                            cbtm_spliced.extend_from_slice(&chl[1..chl.len() - 1]);
+                        }
+                        cbtm_spliced.extend_from_slice(&connectors[j][1..]);
+                        if chr.len() > 2 {
+                            cbtm_spliced.extend_from_slice(&chr[1..chr.len() - 1]);
+                        }
+                        &cbtm_spliced
+                    }
+                } else {
+                    &connectors[j]
+                };
                 let ctop = &connectors[j + 1];
                 let na = cbtm.len();
                 let nb = ctop.len();
@@ -19570,6 +19694,84 @@ mod tests {
         }
         let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
         assert!(!tris.is_empty(), "curved-wall lune must qualify");
+        assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// s73: SLEEVE f49-like step foot. The left wall carries a lip
+    /// (u=0.10, v 0→0.03) + a chord to the step corner (0.30, 0.035);
+    /// the right wall's dense early steps force the strict-monotone
+    /// fixup to pin its level-1 anchor LOW (v=0.018), so the level-1
+    /// line (0.035→0.018) descends across the flat h0 line
+    /// (0.02→0.03) — the pre-s73 build crossed them near u≈0.68 and
+    /// the whole band-1 zipper became an inverted razor. The s73-A
+    /// h0 clamp keeps C_0 below C_1; the strip must accept.
+    #[test]
+    fn nurbs_lune_band_step_foot_no_inversion() {
+        let nurbs = fillet_nurbs_fixture();
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom chord (tilted 0 → 0.01), 17 pts, L→R
+        for k in 0..17 {
+            let t = k as f64 / 16.0;
+            ring.push([0.10 + 0.80 * t, 0.010 * t]);
+        }
+        // right wall: u=0.90, v = 0.018·k (dense early steps), up
+        for k in 1..=55 {
+            ring.push([0.90, 0.018 * k as f64]);
+        }
+        // top arc v≈1, R→L, 13 pts
+        for k in 0..13 {
+            ring.push([0.90 - 0.60 * k as f64 / 12.0, 1.0]);
+        }
+        // left wall: vertical at u=0.30 from v=1.0 down to v=0.035
+        for k in 0..20 {
+            ring.push([0.30, 1.0 - 0.965 * k as f64 / 19.0]);
+        }
+        // step chord: (0.30, 0.035) → (0.10, 0.030), 3 pts
+        for k in 1..3 {
+            let t = k as f64 / 3.0;
+            ring.push([0.30 - 0.20 * t, 0.035 - 0.005 * t]);
+        }
+        // lip: u=0.10 from v=0.030 down to v=0, 4 pts
+        for k in 0..4 {
+            ring.push([0.10, 0.030 - 0.030 * k as f64 / 3.0]);
+        }
+        let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(
+            !tris.is_empty(),
+            "step-foot lune must accept (h0 clamp keeps C_0 below C_1)"
+        );
+        assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// s73: HOUSING f101-like apex wedge. The right wall converges to
+    /// the left wall's top point (a 1-point top chain); the last
+    /// interior band is ~0.25 tall × ~0.05 wide — the pre-s73 2-point
+    /// column edge was a single long chord through the v-curved
+    /// surface and the flanking ladder triangles folded. The s73-C
+    /// sag-bounded column chains subdivide it; the strip must accept.
+    #[test]
+    fn nurbs_lune_band_apex_wedge_column_chain() {
+        let nurbs = fillet_nurbs_fixture();
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom chord, 13 pts, L→R
+        for k in 0..13 {
+            ring.push([0.25 + 0.55 * k as f64 / 12.0, 0.0]);
+        }
+        // right wall: u = 0.80 − 0.55·t^1.7, v = t (converging to the
+        // apex (0.25, 1.0)), 25 pts
+        for k in 1..=25 {
+            let t = k as f64 / 25.0;
+            ring.push([0.80 - 0.55 * t.powf(1.7), t]);
+        }
+        // left wall: vertical at u=0.25 from the apex down, 26 pts
+        for k in 0..26 {
+            ring.push([0.25, 1.0 - k as f64 / 25.0]);
+        }
+        let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(
+            !tris.is_empty(),
+            "apex-wedge lune must accept (sag-bounded column chains)"
+        );
         assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
     }
 
