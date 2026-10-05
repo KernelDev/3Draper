@@ -11685,6 +11685,31 @@ pub fn triangulate_surface_consistent(
                             .count()
                     };
                     let legacy_extra_bnd = extra_boundary_edges(&tris);
+                    // session-77: NURBS SAIL class — interior Steiner
+                    // points dropped by the legacy earcutr pass (the
+                    // s76 "twin-fan" unmasking: f215/f224-class sails
+                    // with dense rims + interior lattices). earcutr has
+                    // no native Steiner support — the appended lattice
+                    // chain is absorbed as a rim spike, and whole rows
+                    // land on no triangle (f215: 63 of 111 dropped)
+                    // while the remainder triangulates as corner fans
+                    // at rim vertices (degree 34/32/31 of 242 tris) —
+                    // the (215,216)/(26,31)/(114,114) unmasked families.
+                    // Trigger: ≥ 4 dropped AND ≥ 25% of the interior
+                    // budget. Feeds BOTH the s71 LUNE_FILLET_BAND (the
+                    // structural ladder — preferred) and the per-face
+                    // CDT re-route (fallback; s77 measurement: the CDT
+                    // alone made HOUSING +20/HM +33 REAL — the s51
+                    // "Delaunay near the rim" regression — so the CDT
+                    // arm is OPT-IN: DRAPPER_NURBS_SAIL_CDT=1).
+                    let n_interior_total = interior_2d.len();
+                    let n_interior_dropped = (n_boundary_and_holes_actual..all_uv.len())
+                        .filter(|&i| !used[i])
+                        .count();
+                    let sail_cdt_candidate = matches!(surface, Surface::Nurbs(_))
+                        && n_interior_dropped >= 4
+                        && n_interior_dropped * 4 >= n_interior_total
+                        && std::env::var("DRAPPER_NURBS_SAIL_CDT").as_deref() == Ok("1");
                     // session-65: the region-drop rescue is restricted to
                     // the CRESCENT class (the polygon qualifies as two
                     // monotone chains sharing both endpoints — the lune
@@ -11813,7 +11838,11 @@ pub fn triangulate_surface_consistent(
                     // DRAPPER_LUNE_FILLET_BAND=0.
                     let lune_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
                         && nurbs_band_strip.0.is_empty()
-                        && (n_unused > 0 || legacy_extra_bnd > 0)
+                        && (n_unused > 0
+                            || legacy_extra_bnd > 0
+                            || (matches!(surface, Surface::Nurbs(_))
+                                && n_interior_dropped >= 4
+                                && n_interior_dropped * 4 >= n_interior_total))
                         && std::env::var("DRAPPER_LUNE_FILLET_BAND").as_deref() != Ok("0")
                     {
                         match surface {
@@ -11831,6 +11860,7 @@ pub fn triangulate_surface_consistent(
                         || !torus_band_strip.0.is_empty()
                         || !nurbs_band_strip.0.is_empty()
                         || !lune_band_strip.0.is_empty()
+                        || sail_cdt_candidate
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -12207,10 +12237,28 @@ pub fn triangulate_surface_consistent(
                                 cnt
                             };
                             let strip_extra = extra_boundary_edges(&strip);
-                            let never_worse = strip_rim >= legacy_rim_count
+                            // s77: the strict gate can never accept a
+                            // strip for the SAIL class — their legacy is
+                            // already at the ceiling (f215: rim 196/196,
+                            // extra 0) while carrying corner fans +
+                            // dropped-interior debt. For faces whose sail
+                            // trigger fired (Nurbs + ≥25% of the interior
+                            // budget dropped by the legacy pass), accept
+                            // at EQUAL rim/extra: the ladder grid restores
+                            // the Steiner coverage the legacy dropped;
+                            // nurbs_lune_band_strip has already run its
+                            // internal edge-audit/fold/area/winding
+                            // verification before returning non-empty.
+                            let sail_triggered = matches!(surface, Surface::Nurbs(_))
+                                && n_interior_dropped >= 4
+                                && n_interior_dropped * 4 >= n_interior_total;
+                            let never_worse = (strip_rim >= legacy_rim_count
                                 && strip_extra <= legacy_extra_bnd
                                 && (strip_rim > legacy_rim_count
-                                    || strip_extra < legacy_extra_bnd);
+                                    || strip_extra < legacy_extra_bnd))
+                                || (sail_triggered
+                                    && strip_rim >= legacy_rim_count
+                                    && strip_extra <= legacy_extra_bnd);
                             if never_worse {
                                 let base = all_uv.len();
                                 for p in strip_new.iter() {
@@ -12328,16 +12376,38 @@ pub fn triangulate_surface_consistent(
                             // crescent hole disappears). Never-worsen: ring
                             // edges must not decrease in either branch.
                             let cdt_extra_bnd = extra_boundary_edges(&cdt_flat);
+                            // s77: the CDT must insert EVERY interior
+                            // Steiner point — the sail trigger fired
+                            // because the legacy pass dropped them; a CDT
+                            // that also drops them is not a fix.
+                            let mut cdt_used = vec![false; all_uv.len()];
+                            for &i in &cdt_flat {
+                                if i < cdt_used.len() {
+                                    cdt_used[i] = true;
+                                }
+                            }
+                            let cdt_interior_dropped =
+                                (n_boundary_and_holes_actual..all_uv.len())
+                                    .filter(|&i| !cdt_used[i])
+                                    .count();
                             // s64 semantics for n_unused cases (strictly more
                             // ring edges — bit-identical to the session-64
                             // gate); the extended equal-rim/fewer-extra branch
-                            // applies ONLY to the crescent region-drop class.
+                            // applies ONLY to the crescent region-drop class;
+                            // the s77 sail arm: equal ring edges + zero extra
+                            // boundary + zero dropped interior (never-worsen:
+                            // fewer CDT ring edges → reject).
                             let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
+                            let sail_fallback = sail_cdt_candidate;
                             let cdt_improves = !cdt2.is_empty()
                                 && (cdt_ring_edges > legacy_ring_edges
                                     || (crescent_fallback
                                         && cdt_ring_edges == legacy_ring_edges
-                                        && cdt_extra_bnd < legacy_extra_bnd));
+                                        && cdt_extra_bnd < legacy_extra_bnd)
+                                    || (sail_fallback
+                                        && cdt_ring_edges == legacy_ring_edges
+                                        && cdt_extra_bnd == 0
+                                        && cdt_interior_dropped == 0));
                             if cdt_improves {
                                 log::warn!(
                                 "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris)",

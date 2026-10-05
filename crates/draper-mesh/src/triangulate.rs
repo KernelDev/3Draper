@@ -10442,7 +10442,73 @@ fn degen_strip_zipper(indices: &[u32], points: &[Point2d]) -> Option<Vec<[u32; 3
     let a: &[usize] = &fwd;
     let b: Vec<usize> = bwd.iter().rev().copied().collect();
     let (la, lb) = (a.len(), b.len());
+    if std::env::var("DRAPPER_STRIP_DEBUG").is_ok() {
+        if la.min(lb) <= 6 {
+            let short_t: Vec<f64> = if lb <= la {
+                b.iter().map(|&ix| t[ix]).collect()
+            } else {
+                a.iter().map(|&ix| t[ix]).collect()
+            };
+            eprintln!(
+                "STRIP chains [{}] m={} la={} lb={} short-chain t=[{}] (t-range {:.4}..{:.4})",
+                crate::parametric_domain::current_face_label(),
+                m,
+                la,
+                lb,
+                short_t
+                    .iter()
+                    .map(|x| format!("{:.3}", x))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                t_min,
+                t_max
+            );
+        } else {
+            eprintln!(
+                "STRIP chains [{}] m={} la={} lb={}",
+                crate::parametric_domain::current_face_label(),
+                m,
+                la,
+                lb
+            );
+        }
+    }
     if la < 2 || lb < 2 {
+        return None;
+    }
+    // session-77: DIGON/LUNE guard. When one PCA chain is just the two
+    // shared extremes (no interior points on that side: the domain is an
+    // arc + a closing chord), the two-pointer merge takes `take_a` on
+    // every step — the short chain's only advance happens after the long
+    // chain is exhausted — so the output is a single-apex fan spanning
+    // the whole arc. Measured on drill HM f216 (THIN_STRIP_ZIPPER=1):
+    // 80 of 85 triangles from one apex, replacing ear_clip's natural
+    // two-fan from the arc endpoints and growing (215,216) 5→18 — the
+    // verification suite (coverage/m−2/area/single-sign) cannot see it:
+    // a fan IS a valid triangulation. Reject when the short side is the
+    // 2-pt extremes AND the long side is ≥ 8 pts (the digon aspect);
+    // small domains (the L-shape class, e.g. 2:5) keep the s76 zipper —
+    // their corner fans are local and measured fine.
+    // Kill-switch semantics FLIPPED to opt-in after the s77 measurement
+    // matrix: the guard rejects the (2,167)-class walls whose zipper
+    // mega-fan is MEASURED GOOD against clean neighbors (SLEEVE f159/
+    // f369 vs the lune'd f39/f43: (39,159) 2→0, (43,369) 2→0 — the
+    // s76 SLEEVE −30 dies with the guard on: REAL 185→215). The
+    // (112,4)-class f216 mega-fan is bad only against garbage sail
+    // neighbors — the debt lives in the SAIL side (s78). Opt-in:
+    // DRAPPER_DIGON_GUARD=1.
+    if (la == 2 || lb == 2)
+        && la.max(lb) >= 8
+        && std::env::var("DRAPPER_DIGON_GUARD").as_deref() == Ok("1")
+    {
+        if std::env::var("DRAPPER_STRIP_DEBUG").is_ok() {
+            eprintln!(
+                "STRIP digon-reject [{}] la={} lb={} — single-apex fan risk, fall back",
+                crate::parametric_domain::current_face_label(),
+                la,
+                lb
+            );
+        }
         return None;
     }
     let mut tris: Vec<[u32; 3]> = Vec::with_capacity(m - 2);
