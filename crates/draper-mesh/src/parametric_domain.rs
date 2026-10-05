@@ -9464,6 +9464,773 @@ fn nurbs_lune_band_strip_impl(
     (out, new_pts)
 }
 
+// ════════════════════════════════════════════════════════════════
+// session-78: NURBS SAIL BAND — the full 4-sided patch lattice for
+// the f215/f224 sail class (the s77 twin-fan debt).
+//
+// Anatomy (s77, f215 HOUSING_MIRROR): the ring is 4-sided —
+//   * TWO u-const walls (55 rim pts each, left u≈u_min spanning
+//     v 0.072..1.0016, right u≈u_max spanning v -0.009..0.9867),
+//   * a top cap (30 pts, v≈v_max),
+//   * a WAVY bottom cap (55 pts: v-flat run + diagonal wave + flat
+//     run; v from +0.072 at the left corner DOWN to -0.009 at the
+//     right — the right wall foot sits BELOW the bottom cap's max v,
+//     the s77 "corner problem").
+// The legacy earcutr pass drops 63/111 interior Steiners and fans
+// from rim vertices (degree 34/32/31). The s71 LUNE ladder cannot
+// cover a 4-sided patch (s77: "violations but no splittable band" —
+// doubled interior edges in non-splittable bands).
+//
+// The SAIL band builds the patch structurally:
+//   * the walls are located by their VERTICAL RIM EDGES (both end
+//     points near u_min/u_max AND |dv| > 2|du|) — point-membership
+//     alone misclassifies the cap's last flat run into the wall
+//     (f215: b139/b86 sit within the 2% u-band but their edges are
+//     horizontal) and that breaks both the corner split and the
+//     v-monotonicity (the 9.1e-5 sampling noise at b139→b140);
+//   * levels L_1..L_M from the DIRECT 3D chord-sag along the
+//     corridor midline (the s70 circumradius estimate; no radius
+//     formulas on the normalized parametric box);
+//   * row j = [wall-left segment (L_{j-1}, L_j]] + [analytic
+//     interior points point_at(u_i, L_j)] + [wall-right segment
+//     (L_{j-1}, L_j] in v-descending order] — every wall point lands
+//     on the grid boundary BY CONSTRUCTION (the s73 splice idea,
+//     generalized: rows do not need the walls to be level-aligned);
+//     the LAST row's wall segment is open at the top ((L_{M-1}, +∞))
+//     so the wall points above the last level — up to the top
+//     corners — are carried too (their head edges via advance-B,
+//     the sub-corner→corner edge via the final band's opening pair);
+//   * both caps are END rows (row 0 = wavy bottom, row M+1 = top);
+//   * OPEN two-pointer zipper between consecutive rows (s65-merge
+//     style, NOT the s66 annulus closure). The lower chain of band
+//     j is the ANALYTIC part of row j-1 plus its wall anchors (the
+//     last wall point with v ≤ L_{j-1}); the final band's lower
+//     chain anchors are the SUB-CORNER points (the wall neighbors
+//     of tl/tr) — each wall rim edge is created exactly once;
+//   * zipper degeneracy guards: advance is rejected when the
+//     candidate triangle is collinear (area ≤ eps, the left-wall
+//     opening fan) and the LAST advance-A is deferred while B still
+//     walks the right wall (otherwise A exhausts on the wall and
+//     every remaining advance-B triangle is collinear-zero-area);
+//   * guards: coverage (every ring+new point used), edge audit
+//     (every rim edge exactly 1×, every interior edge exactly 2×),
+//     area == polygon ±0.5%, single winding sign (noise-bounded).
+//
+// Trigger (caller): Nurbs, hole-free, legacy debt (unused rim verts
+// OR extra non-rim boundary edges) OR the s77 sail trigger (≥4 and
+// ≥25% of the interior Steiner budget dropped). Kill-switch:
+// DRAPPER_NURBS_SAIL_BAND=0.
+// ════════════════════════════════════════════════════════════════
+pub fn nurbs_sail_band_strip(
+    nurbs: &draper_geometry::NurbsSurface,
+    boundary_2d: &[[f64; 2]],
+    max_dev: f64,
+) -> (Vec<usize>, Vec<[f64; 2]>) {
+    macro_rules! sail_fail {
+        ($reason:expr) => {{
+            if std::env::var("DRAPPER_SAIL_DEBUG").is_ok() {
+                eprintln!("[SAIL reject {}] {}", current_face_label(), $reason);
+            }
+            return (Vec::new(), Vec::new());
+        }};
+    }
+    let n_raw = boundary_2d.len();
+    if n_raw < 8 {
+        sail_fail!("tiny ring");
+    }
+    if nurbs.control_points.is_empty() || nurbs.control_points[0].is_empty() {
+        sail_fail!("empty control grid");
+    }
+    // ── 1. unwrap u/v along the ring walk (seam crossing) ─────────
+    let (u0d, u1d) = nurbs.u_range();
+    let (v0d, v1d) = nurbs.v_range();
+    let u_period = if nurbs.u_closed && u1d > u0d { u1d - u0d } else { 0.0 };
+    let v_period = if nurbs.v_closed && v1d > v0d { v1d - v0d } else { 0.0 };
+    let mut us = Vec::with_capacity(n_raw);
+    let mut vs = Vec::with_capacity(n_raw);
+    us.push(boundary_2d[0][0]);
+    vs.push(boundary_2d[0][1]);
+    for k in 1..n_raw {
+        let mut u = boundary_2d[k][0];
+        let mut v = boundary_2d[k][1];
+        if u_period > 0.0 {
+            while u - us[k - 1] > u_period * 0.5 {
+                u -= u_period;
+            }
+            while us[k - 1] - u > u_period * 0.5 {
+                u += u_period;
+            }
+        }
+        if v_period > 0.0 {
+            while v - vs[k - 1] > v_period * 0.5 {
+                v -= v_period;
+            }
+            while vs[k - 1] - v > v_period * 0.5 {
+                v += v_period;
+            }
+        }
+        us.push(u);
+        vs.push(v);
+    }
+    let vmin = vs.iter().cloned().fold(f64::INFINITY, f64::min);
+    let vmax = vs.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let vspan = vmax - vmin;
+    let umin = us.iter().cloned().fold(f64::INFINITY, f64::min);
+    let umax = us.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let uspan = umax - umin;
+    if !(vspan > 1e-9) || !(uspan > 1e-9) {
+        sail_fail!("flat ring");
+    }
+    // ── 2. locate the two u-const walls (by VERTICAL RIM EDGES) ──
+    // A wall edge has BOTH endpoints within eps of u_min (left) /
+    // u_max (right) AND is vertical (|dv| > 2|du|). Point membership
+    // alone misclassifies the cap's final flat run (f215 b139/b86:
+    // within the u-band, horizontal edges) and breaks the corner
+    // split + v-monotonicity (9.1e-5 sampling noise at b139→b140).
+    let eps_wall = uspan * 0.02;
+    let near_l = |i: usize| us[i] <= umin + eps_wall;
+    let near_r = |i: usize| us[i] >= umax - eps_wall;
+    let vertical = |i: usize| {
+        let (du, dv) = (
+            (us[(i + 1) % n_raw] - us[i]).abs(),
+            (vs[(i + 1) % n_raw] - vs[i]).abs(),
+        );
+        dv > 2.0 * du && dv > 1e-12
+    };
+    // maximal cyclic run of edges satisfying (near, vertical)
+    let longest_wall = |near: &dyn Fn(usize) -> bool| -> Option<(usize, usize)> {
+        let pred = |i: usize| near(i) && near((i + 1) % n_raw) && vertical(i);
+        if !(0..n_raw).any(|i| pred(i)) {
+            return None;
+        }
+        let rot = (0..n_raw).find(|&i| !pred(i)).unwrap();
+        let mut best = (0usize, 0usize); // (start edge, len)
+        let mut run_start: Option<usize> = None;
+        let mut cur_len = 0usize;
+        for k in 0..=n_raw {
+            let i = (rot + k) % n_raw;
+            if k < n_raw && pred(i) {
+                if run_start.is_none() {
+                    run_start = Some(i);
+                    cur_len = 0;
+                }
+                cur_len += 1;
+            } else {
+                if let Some(s) = run_start.take() {
+                    if cur_len > best.1 {
+                        best = (s, cur_len);
+                    }
+                }
+                cur_len = 0;
+            }
+        }
+        if best.1 >= 6 {
+            Some(best)
+        } else {
+            None
+        }
+    };
+    let (wl_e0, wl_elen) = match longest_wall(&near_l) {
+        Some(x) => x,
+        None => sail_fail!("no left u-const wall"),
+    };
+    let (wr_e0, wr_elen) = match longest_wall(&near_r) {
+        Some(x) => x,
+        None => sail_fail!("no right u-const wall"),
+    };
+    // wall point lists in RING ORDER (edges e0..e0+len-1 → points)
+    let wall_l: Vec<usize> = (0..=wl_elen).map(|k| (wl_e0 + k) % n_raw).collect();
+    let wall_r: Vec<usize> = (0..=wr_elen).map(|k| (wr_e0 + k) % n_raw).collect();
+    {
+        use std::collections::HashSet;
+        let sl: HashSet<usize> = wall_l.iter().copied().collect();
+        if wall_r.iter().any(|k| sl.contains(k)) {
+            sail_fail!("walls overlap");
+        }
+    }
+    // v-monotone with a noise allowance: sampling noise on flat
+    // walls is ~1e-4·vspan (b139→b140 measured 9.1e-5); real
+    // meanders reverse by >= 1% of vspan (s72 taxonomy)
+    let v_noise = vspan * 5e-3;
+    let mono = |w: &[usize]| -> bool {
+        let mut dir = 0i32; // +1 up, -1 down
+        for pair in w.windows(2) {
+            let dv = vs[pair[1]] - vs[pair[0]];
+            if dv > v_noise {
+                if dir == -1 {
+                    return false;
+                }
+                dir = 1;
+            } else if dv < -v_noise {
+                if dir == 1 {
+                    return false;
+                }
+                dir = -1;
+            }
+        }
+        true
+    };
+    if !mono(&wall_l) || !mono(&wall_r) {
+        sail_fail!("wall not v-monotone");
+    }
+    // ascending (bottom→top) order
+    let wall_l_asc: Vec<usize> = {
+        let mut w = wall_l.clone();
+        if vs[w[0]] > vs[*w.last().unwrap()] {
+            w.reverse();
+        }
+        w
+    };
+    let wall_r_asc: Vec<usize> = {
+        let mut w = wall_r.clone();
+        if vs[w[0]] > vs[*w.last().unwrap()] {
+            w.reverse();
+        }
+        w
+    };
+    let bl = *wall_l_asc.first().unwrap(); // bottom-left corner (ring idx)
+    let tl = *wall_l_asc.last().unwrap(); // top-left corner
+    let br = *wall_r_asc.first().unwrap(); // bottom-right corner
+    let tr = *wall_r_asc.last().unwrap(); // top-right corner
+    let vl_span = vs[tl] - vs[bl];
+    let vr_span = vs[tr] - vs[br];
+    if vl_span < 0.25 * vspan || vr_span < 0.25 * vspan {
+        sail_fail!("wall too short for the patch");
+    }
+    // ── 3. caps: ring arcs between the wall ends ──────────────────
+    // bottom = arc bl→br avoiding tl/tr; top = arc tl→tr avoiding
+    // bl/br. Each is then normalized to u-ascending order.
+    let arc_between = |from: usize, to: usize, avoid: &[usize]| -> Option<Vec<usize>> {
+        let mut fwd = vec![from];
+        let mut i = from;
+        while i != to {
+            i = (i + 1) % n_raw;
+            if avoid.contains(&i) && i != to {
+                fwd.clear();
+                break;
+            }
+            fwd.push(i);
+        }
+        let mut bwd = vec![from];
+        let mut i = from;
+        while i != to {
+            i = (i + n_raw - 1) % n_raw;
+            if avoid.contains(&i) && i != to {
+                bwd.clear();
+                break;
+            }
+            bwd.push(i);
+        }
+        match (fwd.is_empty(), bwd.is_empty()) {
+            (false, false) => Some(if fwd.len() <= bwd.len() { fwd } else { bwd }),
+            (false, true) => Some(fwd),
+            (true, false) => Some(bwd),
+            (true, true) => None,
+        }
+    };
+    let bottom_cap_raw = match arc_between(bl, br, &[tl, tr]) {
+        Some(x) if x.len() >= 3 => x,
+        _ => sail_fail!("bottom cap degenerate"),
+    };
+    let top_cap_raw = match arc_between(tl, tr, &[bl, br]) {
+        Some(x) if x.len() >= 3 => x,
+        _ => sail_fail!("top cap degenerate"),
+    };
+    let eps_u = uspan * 1e-6;
+    let normalize_u_asc = |pts: Vec<usize>| -> Option<Vec<usize>> {
+        let asc = pts.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u);
+        let desc = pts.windows(2).all(|w| us[w[0]] >= us[w[1]] - eps_u);
+        if !asc && !desc {
+            return None;
+        }
+        let mut p = pts;
+        if !asc {
+            p.reverse();
+        }
+        Some(p)
+    };
+    let bottom_cap = match normalize_u_asc(bottom_cap_raw) {
+        Some(x) => x,
+        None => sail_fail!("bottom cap not u-monotone"),
+    };
+    let top_cap = match normalize_u_asc(top_cap_raw) {
+        Some(x) => x,
+        None => sail_fail!("top cap not u-monotone"),
+    };
+    if bottom_cap[0] != bl || *bottom_cap.last().unwrap() != br {
+        sail_fail!("bottom cap ends mismatch");
+    }
+    if top_cap[0] != tl || *top_cap.last().unwrap() != tr {
+        sail_fail!("top cap ends mismatch");
+    }
+    let bcap_vmax = bottom_cap.iter().map(|&k| vs[k]).fold(f64::NEG_INFINITY, f64::max);
+    let tcap_vmin = top_cap.iter().map(|&k| vs[k]).fold(f64::INFINITY, f64::min);
+    if bcap_vmax >= tcap_vmin - 1e-9 {
+        sail_fail!("caps overlap in v");
+    }
+    // ── 3.5 median 3D rim-edge chord (the weld-collapse signal) ───
+    // Faces whose rim is discretized FINER than the mesh's vertex
+    // resolution (merge/weld tolerance, ~eff_tol in the converter)
+    // collapse in the global weld: the whole lattice — legacy fan or
+    // SAIL band alike — reduces to a ~15-tri skeleton, and the band's
+    // surviving slivers fold against the fillet neighbors (SLEEVE
+    // f86..f364: +4 REAL measured). The mesh layer has no access to
+    // the weld tolerance, so the gate uses the median rim chord vs
+    // the sag tolerance as the proxy (ratio 0.35, matrix-tuned): a
+    // rim much finer than the sag carries no information the band
+    // could improve, and its post-weld skeleton folds against the
+    // fillet neighbors.
+    let rim_median_3d = {
+        let mut steps: Vec<f64> = (0..n_raw)
+            .map(|i| {
+                let a = nurbs.point_at(us[i], vs[i]);
+                let b = nurbs.point_at(us[(i + 1) % n_raw], vs[(i + 1) % n_raw]);
+                ((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z))
+                    .sqrt()
+            })
+            .collect();
+        steps.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        steps[n_raw / 2]
+    };
+    if std::env::var("DRAPPER_SAIL_DEBUG").is_ok() {
+        eprintln!(
+            "[SAIL {}] rim median 3D chord {:.6}, max_dev {:.6}, ratio {:.3}",
+            current_face_label(),
+            rim_median_3d,
+            max_dev,
+            if max_dev > 0.0 { rim_median_3d / max_dev } else { f64::INFINITY }
+        );
+    }
+    // tunable ratio (default 0.35): DRAPPER_SAIL_RIM_RATIO=<r> uses
+    // r*max_dev as the cutoff. The s78 matrix measured 0.15 → SLEEVE
+    // +4 REAL (weld-collapse slivers), 0.25/0.35 → SLEEVE −3 /
+    // HOUSING −73 / HM −60 (=1052 total, the optimum; the 4x8 class
+    // sits at ratio 0.244/0.489 across its two converter passes and
+    // any cutoff in between separates them), 0.5 → SLEEVE baseline /
+    // HOUSING −61 / HM −60 (=1067).
+    let rim_ratio: f64 = std::env::var("DRAPPER_SAIL_RIM_RATIO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.35);
+    if max_dev > 0.0 && rim_median_3d < rim_ratio * max_dev {
+        sail_fail!(format!(
+            "rim finer than sag (median chord {:.6} < {}*max_dev {:.6}) — weld-collapse class",
+            rim_median_3d, rim_ratio, max_dev
+        ));
+    }
+    // ── 4. level step from the DIRECT 3D chord-sag (s70 form) ─────
+    let dist3 = |p: &Point3d, q: &Point3d| -> f64 {
+        ((p.x - q.x) * (p.x - q.x) + (p.y - q.y) * (p.y - q.y) + (p.z - q.z) * (p.z - q.z)).sqrt()
+    };
+    let u_l = us[wall_l_asc[wall_l_asc.len() / 2]];
+    let u_r = us[wall_r_asc[wall_r_asc.len() / 2]];
+    let v_lo = bcap_vmax;
+    let v_hi = tcap_vmin;
+    let v_corridor = v_hi - v_lo;
+    if v_corridor <= 1e-9 {
+        sail_fail!("no corridor between the caps");
+    }
+    let sag_step = |samples: &[(f64, Point3d)], span: f64| -> f64 {
+        let mut bound = span * 0.5; // tol<=0 default
+        if max_dev <= 0.0 {
+            return bound.min(span).max(span * 1e-6);
+        }
+        let mm = samples.len();
+        if mm < 3 {
+            return bound.min(span).max(span * 1e-6);
+        }
+        let scale = {
+            let mut s = 1e-12f64;
+            for i in 0..mm {
+                for j in i + 1..mm {
+                    s = s.max(dist3(&samples[i].1, &samples[j].1));
+                }
+            }
+            s
+        };
+        let circum = |i: usize| -> f64 {
+            if i + 2 >= mm {
+                return f64::INFINITY;
+            }
+            let p0 = samples[i].1;
+            let p1 = samples[i + 1].1;
+            let p2 = samples[i + 2].1;
+            let a = dist3(&p0, &p1);
+            let bx = dist3(&p1, &p2);
+            let cx = dist3(&p0, &p2);
+            let ab = [p1.x - p0.x, p1.y - p0.y, p1.z - p0.z];
+            let ac = [p2.x - p0.x, p2.y - p0.y, p2.z - p0.z];
+            let cr = [
+                ab[1] * ac[2] - ab[2] * ac[1],
+                ab[2] * ac[0] - ab[0] * ac[2],
+                ab[0] * ac[1] - ab[1] * ac[0],
+            ];
+            let area2 = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+            if area2 <= 1e-14 * scale * scale || a * bx * cx <= 0.0 {
+                return f64::INFINITY;
+            }
+            a * bx * cx / (2.0 * area2)
+        };
+        let mut min_step = f64::INFINITY;
+        for i in 0..mm.saturating_sub(1) {
+            let d = dist3(&samples[i].1, &samples[i + 1].1);
+            let dp = samples[i + 1].0 - samples[i].0;
+            if d <= 1e-12 || dp <= 0.0 {
+                continue;
+            }
+            let lo = if i > 0 { circum(i - 1) } else { f64::INFINITY };
+            let r = lo.min(circum(i));
+            if !r.is_finite() {
+                continue;
+            }
+            let c_max = (8.0 * r * max_dev).sqrt();
+            if !c_max.is_finite() || c_max <= 0.0 {
+                continue;
+            }
+            let step_ok = c_max * dp / d;
+            if step_ok < min_step {
+                min_step = step_ok;
+            }
+        }
+        if min_step.is_finite() {
+            bound = min_step;
+        }
+        bound.min(span).max(span * 1e-6)
+    };
+    let dv_max = {
+        const M: usize = 9;
+        let mut samp: Vec<(f64, Point3d)> = Vec::with_capacity(M);
+        let um = (u_l + u_r) * 0.5;
+        for i in 0..M {
+            let vv = v_lo + v_corridor * i as f64 / (M - 1) as f64;
+            samp.push((vv, nurbs.point_at(um, vv)));
+        }
+        sag_step(&samp, v_corridor)
+    };
+    let du_max = {
+        const M: usize = 9;
+        let vm = (v_lo + v_hi) * 0.5;
+        let mut samp: Vec<(f64, Point3d)> = Vec::with_capacity(M);
+        for i in 0..M {
+            let uu = umin + uspan * i as f64 / (M - 1) as f64;
+            samp.push((uu, nurbs.point_at(uu, vm)));
+        }
+        sag_step(&samp, uspan)
+    };
+    // interior analytic columns: at least 4 (rows stay non-degenerate
+    // when both wall segments are empty), more only when the sag
+    // demands it
+    let n_cols = (((uspan / du_max).ceil() as usize).max(4)).min(64);
+    // levels L_1..L_M (M >= 1: at least one interior level so the
+    // wall segments between the caps are always carried by a row);
+    // uniform steps of <= dv_max between the caps
+    let n_levels = (((v_corridor / dv_max).ceil() as usize).max(1)).min(24);
+    let levels: Vec<f64> = (1..=n_levels)
+        .map(|k| v_lo + v_corridor * k as f64 / (n_levels + 1) as f64)
+        .collect();
+    // ── 5. positional wall segments ───────────────────────────────
+    // seg j (0-based, j = 0..M-1) of a wall covers the positional
+    // range [s_j, e_j) of the ascending wall list:
+    //   j = 0:   (v_corner, L_1]
+    //   j mid:   (L_j, L_{j+1}]
+    //   j = M-1: (L_{M-1}, v_top) — open at the top: carries the
+    //             points above the last level up to BUT EXCLUDING the
+    //             top corner (the corner belongs to the top cap row;
+    //             including it would double the sub-corner→corner
+    //             rim edge — measured f215: rim (194,195) count 2).
+    // Positional bounds are immune to equal-v sampling noise; the
+    // bottom corners (position 0) are excluded — they belong to the
+    // bottom cap row.
+    let seg_bounds = |wall_asc: &[usize]| -> Vec<(usize, usize)> {
+        let len = wall_asc.len();
+        let mut bounds = Vec::with_capacity(n_levels);
+        let mut s = 1usize; // skip the bottom corner
+        for j in 0..n_levels {
+            let e = if j == n_levels - 1 {
+                len - 1 // exclude the top corner (top cap row owns it)
+            } else {
+                let mut e = s;
+                while e < len && vs[wall_asc[e]] <= levels[j] + 1e-12 {
+                    e += 1;
+                }
+                e.min(len - 1).max(s)
+            };
+            bounds.push((s, e));
+            s = e;
+        }
+        bounds
+    };
+    let bounds_l = seg_bounds(&wall_l_asc);
+    let bounds_r = seg_bounds(&wall_r_asc);
+    // analytic interior points of row j (1-based, level L_j)
+    let mut new_pts: Vec<[f64; 2]> = Vec::new();
+    let mut row_analytics: Vec<Vec<usize>> = Vec::with_capacity(n_levels);
+    for &vk in levels.iter() {
+        let mut an = Vec::with_capacity(n_cols - 1);
+        for i in 1..n_cols {
+            let uu = umin + uspan * i as f64 / n_cols as f64;
+            let uu = uu.max(umin + eps_wall).min(umax - eps_wall);
+            new_pts.push([uu, vk]);
+            an.push(n_raw + new_pts.len() - 1);
+        }
+        row_analytics.push(an);
+    }
+    // full row j (1-based j = 1..M): [left seg] + [analytic L_j] +
+    // [right seg v-descending]
+    let full_row = |j: usize| -> Vec<usize> {
+        if j == 0 {
+            return bottom_cap.clone();
+        }
+        if j == n_levels + 1 {
+            return top_cap.clone();
+        }
+        let (sl, el) = bounds_l[j - 1];
+        let (sr, er) = bounds_r[j - 1];
+        let mut row: Vec<usize> = wall_l_asc[sl..el].to_vec();
+        row.extend(row_analytics[j - 1].iter().copied());
+        let mut tail: Vec<usize> = wall_r_asc[sr..er].to_vec();
+        tail.reverse(); // v-descending
+        row.extend(tail);
+        row
+    };
+    // lower chain of band k (1-based k = 1..M+1):
+    //   k = 1: the bottom cap;
+    //   k = 2..=M: [left anchor at L_{k-1}] + analytic L_{k-1} +
+    //              [right anchor] — the anchor is the last wall point
+    //              with v <= L_{k-1} (positionally: the last point of
+    //              segment k-2);
+    //   k = M+1: [SUB-corner left] + analytic L_M + [SUB-corner
+    //              right] — the sub-corner is the wall neighbor of
+    //              tl/tr (the corners themselves belong to the top
+    //              cap row; the sub-corner→corner rim edge is created
+    //              by the final band's opening/closing pair).
+    let lower_chain = |k: usize| -> Option<Vec<usize>> {
+        if k == 1 {
+            return Some(bottom_cap.clone());
+        }
+        if k == n_levels + 1 {
+            if wall_l_asc.len() < 2 || wall_r_asc.len() < 2 {
+                return None;
+            }
+            let la = wall_l_asc[wall_l_asc.len() - 2];
+            let ra = wall_r_asc[wall_r_asc.len() - 2];
+            let mut c = vec![la];
+            c.extend(row_analytics[n_levels - 1].iter().copied());
+            c.push(ra);
+            return Some(c);
+        }
+        // k in 2..=M → anchor at level L_{k-1} = levels[k-2]:
+        // the LAST wall point with v <= L_{k-1} (direct v-scan over
+        // the ascending wall — immune to empty-segment index shifts)
+        let level = levels[k - 2];
+        let anchor_at = |wall_asc: &[usize], lvl: f64| -> usize {
+            let mut best = 0usize;
+            for (p, &w) in wall_asc.iter().enumerate() {
+                if vs[w] <= lvl + 1e-12 {
+                    best = p;
+                } else {
+                    break;
+                }
+            }
+            wall_asc[best]
+        };
+        let la = anchor_at(&wall_l_asc, level);
+        let ra = anchor_at(&wall_r_asc, level);
+        let mut c = vec![la];
+        c.extend(row_analytics[k - 2].iter().copied());
+        c.push(ra);
+        Some(c)
+    };
+    // ── 6. open zipper with wall-degeneracy guards ────────────────
+    let uv_of = |idx: usize| -> [f64; 2] {
+        if idx < n_raw {
+            [us[idx], vs[idx]]
+        } else {
+            new_pts[idx - n_raw]
+        }
+    };
+    let scale2 = (uspan * uspan + vspan * vspan).max(1e-12);
+    let eps_area = 1e-12 * scale2;
+    let on_left_wall = |idx: usize| uv_of(idx)[0] <= umin + eps_wall;
+    let on_right_wall = |idx: usize| uv_of(idx)[0] >= umax - eps_wall;
+    let area2 = |a: usize, b: usize, c: usize| -> f64 {
+        let pa = uv_of(a);
+        let pb = uv_of(b);
+        let pc = uv_of(c);
+        (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])
+    };
+    let mut tris: Vec<usize> = Vec::new();
+    for k in 1..=n_levels + 1 {
+        let a_chain = match lower_chain(k) {
+            Some(x) if x.len() >= 2 => x,
+            _ => sail_fail!("lower chain degenerate"),
+        };
+        let b_chain = full_row(k);
+        let m = a_chain.len();
+        let nb = b_chain.len();
+        if nb < 2 {
+            sail_fail!("upper row degenerate");
+        }
+        let mut ia = 0usize;
+        let mut ib = 0usize;
+        let mut guard_ct = 0usize;
+        while ia < m - 1 || ib < nb - 1 {
+            let dead_a = ia >= m - 1;
+            let dead_b = ib >= nb - 1;
+            let deg_a =
+                !dead_a && area2(a_chain[ia], a_chain[ia + 1], b_chain[ib]).abs() <= eps_area;
+            let deg_b =
+                !dead_b && area2(a_chain[ia], b_chain[ib + 1], b_chain[ib]).abs() <= eps_area;
+            // right-wall deadlock guard: advancing A to its LAST point
+            // while B still walks the right wall strands the zipper
+            // (every later advance-B triangle is collinear on the wall)
+            let wall_block_a = !dead_a
+                && ia + 1 == m - 1
+                && !dead_b
+                && on_right_wall(a_chain[m - 1])
+                && on_right_wall(b_chain[ib + 1]);
+            let can_a = !dead_a && !deg_a && !wall_block_a;
+            let can_b = !dead_b && !deg_b;
+            let take_a = if !can_a {
+                false
+            } else if !can_b {
+                true
+            } else if ia == 0
+                && ib == 0
+                && on_left_wall(a_chain[0])
+                && on_left_wall(b_chain[0])
+            {
+                // opening pair on the left wall: advance A first
+                true
+            } else {
+                // u-criterion (both chains are weakly u-monotone)
+                uv_of(a_chain[ia + 1])[0] <= uv_of(b_chain[ib + 1])[0]
+            };
+            if take_a {
+                tris.push(a_chain[ia]);
+                tris.push(a_chain[ia + 1]);
+                tris.push(b_chain[ib]);
+                ia += 1;
+            } else if can_b {
+                tris.push(a_chain[ia]);
+                tris.push(b_chain[ib + 1]);
+                tris.push(b_chain[ib]);
+                ib += 1;
+            } else if !dead_a && !deg_a {
+                // wall_block_a is the only blocker — B is exhausted or
+                // blocked; advance A to finish the band
+                tris.push(a_chain[ia]);
+                tris.push(a_chain[ia + 1]);
+                tris.push(b_chain[ib]);
+                ia += 1;
+            } else {
+                sail_fail!("zipper stuck");
+            }
+            guard_ct += 1;
+            if guard_ct > 4 * (m + nb) {
+                sail_fail!("zipper loop guard");
+            }
+        }
+    }
+    if tris.len() < 3 {
+        sail_fail!("empty strip");
+    }
+    // ── 7. guards: coverage / edge audit / area / winding ─────────
+    {
+        use std::collections::{HashMap, HashSet};
+        let mut used = HashSet::new();
+        for &i in tris.iter() {
+            used.insert(i);
+        }
+        for i in 0..n_raw {
+            if !used.contains(&i) {
+                sail_fail!(format!("ring point {} unused", i));
+            }
+        }
+        for i in n_raw..n_raw + new_pts.len() {
+            if !used.contains(&i) {
+                sail_fail!(format!("new point {} unused", i));
+            }
+        }
+        let mut ecount: HashMap<(usize, usize), usize> = HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for s in 0..3 {
+                let x = c[s];
+                let y = c[(s + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let mut rim_set: HashSet<(usize, usize)> = HashSet::new();
+        for i in 0..n_raw {
+            let j = (i + 1) % n_raw;
+            rim_set.insert((i.min(j), i.max(j)));
+        }
+        for (e, cnt) in ecount.iter() {
+            if rim_set.contains(e) {
+                if *cnt != 1 {
+                    sail_fail!(format!("rim edge {:?} count {}", e, cnt));
+                }
+            } else if *cnt != 2 {
+                sail_fail!(format!("interior edge {:?} count {}", e, cnt));
+            }
+        }
+        for e in rim_set.iter() {
+            if !ecount.contains_key(e) {
+                sail_fail!(format!("rim edge {:?} missing", e));
+            }
+        }
+        let signed = |ring: &[[f64; 2]]| -> f64 {
+            let mut s = 0.0;
+            for w in ring.windows(2) {
+                s += w[0][0] * w[1][1] - w[1][0] * w[0][1];
+            }
+            if ring.len() > 1 {
+                let (a, b) = (ring[ring.len() - 1], ring[0]);
+                s += a[0] * b[1] - b[0] * a[1];
+            }
+            s * 0.5
+        };
+        let poly_uv: Vec<[f64; 2]> = (0..n_raw).map(|k| [us[k], vs[k]]).collect();
+        let poly_s = signed(&poly_uv);
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                (uv_of(c[0])[0] * (uv_of(c[1])[1] - uv_of(c[2])[1])
+                    + uv_of(c[1])[0] * (uv_of(c[2])[1] - uv_of(c[0])[1])
+                    + uv_of(c[2])[0] * (uv_of(c[0])[1] - uv_of(c[1])[1]))
+                    * 0.5
+            })
+            .sum();
+        if (strip_s - poly_s).abs() > 0.005 * poly_s.abs().max(1e-12) {
+            sail_fail!(format!(
+                "area mismatch strip {:.6} vs poly {:.6}",
+                strip_s, poly_s
+            ));
+        }
+        if strip_s * poly_s < 0.0 {
+            for c in tris.chunks_exact_mut(3) {
+                c.swap(1, 2);
+            }
+        }
+        let noise = 1e-9 * scale2;
+        let mut pos = 0usize;
+        let mut neg = 0usize;
+        for c in tris.chunks_exact(3) {
+            let s = area2(c[0], c[1], c[2]);
+            if s > noise {
+                pos += 1;
+            } else if s < -noise {
+                neg += 1;
+            }
+        }
+        if pos > 0 && neg > 0 {
+            sail_fail!(format!("winding inversion {} pos / {} neg", pos, neg));
+        }
+    }
+    (tris, new_pts)
+}
 pub fn triangulate_surface_consistent(
     surface: &Surface,
     boundary_points_3d: &[Point3d],
@@ -11828,6 +12595,38 @@ pub fn triangulate_surface_consistent(
                     } else {
                         (Vec::new(), Vec::new())
                     };
+                    // session-78: NURBS SAIL BAND — the 4-sided patch
+                    // lattice (2 u-const walls + wavy bottom cap + top
+                    // cap) for the f215/f224 sail class: the legacy
+                    // earcutr pass drops the interior Steiner lattice
+                    // (63/111 on f215) and corner-fans from rim verts;
+                    // the s71 LUNE ladder cannot cover a 4-sided patch
+                    // (s77: "violations but no splittable band"). Runs
+                    // BEFORE the lune (disjoint by construction: the
+                    // sail owns exactly the 2-wall + 2-cap topology);
+                    // same [ring | new] contract, same never-worsen
+                    // gate below (the s77 sail arm accepts at EQUAL
+                    // rim/extra — the legacy is already at the rim
+                    // ceiling while dropping the interior budget).
+                    // Kill-switch: DRAPPER_NURBS_SAIL_BAND=0.
+                    let sail_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
+                        && nurbs_band_strip.0.is_empty()
+                        && (n_unused > 0
+                            || legacy_extra_bnd > 0
+                            || (matches!(surface, Surface::Nurbs(_))
+                                && n_interior_dropped >= 4
+                                && n_interior_dropped * 4 >= n_interior_total))
+                        && std::env::var("DRAPPER_NURBS_SAIL_BAND").as_deref() != Ok("0")
+                    {
+                        match surface {
+                            Surface::Nurbs(nr) => {
+                                nurbs_sail_band_strip(nr, &boundary_2d, params.max_deviation)
+                            }
+                            _ => (Vec::new(), Vec::new()),
+                        }
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     // session-71: LUNE_FILLET_BAND fallback — the curved-
                     // wall lune class the s70 strip rejects ("no level
                     // count passes": collinear wall-fan needles + corner
@@ -11838,6 +12637,7 @@ pub fn triangulate_surface_consistent(
                     // DRAPPER_LUNE_FILLET_BAND=0.
                     let lune_band_strip: (Vec<usize>, Vec<[f64; 2]>) = if holes_2d.is_empty()
                         && nurbs_band_strip.0.is_empty()
+                        && sail_band_strip.0.is_empty()
                         && (n_unused > 0
                             || legacy_extra_bnd > 0
                             || (matches!(surface, Surface::Nurbs(_))
@@ -11859,6 +12659,7 @@ pub fn triangulate_surface_consistent(
                         || !cyl_band_strip.is_empty()
                         || !torus_band_strip.0.is_empty()
                         || !nurbs_band_strip.0.is_empty()
+                        || !sail_band_strip.0.is_empty()
                         || !lune_band_strip.0.is_empty()
                         || sail_cdt_candidate
                     {
@@ -12181,6 +12982,100 @@ pub fn triangulate_surface_consistent(
                             } else {
                                 log::debug!(
                                     "[f{}] NURBS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
+                            }
+                        }
+                        // s78: SAIL_BAND acceptance — same never-worsen
+                        // shape as the s70 strip plus the s77 sail arm
+                        // (the sail legacy is already at the rim ceiling
+                        // while dropping the interior Steiner budget:
+                        // accept at EQUAL rim/extra — the band restores
+                        // the dropped-lattice coverage; the strip itself
+                        // is fully edge-audited before returning).
+                        if !strip_accepted && !sail_band_strip.0.is_empty() {
+                            let mut strip = sail_band_strip.0.clone();
+                            let strip_new = &sail_band_strip.1;
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let sail_arm = matches!(surface, Surface::Nurbs(_))
+                                && n_interior_dropped >= 4
+                                && n_interior_dropped * 4 >= n_interior_total;
+                            let never_worse = (strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count
+                                    || strip_extra < legacy_extra_bnd))
+                                || (sail_arm
+                                    && strip_rim >= legacy_rim_count
+                                    && strip_extra <= legacy_extra_bnd);
+                            if never_worse {
+                                let base = all_uv.len();
+                                for p in strip_new.iter() {
+                                    all_uv.push(Point2d::new(p[0], p[1]));
+                                }
+                                for idx in strip.iter_mut() {
+                                    if *idx >= n_boundary {
+                                        *idx = base + (*idx - n_boundary);
+                                    }
+                                }
+                                log::warn!(
+                                    "[f{}] SAIL_BAND rescue: 4-sided patch lattice accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, {} analytic pts, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3,
+                                    strip_new.len(),
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] SAIL_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
                                     current_face_label(),
                                     strip_rim,
                                     legacy_rim_count,
@@ -19873,6 +20768,124 @@ mod tests {
         }
         let (tris, _new) = nurbs_fillet_band_strip(&nurbs, &ring, 0.01);
         assert!(tris.is_empty(), "flat ring must be rejected");
+    }
+
+    // ═══ session-78: NURBS_SAIL_BAND unit tests ═══════════════════
+    // Fixture: a 4-sided patch sail — degree (3,3), 4x4 control grid
+    // over [0,1]x[0,1] with a smooth bump; the RING carries two
+    // u-const walls (7 pts each), a flat top, and a WAVY bottom whose
+    // right foot sits BELOW the bottom cap's left end (the f215
+    // corner problem: right wall v from -0.01, bottom cap max v
+    // +0.05).
+    fn sail_nurbs_fixture() -> draper_geometry::NurbsSurface {
+        use draper_geometry::NurbsSurface;
+        let bump = |u: f64, v: f64| -> f64 { 0.22 * (std::f64::consts::PI * u).sin() * (std::f64::consts::PI * v * 0.5).sin() };
+        let rows: Vec<Vec<Point3d>> = (0..4)
+            .map(|i| {
+                let u = i as f64 / 3.0;
+                (0..4)
+                    .map(|j| {
+                        let v = j as f64 / 3.0;
+                        Point3d::new(u, v, bump(u, v))
+                    })
+                    .collect()
+            })
+            .collect();
+        NurbsSurface {
+            u_degree: 3,
+            v_degree: 3,
+            control_points: rows,
+            weights: vec![vec![1.0; 4]; 4],
+            u_knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            u_closed: false,
+            v_closed: false,
+        }
+    }
+
+    /// the f215-shaped ring: wavy bottom (v 0.05 → -0.01 with a
+    /// sine wiggle), right wall from v=-0.01 up to 1, flat top,
+    /// left wall from v=1 down to 0.05 (the left foot ABOVE the
+    /// bottom cap's max v — the corner asymmetry)
+    fn sail_ring() -> Vec<[f64; 2]> {
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        // bottom: u 0→1, v = 0.05 - 0.06u + 0.01 sin(6πu)
+        for k in 0..9 {
+            let u = k as f64 / 8.0;
+            let v = 0.05 - 0.06 * u + 0.01 * (6.0 * std::f64::consts::PI * u).sin();
+            ring.push([u, v]);
+        }
+        // right wall: u=1, v -0.01 → 1
+        for k in 1..7 {
+            let v = -0.01 + 1.01 * k as f64 / 7.0;
+            ring.push([1.0, v]);
+        }
+        // top: u 1→0, v=1
+        for k in (1..7).rev() {
+            ring.push([k as f64 / 7.0, 1.0]);
+        }
+        // left wall: u=0, v 1 → 0.05
+        for k in (1..7).rev() {
+            let v = 0.05 + 0.95 * k as f64 / 7.0;
+            ring.push([0.0, v]);
+        }
+        ring
+    }
+
+    #[test]
+    fn sail_band_builds_four_sided_patch() {
+        let nurbs = sail_nurbs_fixture();
+        let ring = sail_ring();
+        let (tris, new_pts) = nurbs_sail_band_strip(&nurbs, &ring, 0.05);
+        assert!(
+            !tris.is_empty(),
+            "the 4-sided sail must build (walls + wavy bottom + top cap)"
+        );
+        assert_nurbs_band_invariants(&nurbs, &ring, &tris, &new_pts);
+        // the analytic interior must actually be populated (the
+        // lattice restores the dropped Steiner coverage)
+        assert!(!new_pts.is_empty(), "analytic rows must exist");
+    }
+
+    #[test]
+    fn sail_band_rejects_no_walls() {
+        let nurbs = sail_nurbs_fixture();
+        // an elliptical ring: no u-const runs at all
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for k in 0..32 {
+            let t = 2.0 * std::f64::consts::PI * k as f64 / 32.0;
+            ring.push([0.5 + 0.4 * t.cos(), 0.5 + 0.35 * t.sin()]);
+        }
+        let (tris, _new) = nurbs_sail_band_strip(&nurbs, &ring, 0.05);
+        assert!(tris.is_empty(), "a ring without u-const walls must be rejected");
+    }
+
+    #[test]
+    fn sail_band_rejects_wavy_wall() {
+        let nurbs = sail_nurbs_fixture();
+        let mut ring = sail_ring();
+        // fold the left wall into a meander (v goes 0.05 → 0.9 → 0.2
+        // → 1.0): a real reversal, way past the 0.5% noise allowance
+        let n = ring.len();
+        let lw_start = n - 6; // last 6 pts are the left wall (v descending)
+        ring[lw_start] = [0.0, 0.2];
+        ring[lw_start + 1] = [0.0, 0.9];
+        let (tris, _new) = nurbs_sail_band_strip(&nurbs, &ring, 0.05);
+        assert!(tris.is_empty(), "a non-monotone wall must be rejected");
+    }
+
+    #[test]
+    fn sail_band_rejects_weld_collapse_rim() {
+        let nurbs = sail_nurbs_fixture();
+        let ring = sail_ring();
+        // max_dev so large that 0.35*max_dev exceeds every rim chord:
+        // the weld-collapse class (SLEEVE f86-family, rim finer than
+        // the sag carries nothing the band could improve)
+        let (tris, _new) = nurbs_sail_band_strip(&nurbs, &ring, 10.0);
+        assert!(
+            tris.is_empty(),
+            "a rim finer than 0.35*max_dev must be rejected (weld-collapse class)"
+        );
     }
 }
 

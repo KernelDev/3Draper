@@ -10240,24 +10240,26 @@ pub fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
 /// Any rejection returns `None` and the caller falls through to the
 /// legacy convex-fan / ear_clip / earcutr chain bit-exactly.
 ///
-/// session-76 STATUS: **default OFF** (opt-in: `DRAPPER_THIN_STRIP_ZIPPER=1`).
-/// On drill_top the zipper kills ALL four target families — (105,113):52→0,
-/// (224,247):47→0, (57,58):51→0, (49,178):47→0, SLEEVE REAL 215→185 — but
-/// the Plane wall strips whose rim neighbor is a corner-fanning Nurbs sail
-/// (f215/f224-class with interior spike-chain lattices) grow their latent
-/// fold families when the twin fan's duplicate triangles stop being
-/// merge-deduplicated: (215,216) 5→18, (117,134) 0→7, (216,233) 1→7,
-/// (26,31) 2→7 — net REAL 1188→1206 (+18). Never-worsen → keep off until
-/// the Nurbs fan class is fixed (s77 plan: fan-detect trigger + two-chain
-/// strip for Nurbs domains with interior lattices).
+/// session-78 STATUS: **default ON** (kill-switch:
+/// `DRAPPER_THIN_STRIP_ZIPPER=0`). The s76 twin-fan unmasking (+18 REAL:
+/// (215,216) 5→18, (117,134) 0→7, (216,233) 1→7, (26,31) 2→7) is now
+/// closed on the Nurbs side by the session-78 SAIL_BAND: the f215/f224
+/// sails with dropped interior lattices are rebuilt as structural 4-sided
+/// band lattices (see nurbs_sail_band_strip), so the Plane zipper no
+/// longer unmasks a garbage neighbor. Measured s78 (SAIL on): TSZ off →
+/// drill REAL 1052, TSZ on → 1034 (−18); corpus: Z/as1/comp/transmission
+/// unchanged, brick_thin_round 13→14 (+1, the known s76 sliver). Net
+/// −17 → default ON per the s77 plan item 2.
 pub fn thin_strip_zipper(points: &[Point2d]) -> Option<Vec<[u32; 3]>> {
     const THIN_STRIP_MAX_THINNESS: f64 = 0.12;
     let m = points.len();
     if m < 6 {
         return None;
     }
-    // session-76: default OFF — opt-in only (see the doc comment above).
-    if std::env::var("DRAPPER_THIN_STRIP_ZIPPER").as_deref() != Ok("1") {
+    // session-78: default ON — kill-switch only (see the doc comment
+    // above; the s76 unmasking is closed by the SAIL_BAND on the twin
+    // Nurbs side).
+    if std::env::var("DRAPPER_THIN_STRIP_ZIPPER").as_deref() == Ok("0") {
         return None;
     }
     // thinness gate: |area| / (semi-perimeter)^2
