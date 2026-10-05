@@ -10177,10 +10177,41 @@ pub fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
         }
 
         if !found_ear {
-            // Degenerate polygon — fan triangulate as fallback
-            for i in 1..indices.len() - 1 {
-                triangles.push([indices[0], indices[i], indices[i + 1]]);
+            // Degenerate polygon remainder. The legacy fallback is a fan
+            // from indices[0]; on thin strip domains (drill HM f105 wall /
+            // HOUSING f224 — Plane×Nurbs fold families (105,113):52,
+            // (224,247):47, (57,58):33, (49,178):37) the sparse
+            // longitudinal chains are collinear (cross == 0 is not > 0, so
+            // they are never ears) and the fan chords span the WHOLE strip,
+            // folding 180° against the neighbor face's rim rows in 3D.
+            // session-76: try a monotone strip zipper over the remainder
+            // first; on any shape/verification rejection fall back to the
+            // legacy fan bit-exactly. Kill-switch: DRAPPER_DEGEN_FAN_ZIPPER=0.
+            let legacy_fan = || -> Vec<[u32; 3]> {
+                (1..indices.len() - 1)
+                    .map(|i| [indices[0], indices[i], indices[i + 1]])
+                    .collect()
+            };
+            let ztris = if std::env::var("DRAPPER_DEGEN_FAN_ZIPPER")
+                .map(|v| v == "0")
+                .unwrap_or(false)
+            {
+                None
+            } else {
+                degen_strip_zipper(&indices, points)
+            };
+            if let Some(ztris) = ztris {
+                log::debug!(
+                    "ear_clip degenerate remainder: monotone strip zipper accepted ({} verts, {} tris)",
+                    indices.len(),
+                    ztris.len()
+                );
+                triangles.extend(ztris);
+                indices.clear();
+                break;
             }
+            // Degenerate polygon — fan triangulate as fallback
+            triangles.extend(legacy_fan());
             break;
         }
     }
@@ -10190,6 +10221,506 @@ pub fn ear_clip(points: &[Point2d]) -> Vec<[u32; 3]> {
     }
 
     triangles
+}
+
+/// session-76: thin-strip gate for planar domains (converter planar path).
+///
+/// ear_clip's greedy first-ear loop fans a corner vertex across a thin
+/// strip domain (drill HM f105 wall, HOUSING f224 — Plane×Nurbs fold
+/// families (105,113):52 / (224,247):47 / (57,58) / (49,178)); earcutr's
+/// hole-bridge path is not used for hole-less planar faces. This gate
+/// accepts ONLY hole-less domains that are BOTH:
+///   * thin — |area| / (semi-perimeter)² < THIN_STRIP_MAX_THINNESS
+///     (a rectangle qualifies from ~5:1 aspect; the drill walls sit at
+///     ~0.02, an order of magnitude below the gate), and
+///   * monotone — both PCA-axis chains between the extreme projections
+///     are monotone (verified inside `degen_strip_zipper`, which then
+///     emits an intersection-free zipper and re-verifies coverage,
+///     m−2 count, total area, and single-sign orientation).
+/// Any rejection returns `None` and the caller falls through to the
+/// legacy convex-fan / ear_clip / earcutr chain bit-exactly.
+///
+/// session-76 STATUS: **default OFF** (opt-in: `DRAPPER_THIN_STRIP_ZIPPER=1`).
+/// On drill_top the zipper kills ALL four target families — (105,113):52→0,
+/// (224,247):47→0, (57,58):51→0, (49,178):47→0, SLEEVE REAL 215→185 — but
+/// the Plane wall strips whose rim neighbor is a corner-fanning Nurbs sail
+/// (f215/f224-class with interior spike-chain lattices) grow their latent
+/// fold families when the twin fan's duplicate triangles stop being
+/// merge-deduplicated: (215,216) 5→18, (117,134) 0→7, (216,233) 1→7,
+/// (26,31) 2→7 — net REAL 1188→1206 (+18). Never-worsen → keep off until
+/// the Nurbs fan class is fixed (s77 plan: fan-detect trigger + two-chain
+/// strip for Nurbs domains with interior lattices).
+pub fn thin_strip_zipper(points: &[Point2d]) -> Option<Vec<[u32; 3]>> {
+    const THIN_STRIP_MAX_THINNESS: f64 = 0.12;
+    let m = points.len();
+    if m < 6 {
+        return None;
+    }
+    // session-76: default OFF — opt-in only (see the doc comment above).
+    if std::env::var("DRAPPER_THIN_STRIP_ZIPPER").as_deref() != Ok("1") {
+        return None;
+    }
+    // thinness gate: |area| / (semi-perimeter)^2
+    let mut area2 = 0.0_f64;
+    let mut perim = 0.0_f64;
+    for i in 0..m {
+        let j = (i + 1) % m;
+        let (p0, p1) = (&points[i], &points[j]);
+        area2 += p0.u * p1.v - p1.u * p0.v;
+        perim += ((p1.u - p0.u).powi(2) + (p1.v - p0.v).powi(2)).sqrt();
+    }
+    let semi = perim * 0.5;
+    if !(semi > 0.0) || !semi.is_finite() {
+        return None;
+    }
+    let thinness = (area2.abs() * 0.5) / (semi * semi);
+    if !(thinness < THIN_STRIP_MAX_THINNESS) {
+        return None;
+    }
+    let indices: Vec<u32> = (0..m as u32).collect();
+    let r = degen_strip_zipper(&indices, points);
+    if r.is_none() && std::env::var("DRAPPER_STRIP_DEBUG").is_ok() {
+        eprintln!(
+            "STRIP reject [{}] monotone-zipper stage failed (m={}, thinness={:.4})",
+            crate::parametric_domain::current_face_label(),
+            m,
+            thinness
+        );
+    }
+    r
+}
+
+/// session-76: monotone strip zipper for the degenerate `ear_clip`
+/// remainder (no ear found — thin strip domains whose sparse
+/// longitudinal vertex chains are collinear).
+///
+/// Replaces the legacy "fan from indices[0]" fallback, which emits long
+/// chord needles across the whole strip (the drill HM/HOUSING
+/// Plane×Nurbs large-scale REAL fold families). The zipper:
+///
+///   1. PCA main axis over the remainder's points;
+///   2. split the closed vertex cycle into two chains between the
+///      extreme projections (argmin t → argmax t);
+///   3. require BOTH chains to be monotone in t (the classic x-monotone
+///      polygon — intersection-free zipper diagonals by construction);
+///      any violation → `None` (legacy fan);
+///   4. merge the chains by advancing the smaller-t head, emitting one
+///      triangle per advance (skipping index-degenerate cells at the
+///      shared chain ends);
+///   5. verify: every remainder vertex used, exactly m−2 triangles,
+///      and the total signed area matches the polygon's within a
+///      1e-6 relative tolerance; any failure → `None` (legacy fan).
+///
+/// Triangles are emitted with the same winding as the input cycle.
+/// Kill-switch: `DRAPPER_DEGEN_FAN_ZIPPER=0` restores the legacy fan
+/// bit-exactly.
+fn degen_strip_zipper(indices: &[u32], points: &[Point2d]) -> Option<Vec<[u32; 3]>> {
+    let m = indices.len();
+    if m < 4 {
+        return None;
+    }
+
+    // ---- 1. PCA main axis over the remainder's points ----
+    let (mut sx, mut sy) = (0.0_f64, 0.0_f64);
+    for &ix in indices {
+        let p = &points[ix as usize];
+        sx += p.u;
+        sy += p.v;
+    }
+    let (cx, cy) = (sx / m as f64, sy / m as f64);
+    let (mut cxx, mut cxy, mut cyy) = (0.0_f64, 0.0_f64, 0.0_f64);
+    for &ix in indices {
+        let dx = points[ix as usize].u - cx;
+        let dy = points[ix as usize].v - cy;
+        cxx += dx * dx;
+        cxy += dx * dy;
+        cyy += dy * dy;
+    }
+    let theta = 0.5 * (2.0 * cxy).atan2(cxx - cyy);
+    let (ax, ay) = (theta.cos(), theta.sin());
+
+    // ---- 2. projections and extreme positions ----
+    let t: Vec<f64> = indices
+        .iter()
+        .map(|&ix| {
+            let p = &points[ix as usize];
+            p.u * ax + p.v * ay
+        })
+        .collect();
+    let mut t_min = f64::INFINITY;
+    let mut t_max = f64::NEG_INFINITY;
+    let mut pos_min = 0usize;
+    let mut pos_max = 0usize;
+    for (i, &ti) in t.iter().enumerate() {
+        if ti < t_min {
+            t_min = ti;
+            pos_min = i;
+        }
+        if ti > t_max {
+            t_max = ti;
+            pos_max = i;
+        }
+    }
+    if pos_min == pos_max || !(t_max - t_min).is_finite() {
+        return None;
+    }
+    // perpendicular span (scale reference for tolerances)
+    let mut perp_min = f64::INFINITY;
+    let mut perp_max = f64::NEG_INFINITY;
+    for &ix in indices {
+        let p = &points[ix as usize];
+        let s = -ay * p.u + ax * p.v;
+        perp_min = perp_min.min(s);
+        perp_max = perp_max.max(s);
+    }
+    let scale = (t_max - t_min).max(perp_max - perp_min);
+    if !(scale > 0.0) || !scale.is_finite() {
+        return None;
+    }
+    if t_max - t_min < 1e-12 * scale {
+        return None;
+    }
+
+    // ---- 3. two chains along the cycle between the extremes ----
+    // forward: pos_min → pos_max (in cycle order); backward: pos_max → pos_min.
+    let mut fwd: Vec<usize> = Vec::with_capacity(m);
+    let mut bwd: Vec<usize> = Vec::with_capacity(m);
+    let mut i = pos_min;
+    while {
+        fwd.push(i);
+        i != pos_max
+    } {
+        i = (i + 1) % m;
+    }
+    let mut i = pos_max;
+    while {
+        bwd.push(i);
+        i != pos_min
+    } {
+        i = (i + 1) % m;
+    }
+    // Monotonicity: t non-decreasing along fwd; non-increasing along bwd.
+    // eps is deliberately loose (1e-3 × t-range): densely-sampled t-flat
+    // end caps carry UV sampling noise (drill f57: ~100 backtracks of
+    // 1e-5) and rectangular strip noses bend back by ~1e-3 of the range
+    // (f57 fwd: 1.283→1.280); genuine chain reversals (the "hump"
+    // reject case, and any real overlap) run at ≥1e-2 of the range.
+    // The zipper remains protected by the full verification suite
+    // (coverage / m−2 / area / single-sign) below.
+    let eps = 1e-3 * (t_max - t_min);
+    let strip_debug = std::env::var("DRAPPER_STRIP_DEBUG").is_ok();
+    let label = if strip_debug {
+        crate::parametric_domain::current_face_label()
+    } else {
+        String::new()
+    };
+    for w in fwd.windows(2) {
+        if t[w[1]] < t[w[0]] - eps {
+            if strip_debug {
+                eprintln!(
+                    "STRIP reject [{}] fwd non-monotone at t {:.5}→{:.5} (eps {:.2e})",
+                    label, t[w[0]], t[w[1]], eps
+                );
+            }
+            return None;
+        }
+    }
+    for w in bwd.windows(2) {
+        if t[w[1]] > t[w[0]] + eps {
+            if strip_debug {
+                eprintln!(
+                    "STRIP reject [{}] bwd non-monotone at t {:.5}→{:.5} (eps {:.2e})",
+                    label, t[w[0]], t[w[1]], eps
+                );
+            }
+            return None;
+        }
+    }
+
+    // ---- 4. zipper merge ----
+    // A: fwd (t ascending, p → q). B: bwd reversed (t ascending, p → q).
+    let a: &[usize] = &fwd;
+    let b: Vec<usize> = bwd.iter().rev().copied().collect();
+    let (la, lb) = (a.len(), b.len());
+    if la < 2 || lb < 2 {
+        return None;
+    }
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(m - 2);
+    let mut used = vec![false; m];
+    let mut anchor_a = 0usize;
+    let mut anchor_b = 0usize;
+    let mut ia = 1usize;
+    let mut ib = 1usize;
+    while ia < la || ib < lb {
+        let take_a = if ia >= la {
+            false
+        } else if ib >= lb {
+            true
+        } else {
+            t[a[ia]] <= t[b[ib]]
+        };
+        let (x, y, z) = if take_a {
+            let r = (a[anchor_a], a[ia], b[anchor_b]);
+            anchor_a = ia;
+            ia += 1;
+            r
+        } else {
+            let r = (a[anchor_a], b[ib], b[anchor_b]);
+            anchor_b = ib;
+            ib += 1;
+            r
+        };
+        if x == y || y == z || x == z {
+            continue; // degenerate cell at the shared chain ends
+        }
+        used[x] = true;
+        used[y] = true;
+        used[z] = true;
+        tris.push([indices[x], indices[y], indices[z]]);
+    }
+
+    // ---- 5. verification ----
+    let strip_debug = std::env::var("DRAPPER_STRIP_DEBUG").is_ok();
+    let zlabel = if strip_debug {
+        crate::parametric_domain::current_face_label()
+    } else {
+        String::new()
+    };
+    let reject = |reason: String| -> Option<Vec<[u32; 3]>> {
+        if strip_debug {
+            eprintln!("ZIPPER reject [{}] {}", zlabel, reason);
+        }
+        None
+    };
+    // 5a. every remainder vertex must be used.
+    if !used.iter().all(|&u| u) {
+        return reject(format!(
+            "unused vertices (m={m}, tris={})",
+            tris.len()
+        ));
+    }
+    // 5b. exactly m−2 triangles.
+    if tris.len() != m - 2 {
+        return reject(format!("{} tris != m-2 = {}", tris.len(), m - 2));
+    }
+    // 5c/5d. winding first: if the emitted winding is opposite to the
+    //     input cycle's, flip every triangle BEFORE the area check
+    //     (otherwise a legitimately-CW input would be rejected).
+    let mut poly_area2 = 0.0_f64;
+    for k in 0..m {
+        let j = (k + 1) % m;
+        let (p0, p1) = (
+            &points[indices[k] as usize],
+            &points[indices[j] as usize],
+        );
+        poly_area2 += p0.u * p1.v - p1.u * p0.v;
+    }
+    let tri_area2 = |tri: &[u32; 3]| -> f64 {
+        let (p0, p1, p2) = (
+            &points[tri[0] as usize],
+            &points[tri[1] as usize],
+            &points[tri[2] as usize],
+        );
+        (p1.u - p0.u) * (p2.v - p0.v) - (p1.v - p0.v) * (p2.u - p0.u)
+    };
+    let mut sum_area2: f64 = tris.iter().map(|t| tri_area2(t)).sum();
+    if poly_area2 != 0.0 && sum_area2 != 0.0 && poly_area2.signum() != sum_area2.signum() {
+        for tri in tris.iter_mut() {
+            tri.swap(1, 2);
+        }
+        sum_area2 = -sum_area2;
+    }
+    // 5e. total signed area must match the polygon's signed area.
+    let tol = 1e-6 * poly_area2.abs().max(scale * scale) + 1e-12 * scale * scale;
+    if (sum_area2 - poly_area2).abs() > tol {
+        return reject(format!(
+            "area mismatch {:.6e} vs {:.6e} (tol {:.2e})",
+            sum_area2, poly_area2, tol
+        ));
+    }
+    // 5f. no triangle may be MEANINGFULLY inverted w.r.t. the polygon's
+    //     orientation — a genuinely simple x-monotone polygon triangulates
+    //     with every triangle signed like the cycle; an opposite sign
+    //     means the chains overlap/interleave (e.g. a "U" shape whose
+    //     vertical legs are t-flat and slip past the monotonicity gate).
+    //     Noise floor 1e-5·scale²: near-degenerate cells on t-flat end
+    //     caps sign-flip on UV sampling noise (f105: |a2| = 1.6e-5 over
+    //     scale² = 15.5) without covering meaningful area; real overlaps
+    //     produce inversions ≥1e-3·scale² — two orders above this floor.
+    let noise = 1e-5 * scale * scale;
+    let poly_sign = poly_area2.signum();
+    for tri in &tris {
+        let a2 = tri_area2(tri);
+        if a2.abs() > noise && a2.signum() != poly_sign {
+            return reject(format!("inverted triangle ({:.3e})", a2));
+        }
+    }
+    Some(tris)
+}
+
+#[cfg(test)]
+mod degen_strip_zipper_tests {
+    use super::*;
+
+    fn p(u: f64, v: f64) -> Point2d {
+        Point2d::new(u, v)
+    }
+
+    fn cycle_area2(pts: &[Point2d]) -> f64 {
+        let n = pts.len();
+        let mut a = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            a += pts[i].u * pts[j].v - pts[j].u * pts[i].v;
+        }
+        a
+    }
+
+    fn tri_area2(pts: &[Point2d], tri: &[u32; 3]) -> f64 {
+        let (p0, p1, p2) = (
+            &pts[tri[0] as usize],
+            &pts[tri[1] as usize],
+            &pts[tri[2] as usize],
+        );
+        (p1.u - p0.u) * (p2.v - p0.v) - (p1.v - p0.v) * (p2.u - p0.u)
+    }
+
+    /// drill-HM-f105-like sickle strip: a thin crescent whose two chains
+    /// both bow the same way (banana), the shape that drives ear_clip into
+    /// its degenerate fan fallback.
+    fn sickle() -> Vec<Point2d> {
+        vec![
+            p(0.0, 0.0),
+            p(0.5, -0.02),
+            p(1.0, -0.04),
+            p(1.5, -0.02),
+            p(2.0, 0.0),
+            p(2.0, 0.4),
+            p(1.5, 0.36),
+            p(1.0, 0.34),
+            p(0.5, 0.36),
+            p(0.0, 0.4),
+        ]
+    }
+
+    #[test]
+    fn degen_strip_zipper_sickle_strip_full_coverage() {
+        let pts = sickle();
+        let m = pts.len();
+        let indices: Vec<u32> = (0..m as u32).collect();
+        let tris = degen_strip_zipper(&indices, &pts)
+            .expect("sickle strip should zipper-triangulate");
+        assert_eq!(tris.len(), m - 2, "expected exactly m-2 triangles");
+        let mut used = vec![false; m];
+        for t in &tris {
+            for &ix in t {
+                used[ix as usize] = true;
+            }
+        }
+        assert!(used.iter().all(|&u| u), "every vertex must be used");
+        let poly = cycle_area2(&pts);
+        let sum: f64 = tris.iter().map(|t| tri_area2(&pts, t)).sum();
+        assert!(
+            (sum - poly).abs() < 1e-9 * poly.abs().max(1.0),
+            "area mismatch: sum={sum:.6e} poly={poly:.6e}"
+        );
+        // every non-noise triangle signed like the cycle (CCW here)
+        for t in &tris {
+            let a2 = tri_area2(&pts, t);
+            assert!(a2 >= -1e-12, "inverted triangle {t:?} a2={a2:.3e}");
+        }
+    }
+
+    #[test]
+    fn degen_strip_zipper_cw_input_keeps_winding() {
+        let mut pts = sickle();
+        pts.reverse(); // CW cycle now
+        let m = pts.len();
+        let indices: Vec<u32> = (0..m as u32).collect();
+        let tris = degen_strip_zipper(&indices, &pts)
+            .expect("CW sickle should also zipper-triangulate");
+        let poly = cycle_area2(&pts);
+        assert!(poly < 0.0, "reversed cycle must be CW");
+        let sum: f64 = tris.iter().map(|t| tri_area2(&pts, t)).sum();
+        assert!(
+            (sum - poly).abs() < 1e-9 * poly.abs().max(1.0),
+            "area mismatch: sum={sum:.6e} poly={poly:.6e}"
+        );
+        for t in &tris {
+            let a2 = tri_area2(&pts, t);
+            assert!(a2 <= 1e-12, "inverted triangle {t:?} a2={a2:.3e}");
+        }
+    }
+
+    #[test]
+    fn degen_strip_zipper_l_shape_x_monotone() {
+        // L whose long base edge is the t-min→t-max chain: x-monotone,
+        // must zipper cleanly.
+        let pts = vec![
+            p(0.0, 0.0),
+            p(4.0, 0.0),
+            p(4.0, 0.2),
+            p(1.0, 0.2),
+            p(1.0, 1.0),
+            p(0.0, 1.0),
+        ];
+        let m = pts.len();
+        let indices: Vec<u32> = (0..m as u32).collect();
+        let tris = degen_strip_zipper(&indices, &pts).expect("L is x-monotone");
+        assert_eq!(tris.len(), m - 2);
+        let poly = cycle_area2(&pts);
+        let sum: f64 = tris.iter().map(|t| tri_area2(&pts, t)).sum();
+        assert!((sum - poly).abs() < 1e-9 * poly.abs().max(1.0));
+    }
+
+    #[test]
+    fn degen_strip_zipper_rejects_backtracking_chain() {
+        // upper chain backtracks along the main axis (t goes 5,3,4,0):
+        // not monotone → None → legacy fan.
+        let pts = vec![
+            p(0.0, 0.0),
+            p(5.0, 0.0),
+            p(5.0, 1.0),
+            p(3.0, 2.0),
+            p(4.0, 3.0),
+            p(0.0, 3.0),
+        ];
+        let indices: Vec<u32> = (0..pts.len() as u32).collect();
+        assert!(degen_strip_zipper(&indices, &pts).is_none());
+    }
+
+    #[test]
+    fn degen_strip_zipper_fully_collinear_is_never_worse_than_fan() {
+        // zero-width degenerate remainder: the second chain is the single
+        // closing edge, so the zipper degenerates to a fan from p over
+        // the first chain — the same m-2 zero-area triangles the legacy
+        // fan produced. Accept either that or None; demand full vertex
+        // coverage and a zero total area either way.
+        let pts = vec![p(0.0, 0.0), p(1.0, 0.0), p(2.0, 0.0), p(3.0, 0.0)];
+        let m = pts.len();
+        let indices: Vec<u32> = (0..m as u32).collect();
+        if let Some(tris) = degen_strip_zipper(&indices, &pts) {
+            assert_eq!(tris.len(), m - 2);
+            let mut used = vec![false; m];
+            for t in &tris {
+                for &ix in t {
+                    used[ix as usize] = true;
+                }
+            }
+            assert!(used.iter().all(|&u| u));
+            let sum: f64 = tris.iter().map(|t| tri_area2(&pts, t)).sum();
+            assert!(sum.abs() < 1e-12, "collinear cycle must have zero area");
+        }
+    }
+
+    #[test]
+    fn ear_clip_fully_collinear_still_returns_m2() {
+        // the degenerate fallback path must keep producing a fan (or a
+        // zipper) — never zero triangles, never a panic.
+        let pts = vec![p(0.0, 0.0), p(1.0, 0.0), p(2.0, 0.0), p(3.0, 0.0)];
+        let tris = ear_clip(&pts);
+        assert_eq!(tris.len(), 2, "m-2 fan triangles on collinear input");
+    }
 }
 
 /// Debug assertion to verify that all per-triangle arrays in a mesh have consistent lengths.

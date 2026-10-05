@@ -13708,6 +13708,39 @@ impl<'a> StepConverter<'a> {
 
         // Same triangulation logic as the non-cached version
         if hole_points_2d.is_empty() {
+            // ── session-76: thin monotone strip zipper (default OFF) ──
+            // ear_clip's greedy first-ear loop fans a corner vertex
+            // across thin strip domains (drill HM f105 / HOUSING f224
+            // wall strips — Plane×Nurbs REAL fold families (105,113):52,
+            // (224,247):47, (57,58), (49,178)): every clipped ear chords
+            // across the whole strip and folds 180° against the
+            // neighbor's rim rows in 3D. The zipper emits local
+            // inter-chain cells instead. Strict gate (thin AND
+            // PCA-monotone, hole-less only) + full verification; any
+            // rejection falls through to the legacy chain bit-exactly.
+            // With =1 on drill_top: all four families →0, SLEEVE REAL
+            // 215→185, BUT twin-fan dedup-unmasking on Nurbs-sail
+            // neighbors nets REAL +18 (see thin_strip_zipper doc) —
+            // so the gate is opt-in (DRAPPER_THIN_STRIP_ZIPPER=1)
+            // until the Nurbs fan class is fixed (s77).
+            if let Some(strip_tris) = draper_mesh::triangulate::thin_strip_zipper(&outer_2d) {
+                log::info!(
+                    "THIN_STRIP_ZIPPER accepted: planar face with {} boundary pts → {} zipper tris (was ear_clip corner-fan)",
+                    outer_2d.len(),
+                    strip_tris.len()
+                );
+                for p in &outer_points_3d {
+                    mesh.add_vertex(*p);
+                }
+                for tri in &strip_tris {
+                    if forward {
+                        mesh.add_triangle(tri[0], tri[1], tri[2]);
+                    } else {
+                        mesh.add_triangle(tri[0], tri[2], tri[1]);
+                    }
+                }
+                return mesh;
+            }
             // For convex polygons, use fast fan triangulation O(n).
             // For non-convex, use ear_clip O(n²) or earcutr O(n log n).
             // earcutr is only used as fallback if ear_clip fails.
