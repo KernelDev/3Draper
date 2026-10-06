@@ -10292,6 +10292,225 @@ pub fn thin_strip_zipper(points: &[Point2d]) -> Option<Vec<[u32; 3]>> {
     r
 }
 
+/// session-79: planar mega-fan guard for hole-less planar faces.
+///
+/// `ear_clip`'s greedy first-ear loop chains ears along a convex run and
+/// emits a corner fan (the s76 root cause), and the convex fast path
+/// fans from vertex 0 — both leave a single pole carrying a large share
+/// of the m−2 triangles. On NON-monotone domains (concave strips: drill
+/// HM f57/f3/f31, HOUSING f178 — thinness 0.009..0.06 PASSES the s76
+/// gate but the PCA chains double back structurally, `STRIP reject …
+/// fwd non-monotone at t 3.355→2.155`) the monotone zipper cannot run,
+/// so the fan survives. Its needle triangles (pole → distant rim edge)
+/// then fold 180° against the G1-tangent fillet/cylinder rim slivers
+/// of the neighbor face — the (57,58):43 / (49,178):37 / (3,121):30
+/// Plane×Nurbs and (144,145)/(147,148) Plane×Cylinder REAL families,
+/// with fold apex heights up to 4.3 (the full plane length).
+///
+/// The guard re-triangulates such fans through the earcut adapter
+/// (earcutr + the s75 `repair_collinear_strips` + `flip_zero_area_ears`
+/// — the same battle-tested chain the parametric path uses), and
+/// accepts the result ONLY under a full never-worse contract:
+///   1. every rim edge (i, (i+1) mod m) present in the new mesh;
+///   2. every ring vertex used;
+///   3. signed area equals the ring's within 1e-6 relative;
+///   4. the new max vertex degree is STRICTLY below the fan's.
+/// Any failure keeps the fan bit-exactly. Winding is normalized to the
+/// ring's signed-area sign so the caller's `forward` swap applies
+/// unchanged.
+///
+/// Kill-switch: `DRAPPER_PLANAR_FAN_GUARD=0` restores the legacy
+/// behavior bit-exactly.
+pub fn planar_fan_guard(
+    points: &[Point2d],
+    tri_indices: &[[u32; 3]],
+) -> Option<Vec<[u32; 3]>> {
+    if std::env::var("DRAPPER_PLANAR_FAN_GUARD").as_deref() == Ok("0") {
+        return None;
+    }
+    let m = points.len();
+    if m < 8 || tri_indices.is_empty() {
+        return None;
+    }
+    // ── fan detection: max vertex degree vs gate ──
+    let mut deg = vec![0u32; m];
+    let mut fan_tris = 0usize;
+    for t in tri_indices {
+        fan_tris += 1;
+        for &v in t {
+            let vi = v as usize;
+            if vi < m {
+                deg[vi] += 1;
+            } else {
+                return None; // interior/extra vertices (centroid fan) — skip
+            }
+        }
+    }
+    let max_deg = *deg.iter().max()? as usize;
+    let gate = std::cmp::max(8, m / 8);
+    if max_deg < gate {
+        return None; // not a mega-fan — leave the mesh untouched
+    }
+    // session-79 A/B drill: FULL wheels (deg == m−2: the convex-fan
+    // fast path) and total ear_clip fans are TWIN-MASKED — the
+    // neighbor's matching fan dedups against them (merge-dedup eats
+    // the duplicate triangles, no fold pairs). Replacing them
+    // unmasked the neighbors' fans: SLEEVE +53 REAL across ~60 faces
+    // (m=58/60/66 wheels), HOUSING (3,12) +7, (85,86) +7 — the s76
+    // unmasking, measured again. PARTIAL fans (f57 169/335, f3
+    // 312/840, f31 143/335, f178 167/335) carry the real needle debt
+    // (fold h up to 4.3 against G1-tangent neighbors). Gate: partial
+    // fans only.
+    if max_deg as f64 > 0.9 * (m as f64 - 2.0) {
+        return None; // full wheel — keep legacy (twin dedup intact)
+    }
+    // Thin-domain gate: the guard is the CONCAVE complement of the
+    // monotone zipper —
+    //   thin + monotone     → zipper (s76);
+    //   thin + non-monotone → fan guard → earcutr + repairs (s79);
+    //   thick               → legacy (GEAR tooth flanks: deg 95..105
+    //     of 156, thinness ≥ 0.12 — re-triangulating them measured
+    //     GEAR +4 REAL for zero gain).
+    // Bound 0.08 (tighter than the zipper's 0.12 — the s79 A/B
+    // measured the populations: every WINNING trigger sits at
+    // thinness 0.0053..0.0606 (f57/f67/f178 0.056-0.061, f3 0.009,
+    // f31/f7 0.005), while the f40/f16 class (m=128, deg=39, zero
+    // direct gain, HOUSING (85,86) +7 unmasking) sits at 0.1073.
+    // The earcutr re-triangulation quality boundary differs from the
+    // zipper's — measured separately.)
+    let mut f_area2 = 0.0_f64;
+    let mut f_perim = 0.0_f64;
+    for i in 0..m {
+        let j = (i + 1) % m;
+        let (p0, p1) = (&points[i], &points[j]);
+        f_area2 += p0.u * p1.v - p1.u * p0.v;
+        f_perim +=
+            ((p1.u - p0.u).powi(2) + (p1.v - p0.v).powi(2)).sqrt();
+    }
+    let f_semi = f_perim * 0.5;
+    if !(f_semi > 0.0) || !f_semi.is_finite() {
+        return None;
+    }
+    let f_thin = (f_area2.abs() * 0.5) / (f_semi * f_semi);
+    if !(f_thin < 0.08) {
+        return None; // thick domain — legacy
+    }
+    let fan_debug = std::env::var("DRAPPER_FAN_DEBUG").is_ok();
+    if fan_debug {
+        eprintln!(
+            "FAN_GUARD trigger [{}] m={} max_deg={} thinness={:.4}",
+            crate::parametric_domain::current_face_label(),
+            m,
+            max_deg,
+            f_thin
+        );
+    }
+
+    // ── re-triangulate via the earcut adapter (earcutr + repairs) ──
+    let mut coords: Vec<f64> = Vec::with_capacity(m * 2);
+    for p in points {
+        coords.push(p.u);
+        coords.push(p.v);
+    }
+    let flat = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &[]);
+    if flat.len() < 3 || flat.len() % 3 != 0 {
+        return None;
+    }
+    let mut alt: Vec<[u32; 3]> = flat
+        .chunks_exact(3)
+        .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
+        .collect();
+    if alt.iter().any(|t| t.iter().any(|&v| v as usize >= m)) {
+        return None;
+    }
+
+    // ── validation 1+2: rim-edge coverage and vertex usage ──
+    let mut edge_set: std::collections::HashSet<(u32, u32)> =
+        std::collections::HashSet::with_capacity(alt.len() * 3);
+    let mut used = vec![false; m];
+    for t in &alt {
+        for k in 0..3 {
+            let a = t[k];
+            let b = t[(k + 1) % 3];
+            edge_set.insert((a.min(b), a.max(b)));
+        }
+        for &v in t {
+            used[v as usize] = true;
+        }
+    }
+    for i in 0..m {
+        let a = i as u32;
+        let b = ((i + 1) % m) as u32;
+        if !edge_set.contains(&(a.min(b), a.max(b))) {
+            return None; // a rim edge went missing — watertightness risk
+        }
+        if !used[i] {
+            return None; // a ring vertex dropped — weld-compat risk
+        }
+    }
+
+    // ── validation 3: signed area (ring vs alt) ──
+    let area2 = |tr: &[[u32; 3]]| -> f64 {
+        let mut s = 0.0_f64;
+        for t in tr {
+            let (a, b, c) = (
+                &points[t[0] as usize],
+                &points[t[1] as usize],
+                &points[t[2] as usize],
+            );
+            s += (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+        }
+        s
+    };
+    let mut ring_area2 = 0.0_f64;
+    for i in 0..m {
+        let j = (i + 1) % m;
+        ring_area2 +=
+            points[i].u * points[j].v - points[j].u * points[i].v;
+    }
+    let mut alt_area2 = area2(&alt);
+    if ring_area2 == 0.0 || !ring_area2.is_finite() {
+        return None;
+    }
+    // winding normalization: the alt triangles must carry the ring's
+    // orientation so the caller's forward swap applies unchanged.
+    if alt_area2 * ring_area2 < 0.0 {
+        for t in alt.iter_mut() {
+            t.swap(1, 2);
+        }
+        alt_area2 = area2(&alt);
+    }
+    let rel = ((alt_area2 - ring_area2).abs())
+        / ring_area2.abs().max(1e-30);
+    if !(rel <= 1e-6) {
+        return None;
+    }
+
+    // ── validation 4: strictly lower max degree ──
+    let mut adeg = vec![0u32; m];
+    for t in &alt {
+        for &v in t {
+            adeg[v as usize] += 1;
+        }
+    }
+    let alt_max = *adeg.iter().max()? as usize;
+    if alt_max >= max_deg {
+        return None;
+    }
+    if fan_debug {
+        eprintln!(
+            "FAN_GUARD accepted [{}] m={} fan_deg={} alt_deg={} alt_tris={}",
+            crate::parametric_domain::current_face_label(),
+            m,
+            max_deg,
+            alt_max,
+            alt.len()
+        );
+    }
+    let _ = fan_tris;
+    Some(alt)
+}
+
 /// session-76: monotone strip zipper for the degenerate `ear_clip`
 /// remainder (no ear found — thin strip domains whose sparse
 /// longitudinal vertex chains are collinear).
@@ -10788,6 +11007,167 @@ mod degen_strip_zipper_tests {
         let pts = vec![p(0.0, 0.0), p(1.0, 0.0), p(2.0, 0.0), p(3.0, 0.0)];
         let tris = ear_clip(&pts);
         assert_eq!(tris.len(), 2, "m-2 fan triangles on collinear input");
+    }
+
+    // ── session-79: planar_fan_guard ─────────────────────────────
+
+    fn max_degree(tris: &[[u32; 3]], m: usize) -> usize {
+        let mut deg = vec![0usize; m];
+        for t in tris {
+            for &v in t {
+                deg[v as usize] += 1;
+            }
+        }
+        *deg.iter().max().unwrap()
+    }
+
+    /// A long concave strip (an L-bend — the f57/f178 class shape:
+    /// monotone zipper structurally rejects it, ear_clip fans the
+    /// corner). The guard must replace the fan with a lower-degree
+    /// mesh that keeps every rim edge.
+    #[test]
+    fn planar_fan_guard_replaces_concave_corner_fan() {
+        // L-shaped strip: long horizontal bar + a downward leg, densely
+        // sampled along all edges (like fillet-foot sampled rims).
+        let mut pts: Vec<Point2d> = Vec::new();
+        // outer walk CCW: (0,0) → (10,0) → (10,1) → (1,1) → (1,3) → (0,3)
+        let corner_runs: [(f64, f64); 5] = [
+            (10.0, 0.0),
+            (10.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 3.0),
+            (0.0, 3.0),
+        ];
+        let mut cur = p(0.0, 0.0);
+        pts.push(cur);
+        for &(tx, ty) in &corner_runs {
+            let steps = 12;
+            for s in 1..=steps {
+                let f = s as f64 / steps as f64;
+                pts.push(p(
+                    cur.u + (tx - cur.u) * f,
+                    cur.v + (ty - cur.v) * f,
+                ));
+            }
+            cur = p(tx, ty);
+        }
+        let m = pts.len();
+        assert!(m >= 8);
+
+        let fan = ear_clip(&pts);
+        assert!(!fan.is_empty());
+        let fan_deg = max_degree(&fan, m);
+
+        let alt = planar_fan_guard(&pts, &fan);
+        if fan_deg >= std::cmp::max(8, m / 8)
+            && (fan_deg as f64) <= 0.9 * (m as f64 - 2.0)
+        {
+            // a partial mega-fan MUST be improved (never-worse contract)
+            let alt = alt.expect("guard must accept a mega-fan case");
+            let alt_deg = max_degree(&alt, m);
+            assert!(
+                alt_deg < fan_deg,
+                "alt max degree {} must drop below fan's {}",
+                alt_deg,
+                fan_deg
+            );
+            // every rim edge present exactly once
+            let mut edges = std::collections::HashSet::new();
+            for t in &alt {
+                for k in 0..3 {
+                    let a = t[k];
+                    let b = t[(k + 1) % 3];
+                    edges.insert((a.min(b), a.max(b)));
+                }
+            }
+            for i in 0..m {
+                let a = i as u32;
+                let b = ((i + 1) % m) as u32;
+                assert!(
+                    edges.contains(&(a.min(b), a.max(b))),
+                    "rim edge {} missing",
+                    i
+                );
+            }
+        } else {
+            // not a mega-fan → guard must leave it alone
+            assert!(alt.is_none());
+        }
+    }
+
+    /// A clean mesh (max degree 3) must never be touched.
+    #[test]
+    fn planar_fan_guard_leaves_clean_mesh_alone() {
+        let pts = vec![
+            p(0.0, 0.0), p(2.0, 0.0), p(4.0, 0.0), p(4.0, 2.0),
+            p(3.0, 3.0), p(1.0, 3.0), p(0.0, 2.0), p(0.0, 1.0),
+        ];
+        let clean: Vec<[u32; 3]> = vec![
+            [0, 1, 7], [1, 2, 7], [2, 4, 7], [2, 3, 4], [4, 6, 7], [4, 5, 6],
+        ];
+        assert_eq!(max_degree(&clean, 8), 4);
+        assert!(planar_fan_guard(&pts, &clean).is_none());
+    }
+
+    /// A FULL convex wheel (the f12/SLEEVE class: deg == m−2) is
+    /// twin-masked against the neighbor's matching fan — the s79 A/B
+    /// measured that replacing it unmasked the neighbors (SLEEVE +53
+    /// REAL). The guard must leave full wheels alone.
+    #[test]
+    fn planar_fan_guard_leaves_full_wheel_alone() {
+        let mut pts: Vec<Point2d> = Vec::new();
+        let n = 58;
+        for i in 0..n {
+            let a = i as f64 * 2.0 * std::f64::consts::PI / n as f64;
+            pts.push(p(5.0 + 4.0 * a.cos(), 1.0 * a.sin()));
+        }
+        let m = pts.len();
+        let wheel: Vec<[u32; 3]> =
+            (1..m as u32 - 1).map(|i| [0, i, i + 1]).collect();
+        assert_eq!(max_degree(&wheel, m), m - 2);
+        assert!(planar_fan_guard(&pts, &wheel).is_none());
+    }
+
+    /// A PARTIAL mega-fan (deg ≈ 50% of m−2 — the f57/f178/f3 class)
+    /// must be replaced by a strictly lower-degree mesh with every rim
+    /// edge kept and the area preserved.
+    #[test]
+    fn planar_fan_guard_replaces_partial_fan() {
+        // concave L-strip, densely sampled (the f57-like domain)
+        let mut pts: Vec<Point2d> = Vec::new();
+        let corner_runs: [(f64, f64); 5] = [
+            (10.0, 0.0),
+            (10.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 3.0),
+            (0.0, 3.0),
+        ];
+        let mut cur = p(0.0, 0.0);
+        pts.push(cur);
+        for &(tx, ty) in &corner_runs {
+            let steps = 14;
+            for s in 1..=steps {
+                let f = s as f64 / steps as f64;
+                pts.push(p(cur.u + (tx - cur.u) * f, cur.v + (ty - cur.v) * f));
+            }
+            cur = p(tx, ty);
+        }
+        let m = pts.len();
+        let fan = ear_clip(&pts);
+        assert!(!fan.is_empty());
+        let deg = max_degree(&fan, m);
+        if deg >= std::cmp::max(8, m / 8)
+            && (deg as f64) <= 0.9 * (m as f64 - 2.0)
+        {
+            // partial mega-fan → must be replaced
+            let alt = planar_fan_guard(&pts, &fan)
+                .expect("partial mega-fan must be replaced");
+            assert!(max_degree(&alt, m) < deg);
+            let ring_a = cycle_area2(&pts);
+            let tri_sum: f64 =
+                alt.iter().map(|t| tri_area2(&pts, t)).sum();
+            assert!((tri_sum - ring_a).abs() < 1e-6 * ring_a.abs());
+        }
     }
 }
 

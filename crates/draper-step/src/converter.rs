@@ -13746,16 +13746,47 @@ impl<'a> StepConverter<'a> {
             // earcutr is only used as fallback if ear_clip fails.
             let is_convex = is_convex_polygon_2d(&outer_2d);
             if is_convex && outer_points_3d.len() >= 3 {
-                for p in &outer_points_3d { mesh.add_vertex(*p); }
                 let n = outer_points_3d.len() as u32;
-                for i in 1..n - 1 {
-                    if forward { mesh.add_triangle(0, i, i + 1); }
-                    else { mesh.add_triangle(0, i + 1, i); }
+                // session-79: the convex fast path fans from vertex 0 —
+                // on large convex rims that is a full needle wheel
+                // (drill HOUSING f12: 56/56 triangles from one pole,
+                // folding against the G1-tangent fillet neighbor).
+                // Route the fan through the never-worse fan guard.
+                let mut fan: Vec<[u32; 3]> =
+                    (1..n - 1).map(|i| [0, i, i + 1]).collect();
+                if let Some(alt) = draper_mesh::triangulate::planar_fan_guard(
+                    &outer_2d, &fan,
+                ) {
+                    log::info!(
+                        "PLANAR_FAN_GUARD accepted (convex): m={} fan tris {} → {} guard tris",
+                        n, fan.len(), alt.len()
+                    );
+                    fan = alt;
+                }
+                for p in &outer_points_3d { mesh.add_vertex(*p); }
+                for tri in &fan {
+                    if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
+                    else { mesh.add_triangle(tri[0], tri[2], tri[1]); }
                 }
             } else {
                 // Try ear_clip first (faster for simple non-convex polygons)
-                let triangles = ear_clip(&outer_2d);
+                let mut triangles = ear_clip(&outer_2d);
                 if !triangles.is_empty() {
+                    // session-79: ear_clip's greedy first-ear loop fans a
+                    // corner pole across concave strip domains (drill HM
+                    // f57: 169/335 triangles from one corner; the s76
+                    // monotone zipper structurally rejects the non-
+                    // monotone chains). Never-worse fan guard → earcutr
+                    // + s75 repairs. Kill-switch DRAPPER_PLANAR_FAN_GUARD=0.
+                    if let Some(alt) = draper_mesh::triangulate::planar_fan_guard(
+                        &outer_2d, &triangles,
+                    ) {
+                        log::info!(
+                            "PLANAR_FAN_GUARD accepted (ear_clip): m={} fan tris {} → {} guard tris",
+                            outer_2d.len(), triangles.len(), alt.len()
+                        );
+                        triangles = alt;
+                    }
                     for p in &outer_points_3d { mesh.add_vertex(*p); }
                     for tri in &triangles {
                         if forward { mesh.add_triangle(tri[0], tri[1], tri[2]); }
