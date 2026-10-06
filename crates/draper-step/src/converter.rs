@@ -4706,7 +4706,7 @@ impl<'a> StepConverter<'a> {
         // old detailed-path order let Phase 2 re-alias seam edges).
         {
             let seam_count =
-                self.register_seam_aliases(face_data_list, edge_cache, tol_ctx.sewing_tol);
+                self.register_seam_aliases(face_data_list, edge_cache, tol_ctx.sewing_tol, tol_ctx.aliasing_tolerance());
             if seam_count > 0 {
                 log::info!(
                     "BREP #{}: registered {} seam edge aliases (topological gluing before triangulation)",
@@ -9383,6 +9383,27 @@ impl<'a> StepConverter<'a> {
         Some(rev)
     }
 
+    /// session-80: max 5-point signature deviation between two edge curves,
+    /// best of forward/reversed alignment. None when either signature is
+    /// untrusted/missing (caller keeps legacy behavior). Used by the seam
+    /// gluing deviation guard: curves within the vertex-merge tolerance
+    /// are sub-weld duplicates (glue for pre-weld consistency); beyond it
+    /// they are distinct physical boundaries (never glue).
+    fn edge_curve_pair_deviation(&self, a: i64, b: i64) -> Option<f64> {
+        let pa = self.edge_curve_shape_signature_trusted(a)?;
+        let pb = self.edge_curve_shape_signature_trusted(b)?;
+        if pa.is_empty() || pa.len() != pb.len() {
+            return None;
+        }
+        let fwd = pa.iter().zip(pb.iter())
+            .map(|(x, y)| x.distance_to(y))
+            .fold(0.0_f64, f64::max);
+        let rev = pa.iter().zip(pb.iter().rev())
+            .map(|(x, y)| x.distance_to(y))
+            .fold(0.0_f64, f64::max);
+        Some(fwd.min(rev))
+    }
+
     fn compute_edge_curve_sample_points(&self, edge_curve_id: i64) -> Option<Vec<Point3d>> {
         // Primary path: use resolve_edge_curve to get a proper TopoEdge.
         if let Some(edge) = self.resolve_edge_curve(edge_curve_id) {
@@ -9891,6 +9912,7 @@ impl<'a> StepConverter<'a> {
         face_data_list: &[FaceData],
         edge_cache: &mut EdgeDiscretizationCache,
         seam_tol: f64,
+        merge_tol: f64,
     ) -> usize {
         let mut seam_count = 0;
 
@@ -9951,35 +9973,50 @@ impl<'a> StepConverter<'a> {
                     let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
 
                     if dist_a < seam_tol && dist_b < seam_tol {
-                        // session-65 SHAPE GUARD (DIGON-ONLY): same vertex
+                        // session-80 DEVIATION GUARD (general): same vertex
                         // pair does NOT imply the same physical boundary.
-                        // A periodic face with EXACTLY TWO edges (a topo-
-                        // logical DIGON — the Zentralstaender #1086 lune
-                        // flaps: CIRCLE corner arc + B_SPLINE lip on cone
-                        // f9-f14) has two DISTINCT boundary curves between
-                        // the same corner vertices; gluing them collapses
-                        // the flap onto one curve and creates non-manifold
-                        // junctions. For faces with MORE edges the same-
-                        // vertex-pair pairs are genuine seam candidates
-                        // (incl. "sloppy seams" — two exports of one
-                        // intended boundary, drill_top #831/#833 midpoints
-                        // 0.25 apart, where gluing is the repair that
-                        // keeps the mesh clean) — legacy gluing preserved.
+                        // The legacy pass glued EVERY same-vertex-pair pair
+                        // on periodic faces — correct for genuine seams
+                        // (u=0 vs u=2π lines, deviation ≈ 0) and for sub-
+                        // tolerance slit lips (the SLEEVE wall slit: two
+                        // curves ~merge_tol apart that the mesh weld merges
+                        // anyway — gluing = pre-weld consistency), but a
+                        // SUBSTITUTION ERROR for real distinct boundaries:
+                        // the HM cushion end arcs (CIRCLE in the plane vs
+                        // B_SPLINE on the cylinder, 0.09 apart — the alias
+                        // fed the cylinder face the plane's curve AND
+                        // flipped the traversal direction → self-intersect-
+                        // ing UV polygon → v-clamped re-projection → flat
+                        // centroid fan = the class-B (147,148)/(144,145)
+                        // 52-pair tangential G1 families), and the GEAR
+                        // tube rims (two arcs = opposite halves of one
+                        // circle, ~diameter apart). Rule: glue only when
+                        // the 5-point signature deviation is within the
+                        // vertex-merge tolerance (sub-weld duplicates);
+                        // otherwise the curves are distinct physical
+                        // boundaries — reject. Subsumes the s65 digon
+                        // guard (2-edge faces) with the same kill-switch.
                         // Kill-switch: DRAPPER_ALIAS_SHAPE_GUARD=0.
-                        let is_digon = edges.len() == 2;
-                        if is_digon
-                            && std::env::var("DRAPPER_ALIAS_SHAPE_GUARD").as_deref() != Ok("0")
-                        {
-                            let shape_tol = seam_tol.max(1e-6);
-                            match self.edge_curve_shapes_compatible(*sid_i, *sid_j, shape_tol) {
-                                Some(false) => {
+                        let guard_on = std::env::var("DRAPPER_ALIAS_SHAPE_GUARD").as_deref() != Ok("0");
+                        if guard_on {
+                            // s80: threshold = 2× the aliasing tolerance (the
+                            // sewing ladder: sub-sewing deviations are export
+                            // slop of one boundary — the SLEEVE slit lips at
+                            // 0.023 glue for pre-weld consistency; the GEAR
+                            // tube rims 0.068 and the cushion arcs 0.120 are
+                            // distinct physical boundaries — rejected).
+                            let glue_dev_tol = seam_tol.max(merge_tol) * 2.0;
+                            let dev = self.edge_curve_pair_deviation(*sid_i, *sid_j);
+                            if let Some(d) = dev {
+                                if d > glue_dev_tol {
                                     log::info!(
-                                        "BREP: seam alias REJECTED by digon shape guard: #{} vs #{} (2-edge lune face, different curves)",
-                                        sid_i, sid_j
+                                        "BREP: seam alias REJECTED by deviation guard: #{} vs #{} (dev={:.4} > tol={:.4} — distinct physical boundaries, types {}/{})",
+                                        sid_i, sid_j, d, glue_dev_tol,
+                                        self.edge_curve_type_name(*sid_i),
+                                        self.edge_curve_type_name(*sid_j)
                                     );
                                     continue;
                                 }
-                                _ => {}
                             }
                         }
                         // These are likely seam edges — register alias
@@ -12845,6 +12882,32 @@ impl<'a> StepConverter<'a> {
                 if let Some(last_uv) = uvs.last() {
                     prev_edge_last_uv = Some(*last_uv);
                 }
+                // session-80 diagnostics (DRAPPER_DUMP_EDGE_COLLECTION):
+                // per-edge dump for ALL surface types (not just Nurbs) —
+                // traces the flat-fan class (HM f148: 3 of 4 cushion edges
+                // lost between STEP loop and boundary collection).
+                if std::env::var("DRAPPER_DUMP_EDGE_COLLECTION").is_ok() {
+                    let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
+                    let eu_max = uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max);
+                    let ev_min = uvs.iter().map(|p| p.v).fold(f64::MAX, f64::min);
+                    let ev_max = uvs.iter().map(|p| p.v).fold(f64::MIN, f64::max);
+                    let has_c2d = curve_2d.is_some();
+                    let p0 = pts.first();
+                    let p_n = pts.last();
+                    eprintln!(
+                        "EDGECOL: face_step={} edge_idx={} step_id={} n_pts={} pcurve={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] 3d_first=({:.3},{:.3},{:.3}) 3d_last=({:.3},{:.3},{:.3}) pr=({:.4},{:.4}) svp=({:.3},{:.3},{:.3}) evp=({:.3},{:.3},{:.3})",
+                        face_data.step_face_id, edge_idx, step_id, uvs.len(), has_c2d, eu_min, eu_max, ev_min, ev_max,
+                        p0.map(|p| p.x).unwrap_or(0.0), p0.map(|p| p.y).unwrap_or(0.0), p0.map(|p| p.z).unwrap_or(0.0),
+                        p_n.map(|p| p.x).unwrap_or(0.0), p_n.map(|p| p.y).unwrap_or(0.0), p_n.map(|p| p.z).unwrap_or(0.0),
+                        edge.param_range.0, edge.param_range.1,
+                        edge.start_vertex_point.as_ref().map(|p| p.x).unwrap_or(f64::NAN),
+                        edge.start_vertex_point.as_ref().map(|p| p.y).unwrap_or(f64::NAN),
+                        edge.start_vertex_point.as_ref().map(|p| p.z).unwrap_or(f64::NAN),
+                        edge.end_vertex_point.as_ref().map(|p| p.x).unwrap_or(f64::NAN),
+                        edge.end_vertex_point.as_ref().map(|p| p.y).unwrap_or(f64::NAN),
+                        edge.end_vertex_point.as_ref().map(|p| p.z).unwrap_or(f64::NAN)
+                    );
+                }
                 // Diagnostic: log per-edge UV range for NURBS faces
                 if matches!(&face_data.surface, Surface::Nurbs(_)) && !uvs.is_empty() {
                     let eu_min = uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min);
@@ -14274,12 +14337,80 @@ impl<'a> StepConverter<'a> {
                 }
                 uvs
             } else {
-                // Non-NURBS surfaces: project_point() is fast (analytic formulas)
-                points_3d.iter().map(|p| {
-                    let (u, v) = surface.project_point(p);
-                    Point2d::new(u, v)
-                }).collect()
-        }
+                // Non-NURBS surfaces: project_point() is fast (analytic formulas).
+                // session-80 (SEAM_UNWRAP): seam-aware u-unwrap for periodic
+                // surfaces. The raw per-point projection returns u ∈ [0, 2π);
+                // a boundary curve CROSSING the seam (e.g. the HM f148 cushion:
+                // 70° arcs from u=+0.609 through 0 to u=−0.609) gets a mid-edge
+                // u-jump of ~2π, which self-intersects the UV polygon. Downstream
+                // the seam-split/degenerate handling collapses to a v-constant
+                // sub-polygon → flat centroid fan (DEGEN_FAN) → the whole
+                // cylindrical surface replaced by an in-plane fan → tangential
+                // G1 fold pairs against the plane rim-rows (h = rim-row
+                // thickness, ang = 180°). Fix: unwrap consecutive u-jumps > π
+                // by ±2π (per edge), then align the edge's start with the
+                // previous edge's end (initial_uv chain). Both steps are
+                // bit-identical no-ops when no jump occurs and branches
+                // already match. Kill-switch: DRAPPER_SEAM_UNWRAP=0.
+                let u_period: Option<f64> = match surface {
+                    Surface::Cylinder(_)
+                    | Surface::Cone(_)
+                    | Surface::Sphere(_)
+                    | Surface::Torus(_) => Some(2.0 * std::f64::consts::PI),
+                    _ => None,
+                };
+                let mut uvs: Vec<Point2d> = points_3d
+                    .iter()
+                    .map(|p| {
+                        let (u, v) = surface.project_point(p);
+                        Point2d::new(u, v)
+                    })
+                    .collect();
+                if let Some(period) = u_period {
+                    // s80 A/B MEASURED NET-NEGATIVE (HOUSING +15 REAL: the
+                    // wrapped polygon's seam-split path outperforms the
+                    // unwrapped earcutr on the affected faces) — default
+                    // OFF, opt-in DRAPPER_SEAM_UNWRAP=1 for reproduction.
+                    let enabled = std::env::var("DRAPPER_SEAM_UNWRAP")
+                        .map_or(false, |v| v == "1");
+                    if enabled && uvs.len() >= 2 {
+                        let half = period / 2.0;
+                        let mut unwrapped = false;
+                        for i in 1..uvs.len() {
+                            let du = uvs[i].u - uvs[i - 1].u;
+                            if du > half {
+                                uvs[i].u -= period;
+                                unwrapped = true;
+                            } else if du < -half {
+                                uvs[i].u += period;
+                                unwrapped = true;
+                            }
+                        }
+                        // Chain alignment: bring this edge's first point onto
+                        // the same 2π-branch as the previous edge's last point.
+                        // Only fires on a genuine branch mismatch (shift is a
+                        // nonzero multiple of the period).
+                        if let Some(iu) = initial_uv {
+                            let shift = ((iu.u - uvs[0].u) / period).round() * period;
+                            if shift != 0.0 {
+                                for uv in &mut uvs {
+                                    uv.u += shift;
+                                }
+                                unwrapped = true;
+                            }
+                        }
+                        if unwrapped {
+                            log::info!(
+                                "SEAM_UNWRAP: projected UVs unwrapped ({} pts, u now [{:.4},{:.4}])",
+                                uvs.len(),
+                                uvs.iter().map(|p| p.u).fold(f64::MAX, f64::min),
+                                uvs.iter().map(|p| p.u).fold(f64::MIN, f64::max)
+                            );
+                        }
+                    }
+                }
+                uvs
+            }
     }
 
     /// Find the Curve2d for an edge within the FaceData.

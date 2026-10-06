@@ -809,6 +809,32 @@ impl EdgeDiscretizationCache {
         // Retrieve the cached entry
         let entry = &self.entries[&key];
 
+        // session-80 diagnostics: trace the alias chain + entry direction
+        // for the cushion-class seam edges (wrong-direction entries).
+        if std::env::var("DRAPPER_DUMP_EDGE_KEYS").is_ok() {
+            let ef = entry.points_3d.first();
+            let el = entry.points_3d.last();
+            let rf = if edge.param_range.0 > edge.param_range.1 {
+                el
+            } else {
+                ef
+            };
+            let rl = if edge.param_range.0 > edge.param_range.1 {
+                ef
+            } else {
+                el
+            };
+            eprintln!(
+                "EDGEKEY: sid={} canon={} pr=({:.4},{:.4}) n={} entry_first=({:.3},{:.3},{:.3}) entry_last=({:.3},{:.3},{:.3}) ret_first=({:.3},{:.3},{:.3}) ret_last=({:.3},{:.3},{:.3})",
+                step_entity_id, canonical_id, edge.param_range.0, edge.param_range.1,
+                entry.points_3d.len(),
+                ef.map(|p| p.x).unwrap_or(f64::NAN), ef.map(|p| p.y).unwrap_or(f64::NAN), ef.map(|p| p.z).unwrap_or(f64::NAN),
+                el.map(|p| p.x).unwrap_or(f64::NAN), el.map(|p| p.y).unwrap_or(f64::NAN), el.map(|p| p.z).unwrap_or(f64::NAN),
+                rf.map(|p| p.x).unwrap_or(f64::NAN), rf.map(|p| p.y).unwrap_or(f64::NAN), rf.map(|p| p.z).unwrap_or(f64::NAN),
+                rl.map(|p| p.x).unwrap_or(f64::NAN), rl.map(|p| p.y).unwrap_or(f64::NAN), rl.map(|p| p.z).unwrap_or(f64::NAN)
+            );
+        }
+
         // If the original edge was reversed, reverse the result for the caller
         if edge.param_range.0 > edge.param_range.1 {
             let mut pts = entry.points_3d.clone();
