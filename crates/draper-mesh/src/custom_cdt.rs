@@ -174,6 +174,10 @@ fn insert_interior_points(
     // curve there), so the point is simply skipped.
     let ring_edges: HashSet<(u32, u32)> = build_constraint_set(n_boundary, hole_ranges);
 
+    // s81 diagnostics: drop-reason census (env-gated)
+    let dbg = std::env::var("DRAPPER_CDT_DEBUG").is_ok();
+    let (mut n_ring_skip, mut n_sliver_skip, mut n_not_found) = (0usize, 0usize, 0usize);
+
     for i in 0..n_interior {
         let point_idx = (interior_start + i) as u32;
         let p = all_2d[point_idx as usize];
@@ -190,6 +194,7 @@ fn insert_interior_points(
                         .map(|(v1, v2)| ring_edges.contains(&(v1.min(v2), v1.max(v2))))
                         .unwrap_or(false);
                     if is_ring {
+                        n_ring_skip += 1;
                         continue; // redundant with the rim — skip
                     }
                     insert_point_on_edge_fast(all_2d, triangles, tri_idx, point_idx, &mut edge_map);
@@ -236,6 +241,7 @@ fn insert_interior_points(
                     let skip_aspect =
                         max_edge_sq > 0.0 && min_prod < MIN_FAN_ASPECT * max_edge_sq;
                     if skip_relative || skip_aspect {
+                        n_sliver_skip += 1;
                         log::debug!(
                             "insert_interior_points: sliver guard — point {} min product {:.3e} (parent {:.3e}, max_edge² {:.3e}) skipped",
                             point_idx, min_prod, parent_area, max_edge_sq
@@ -247,9 +253,20 @@ fn insert_interior_points(
             }
             None => {
                 // Point is outside the triangulation - skip it
+                n_not_found += 1;
                 log::debug!("Interior point {} outside triangulation, skipping", point_idx);
             }
         }
+    }
+    if dbg && (n_ring_skip + n_sliver_skip + n_not_found) > 0 {
+        eprintln!(
+            "CDT_DEBUG: interior drops: ring_skip={} sliver_skip={} not_found={} of {} (label={})",
+            n_ring_skip,
+            n_sliver_skip,
+            n_not_found,
+            n_interior,
+            crate::parametric_domain::current_face_label()
+        );
     }
 }
 
