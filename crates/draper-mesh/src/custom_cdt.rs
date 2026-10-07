@@ -125,6 +125,46 @@ pub fn triangulate_polygon_cdt(
         );
     }
 
+    // session-83: STRUCTURAL LATTICE rescue. When the standard
+    // pipeline leaves defects (interior Steiner drops / missing rim
+    // edges / one-sided interior seams — the f26 class: 205/341
+    // lattice points dropped by the sliver-guard chord deadlock) and
+    // the interior points form a clean v-const row lattice on a
+    // 4-corner monotone ring, rebuild the whole face structurally:
+    // rows zipped to the ring walls (the s78 SAIL_BAND construction
+    // on the adaptive subdivision's own lattice). Healthy faces
+    // (defects == 0) stay bit-identical — the rescue never fires.
+    // Kill-switch DRAPPER_LATTICE_BAND=0; debug DRAPPER_LATTICE_DEBUG.
+    if !interior_2d.is_empty() && hole_index_ranges.is_empty() {
+        let defects = cdt_defect_count(
+            &all_2d,
+            &triangles,
+            n_boundary,
+            &hole_index_ranges,
+            interior_start,
+            interior_2d.len(),
+        );
+        if defects > 0 {
+            if let Some(structured) = structured_lattice_triangulation(
+                &all_2d,
+                n_boundary,
+                interior_start,
+                interior_2d.len(),
+            ) {
+                if std::env::var("DRAPPER_LATTICE_DEBUG").is_ok() {
+                    eprintln!(
+                        "[LATTICE rescue {}] standard defects {} -> structured {} tris (was {})",
+                        crate::parametric_domain::current_face_label(),
+                        defects,
+                        structured.len(),
+                        triangles.len()
+                    );
+                }
+                return structured;
+            }
+        }
+    }
+
     // session-64: post-insertion Delaunay round (same guarded flips) —
     // DISABLED after measurement: flipping around the inserted fan
     // triangles introduced 276 winding conflicts + 5 non-manifold edges
@@ -460,6 +500,688 @@ fn insert_interior_points(
             crate::parametric_domain::current_face_label()
         );
     }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// session-83: STRUCTURAL LATTICE triangulation
+// ══════════════════════════════════════════════════════════════════
+
+/// session-83: count the standard pipeline's output defects that the
+/// structural lattice rescue exists to fix:
+///   - interior Steiner points left unused (insertion drops)
+///   - rim edges missing (cross-face contract violations)
+///   - one-sided non-rim edges (interior seams)
+/// Returns the total; 0 = the standard result is healthy and the face
+/// must stay bit-identical (the rescue never fires).
+fn cdt_defect_count(
+    all_2d: &[[f64; 2]],
+    triangles: &[[u32; 3]],
+    n_boundary: usize,
+    hole_ranges: &[(usize, usize)],
+    interior_start: usize,
+    n_interior: usize,
+) -> usize {
+    let _ = all_2d;
+    let mut used = vec![false; interior_start + n_interior];
+    for t in triangles {
+        for &v in t.iter() {
+            let vi = v as usize;
+            if vi < used.len() {
+                used[vi] = true;
+            }
+        }
+    }
+    let mut defects = (interior_start..interior_start + n_interior)
+        .filter(|&i| !used[i])
+        .count();
+    // edge multiplicity census
+    let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+    for t in triangles {
+        for k in 0..3 {
+            let a = t[k];
+            let b = t[(k + 1) % 3];
+            if a != b {
+                *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+    }
+    let mut rim_miss = 0usize;
+    let mut is_rim = |a: usize, b: usize| -> bool {
+        ecount.contains_key(&(a.min(b) as u32, a.max(b) as u32))
+    };
+    for i in 0..n_boundary {
+        let j = (i + 1) % n_boundary;
+        if !is_rim(i, j) {
+            rim_miss += 1;
+        }
+    }
+    for &(start, end) in hole_ranges {
+        let len = end - start;
+        for i in 0..len {
+            let a = start + i;
+            let b = start + (i + 1) % len;
+            if !is_rim(a, b) {
+                rim_miss += 1;
+            }
+        }
+    }
+    defects += rim_miss;
+    // one-sided non-rim edges: count 1 (or 3+) edges that are not rim
+    let rim_set: HashSet<(u32, u32)> = {
+        let mut s = HashSet::new();
+        for i in 0..n_boundary {
+            let j = (i + 1) % n_boundary;
+            s.insert((i.min(j) as u32, i.max(j) as u32));
+        }
+        for &(start, end) in hole_ranges {
+            let len = end - start;
+            for i in 0..len {
+                let a = start + i;
+                let b = start + (i + 1) % len;
+                s.insert((a.min(b) as u32, a.max(b) as u32));
+            }
+        }
+        s
+    };
+    for (e, cnt) in ecount.iter() {
+        if *cnt != 2 && !rim_set.contains(e) {
+            defects += 1;
+        }
+    }
+    defects
+}
+
+/// session-83: STRUCTURAL LATTICE row triangulation — the s78 SAIL_BAND
+/// construction generalized to a GIVEN interior lattice (the adaptive
+/// subdivision's own Steiner points) on a 4-corner monotone ring.
+///
+/// Motivation (s81/s82): on dense fillet lattices (f26 class: 341-point
+/// brick lattice, 16x21 at step 0.024) the point-by-point
+/// Bowyer-Watson insertion DEADLOCKS — the earcut+lawson base carries
+/// long Delaunay chords (4-17 lattice steps), every lattice point
+/// inside a long-chord parent trips the s64 sliver guard, and the skip
+/// keeps the chord alive for the next point (s82 f26: 205/341 dropped,
+/// the surviving 25 (26,26) REAL fold pairs ARE the unsplit coarse
+/// triangles). Guard-off inserts them but manufactures 133 UV needles
+/// that fold in 3D; the single-point split fallback inserts ~1000:1
+/// strips that fold worse (s82 measured, default OFF).
+///
+/// The structural answer never fights the base: it builds the whole
+/// face from rows. Interior points are clustered into v-const rows;
+/// the ring is split at its 4 direction-transition corners into
+/// bottom/top caps (u-monotone) and left/right walls (v-monotone,
+/// ANGLED walls allowed — the sail band's u-const requirement is
+/// dropped); wall points are banded positionally between row levels;
+/// consecutive rows are stitched with the s78 two-pointer zipper.
+/// Every rim edge is emitted exactly once (wall bands fan from the
+/// adjacent row's end points, never from a bare wall anchor), and the
+/// grid quads carry healthy aspect by construction.
+///
+/// Guards (any failure → None → the standard pipeline result stands):
+/// every ring/interior point used, rim edges exactly once, non-rim
+/// edges exactly twice, uniform winding, area within 0.5% of the
+/// polygon shoelace, zero UV needles (aspect < 1e-3).
+///
+/// Kill-switch: DRAPPER_LATTICE_BAND=0. Debug: DRAPPER_LATTICE_DEBUG.
+fn structured_lattice_triangulation(
+    all_2d: &[[f64; 2]],
+    n_boundary: usize,
+    interior_start: usize,
+    n_interior: usize,
+) -> Option<Vec<[u32; 3]>> {
+    if std::env::var("DRAPPER_LATTICE_BAND").as_deref() == Ok("0") {
+        return None;
+    }
+    let dbg = std::env::var("DRAPPER_LATTICE_DEBUG").is_ok();
+    macro_rules! lattice_reject {
+        ($reason:expr) => {{
+            if dbg {
+                eprintln!(
+                    "[LATTICE reject {}] {}",
+                    crate::parametric_domain::current_face_label(),
+                    $reason
+                );
+            }
+            return None;
+        }};
+    }
+    if n_boundary < 8 || n_interior < 8 {
+        lattice_reject!("tiny input");
+    }
+    // ── 1. interior row detection (v-const clusters) ───────────────
+    let mut ivmin = f64::INFINITY;
+    let mut ivmax = f64::NEG_INFINITY;
+    for i in interior_start..interior_start + n_interior {
+        let v = all_2d[i][1];
+        if !v.is_finite() {
+            lattice_reject!("non-finite interior v");
+        }
+        ivmin = ivmin.min(v);
+        ivmax = ivmax.max(v);
+    }
+    let ivspan = ivmax - ivmin;
+    if ivspan <= 0.0 {
+        lattice_reject!("flat interior v");
+    }
+    let row_tol = 2e-3 * ivspan;
+    let mut order: Vec<usize> = (interior_start..interior_start + n_interior).collect();
+    order.sort_by(|&a, &b| {
+        all_2d[a][1]
+            .partial_cmp(&all_2d[b][1])
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                all_2d[a][0]
+                    .partial_cmp(&all_2d[b][0])
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    let mut rows: Vec<Vec<usize>> = Vec::new();
+    {
+        let mut cur: Vec<usize> = vec![order[0]];
+        for &idx in order.iter().skip(1) {
+            if all_2d[idx][1] - all_2d[cur[cur.len() - 1]][1] > row_tol {
+                rows.push(cur);
+                cur = vec![idx];
+            } else {
+                cur.push(idx);
+            }
+        }
+        rows.push(cur);
+    }
+    let m_rows = rows.len();
+    if m_rows < 4 {
+        lattice_reject!("too few rows");
+    }
+    for r in rows.iter_mut() {
+        r.sort_by(|&a, &b| {
+            all_2d[a][0]
+                .partial_cmp(&all_2d[b][0])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        // strict u-monotone within the row, v-spread within tol
+        let (vlo, vhi) = {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for &i in r.iter() {
+                lo = lo.min(all_2d[i][1]);
+                hi = hi.max(all_2d[i][1]);
+            }
+            (lo, hi)
+        };
+        if r.len() < 2 || vhi - vlo > row_tol {
+            lattice_reject!("row not v-const");
+        }
+        for w in r.windows(2) {
+            if all_2d[w[1]][0] - all_2d[w[0]][0] <= 1e-9 {
+                lattice_reject!("row u not strictly ascending");
+            }
+        }
+    }
+    let row_v: Vec<f64> = rows.iter().map(|r| all_2d[r[0]][1]).collect();
+    // ── 2. ring 4-corner split (H/V edge-class transitions) ────────
+    let n = n_boundary;
+    let edge_class = |i: usize| -> u8 {
+        // 0 = H (u-dominant), 1 = V (v-dominant), 2 = D (mixed)
+        let a = all_2d[i];
+        let b = all_2d[(i + 1) % n];
+        let (du, dv) = ((b[0] - a[0]).abs(), (b[1] - a[1]).abs());
+        if du >= 2.0 * dv {
+            0
+        } else if dv > 2.0 * du {
+            1
+        } else {
+            2
+        }
+    };
+    let mut has_d = false;
+    let mut cls = Vec::with_capacity(n);
+    for i in 0..n {
+        let c = edge_class(i);
+        if c == 2 {
+            has_d = true;
+        }
+        cls.push(c);
+    }
+    if has_d {
+        // rounded/organic corners: outside the s83 rectangle class
+        lattice_reject!("diagonal rim edges (rounded corners)");
+    }
+    let corners: Vec<usize> = (0..n)
+        .filter(|&i| cls[(i + n - 1) % n] != cls[i])
+        .collect();
+    if corners.len() != 4 {
+        lattice_reject!(format!("corner count {}", corners.len()));
+    }
+    let cu_min = corners.iter().map(|&i| all_2d[i][0]).fold(f64::INFINITY, f64::min);
+    let cu_max = corners.iter().map(|&i| all_2d[i][0]).fold(f64::NEG_INFINITY, f64::max);
+    let cv_min = corners.iter().map(|&i| all_2d[i][1]).fold(f64::INFINITY, f64::min);
+    let cv_max = corners.iter().map(|&i| all_2d[i][1]).fold(f64::NEG_INFINITY, f64::max);
+    let nearest_corner = |tu: f64, tv: f64| -> usize {
+        let mut best = corners[0];
+        let mut bd = f64::INFINITY;
+        for &c in corners.iter() {
+            let p = all_2d[c];
+            let d = (p[0] - tu) * (p[0] - tu) + (p[1] - tv) * (p[1] - tv);
+            if d < bd {
+                bd = d;
+                best = c;
+            }
+        }
+        best
+    };
+    let bl = nearest_corner(cu_min, cv_min);
+    let br = nearest_corner(cu_max, cv_min);
+    let tr = nearest_corner(cu_max, cv_max);
+    let tl = nearest_corner(cu_min, cv_max);
+    if bl == br || bl == tr || bl == tl || br == tr || br == tl || tr == tl {
+        lattice_reject!("corner identity collapse");
+    }
+    // ── 3. four arcs between corners ───────────────────────────────
+    let arc = |from: usize, to: usize, avoid: &[usize; 2]| -> Option<Vec<usize>> {
+        let mut fwd = vec![from];
+        let mut i = from;
+        let mut ok = true;
+        while i != to {
+            i = (i + 1) % n;
+            if i == to {
+                break;
+            }
+            if i == avoid[0] || i == avoid[1] {
+                ok = false;
+                break;
+            }
+            fwd.push(i);
+        }
+        if ok {
+            fwd.push(to);
+        } else {
+            fwd.clear();
+        }
+        let mut bwd = vec![from];
+        let mut i = from;
+        let mut ok = true;
+        while i != to {
+            i = (i + n - 1) % n;
+            if i == to {
+                break;
+            }
+            if i == avoid[0] || i == avoid[1] {
+                ok = false;
+                break;
+            }
+            bwd.push(i);
+        }
+        if ok {
+            bwd.push(to);
+        } else {
+            bwd.clear();
+        }
+        match (fwd.is_empty(), bwd.is_empty()) {
+            (false, false) => Some(if fwd.len() <= bwd.len() { fwd } else { bwd }),
+            (false, true) => Some(fwd),
+            (true, false) => Some(bwd),
+            (true, true) => None,
+        }
+    };
+    let mut bottom = arc(bl, br, &[tl, tr])?;
+    let mut top = arc(tl, tr, &[bl, br])?;
+    let mut left = arc(bl, tl, &[br, tr])?;
+    let mut right = arc(br, tr, &[bl, tl])?;
+    if bottom.len() < 2 || top.len() < 2 || left.len() < 2 || right.len() < 2 {
+        lattice_reject!("degenerate arc");
+    }
+    let (umin, umax) = {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..n {
+            lo = lo.min(all_2d[i][0]);
+            hi = hi.max(all_2d[i][0]);
+        }
+        (lo, hi)
+    };
+    let (vmin, vmax) = {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..n {
+            lo = lo.min(all_2d[i][1]);
+            hi = hi.max(all_2d[i][1]);
+        }
+        (lo, hi)
+    };
+    let uspan = umax - umin;
+    let vspan = vmax - vmin;
+    if uspan <= 0.0 || vspan <= 0.0 {
+        lattice_reject!("flat ring");
+    }
+    // orient: caps u-ascending, walls v-ascending
+    if all_2d[bottom[0]][0] > all_2d[bottom[bottom.len() - 1]][0] {
+        bottom.reverse();
+    }
+    if all_2d[top[0]][0] > all_2d[top[top.len() - 1]][0] {
+        top.reverse();
+    }
+    if all_2d[left[0]][1] > all_2d[left[left.len() - 1]][1] {
+        left.reverse();
+    }
+    if all_2d[right[0]][1] > all_2d[right[right.len() - 1]][1] {
+        right.reverse();
+    }
+    let utol = 1e-3 * uspan + 1e-12;
+    let vtol = 5e-3 * vspan + 1e-12;
+    let mono = |chain: &[usize], axis: usize, tol: f64| -> bool {
+        chain.windows(2).all(|w| {
+            all_2d[w[1]][axis] >= all_2d[w[0]][axis] - tol
+        })
+    };
+    if !mono(&bottom, 0, utol) || !mono(&top, 0, utol) {
+        lattice_reject!("cap not u-monotone");
+    }
+    if !mono(&left, 1, vtol) || !mono(&right, 1, vtol) {
+        lattice_reject!("wall not v-monotone");
+    }
+    // ── 4. wall band segments between row levels ───────────────────
+    // seg j (0-based) covers wall positions (L_{j-1}, L_j] where L_j
+    // = row_v[j]; positions 0 (bottom corner) and len-1 (top corner)
+    // are excluded — the caps own the corners. The LAST band is OPEN
+    // at the top (carries everything above L_{M-1} up to the top
+    // corner, the sub-corner included): the sub-corner is the final
+    // zipper's lower-chain anchor, and its band's rim edges close
+    // against it (s78 "open at the top" contract).
+    let seg_bounds = |wall: &[usize]| -> Vec<(usize, usize)> {
+        let len = wall.len();
+        let mut bounds = Vec::with_capacity(m_rows);
+        let mut s = 1usize;
+        for j in 0..m_rows {
+            let e = if j == m_rows - 1 {
+                len - 1
+            } else {
+                let mut e = s;
+                while e < len - 1 && all_2d[wall[e]][1] <= row_v[j] + 1e-12 {
+                    e += 1;
+                }
+                e.min(len - 1).max(s)
+            };
+            bounds.push((s, e));
+            s = e;
+        }
+        bounds
+    };
+    let lb = seg_bounds(&left);
+    let rb = seg_bounds(&right);
+    // ── 5. chains ──────────────────────────────────────────────────
+    let full_row = |j: usize| -> Vec<u32> {
+        // j = 0: bottom cap; j = m_rows+1: top cap; else band-j walls
+        // + row j (1-based) between them
+        if j == 0 {
+            return bottom.iter().map(|&i| i as u32).collect();
+        }
+        if j == m_rows + 1 {
+            return top.iter().map(|&i| i as u32).collect();
+        }
+        let (s, e) = lb[j - 1];
+        let mut row: Vec<u32> = left[s..e].iter().map(|&i| i as u32).collect();
+        row.extend(rows[j - 1].iter().map(|&i| i as u32));
+        let (s, e) = rb[j - 1];
+        let mut tail: Vec<u32> = right[s..e].iter().map(|&i| i as u32).collect();
+        tail.reverse(); // v-descending
+        row.extend(tail);
+        row
+    };
+    let lower_chain = |k: usize| -> Option<Vec<u32>> {
+        // k = 1: bottom cap; k = m_rows+1: sub-corners + row M;
+        // else anchors at L_{k-1} + row k-1
+        if k == 1 {
+            return Some(bottom.iter().map(|&i| i as u32).collect());
+        }
+        if k == m_rows + 1 {
+            if left.len() < 2 || right.len() < 2 {
+                return None;
+            }
+            let mut c: Vec<u32> = vec![left[left.len() - 2] as u32];
+            c.extend(rows[m_rows - 1].iter().map(|&i| i as u32));
+            c.push(right[right.len() - 2] as u32);
+            return Some(c);
+        }
+        let lvl = row_v[k - 2];
+        let anchor_at = |wall: &[usize]| -> usize {
+            let mut best = 1usize;
+            for p in 1..wall.len() - 1 {
+                if all_2d[wall[p]][1] <= lvl + 1e-12 {
+                    best = p;
+                } else {
+                    break;
+                }
+            }
+            wall[best]
+        };
+        let mut c: Vec<u32> = vec![anchor_at(&left) as u32];
+        c.extend(rows[k - 2].iter().map(|&i| i as u32));
+        c.push(anchor_at(&right) as u32);
+        Some(c)
+    };
+    let left_set: HashSet<u32> = left.iter().map(|&i| i as u32).collect();
+    let right_set: HashSet<u32> = right.iter().map(|&i| i as u32).collect();
+    // ── 6. two-pointer zipper (s78 mechanics, angled-wall hardened) ─
+    let scale2 = uspan * uspan + vspan * vspan;
+    let eps_area = 1e-12 * scale2;
+    let area2 = |a: u32, b: u32, c: u32| -> f64 {
+        let pa = all_2d[a as usize];
+        let pb = all_2d[b as usize];
+        let pc = all_2d[c as usize];
+        (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])
+    };
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for k in 1..=m_rows + 1 {
+        let a = match lower_chain(k) {
+            Some(c) if c.len() >= 2 => c,
+            _ => lattice_reject!(format!("lower chain degenerate k={}", k)),
+        };
+        let b = full_row(k);
+        if b.len() < 2 {
+            lattice_reject!(format!("upper row degenerate k={}", k));
+        }
+        let (m, nb) = (a.len(), b.len());
+        let (mut ia, mut ib) = (0usize, 0usize);
+        let mut guard_ct = 0usize;
+        while ia < m - 1 || ib < nb - 1 {
+            let dead_a = ia >= m - 1;
+            let dead_b = ib >= nb - 1;
+            // all-on-one-wall triangles are 1D degenerates: on u-const
+            // walls (sail) they are EXACTLY collinear and the eps guard
+            // catches them; an ANGLED wall's curvature (f26 right wall:
+            // area ~1e-7) slips past the absolute eps and would emit an
+            // inverted wall sliver — tripped explicitly instead.
+            let deg_a = !dead_a && {
+                area2(a[ia], a[ia + 1], b[ib]).abs() <= eps_area
+                    || (left_set.contains(&a[ia])
+                        && left_set.contains(&a[ia + 1])
+                        && left_set.contains(&b[ib]))
+                    || (right_set.contains(&a[ia])
+                        && right_set.contains(&a[ia + 1])
+                        && right_set.contains(&b[ib]))
+            };
+            let deg_b = !dead_b && {
+                area2(a[ia], b[ib + 1], b[ib]).abs() <= eps_area
+                    || (left_set.contains(&a[ia])
+                        && left_set.contains(&b[ib + 1])
+                        && left_set.contains(&b[ib]))
+                    || (right_set.contains(&a[ia])
+                        && right_set.contains(&b[ib + 1])
+                        && right_set.contains(&b[ib]))
+            };
+            // right-anchor block (s78 wall-deadlock guard generalized
+            // for ANGLED walls): A must not step onto its final right
+            // anchor while B still has anything to walk and B's chain
+            // ends in a right-wall suffix — the tail would then have
+            // to fan from the ANCHOR (all-wall triangles, deg →
+            // stuck). On u-const walls the u-criterion already
+            // enforces this (anchor u = max); an angled wall lets a
+            // row point sit RIGHT of the anchor (f26: row u 0.7999 vs
+            // anchor 0.7994), so the block is explicit: B consumes its
+            // whole right tail first (fanning from A's row-last
+            // interior point), then A takes the final step.
+            let wall_block_a = !dead_a
+                && ia + 1 == m - 1
+                && !dead_b
+                && right_set.contains(&a[m - 1])
+                && right_set.contains(&b[nb - 1]);
+            let can_a = !dead_a && !deg_a && !wall_block_a;
+            let can_b = !dead_b && !deg_b;
+            let take_a = if !can_a {
+                false
+            } else if !can_b {
+                true
+            } else if ia == 0
+                && ib == 0
+                && left_set.contains(&a[0])
+                && left_set.contains(&b[0])
+            {
+                // opening pair on the left wall: advance A first
+                true
+            } else {
+                // u-criterion (both chains weakly u-monotone)
+                all_2d[a[ia + 1] as usize][0] <= all_2d[b[ib + 1] as usize][0]
+            };
+            if take_a {
+                tris.push([a[ia], a[ia + 1], b[ib]]);
+                ia += 1;
+            } else if can_b {
+                tris.push([a[ia], b[ib + 1], b[ib]]);
+                ib += 1;
+            } else if !dead_a && !deg_a {
+                // wall_block_a is the only blocker — B is exhausted or
+                // blocked; advance A to finish the band
+                tris.push([a[ia], a[ia + 1], b[ib]]);
+                ia += 1;
+            } else {
+                lattice_reject!(format!(
+                    "zipper stuck k={} ia={} ib={}",
+                    k, ia, ib
+                ));
+            }
+            guard_ct += 1;
+            if guard_ct > 4 * (m + nb) {
+                lattice_reject!(format!("zipper loop k={}", k));
+            }
+        }
+    }
+    if tris.len() < 3 {
+        lattice_reject!("empty strip");
+    }
+    // ── 7. guards: coverage / edge audit / area / winding / needles ─
+    {
+        let mut used = vec![false; interior_start + n_interior];
+        for t in tris.iter() {
+            for &v in t.iter() {
+                if (v as usize) < used.len() {
+                    used[v as usize] = true;
+                }
+            }
+        }
+        for i in 0..interior_start + n_interior {
+            if !used[i] {
+                lattice_reject!(format!("point {} unused", i));
+            }
+        }
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in tris.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let mut rim_set: HashSet<(u32, u32)> = HashSet::new();
+        for i in 0..n_boundary {
+            let j = (i + 1) % n_boundary;
+            rim_set.insert((i.min(j) as u32, i.max(j) as u32));
+        }
+        for (e, cnt) in ecount.iter() {
+            if rim_set.contains(e) {
+                if *cnt != 1 {
+                    lattice_reject!(format!("rim edge {:?} count {}", e, cnt));
+                }
+            } else if *cnt != 2 {
+                lattice_reject!(format!("interior edge {:?} count {}", e, cnt));
+            }
+        }
+        for e in rim_set.iter() {
+            if !ecount.contains_key(e) {
+                lattice_reject!(format!("rim edge {:?} missing", e));
+            }
+        }
+        // area + winding (normalize to the polygon's sign)
+        let mut poly_s = 0.0f64;
+        for i in 0..n_boundary {
+            let a = all_2d[i];
+            let b = all_2d[(i + 1) % n_boundary];
+            poly_s += a[0] * b[1] - b[0] * a[1];
+        }
+        poly_s *= 0.5;
+        let strip_s: f64 = tris
+            .iter()
+            .map(|t| area2(t[0], t[1], t[2]) * 0.5)
+            .sum();
+        if (strip_s - poly_s).abs() > 0.005 * poly_s.abs().max(1e-12) {
+            lattice_reject!(format!(
+                "area mismatch strip {:.6} vs poly {:.6}",
+                strip_s, poly_s
+            ));
+        }
+        if strip_s * poly_s < 0.0 {
+            for t in tris.iter_mut() {
+                t.swap(1, 2);
+            }
+        }
+        let noise = 1e-9 * scale2;
+        let mut pos = 0usize;
+        let mut neg = 0usize;
+        for t in tris.iter() {
+            let s = area2(t[0], t[1], t[2]);
+            if s > noise {
+                pos += 1;
+            } else if s < -noise {
+                neg += 1;
+            }
+        }
+        if pos > 0 && neg > 0 {
+            lattice_reject!(format!("winding inversion {} pos / {} neg", pos, neg));
+        }
+        if pos == 0 && neg == 0 {
+            lattice_reject!("all-zero areas");
+        }
+        // UV needle census (s82 lesson: aspect < 1e-3 folds in 3D).
+        // Strict zero: a row-built grid is needle-free by construction
+        // (grid quads ~1.5:1); any needle means the rows/walls are
+        // mismatched (f26-168 class: row ends 0.08 short of the wall,
+        // 55-pt wall band fanning from a distant row point) — such a
+        // face keeps the standard CDT result.
+        for t in tris.iter() {
+            let p = all_2d[t[0] as usize];
+            let q = all_2d[t[1] as usize];
+            let r = all_2d[t[2] as usize];
+            let e1 = (p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]);
+            let e2 = (q[0] - r[0]) * (q[0] - r[0]) + (q[1] - r[1]) * (q[1] - r[1]);
+            let e3 = (r[0] - p[0]) * (r[0] - p[0]) + (r[1] - p[1]) * (r[1] - p[1]);
+            let max_e = e1.max(e2).max(e3);
+            let a = area2(t[0], t[1], t[2]).abs() * 0.5;
+            if max_e > 0.0 && a < 1e-3 * max_e {
+                lattice_reject!("UV needle in row grid");
+            }
+        }
+    }
+    if dbg {
+        eprintln!(
+            "[LATTICE accept {}] {} tris, {} rows, ring {}",
+            crate::parametric_domain::current_face_label(),
+            tris.len(),
+            m_rows,
+            n_boundary
+        );
+    }
+    Some(tris)
 }
 
 /// The triangle edge nearest to point p (by |orient2d|), as a
@@ -1760,5 +2482,270 @@ mod s82_tests {
             "non-manifold edge (0,2) triangle count changed {} -> {} — the nm guard must prevent flips on it",
             c_before, c_after
         );
+    }
+
+    // session-83: the f26-class regression — a 4-corner ring (angled
+    // right wall with slight convex curvature) carrying a 341-point
+    // brick lattice (16 fine u-step-0.04 rows interleaved with 15
+    // offset coarse u-step-0.08 rows). The data is the production
+    // HOUSING_MIRROR f26 dump (drill BREP#62542, Nurbs 4x10 fillet,
+    // 6-decimal). The STANDARD pipeline drops 205/341 lattice points
+    // to the s64 sliver-guard chord deadlock (the measured s82 state
+    // — the surviving 25 (26,26) REAL fold pairs were the unsplit
+    // coarse triangles); the s83 STRUCTURAL LATTICE rescue must
+    // recover EVERY point with an exact rim and no interior seams.
+    // Self-proving: if the rescue breaks, the standard result (491
+    // tris, 205 drops) fails the all-points-used assertion below.
+    #[test]
+    fn test_structural_lattice_rescue_f26_class() {
+    const RING: [[f64; 2]; 220] = [
+        [0.749444,0.425793], [0.749875,0.433133], [0.750339,0.440487], [0.750838,0.447855],
+        [0.751375,0.455239], [0.751952,0.462638], [0.752568,0.470054], [0.753217,0.477485],
+        [0.753896,0.484933], [0.7546,0.492398], [0.755327,0.499881], [0.756084,0.507381],
+        [0.756877,0.514896], [0.757714,0.522427], [0.758599,0.529971], [0.759533,0.537529],
+        [0.760509,0.545098], [0.76152,0.552678], [0.762557,0.560267], [0.763611,0.567866],
+        [0.764684,0.575474], [0.765782,0.58309], [0.766911,0.590714], [0.768079,0.598347],
+        [0.769288,0.605988], [0.770538,0.613637], [0.771825,0.621294], [0.773148,0.628959],
+        [0.774504,0.636631], [0.775888,0.644311], [0.7773,0.652], [0.778735,0.659698],
+        [0.780195,0.667407], [0.781676,0.675127], [0.783175,0.682859], [0.784687,0.690605],
+        [0.786207,0.698366], [0.787734,0.706141], [0.789274,0.713931], [0.790844,0.721732],
+        [0.792458,0.72954], [0.794124,0.737351], [0.795848,0.745162], [0.797623,0.752968],
+        [0.79944,0.760765], [0.801284,0.76855], [0.803138,0.776318], [0.804987,0.784067],
+        [0.80683,0.791798], [0.808671,0.799513], [0.810514,0.807212], [0.812365,0.814897],
+        [0.814226,0.822569], [0.8161,0.83023], [0.817992,0.83788], [0.819905,0.84552],
+        [0.807598,0.845502], [0.795368,0.845488], [0.783211,0.845476], [0.771123,0.845467],
+        [0.759103,0.845461], [0.747145,0.845456], [0.735247,0.845454], [0.723407,0.845454],
+        [0.711622,0.845455], [0.699888,0.845457], [0.688203,0.845461], [0.676564,0.845466],
+        [0.664969,0.845471], [0.653414,0.845476], [0.641898,0.845482], [0.630417,0.845488],
+        [0.618969,0.845494], [0.607551,0.845499], [0.596159,0.845503], [0.584791,0.845507],
+        [0.573445,0.84551], [0.562116,0.845512], [0.550802,0.845514], [0.5395,0.845515],
+        [0.528208,0.845516], [0.516923,0.845516], [0.505642,0.845516], [0.494362,0.845516],
+        [0.483081,0.845515], [0.471797,0.845514], [0.460507,0.845513], [0.449207,0.845512],
+        [0.437896,0.845511], [0.426571,0.845511], [0.415228,0.84551], [0.403865,0.845509],
+        [0.392479,0.845509], [0.381067,0.845509], [0.369625,0.845509], [0.358151,0.845509],
+        [0.346642,0.84551], [0.335095,0.84551], [0.323507,0.845511], [0.311874,0.845512],
+        [0.300195,0.845513], [0.288465,0.845514], [0.276683,0.845515], [0.264845,0.845516],
+        [0.252947,0.845517], [0.240987,0.845518], [0.228962,0.845518], [0.216867,0.845519],
+        [0.204699,0.84552], [0.192455,0.84552], [0.180131,0.84552], [0.180186,0.837833],
+        [0.18031,0.830163], [0.18045,0.822506], [0.180566,0.814856], [0.180631,0.807209],
+        [0.180628,0.799558], [0.180544,0.7919], [0.180379,0.784227], [0.180146,0.776536],
+        [0.179874,0.768822], [0.179613,0.761086], [0.179407,0.753334], [0.179286,0.745571],
+        [0.179271,0.737801], [0.179365,0.73003], [0.179548,0.722263], [0.179785,0.714504],
+        [0.180029,0.706758], [0.180224,0.699029], [0.180348,0.691318], [0.180409,0.683625],
+        [0.180418,0.675947], [0.18039,0.668284], [0.180339,0.660634], [0.180275,0.652997],
+        [0.180203,0.645371], [0.180133,0.637755], [0.180076,0.630149], [0.180038,0.622551],
+        [0.18002,0.614962], [0.18002,0.607381], [0.180037,0.599809], [0.18007,0.592246],
+        [0.180109,0.584691], [0.180136,0.577145], [0.180131,0.569607], [0.180078,0.562078],
+        [0.179979,0.554557], [0.179864,0.547047], [0.179761,0.53955], [0.179696,0.532067],
+        [0.179685,0.524599], [0.179735,0.517151], [0.179837,0.509722], [0.179975,0.502316],
+        [0.180127,0.494933], [0.180268,0.487576], [0.180373,0.480239], [0.180427,0.472919],
+        [0.180427,0.465611], [0.180381,0.458311], [0.180306,0.451015], [0.180218,0.443718],
+        [0.180138,0.436416], [0.180102,0.429106], [0.191672,0.429026], [0.203084,0.428946],
+        [0.214351,0.428868], [0.225482,0.42879], [0.236486,0.428713], [0.247375,0.428636],
+        [0.258157,0.42856], [0.268843,0.428485], [0.279441,0.428411], [0.289961,0.428337],
+        [0.300412,0.428263], [0.310803,0.428191], [0.321142,0.428119], [0.331438,0.428047],
+        [0.341698,0.427976], [0.351932,0.427906], [0.362147,0.427836], [0.372351,0.427767],
+        [0.382551,0.427698], [0.392749,0.427629], [0.402945,0.427561], [0.413138,0.427494],
+        [0.423327,0.427428], [0.433511,0.427362], [0.443688,0.427296], [0.453858,0.427232],
+        [0.464019,0.427168], [0.47417,0.427105], [0.48431,0.427043], [0.494437,0.426982],
+        [0.50455,0.426921], [0.514647,0.426862], [0.524729,0.426803], [0.534792,0.426746],
+        [0.544837,0.42669], [0.554862,0.426635], [0.564866,0.426581], [0.574851,0.426528],
+        [0.584825,0.426476], [0.594795,0.426425], [0.604769,0.426376], [0.614755,0.426327],
+        [0.624761,0.42628], [0.634795,0.426233], [0.644866,0.426188], [0.654981,0.426144],
+        [0.665149,0.426101], [0.675379,0.426059], [0.685679,0.426018], [0.696058,0.425978],
+        [0.706524,0.425939], [0.717087,0.425901], [0.727755,0.425864], [0.738538,0.425828],
+    ];
+    const LATTICE: [[f64; 2]; 341] = [
+        [0.259351,0.478259], [0.33943,0.478259], [0.419509,0.478259], [0.499588,0.478259],
+        [0.579667,0.478259], [0.659746,0.478259], [0.739825,0.478259], [0.259351,0.530725],
+        [0.33943,0.530725], [0.419509,0.530725], [0.499588,0.530725], [0.579667,0.530725],
+        [0.659746,0.530725], [0.739825,0.530725], [0.259351,0.583191], [0.33943,0.583191],
+        [0.419509,0.583191], [0.499588,0.583191], [0.579667,0.583191], [0.659746,0.583191],
+        [0.739825,0.583191], [0.259351,0.635657], [0.33943,0.635657], [0.419509,0.635657],
+        [0.499588,0.635657], [0.579667,0.635657], [0.659746,0.635657], [0.739825,0.635657],
+        [0.259351,0.688123], [0.33943,0.688123], [0.419509,0.688123], [0.499588,0.688123],
+        [0.579667,0.688123], [0.659746,0.688123], [0.739825,0.688123], [0.259351,0.740588],
+        [0.33943,0.740588], [0.419509,0.740588], [0.499588,0.740588], [0.579667,0.740588],
+        [0.659746,0.740588], [0.739825,0.740588], [0.259351,0.793054], [0.33943,0.793054],
+        [0.419509,0.793054], [0.499588,0.793054], [0.579667,0.793054], [0.659746,0.793054],
+        [0.739825,0.793054], [0.219311,0.452026], [0.199291,0.43891], [0.239331,0.43891],
+        [0.199291,0.465142], [0.239331,0.465142], [0.219311,0.504492], [0.199291,0.491375],
+        [0.239331,0.491375], [0.199291,0.517608], [0.239331,0.517608], [0.219311,0.556958],
+        [0.199291,0.543841], [0.239331,0.543841], [0.199291,0.570074], [0.239331,0.570074],
+        [0.219311,0.609424], [0.199291,0.596307], [0.239331,0.596307], [0.199291,0.62254],
+        [0.239331,0.62254], [0.219311,0.66189], [0.199291,0.648773], [0.239331,0.648773],
+        [0.199291,0.675006], [0.239331,0.675006], [0.219311,0.714355], [0.199291,0.701239],
+        [0.239331,0.701239], [0.199291,0.727472], [0.239331,0.727472], [0.219311,0.766821],
+        [0.199291,0.753705], [0.239331,0.753705], [0.199291,0.779938], [0.239331,0.779938],
+        [0.219311,0.819287], [0.199291,0.806171], [0.239331,0.806171], [0.199291,0.832404],
+        [0.239331,0.832404], [0.29939,0.452026], [0.27937,0.43891], [0.31941,0.43891],
+        [0.27937,0.465142], [0.31941,0.465142], [0.29939,0.504492], [0.27937,0.491375],
+        [0.31941,0.491375], [0.27937,0.517608], [0.31941,0.517608], [0.29939,0.556958],
+        [0.27937,0.543841], [0.31941,0.543841], [0.27937,0.570074], [0.31941,0.570074],
+        [0.29939,0.609424], [0.27937,0.596307], [0.31941,0.596307], [0.27937,0.62254],
+        [0.31941,0.62254], [0.29939,0.66189], [0.27937,0.648773], [0.31941,0.648773],
+        [0.27937,0.675006], [0.31941,0.675006], [0.29939,0.714355], [0.27937,0.701239],
+        [0.31941,0.701239], [0.27937,0.727472], [0.31941,0.727472], [0.29939,0.766821],
+        [0.27937,0.753705], [0.31941,0.753705], [0.27937,0.779938], [0.31941,0.779938],
+        [0.29939,0.819287], [0.27937,0.806171], [0.31941,0.806171], [0.27937,0.832404],
+        [0.31941,0.832404], [0.379469,0.452026], [0.359449,0.43891], [0.399489,0.43891],
+        [0.359449,0.465142], [0.399489,0.465142], [0.379469,0.504492], [0.359449,0.491375],
+        [0.399489,0.491375], [0.359449,0.517608], [0.399489,0.517608], [0.379469,0.556958],
+        [0.359449,0.543841], [0.399489,0.543841], [0.359449,0.570074], [0.399489,0.570074],
+        [0.379469,0.609424], [0.359449,0.596307], [0.399489,0.596307], [0.359449,0.62254],
+        [0.399489,0.62254], [0.379469,0.66189], [0.359449,0.648773], [0.399489,0.648773],
+        [0.359449,0.675006], [0.399489,0.675006], [0.379469,0.714355], [0.359449,0.701239],
+        [0.399489,0.701239], [0.359449,0.727472], [0.399489,0.727472], [0.379469,0.766821],
+        [0.359449,0.753705], [0.399489,0.753705], [0.359449,0.779938], [0.399489,0.779938],
+        [0.379469,0.819287], [0.359449,0.806171], [0.399489,0.806171], [0.359449,0.832404],
+        [0.399489,0.832404], [0.459548,0.452026], [0.439529,0.43891], [0.479568,0.43891],
+        [0.439529,0.465142], [0.479568,0.465142], [0.459548,0.504492], [0.439529,0.491375],
+        [0.479568,0.491375], [0.439529,0.517608], [0.479568,0.517608], [0.459548,0.556958],
+        [0.439529,0.543841], [0.479568,0.543841], [0.439529,0.570074], [0.479568,0.570074],
+        [0.459548,0.609424], [0.439529,0.596307], [0.479568,0.596307], [0.439529,0.62254],
+        [0.479568,0.62254], [0.459548,0.66189], [0.439529,0.648773], [0.479568,0.648773],
+        [0.439529,0.675006], [0.479568,0.675006], [0.459548,0.714355], [0.439529,0.701239],
+        [0.479568,0.701239], [0.439529,0.727472], [0.479568,0.727472], [0.459548,0.766821],
+        [0.439529,0.753705], [0.479568,0.753705], [0.439529,0.779938], [0.479568,0.779938],
+        [0.459548,0.819287], [0.439529,0.806171], [0.479568,0.806171], [0.439529,0.832404],
+        [0.479568,0.832404], [0.539628,0.452026], [0.519608,0.43891], [0.559647,0.43891],
+        [0.519608,0.465142], [0.559647,0.465142], [0.539628,0.504492], [0.519608,0.491375],
+        [0.559647,0.491375], [0.519608,0.517608], [0.559647,0.517608], [0.539628,0.556958],
+        [0.519608,0.543841], [0.559647,0.543841], [0.519608,0.570074], [0.559647,0.570074],
+        [0.539628,0.609424], [0.519608,0.596307], [0.559647,0.596307], [0.519608,0.62254],
+        [0.559647,0.62254], [0.539628,0.66189], [0.519608,0.648773], [0.559647,0.648773],
+        [0.519608,0.675006], [0.559647,0.675006], [0.539628,0.714355], [0.519608,0.701239],
+        [0.559647,0.701239], [0.519608,0.727472], [0.559647,0.727472], [0.539628,0.766821],
+        [0.519608,0.753705], [0.559647,0.753705], [0.519608,0.779938], [0.559647,0.779938],
+        [0.539628,0.819287], [0.519608,0.806171], [0.559647,0.806171], [0.519608,0.832404],
+        [0.559647,0.832404], [0.619707,0.452026], [0.599687,0.43891], [0.639726,0.43891],
+        [0.599687,0.465142], [0.639726,0.465142], [0.619707,0.504492], [0.599687,0.491375],
+        [0.639726,0.491375], [0.599687,0.517608], [0.639726,0.517608], [0.619707,0.556958],
+        [0.599687,0.543841], [0.639726,0.543841], [0.599687,0.570074], [0.639726,0.570074],
+        [0.619707,0.609424], [0.599687,0.596307], [0.639726,0.596307], [0.599687,0.62254],
+        [0.639726,0.62254], [0.619707,0.66189], [0.599687,0.648773], [0.639726,0.648773],
+        [0.599687,0.675006], [0.639726,0.675006], [0.619707,0.714355], [0.599687,0.701239],
+        [0.639726,0.701239], [0.599687,0.727472], [0.639726,0.727472], [0.619707,0.766821],
+        [0.599687,0.753705], [0.639726,0.753705], [0.599687,0.779938], [0.639726,0.779938],
+        [0.619707,0.819287], [0.599687,0.806171], [0.639726,0.806171], [0.599687,0.832404],
+        [0.639726,0.832404], [0.699786,0.452026], [0.679766,0.43891], [0.719806,0.43891],
+        [0.679766,0.465142], [0.719806,0.465142], [0.699786,0.504492], [0.679766,0.491375],
+        [0.719806,0.491375], [0.679766,0.517608], [0.719806,0.517608], [0.699786,0.556958],
+        [0.679766,0.543841], [0.719806,0.543841], [0.679766,0.570074], [0.719806,0.570074],
+        [0.699786,0.609424], [0.679766,0.596307], [0.719806,0.596307], [0.679766,0.62254],
+        [0.719806,0.62254], [0.699786,0.66189], [0.679766,0.648773], [0.719806,0.648773],
+        [0.679766,0.675006], [0.719806,0.675006], [0.699786,0.714355], [0.679766,0.701239],
+        [0.719806,0.701239], [0.679766,0.727472], [0.719806,0.727472], [0.699786,0.766821],
+        [0.679766,0.753705], [0.719806,0.753705], [0.679766,0.779938], [0.719806,0.779938],
+        [0.699786,0.819287], [0.679766,0.806171], [0.719806,0.806171], [0.679766,0.832404],
+        [0.719806,0.832404], [0.779865,0.714355], [0.759845,0.701239], [0.759845,0.727472],
+        [0.779865,0.766821], [0.759845,0.753705], [0.759845,0.779938], [0.799885,0.779938],
+        [0.779865,0.819287], [0.759845,0.806171], [0.799885,0.806171], [0.759845,0.832404],
+        [0.799885,0.832404],
+    ];
+        let tris = triangulate_polygon_cdt(&RING, &[], &LATTICE);
+        assert!(
+            !tris.is_empty(),
+            "f26: CDT returned empty — face untriangulated"
+        );
+        // 1. EVERY interior point used (the standard path drops 205)
+        let n_total = RING.len() + LATTICE.len();
+        let mut used = vec![false; n_total];
+        for t in &tris {
+            for &v in t.iter() {
+                assert!((v as usize) < n_total, "index out of range");
+                used[v as usize] = true;
+            }
+        }
+        let unused: Vec<usize> = (RING.len()..n_total)
+            .filter(|&i| !used[i])
+            .collect();
+        assert!(
+            unused.is_empty(),
+            "f26: interior lattice drops: {} of {} (first {:?}) — the structural lattice rescue must recover every Steiner point",
+            unused.len(),
+            LATTICE.len(),
+            &unused[..unused.len().min(5)]
+        );
+        // 2. rim edges exactly once, non-rim edges exactly twice
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in &tris {
+            for k in 0..3 {
+                let a = t[k];
+                let b = t[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        let n_ring = RING.len();
+        for i in 0..n_ring {
+            let j = (i + 1) % n_ring;
+            let e = (i.min(j) as u32, i.max(j) as u32);
+            let cnt = ecount.get(&e).copied().unwrap_or(0);
+            assert_eq!(
+                cnt, 1,
+                "f26: rim edge ({},{}) count {} (must be exactly 1 — the cross-face watertight contract)",
+                e.0, e.1, cnt
+            );
+        }
+        let rim = |a: usize, b: usize| -> bool {
+            let (lo, hi) = (a.min(b), a.max(b));
+            (lo == 0 && hi == n_ring - 1)
+                || hi - lo == 1
+        };
+        for (e, cnt) in ecount.iter() {
+            if !rim(e.0 as usize, e.1 as usize) {
+                assert_eq!(
+                    *cnt, 2,
+                    "f26: interior edge ({},{}) count {} (one-sided seam)",
+                    e.0, e.1, cnt
+                );
+            }
+        }
+        // 3. uniform winding (no inversions)
+        let all: Vec<[f64; 2]> = RING.iter().chain(LATTICE.iter()).copied().collect();
+        let scale2 = {
+            let (mut lo0, mut hi0, mut lo1, mut hi1) =
+                (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY, f64::NEG_INFINITY);
+            for p in all.iter() {
+                lo0 = lo0.min(p[0]);
+                hi0 = hi0.max(p[0]);
+                lo1 = lo1.min(p[1]);
+                hi1 = hi1.max(p[1]);
+            }
+            (hi0 - lo0) * (hi0 - lo0) + (hi1 - lo1) * (hi1 - lo1)
+        };
+        let noise = 1e-9 * scale2;
+        let (mut pos, mut neg) = (0usize, 0usize);
+        for t in &tris {
+            let s = orient2d(all[t[0] as usize], all[t[1] as usize], all[t[2] as usize]);
+            if s > noise {
+                pos += 1;
+            } else if s < -noise {
+                neg += 1;
+            }
+        }
+        assert!(
+            pos == 0 || neg == 0,
+            "f26: winding inversion {} pos / {} neg",
+            pos,
+            neg
+        );
+        // 4. no UV needles (aspect < 1e-3 — the s82 fold-prone class)
+        for t in &tris {
+            let p = all[t[0] as usize];
+            let q = all[t[1] as usize];
+            let r = all[t[2] as usize];
+            let e1 = (p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]);
+            let e2 = (q[0] - r[0]) * (q[0] - r[0]) + (q[1] - r[1]) * (q[1] - r[1]);
+            let e3 = (r[0] - p[0]) * (r[0] - p[0]) + (r[1] - p[1]) * (r[1] - p[1]);
+            let max_e = e1.max(e2).max(e3);
+            let a = orient2d(p, q, r).abs() * 0.5;
+            assert!(
+                max_e <= 0.0 || a >= 1e-3 * max_e,
+                "f26: UV needle in the lattice grid (aspect < 1e-3)"
+            );
+        }
     }
 }

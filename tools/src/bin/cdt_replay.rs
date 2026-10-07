@@ -425,7 +425,16 @@ fn main() {
             for i in 0..n {
                 let j = (i + 1) % n;
                 rim_set.insert((((idx + i) as u32).min((idx + j) as u32), ((idx + i) as u32).max((idx + j) as u32)));
-                if ecount.contains_key(&((idx + i) as u32, (idx + j) as u32)) {
+                // s83: the presence check needs the SAME (min,max)
+                // normalization as rim_set above — the closing edge
+                // (n-1, 0) was probed with the raw (n-1, 0) key and
+                // never found, reporting a permanent phantom "miss 1"
+                // on every ring (s82 fixed the set, not the probe).
+                let probe = (
+                    ((idx + i) as u32).min((idx + j) as u32),
+                    ((idx + i) as u32).max((idx + j) as u32),
+                );
+                if ecount.contains_key(&probe) {
                     rim_edges += 1;
                 }
             }
