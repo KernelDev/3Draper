@@ -13292,9 +13292,132 @@ pub fn triangulate_surface_consistent(
                             // the s77 sail arm: equal ring edges + zero extra
                             // boundary + zero dropped interior (never-worsen:
                             // fewer CDT ring edges → reject).
+                            // s82 OVERLAP GUARD: the s64 gate compared only
+                            // RIM coverage — a corrupted CDT (the lawson
+                            // stale-state era) could carry 15.6% UV overlap
+                            // (triangles spilling outside the domain → 3D
+                            // fold families) and still win on ring edges
+                            // (s81 f26: legacy 201 vs CDT 215 — accepted,
+                            // the (26,26) 40-pair family). The CDT result
+                            // must not overlap the domain more than the
+                            // legacy result does (sum|A| vs polygon area,
+                            // computed over each triangulation's triangles
+                            // in the same UV frame).
+                            let uv_overlap_ratio = |flat: &[usize]| -> f64 {
+                                let mut sum_abs = 0.0f64;
+                                for c in flat.chunks_exact(3) {
+                                    let (a, b, ch) = (
+                                        all_uv[c[0]],
+                                        all_uv[c[1]],
+                                        all_uv[c[2]],
+                                    );
+                                    let s = (b.u - a.u) * (ch.v - a.v)
+                                        - (b.v - a.v) * (ch.u - a.u);
+                                    sum_abs += s.abs();
+                                }
+                                // polygon area: outer − holes (shoelace)
+                                let shoelace = |ring: &[Point2d]| -> f64 {
+                                    let n = ring.len();
+                                    if n < 3 {
+                                        return 0.0;
+                                    }
+                                    let mut s = 0.0;
+                                    for i in 0..n {
+                                        let j = (i + 1) % n;
+                                        s += ring[i].u * ring[j].v
+                                            - ring[j].u * ring[i].v;
+                                    }
+                                    s
+                                };
+                                let poly2 = (shoelace(&outer_uv).abs()
+                                    - valid_hole_indices
+                                        .iter()
+                                        .map(|&vi| {
+                                            shoelace(&normalized_holes_uv_capped[vi]).abs()
+                                        })
+                                        .sum::<f64>())
+                                .abs();
+                                // EXCESS only: a triangulation that
+                                // UNDER-covers (sum|A| < polygon — the
+                                // legacy region-drop debt) reports 0.0,
+                                // not a negative — undercoverage is the
+                                // extra_bnd metric's job, not overlap's.
+                                if poly2 > 1e-30 {
+                                    (sum_abs / poly2 - 1.0).max(0.0)
+                                } else {
+                                    0.0
+                                }
+                            };
+                            let legacy_overlap = uv_overlap_ratio(&tris);
+                            let cdt_overlap = uv_overlap_ratio(&cdt_flat);
+                            // Seam-wrap robustness: a periodic ring (full
+                            // u/v turn, e.g. GEAR tooth-flank cones f18/
+                            // f20) makes the shoelace "polygon area" —
+                            // and with it the overlap ratio — meaningless
+                            // (both sides measured 9-22% "overlap" on
+                            // legitimately triangulated wrapped domains;
+                            // the s65 gate comment already knew about
+                            // seam-wrap pathologies). Detect the wrap
+                            // (a consecutive jump over half the span)
+                            // and skip the guard there.
+                            let seam_wrapped = {
+                                let (mut umin, mut umax) = (f64::INFINITY, f64::NEG_INFINITY);
+                                let (mut vmin, mut vmax) = (f64::INFINITY, f64::NEG_INFINITY);
+                                for p in outer_uv.iter() {
+                                    umin = umin.min(p.u);
+                                    umax = umax.max(p.u);
+                                    vmin = vmin.min(p.v);
+                                    vmax = vmax.max(p.v);
+                                }
+                                let (us, vs) = (umax - umin, vmax - vmin);
+                                let jump = |ring: &[Point2d]| {
+                                    let n = ring.len();
+                                    if n < 2 || (us <= 0.0 && vs <= 0.0) {
+                                        return false;
+                                    }
+                                    for i in 0..n {
+                                        let j = (i + 1) % n;
+                                        let du = (ring[i].u - ring[j].u).abs();
+                                        let dv = (ring[i].v - ring[j].v).abs();
+                                        if (us > 0.0 && du > 0.5 * us)
+                                            || (vs > 0.0 && dv > 0.5 * vs)
+                                        {
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                };
+                                jump(&outer_uv)
+                                    || normalized_holes_uv_capped
+                                        .iter()
+                                        .any(|h| jump(h))
+                            };
+                            // s82 final form: a CORRUPTION detector,
+                            // not a quality comparator. The rim-coverage
+                            // criterion already adjudicates degenerate-
+                            // domain tradeoffs (GEAR f18/f20 tooth-flank
+                            // cones: razor bands where BOTH sides carry
+                            // 9-22% overlap from earcut collinearity,
+                            // and the CDT's 5020/5214 rim vs the
+                            // legacy's 2113 unused ring verts is the
+                            // right call). Reject ONLY when the CDT's
+                            // overlap is absolutely large (>15%) AND
+                            // far worse than the legacy's (3x + 5%) —
+                            // the stale-state corruption signature
+                            // (s81 f26: 0.156 vs 0.0 — rejected; f18:
+                            // 0.222 vs 0.093 — accepted).
+                            let overlap_ok = std::env::var(
+                                "DRAPPER_CDT_OVERLAP_GUARD",
+                            )
+                            .as_deref()
+                                == Ok("0")
+                                || seam_wrapped
+                                || !(cdt_overlap > 0.15
+                                    && cdt_overlap > 3.0 * legacy_overlap + 0.05);
                             let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
                             let sail_fallback = sail_cdt_candidate;
                             let cdt_improves = !cdt2.is_empty()
+                                && overlap_ok
                                 && (cdt_ring_edges > legacy_ring_edges
                                     || (crescent_fallback
                                         && cdt_ring_edges == legacy_ring_edges
@@ -13320,14 +13443,17 @@ pub fn triangulate_surface_consistent(
                                 rescued_by_cdt = true;
                             } else {
                                 log::warn!(
-                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}) — keeping legacy spike-chain result",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}, overlap {:.6} → {:.6}{}) — keeping legacy spike-chain result",
                                 current_face_label(),
                                 n_unused,
                                 legacy_extra_bnd,
                                 legacy_ring_edges,
                                 cdt_ring_edges,
                                 legacy_extra_bnd,
-                                cdt_extra_bnd
+                                cdt_extra_bnd,
+                                legacy_overlap,
+                                cdt_overlap,
+                                if overlap_ok { "" } else { " [OVERLAP REJECT]" }
                             );
                                 // session-65 diagnostics: dump the failing CDT
                                 // inputs + both triangulations for offline

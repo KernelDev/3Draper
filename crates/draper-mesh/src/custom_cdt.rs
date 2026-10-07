@@ -178,6 +178,82 @@ fn insert_interior_points(
     let dbg = std::env::var("DRAPPER_CDT_DEBUG").is_ok();
     let (mut n_ring_skip, mut n_sliver_skip, mut n_not_found) = (0usize, 0usize, 0usize);
 
+    // session-82 LATTICE-AWARE GUARD MODE (experimental knob — the
+    // default `s64` keeps the session-64 behavior bit-identical):
+    //   DRAPPER_CDT_GUARD_MODE=s64     — both sliver guards always (s64)
+    //   DRAPPER_CDT_GUARD_MODE=off     — no sliver guard (pre-s64)
+    //   DRAPPER_CDT_GUARD_MODE=lattice — guards gated on a LONG edge
+    //                                     (> LONG_EDGE_STEPS x the
+    //                                     median lattice NN step)
+    // The s64 thresholds were calibrated for SPARSE Steiner points
+    // near long earcut chords (Z #1092 f29/f32). On DENSE interior
+    // lattices (fillet/sail, 300+ points) they misfire as a CASCADE:
+    // an inserted point's fan edges sit a hair from the next lattice
+    // point of the same (near-)collinear row -> min_prod ~ eps ->
+    // skip -> the hole grows -> more edge-adjacent points trip (s81
+    // f26: 169/341 dropped, overlap 15.6%). The tents the guard kills
+    // all have a LONG edge dominating the local scale; on a uniform
+    // lattice no local edge exceeds a few lattice steps.
+    let guard_mode = std::env::var("DRAPPER_CDT_GUARD_MODE")
+        .unwrap_or_else(|_| "s64".to_string());
+    let guard_mode = if guard_mode.is_empty() {
+        "s64".to_string()
+    } else {
+        guard_mode
+    };
+    let lattice_guard = guard_mode == "lattice";
+    let guard_off = guard_mode == "off";
+    // s82 split-fallback switch. MEASURED DEFAULT OFF: the fallback
+    // (split the hugged long edge instead of skipping) inserts
+    // ~1000:1 UV strips — cleaner than the s64 skip's coarse residue
+    // in UV terms, but they FOLD in 3D: drill HM 1315/229 → 1435/297,
+    // (26,26) 25 → 67 REAL. The single-point fallback cannot make the
+    // long-chord region healthy — that needs STRUCTURAL row insertion
+    // (the s78 SAIL_BAND approach), s83 material. Opt-in
+    // DRAPPER_CDT_SPLIT_FALLBACK=1 for reproduction.
+    let split_fallback =
+        std::env::var("DRAPPER_CDT_SPLIT_FALLBACK").as_deref() == Ok("1");
+    // median nearest-neighbor distance among the interior points =
+    // the lattice step estimate (O(n^2), capped — the corpus faces
+    // sit well under 1k interior points). Computed in every mode:
+    // the s82 split fallback needs it to define a LONG edge.
+    let lattice_step = if (lattice_guard || split_fallback) && n_interior >= 2 && n_interior <= 2000 {
+        let mut nn: Vec<f64> = Vec::with_capacity(n_interior);
+        for i in 0..n_interior {
+            let pi = all_2d[(interior_start + i) as usize];
+            let mut best = f64::INFINITY;
+            for j in 0..n_interior {
+                if i == j {
+                    continue;
+                }
+                let pj = all_2d[(interior_start + j) as usize];
+                let dx = pi[0] - pj[0];
+                let dy = pi[1] - pj[1];
+                let d2 = dx * dx + dy * dy;
+                if d2 < best {
+                    best = d2;
+                }
+            }
+            nn.push(best.sqrt());
+        }
+        nn.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        nn[nn.len() / 2]
+    } else {
+        0.0
+    };
+    const LONG_EDGE_STEPS: f64 = 4.0;
+    let long_edge_sq = if lattice_guard && lattice_step > 0.0 {
+        let k = LONG_EDGE_STEPS * lattice_step;
+        k * k
+    } else {
+        f64::INFINITY
+    };
+    // s82: an edge worth splitting in the fallback (> LONG_SPLIT_STEPS
+    // lattice steps — measured on f26's tripping parents: max edges
+    // 4–17 steps; the post-refinement healthy edges sit at 1–2 steps).
+    const LONG_SPLIT_STEPS: f64 = 4.0;
+    let mut n_split_fallback = 0usize;
+
     for i in 0..n_interior {
         let point_idx = (interior_start + i) as u32;
         let p = all_2d[point_idx as usize];
@@ -236,16 +312,131 @@ fn insert_interior_points(
                     };
                     let max_edge_sq = edge_sq(pa, pb, pc).max(edge_sq(p, pb, pc))
                         .max(edge_sq(pa, p, pc)).max(edge_sq(pa, pb, p));
-                    let skip_relative = parent_area > 0.0
+                    let skip_relative = !guard_off
+                        && parent_area > 0.0
                         && min_prod < MIN_FAN_PRODUCT_FRAC * parent_area;
-                    let skip_aspect =
-                        max_edge_sq > 0.0 && min_prod < MIN_FAN_ASPECT * max_edge_sq;
-                    if skip_relative || skip_aspect {
+                    // s82 lattice mode: the guards fire ONLY when the
+                    // local neighborhood carries a LONG edge (> 4
+                    // lattice steps) — the sparse-tent signature. On
+                    // a uniform lattice every local edge is within a
+                    // few steps, so insertions proceed.
+                    let long_present = !lattice_guard || max_edge_sq > long_edge_sq;
+                    let skip_aspect = !guard_off
+                        && long_present
+                        && max_edge_sq > 0.0
+                        && min_prod < MIN_FAN_ASPECT * max_edge_sq;
+                    let skip = (skip_relative && long_present) || skip_aspect;
+                    if skip {
                         n_sliver_skip += 1;
+                        // s82 diagnostics: per-skip geometry dump
+                        if let Ok(path) = std::env::var("DRAPPER_CDT_SKIP_DUMP") {
+                            use std::io::Write;
+                            if let Ok(mut f) =
+                                std::fs::OpenOptions::new().create(true).append(true).open(&path)
+                            {
+                                let _ = writeln!(
+                                    f,
+                                    "pt {} ({:.9},{:.9}) min_prod {:.3e} parent {:.3e} max_edge2 {:.3e} rel={} asp={} parent=[{},{},{}]",
+                                    point_idx,
+                                    p[0],
+                                    p[1],
+                                    min_prod,
+                                    parent_area,
+                                    max_edge_sq,
+                                    skip_relative,
+                                    skip_aspect,
+                                    a,
+                                    b,
+                                    c
+                                );
+                            }
+                        }
                         log::debug!(
                             "insert_interior_points: sliver guard — point {} min product {:.3e} (parent {:.3e}, max_edge² {:.3e}) skipped",
                             point_idx, min_prod, parent_area, max_edge_sq
                         );
+                        // session-82 LONG-CHORD EDGE-SPLIT FALLBACK:
+                        // a SKIP is only safe when the containing
+                        // structure is final — on a DENSE lattice the
+                        // skip deadlocks the refinement exactly where
+                        // it is needed (long earcut/Delaunay chords:
+                        // every lattice point inside a long-chord
+                        // parent trips the aspect guard, the chord
+                        // never gets split, the coarse triangle folds
+                        // against the refined neighborhood — s82 f26:
+                        // 205/341 dropped, the surviving 25 (26,26)
+                        // REAL pairs are the UNSPLIT big triangles).
+                        // Instead of skipping, SPLIT the edge the
+                        // point hugs: the sub-edges halve, the new
+                        // triangles carry the parent's height (healthy
+                        // aspect), and the next lattice row refines
+                        // further. Conditions: (a) not a ring edge
+                        // (cross-face contract), (b) the projection
+                        // lands strictly inside (both sub-edges ≥ 20%
+                        // of the original — a point hugging a VERTEX
+                        // must still skip), (c) the edge is long
+                        // (> LONG_SPLIT_STEPS lattice steps — a short
+                        // edge is already at the refinement scale, the
+                        // split adds nothing a skip wouldn't).
+                        if !guard_off && split_fallback {
+                            let nearest = nearest_triangle_edge(all_2d, triangles[tri_idx], p);
+                            if let Some((e1, e2)) = nearest {
+                                let is_ring = ring_edges.contains(&(e1.min(e2), e1.max(e2)));
+                                let pe1 = all_2d[e1 as usize];
+                                let pe2 = all_2d[e2 as usize];
+                                let ex = pe2[0] - pe1[0];
+                                let ey = pe2[1] - pe1[1];
+                                let len_sq = ex * ex + ey * ey;
+                                let t = if len_sq > 0.0 {
+                                    ((p[0] - pe1[0]) * ex + (p[1] - pe1[1]) * ey) / len_sq
+                                } else {
+                                    -1.0
+                                };
+                                let long_enough = lattice_step > 0.0 && {
+                                    let k = LONG_SPLIT_STEPS * lattice_step;
+                                    len_sq > k * k
+                                };
+                                // Child-quality floor: the split must
+                                // not manufacture degenerate children.
+                                // A needle parent (long edge, ~zero
+                                // height) yields needle children —
+                                // there the s64 SKIP is the right call.
+                                // Require both children on this side
+                                // to clear the needle census aspect
+                                // (area ≥ 1e-3 · sub-edge²).
+                                let child_ok = {
+                                    let popp = triangles[tri_idx]
+                                        .iter()
+                                        .find(|&&v| v != e1 && v != e2)
+                                        .map(|&v| all_2d[v as usize])
+                                        .unwrap_or(p);
+                                    let a1 = orient2d(popp, pe1, p).abs();
+                                    let a2 = orient2d(popp, p, pe2).abs();
+                                    let s1 = {
+                                        let dx = pe1[0] - p[0];
+                                        let dy = pe1[1] - p[1];
+                                        dx * dx + dy * dy
+                                    };
+                                    let s2 = {
+                                        let dx = pe2[0] - p[0];
+                                        let dy = pe2[1] - p[1];
+                                        dx * dx + dy * dy
+                                    };
+                                    a1 >= 2.0 * 1e-3 * s1 && a2 >= 2.0 * 1e-3 * s2
+                                };
+                                if !is_ring && t > 0.2 && t < 0.8 && long_enough && child_ok {
+                                    n_split_fallback += 1;
+                                    insert_point_on_edge_fast(
+                                        all_2d,
+                                        triangles,
+                                        tri_idx,
+                                        point_idx,
+                                        &mut edge_map,
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
                         continue;
                     }
                     insert_point_in_triangle_fast(triangles, tri_idx, point_idx, &mut edge_map);
@@ -258,12 +449,13 @@ fn insert_interior_points(
             }
         }
     }
-    if dbg && (n_ring_skip + n_sliver_skip + n_not_found) > 0 {
+    if dbg && (n_ring_skip + n_sliver_skip + n_not_found + n_split_fallback) > 0 {
         eprintln!(
-            "CDT_DEBUG: interior drops: ring_skip={} sliver_skip={} not_found={} of {} (label={})",
+            "CDT_DEBUG: interior drops: ring_skip={} sliver_skip={} not_found={} split_fallback={} of {} (label={})",
             n_ring_skip,
             n_sliver_skip,
             n_not_found,
+            n_split_fallback,
             n_interior,
             crate::parametric_domain::current_face_label()
         );
@@ -324,7 +516,7 @@ fn build_edge_map(triangles: &[[u32; 3]]) -> HashMap<(u32, u32), Vec<usize>> {
 ///    heuristic — the vertex may be far from the triangle's other edges).
 /// 3. Repeat until every ring vertex is used (an inserted split can chain:
 ///    the first repair may reveal the next collinear vertex).
-fn repair_unused_ring_vertices(
+pub fn repair_unused_ring_vertices(
     all_2d: &[[f64; 2]],
     triangles: &mut Vec<[u32; 3]>,
     n_boundary: usize,
@@ -738,7 +930,7 @@ fn find_edge_order_in_triangle(tri: &[u32; 3], v1: u32, v2: u32) -> (u32, u32) {
 ///
 /// Uses an edge-to-triangle adjacency map for O(1) neighbor lookups
 /// instead of O(n) linear search per edge.
-fn lawson_flip(
+pub fn lawson_flip(
     vertices: &[[f64; 2]],
     triangles: &mut Vec<[u32; 3]>,
     n_boundary: usize,
@@ -762,11 +954,29 @@ fn lawson_flip(
         let n_tris = triangles.len();
 
         for i in 0..n_tris {
-            let tri = triangles[i];
+            let stale_mode = std::env::var("DRAPPER_LAWSON_STALE")
+                .as_deref()
+                == Ok("1");
+            let tri_outer = triangles[i];
             for edge_idx in 0..3 {
+                // session-82 STALE-STATE FIX: re-read the CURRENT
+                // triangle on every edge. A flip on an earlier edge
+                // of the same triangle rewrote triangles[i], and the
+                // stale vertex triple then paired DEAD vertices with
+                // the LIVE neighbor — manufacturing overlapping
+                // degenerate slivers on collinear rim runs (s82 f26
+                // forensics: tri 116 flipped twice in one pass, first
+                // [182,194,178]→[182,194,210], then the STALE copy
+                // again → [194,178,180]+[194,180,182], destroying the
+                // legitimate corner triangle; 18 one-sided edges + a
+                // second non-manifold edge + 2% overlap).
+                let tri = if stale_mode { tri_outer } else { triangles[i] };
                 let ev1 = tri[edge_idx];
                 let ev2 = tri[(edge_idx + 1) % 3];
                 let opposite = tri[(edge_idx + 2) % 3];
+                if ev1 == ev2 || ev2 == opposite || ev1 == opposite {
+                    continue; // degenerate slot (should not happen)
+                }
 
                 // Skip constraint edges
                 let edge_key = (ev1.min(ev2), ev1.max(ev2));
@@ -774,9 +984,27 @@ fn lawson_flip(
                     continue;
                 }
 
-                // Find neighboring triangle using edge map (O(1))
-                let nbr_idx = edge_map.get(&edge_key)
-                    .and_then(|indices| indices.iter().find(|&&idx| idx != i).copied());
+                // Find neighboring triangle using edge map (O(1)).
+                // session-82 NON-MANIFOLD GUARD: an edge shared by
+                // 3+ triangles (earcut emits them around collinear
+                // rim runs — f26 base: 1 nm edge) has NO valid flip
+                // quad. Pairing with an arbitrary neighbor leaves the
+                // remaining triangles dangling on the removed diagonal
+                // — overlapping triangles + one-sided extra boundary
+                // edges (s82 f26 measurement: overlap 0→15.6%, rim
+                // 219→214, extra_bnd 3→22) — and the edge-map update
+                // drops only the flipped pair's entries, leaving stale
+                // references for the third triangle. Never flip a
+                // non-manifold edge.
+                let nm_guard_on = std::env::var("DRAPPER_LAWSON_NM_GUARD")
+                    .as_deref()
+                    != Ok("0");
+                let nbr_idx = match edge_map.get(&edge_key) {
+                    Some(indices) if indices.len() == 2 || !nm_guard_on => {
+                        indices.iter().find(|&&idx| idx != i).copied()
+                    }
+                    _ => None, // 1 (boundary) or 3+ (non-manifold)
+                };
 
                 let nbr = match nbr_idx {
                     Some(idx) => triangles[idx],
@@ -817,6 +1045,65 @@ fn lawson_flip(
                     continue; // same side (reflex quad) or degenerate — never flip
                 }
 
+                // session-82 RELATIVE DEGENERACY GUARD: on
+                // near-collinear rim runs (arc discretizations with
+                // sag ~1e-5 between consecutive points) the absolute
+                // EPS test passes ORIENTS THAT ARE PURE NOISE — the
+                // quad's apexes sit a hair off the shared edge line,
+                // "opposite sides" is decided by rounding, and the
+                // incircle test on the degenerate quad is noise too.
+                // Flipping there manufactures zero-area slivers
+                // (s82 f26 bottom arc: 178/182/194/180 all within
+                // 2.7e-3 of a straight line over a 0.53 span). Require
+                // each apex to clear a RELATIVE height floor: |orient|
+                // ≥ MIN_QUAD_ASPECT · edge_len². The s64 targets (Z
+                // #1092 tents, 300:1 → rel 6.7e-3) still flip; the
+                // collinear sag noise (rel ~5e-4) never does.
+                {
+                    let dx = vertices[ev1 as usize][0] - vertices[ev2 as usize][0];
+                    let dy = vertices[ev1 as usize][1] - vertices[ev2 as usize][1];
+                    let len_sq = dx * dx + dy * dy;
+                    // s82: threshold env-tunable for A/B measurement.
+                    // MEASURED DEFAULT OFF (0): the stale-state fix
+                    // alone keeps the needle-breaking flips AND the
+                    // planar integrity (f26 base: needles 136→4,
+                    // overlap 0, rim 219/220); the relative floor at
+                    // 1e-3 blocks legitimate needle-breaking flips
+                    // and REGRESSES drill HM (1407/284 → 1662/402).
+                    // Retained opt-in for future tuning.
+                    let min_aspect = std::env::var("DRAPPER_LAWSON_MIN_ASPECT")
+                        .ok()
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    if len_sq <= 0.0
+                        || (min_aspect > 0.0
+                            && (s_a.abs() < min_aspect * len_sq
+                                || s_b.abs() < min_aspect * len_sq))
+                    {
+                        continue;
+                    }
+                }
+
+                // session-82 DUPLICATE-DIAGONAL GUARD: in a planar
+                // mesh the new diagonal (opposite, nbr_opposite) cannot
+                // pre-exist (it would cross the flipped edge). The
+                // earcut base is NOT planar-clean — needle caps around
+                // collinear rim runs can already carry that edge, and
+                // flipping on top of it manufactures a non-manifold
+                // edge (s82 f26: second nm edge + 18 one-sided boundary
+                // edges + 2% overlap survived the nm guard). Skip the
+                // flip when the diagonal already exists.
+                let new_diag = (
+                    opposite.min(nbr_opposite),
+                    opposite.max(nbr_opposite),
+                );
+                let dup_guard_on = std::env::var("DRAPPER_LAWSON_DUP_GUARD")
+                    .as_deref()
+                    != Ok("0");
+                if dup_guard_on && edge_map.contains_key(&new_diag) {
+                    continue;
+                }
+
                 // Check if the flip would improve Delaunay quality
                 if should_flip(vertices, opposite, ev1, ev2, nbr_opposite) {
                     let new_tri1 = [opposite, ev1, nbr_opposite];
@@ -850,6 +1137,20 @@ fn lawson_flip(
                     };
 
                     if valid_flip {
+                        // s82 diagnostics: full flip log (env-gated)
+                        if log::log_enabled!(log::Level::Debug) {
+                            log::debug!(
+                                "lawson_flip: edge ({},{}) tris {} {:?} + {} {:?} -> {:?} + {:?}",
+                                ev1,
+                                ev2,
+                                i,
+                                tri,
+                                nbr_idx.unwrap_or(usize::MAX),
+                                nbr,
+                                triangles[i],
+                                triangles.get(nbr_idx.unwrap_or(usize::MAX)).copied(),
+                            );
+                        }
                         // Update edge map: remove old edges, add new ones
                         if let Some(ni) = nbr_idx {
                             // Remove old triangle edges
@@ -1316,5 +1617,148 @@ mod tests {
             let c = usage.get(&key).copied().unwrap_or(0);
             assert_eq!(c, 1, "hole edge {:?} usage {} (must be 1)", key, c);
         }
+    }
+}
+
+#[cfg(test)]
+mod s82_tests {
+    use super::*;
+
+    /// s82 regression: the f26 (Nurbs 4x10 fillet) class — a thin band
+    /// domain whose rim arcs are near-collinear point runs. The stale
+    /// `tri` local in lawson_flip paired dead vertices with live
+    /// neighbors after an intra-triangle flip; on collinear runs the
+    /// noise-driven "opposite sides" test then passed and the flip
+    /// manufactured overlapping degenerate slivers (measured on the
+    /// real face: overlap ratio 0.156, 6 rim edges lost, 22 one-sided
+    /// boundary edges, a second non-manifold edge). A valid
+    /// triangulation of the full polygon satisfies sum|A| == polygon
+    /// area; the stale bug inflated it 15.6%.
+    #[test]
+    fn test_lawson_stale_state_no_overlap_on_collinear_band() {
+        // Thin band 1.0 x 0.06; bottom/top rims are 21-point runs with
+        // a 2e-3 sag (the collinear-run signature), sides are 3-point.
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        let n = 21;
+        for i in 0..n {
+            let x = i as f64 / (n - 1) as f64;
+            ring.push([x, 0.02 * x * (1.0 - x)]); // bottom, sag 5e-3
+        }
+        for i in 0..n {
+            let x = 1.0 - i as f64 / (n - 1) as f64;
+            ring.push([x, 0.06 + 0.02 * x * (1.0 - x)]); // top
+        }
+        // Interior: a sparse lattice (2 rows x 9 cols).
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for j in 1..=2 {
+            let y = 0.02 * j as f64;
+            for i in 1..=9 {
+                interior.push([i as f64 / 10.0, y]);
+            }
+        }
+        let tris = triangulate_polygon_cdt(&ring, &[], &interior);
+        assert!(!tris.is_empty());
+
+        // Planar integrity: sum of |signed areas| equals the polygon
+        // area for any valid full triangulation (no overlap, no
+        // spillover). The stale-state corruption measured 1.156x.
+        let mut all_pts: Vec<[f64; 2]> = ring.clone();
+        all_pts.extend_from_slice(&interior);
+        let mut sum_abs = 0.0;
+        for t in &tris {
+            let s = orient2d(
+                all_pts[t[0] as usize],
+                all_pts[t[1] as usize],
+                all_pts[t[2] as usize],
+            )
+            .abs();
+            sum_abs += s;
+        }
+        let mut ring2 = 0.0;
+        let n_r = ring.len();
+        for i in 0..n_r {
+            let j = (i + 1) % n_r;
+            ring2 += ring[i][0] * ring[j][1] - ring[j][0] * ring[i][1];
+        }
+        let poly2 = ring2.abs();
+        let ratio = sum_abs / poly2;
+        assert!(
+            (ratio - 1.0).abs() < 1e-9,
+            "overlap ratio {} (sum|2A|={:.6} vs polygon 2A={:.6}) — the lawson round corrupted the triangulation",
+            ratio,
+            sum_abs,
+            poly2
+        );
+
+        // Edge census: every edge used by at most 2 triangles (no
+        // manufactured non-manifold edges beyond what earcut emits),
+        // and every rim edge survives (constraints are never flipped).
+        let mut ecount: std::collections::HashMap<(u32, u32), usize> =
+            std::collections::HashMap::new();
+        for t in &tris {
+            for k in 0..3 {
+                let a = t[k];
+                let b = t[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        for i in 0..n_r {
+            let j = (i + 1) % n_r;
+            let key = ((i as u32).min(j as u32), (i as u32).max(j as u32));
+            assert!(
+                ecount.contains_key(&key),
+                "rim edge ({},{}) missing — constraints must never flip",
+                i,
+                j
+            );
+        }
+    }
+
+    /// s82: the non-manifold guard — an edge shared by 3+ triangles
+    /// (emitted by earcut around collinear rim runs) must never be
+    /// flipped: pairing with an arbitrary neighbor strands the third
+    /// triangle on the removed diagonal (overlap + one-sided edges).
+    /// Build a fan-with-flap: 5 triangles where edge (0,2) carries 3.
+    #[test]
+    fn test_lawson_nm_edge_never_flipped() {
+        // vertices: 0..4 on a convex arc + apex 5
+        let verts: Vec<[f64; 2]> = vec![
+            [0.0, 0.0],
+            [1.0, 0.05],
+            [2.0, 0.0],
+            [3.0, 0.05],
+            [1.0, 1.0],
+        ];
+        // Three triangles sharing edge (0,2): one apex-side fan
+        // triangle plus two chord-side flaps — non-manifold by
+        // construction (the earcut degenerate-run signature).
+        let mut tris: Vec<[u32; 3]> = vec![
+            [4, 0, 2], // apex side
+            [4, 2, 3],
+            [4, 3, 0],
+            [1, 0, 2], // chord side, flap A
+            [3, 0, 2], // chord side, flap B
+        ];
+        let before: Vec<[u32; 3]> = tris.clone();
+        let hole_ranges: Vec<(usize, usize)> = Vec::new();
+        lawson_flip(&verts, &mut tris, 5, &hole_ranges);
+        // the nm edge (0,2) must still have exactly its original
+        // triangle count (3) — no flip may have touched it.
+        let count = |tris: &[[u32; 3]]| -> usize {
+            tris.iter().filter(|t| t.contains(&0) && t.contains(&2)).count()
+        };
+        let c_before = count(&before);
+        let c_after = count(&tris);
+        assert_eq!(
+            c_before, 3,
+            "test setup: edge (0,2) must start non-manifold"
+        );
+        assert_eq!(
+            c_after, 3,
+            "non-manifold edge (0,2) triangle count changed {} -> {} — the nm guard must prevent flips on it",
+            c_before, c_after
+        );
     }
 }
