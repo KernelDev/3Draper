@@ -153,7 +153,7 @@ const FLAP_TOL: f64 = 1e-7;
 ///      tolerated — coincident ring points are an upstream pathology
 ///      the fan must carry so both indices stay in use); otherwise
 ///      RESTORE this plan alone (never worse than the input).
-fn repair_collinear_strips(flat: Vec<usize>, coords: &[f64]) -> Vec<usize> {
+pub fn repair_collinear_strips(flat: Vec<usize>, coords: &[f64]) -> Vec<usize> {
     if flat.len() < 3 || flat.len() % 3 != 0 {
         return flat;
     }
@@ -567,12 +567,34 @@ fn flip_zero_area_ears_impl(
                 let a1 = area2(ca, m, d).abs();
                 let a2 = area2(m, cb, d).abs();
                 if a1 > 10.0 * eps && a2 > 10.0 * eps && a1.is_finite() && a2.is_finite() {
-                    // Flip: (ca, m, d) and (m, cb, d). Orientation is
-                    // automatically consistent because m lies on segment
-                    // (ca, cb): area(ca, m, d) has the same sign as
-                    // area(ca, cb, d).
-                    tris[ti] = [ca, m, d];
-                    tris[pi] = [m, cb, d];
+                    // Flip: (ca, m, d) and (m, cb, d). s81 WINDING FIX:
+                    // m lies on segment (ca, cb), so BOTH replacements
+                    // carry the same geometric sign = the side of d
+                    // w.r.t. the directed line ca->cb. The legacy
+                    // hardcoded orders assumed that sign matched the
+                    // partner's stored winding — true only for even
+                    // permutations of pi. For odd permutations the pair
+                    // came out INVERTED: measured on drill HM f3
+                    // (BREP#62542 end-plane, m=842 ring), 2 of the flips
+                    // emitted 4 CW triangles into an all-CCW mesh — a
+                    // 2.4e-3 signed-area drift that (a) leaks inverted
+                    // triangles into every earcut-adapter caller and
+                    // (b) broke the s79 FAN_GUARD area contract, so the
+                    // needle-fan legacy triangulation SURVIVED as the
+                    // 30-pair (3,121) Plane x Nurbs REAL fold family.
+                    // Fix: orient both replacements to the partner's
+                    // stored sign — the flip is signed-area-preserving
+                    // by construction (|area(ca,m,d)| + |area(m,cb,d)|
+                    // == |area(ca,cb,d)| when m is on the chord).
+                    let pi_sign = area2(tris[pi][0], tris[pi][1], tris[pi][2]);
+                    let new_sign = area2(ca, m, d);
+                    if pi_sign != 0.0 && new_sign.signum() != pi_sign.signum() {
+                        tris[ti] = [d, m, ca]; // reversed (ca, m, d)
+                        tris[pi] = [d, cb, m]; // reversed (m, cb, d)
+                    } else {
+                        tris[ti] = [ca, m, d];
+                        tris[pi] = [m, cb, d];
+                    }
                     flipped = true;
                     break 'outer;
                 }

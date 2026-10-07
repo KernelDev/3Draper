@@ -10404,6 +10404,28 @@ pub fn planar_fan_guard(
             max_deg,
             f_thin
         );
+        // s81 diagnostics: dump the UV ring (and the fan tri indices) so
+        // the offline forensics can replay earcutr + the area contract.
+        let label: String = crate::parametric_domain::current_face_label()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+            .collect();
+        let path = format!("/tmp/s81_fanring/{}.txt", label);
+        if let Some(dir) = std::path::Path::new(&path).parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let mut out = String::with_capacity(m * 32);
+        out.push_str(&format!(
+            "m={} max_deg={} thinness={:.6}\n",
+            m, max_deg, f_thin
+        ));
+        for p in points {
+            out.push_str(&format!("p {:.9} {:.9}\n", p.u, p.v));
+        }
+        for t in tri_indices {
+            out.push_str(&format!("t {} {} {}\n", t[0], t[1], t[2]));
+        }
+        let _ = std::fs::write(&path, out);
     }
 
     // ── re-triangulate via the earcut adapter (earcutr + repairs) ──
@@ -10414,6 +10436,10 @@ pub fn planar_fan_guard(
     }
     let flat = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &[]);
     if flat.len() < 3 || flat.len() % 3 != 0 {
+        if fan_debug {
+            eprintln!("FAN_GUARD reject [{}] earcut_invalid flat_len={}",
+                crate::parametric_domain::current_face_label(), flat.len());
+        }
         return None;
     }
     let mut alt: Vec<[u32; 3]> = flat
@@ -10421,6 +10447,10 @@ pub fn planar_fan_guard(
         .map(|c| [c[0] as u32, c[1] as u32, c[2] as u32])
         .collect();
     if alt.iter().any(|t| t.iter().any(|&v| v as usize >= m)) {
+        if fan_debug {
+            eprintln!("FAN_GUARD reject [{}] alt_index_oob",
+                crate::parametric_domain::current_face_label());
+        }
         return None;
     }
 
@@ -10442,9 +10472,17 @@ pub fn planar_fan_guard(
         let a = i as u32;
         let b = ((i + 1) % m) as u32;
         if !edge_set.contains(&(a.min(b), a.max(b))) {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] rim_edge_missing i={}",
+                    crate::parametric_domain::current_face_label(), i);
+            }
             return None; // a rim edge went missing — watertightness risk
         }
         if !used[i] {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] vertex_unused i={}",
+                    crate::parametric_domain::current_face_label(), i);
+            }
             return None; // a ring vertex dropped — weld-compat risk
         }
     }
@@ -10483,6 +10521,10 @@ pub fn planar_fan_guard(
     let rel = ((alt_area2 - ring_area2).abs())
         / ring_area2.abs().max(1e-30);
     if !(rel <= 1e-6) {
+        if fan_debug {
+            eprintln!("FAN_GUARD reject [{}] area_rel={:.3e}",
+                crate::parametric_domain::current_face_label(), rel);
+        }
         return None;
     }
 
@@ -10495,6 +10537,10 @@ pub fn planar_fan_guard(
     }
     let alt_max = *adeg.iter().max()? as usize;
     if alt_max >= max_deg {
+        if fan_debug {
+            eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} fan_max={}",
+                crate::parametric_domain::current_face_label(), alt_max, max_deg);
+        }
         return None;
     }
     if fan_debug {

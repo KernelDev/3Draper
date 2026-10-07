@@ -973,6 +973,7 @@ dependencies = [
  "draper-step",
  "draper-topology",
  "draper-viewer",
+ "earcutr",
  "env_logger",
  "log",
 ]
