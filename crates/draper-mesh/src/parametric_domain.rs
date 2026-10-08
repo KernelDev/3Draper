@@ -12579,6 +12579,38 @@ pub fn triangulate_surface_consistent(
                     } else {
                         Vec::new()
                     };
+                    // session-86: CASTELLATION ROW LATTICE candidate —
+                    // the 3-level castellation class (bottom rim /
+                    // pocket floors / plateaus + near-vertical walls)
+                    // that the s85 stack zipper already accepts but
+                    // triangulates rim-only: its full-strip-height
+                    // fans self-fold post-weld ((39,39) 4→11,
+                    // (43,43) 3→8 REAL — the s85 +12 regressions).
+                    // The lattice adds interior Steiner rows/chords
+                    // (sub-band 3D height ≤ 1.2×max_deviation ⇒ every
+                    // internal pair's apex heights stay sub-tolerance
+                    // ⇒ no REAL self-folds; interior Steiners do NOT
+                    // weld — both weld passes process boundary
+                    // vertices only, so the row structure survives).
+                    // Same trigger zone as the crescent; structure
+                    // detection inside rejects everything that is not
+                    // the exact castellation shape (empty = fallback
+                    // to the s85 zipper bit-exactly). Returns index
+                    // triples over [ring | NEW steiner points] —
+                    // appended to all_uv ON ACCEPTANCE (the gate
+                    // below, torus-band contract). Kill-switch:
+                    // DRAPPER_CAST_ROW_LATTICE=0.
+                    let cast_row_strip: (Vec<usize>, Vec<[f64; 2]>) = if n_unused == 0
+                        && legacy_extra_bnd > 0
+                        && holes_2d.is_empty()
+                        && !matches!(surface, Surface::Torus(_))
+                        && !matches!(surface, Surface::Nurbs(_))
+                        && std::env::var("DRAPPER_CAST_ROW_LATTICE").as_deref() != Ok("0")
+                    {
+                        castellation_row_lattice(surface, &boundary_2d)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
                     // session-68: CYL_RULED_BAND candidate — the cylinder
                     // patch class (rim = 2 u-monotone chains + short side
                     // lines; s67 root cause: the appended interior Steiner
@@ -12803,6 +12835,7 @@ pub fn triangulate_surface_consistent(
                     }
                     if n_unused > 0
                         || !crescent_strip.is_empty()
+                        || !cast_row_strip.0.is_empty()
                         || !cyl_band_strip.is_empty()
                         || !torus_band_strip.0.is_empty()
                         || !nurbs_band_strip.0.is_empty()
@@ -12815,7 +12848,100 @@ pub fn triangulate_surface_consistent(
                         // structurally exact for the pinched-crescent class;
                         // the CDT remains the fallback.
                         let mut strip_accepted = false;
-                        if !crescent_strip.is_empty() {
+                        // session-86: CASTELLATION ROW LATTICE acceptance
+                        // (before the s65 crescent — the classes overlap:
+                        // the castellation IS a two-chain monotone strip,
+                        // but the lattice's row structure is strictly
+                        // better for it). The lattice is edge-audited
+                        // inside (rim 1x / non-rim 2x / area / winding /
+                        // needles / all pts used), so it wins through the
+                        // same never-worsen gate; its NEW Steiner points
+                        // are appended to all_uv here (Step 5 resolves
+                        // them through point_at — the interior path) and
+                        // the indices remapped from [ring | new].
+                        if !cast_row_strip.0.is_empty() {
+                            let mut strip = cast_row_strip.0.clone();
+                            let strip_new = &cast_row_strip.1;
+                            let strip_rim = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in strip.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let legacy_rim_count = {
+                                let mut edges: std::collections::HashSet<(usize, usize)> =
+                                    std::collections::HashSet::new();
+                                for c in tris.chunks_exact(3) {
+                                    for k in 0..3 {
+                                        let a = c[k];
+                                        let b = c[(k + 1) % 3];
+                                        edges.insert((a.min(b), a.max(b)));
+                                    }
+                                }
+                                let mut cnt = 0usize;
+                                for i in 0..n_boundary {
+                                    let j = (i + 1) % n_boundary;
+                                    if edges.contains(&(i.min(j), i.max(j))) {
+                                        cnt += 1;
+                                    }
+                                }
+                                cnt
+                            };
+                            let strip_extra = extra_boundary_edges(&strip);
+                            let never_worse = strip_rim >= legacy_rim_count
+                                && strip_extra <= legacy_extra_bnd
+                                && (strip_rim > legacy_rim_count || strip_extra < legacy_extra_bnd);
+                            if never_worse {
+                                // remap [ring 0..n | new n..n+m] →
+                                // [ring | …all_uv tail… | appended]
+                                let base = all_uv.len();
+                                for p in strip_new.iter() {
+                                    all_uv.push(Point2d::new(p[0], p[1]));
+                                }
+                                for idx in strip.iter_mut() {
+                                    if *idx >= n_boundary {
+                                        *idx = base + (*idx - n_boundary);
+                                    }
+                                }
+                                log::warn!(
+                                    "[f{}] CASTELLATION ROW LATTICE rescue: row lattice accepted (non-rim bnd edges {} → {}, rim edges {} → {}, {} → {} tris, {} steiner rows/chords pts, interior Steiners dropped)",
+                                    current_face_label(),
+                                    legacy_extra_bnd,
+                                    strip_extra,
+                                    legacy_rim_count,
+                                    strip_rim,
+                                    tris.len() / 3,
+                                    strip.len() / 3,
+                                    strip_new.len(),
+                                );
+                                tris = strip;
+                                rescued_by_cdt = true;
+                                strip_accepted = true;
+                            } else {
+                                log::debug!(
+                                    "[f{}] CASTELLATION ROW LATTICE candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    current_face_label(),
+                                    strip_rim,
+                                    legacy_rim_count,
+                                    strip_extra,
+                                    legacy_extra_bnd
+                                );
+                            }
+                        }
+                        if !strip_accepted && !crescent_strip.is_empty() {
                             {
                                 let strip = crescent_strip.clone();
                                 // reuse the ring-edge gate below: compute it
@@ -17277,9 +17403,1248 @@ fn monotone_stack_triangulate(
     Some(tris)
 }
 
+// ─────────────────────────────────────────────────────────────────
+// session-86: CASTELLATION ROW LATTICE
+//
+// The s85 stack zipper accepted the drill SLEEVE castellation faces
+// (f39/f41/f43/f155 — the (153,155)/(41,153) killer) but is RIM-ONLY:
+// its triangles span the full strip height between the sparse 32-pt
+// bottom rim and the 1840-pt castellation. Post-weld (rim runs
+// collapse at ~eff_tol; interior Steiners do NOT weld — both weld
+// passes only process boundary vertices) the surviving wide fans
+// self-fold: (39,39) 4→11, (43,43) 3→8 REAL (+12, the s85
+// regressions: corner quads bottom→plateau across pockets +
+// density needles from the sparse bottom chain).
+//
+// The row lattice decomposes the SAME domain structurally:
+//   band A (bottom rim → pocket-floor level): full-width sub-bands
+//     with intermediate Steiner rows; upper chain = the L1 contour
+//     (floor runs + tooth-base chords);
+//   teeth (floor level → plateau level): per-tooth sub-bands with
+//     rows; side chains = the dovetail pocket walls (s83 pattern).
+// INVARIANT: every sub-band's 3D height ≤ 1.2 × max_deviation ⇒ the
+// apex height over ANY internal edge is ≤ the sub-band height
+// (apex = w·h/hypot(w,h) ≤ h for a quad of width w and height h) ⇒
+// post-weld every internal pair is sub-tolerance thin on BOTH sides
+// ⇒ no REAL self-folds regardless of chain density mismatch.
+//
+// Structure detection (all rejects return empty = the s85 zipper /
+// legacy path unchanged): H/V edge classes (no diagonals), H-runs
+// clustered into EXACTLY 3 v-levels — bottom (1 run, dominant
+// u-span), pocket floors (≥2 runs) and plateaus (≥1 run) — with
+// floors = plateaus + 1 (half-pockets at both ends) and a strictly
+// alternating floor/plateau ring walk. Kill-switch:
+// DRAPPER_CAST_ROW_LATTICE=0. Debug: DRAPPER_CAST_DEBUG.
+//
+// Returns (tris over [ring | NEW steiner uv], new points); the caller
+// appends the points to all_uv on acceptance (the torus-band
+// contract) and the indices are remapped.
+fn castellation_row_lattice(
+    surface: &Surface,
+    boundary_2d: &[[f64; 2]],
+) -> (Vec<usize>, Vec<[f64; 2]>) {
+    macro_rules! cast_fail {
+        ($reason:expr) => {{
+            if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+                eprintln!("[CAST reject {}] {}", current_face_label(), $reason);
+            }
+            return (Vec::new(), Vec::new());
+        }};
+    }
+    if std::env::var("DRAPPER_CAST_ROW_LATTICE").as_deref() == Ok("0") {
+        return (Vec::new(), Vec::new());
+    }
+    let n = boundary_2d.len();
+    if n < 64 {
+        cast_fail!("tiny ring");
+    }
+    let (umin, umax) = boundary_2d.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), p| (lo.min(p[0]), hi.max(p[0])),
+    );
+    let (vmin, vmax) = boundary_2d.iter().fold(
+        (f64::INFINITY, f64::NEG_INFINITY),
+        |(lo, hi), p| (lo.min(p[1]), hi.max(p[1])),
+    );
+    let uspan = umax - umin;
+    let vspan = vmax - vmin;
+    if uspan <= 0.0 || vspan <= 0.0 {
+        cast_fail!("flat domain");
+    }
+    // ── 1. H/V edge classes ─────────────────────────────────────
+    let edge_class = |i: usize| -> u8 {
+        let a = boundary_2d[i];
+        let b = boundary_2d[(i + 1) % n];
+        let du = (b[0] - a[0]).abs();
+        let dv = (b[1] - a[1]).abs();
+        if du >= 2.0 * dv {
+            0
+        } else if dv > 2.0 * du {
+            1
+        } else {
+            2
+        }
+    };
+    // find a V edge to start the walk (so a wrap-around H-run is
+    // never split in two)
+    let start = (0..n).find(|&i| edge_class(i) == 1);
+    let Some(start) = start else {
+        cast_fail!("no vertical edges");
+    };
+    let mut runs: Vec<(usize, usize)> = Vec::new(); // pt index range [s..=e] (ring walk)
+    {
+        let mut i = start;
+        while i < start + n {
+            if edge_class(i % n) == 0 {
+                let s = i % n;
+                let mut j = i;
+                while j < start + n && edge_class(j % n) == 0 {
+                    j += 1;
+                }
+                let e = j % n; // last PT of the run (last H edge's end)
+                runs.push((s, e));
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+    }
+    if runs.len() < 6 || runs.len() > 64 {
+        cast_fail!(format!("run count {}", runs.len()));
+    }
+    for &(s, e) in &runs {
+        let len = (e + n - s) % n + 1;
+        if len < 3 {
+            cast_fail!(format!("short run {} pts", len));
+        }
+    }
+    // ── 2. v-level clustering ───────────────────────────────────
+    let run_v = |r: &(usize, usize)| -> f64 {
+        let (s, e) = *r;
+        let len = (e + n - s) % n + 1;
+        let mut sum = 0.0;
+        for k in 0..len {
+            sum += boundary_2d[(s + k) % n][1];
+        }
+        sum / len as f64
+    };
+    let lvl_tol = 0.08 * vspan;
+    let mut sorted: Vec<(usize, usize)> = runs.clone();
+    sorted.sort_by(|a, b| run_v(a).partial_cmp(&run_v(b)).unwrap_or(std::cmp::Ordering::Equal));
+    let mut levels: Vec<(f64, Vec<(usize, usize)>)> = Vec::new();
+    for r in sorted {
+        let v = run_v(&r);
+        match levels.last_mut() {
+            Some((lv, rs)) if (v - *lv).abs() < lvl_tol => {
+                rs.push(r);
+                let k = rs.len();
+                *lv = (*lv * (k as f64 - 1.0) + v) / k as f64;
+            }
+            _ => levels.push((v, vec![r])),
+        }
+    }
+    if levels.len() != 3 {
+        cast_fail!(format!("level count {}", levels.len()));
+    }
+    for w in levels.windows(2) {
+        if (w[1].0 - w[0].0).abs() < 5.0 * lvl_tol {
+            cast_fail!("levels too close");
+        }
+    }
+    let (v_bot, bot_runs) = &levels[0];
+    let (v_mid, mid_runs) = &levels[1];
+    let (v_top, top_runs) = &levels[2];
+    if bot_runs.len() != 1 || mid_runs.len() < 2 || top_runs.len() < 1 {
+        cast_fail!(format!(
+            "level runs {}/{}/{}",
+            bot_runs.len(),
+            mid_runs.len(),
+            top_runs.len()
+        ));
+    }
+    // ── 3. ring-walk order: bottom, then alternating floor/plateau ──
+    // Re-walk the runs in ring order starting at the bottom run.
+    let (b0, b1) = bot_runs[0];
+    let bot_len = (b1 + n - b0) % n + 1;
+    let bot_uspan = (boundary_2d[b0][0] - boundary_2d[b1][0]).abs();
+    if bot_uspan < 0.5 * uspan || bot_len < 8 {
+        cast_fail!("bottom run not dominant");
+    }
+    // bottom run must be u-monotone; orientation: ascending?
+    let bot_asc = boundary_2d[b1][0] >= boundary_2d[b0][0];
+    // ring sequence after the bottom run's end (b1) must alternate
+    // mid/top runs; collect (run, level) pairs in ring order.
+    let idx_of = |r: &(usize, usize)| -> usize {
+        // position of the run's start in ring order relative to b0
+        (r.0 + n - b0) % n
+    };
+    let mut seq: Vec<(u8, (usize, usize))> = Vec::new();
+    for r in mid_runs.iter().chain(top_runs.iter()) {
+        seq.push((if mid_runs.contains(r) { 1 } else { 2 }, *r));
+    }
+    seq.sort_by_key(|x| idx_of(&x.1));
+    // drop runs that lie inside the bottom run's arc (should not happen)
+    let bot_arc = |i: usize| -> bool {
+        let d = (i + n - b0) % n;
+        d < bot_len
+    };
+    if seq.iter().any(|x| bot_arc(x.1 .0)) {
+        cast_fail!("run inside bottom arc");
+    }
+    if seq.is_empty() || seq[0].0 != 1 || seq[seq.len() - 1].0 != 1 {
+        cast_fail!("walk must start/end with a floor");
+    }
+    for w in seq.windows(2) {
+        if w[0].0 == w[1].0 {
+            cast_fail!("walk not alternating");
+        }
+    }
+    let n_floor = seq.iter().filter(|x| x.0 == 1).count();
+    let n_plat = seq.iter().filter(|x| x.0 == 2).count();
+    if n_floor != n_plat + 1 {
+        cast_fail!(format!("floors {} vs plateaus {}", n_floor, n_plat));
+    }
+    // ── 4. chains (all u-ascending) ─────────────────────────────
+    // ring-walk a pt range [s..=e] forward
+    let walk_fwd = |s: usize, e: usize| -> Vec<usize> {
+        let len = (e + n - s) % n + 1;
+        (0..len).map(|k| (s + k) % n).collect()
+    };
+    // bottom run, u-ascending
+    let c_bottom: Vec<usize> = {
+        let w = walk_fwd(b0, b1);
+        if bot_asc {
+            w
+        } else {
+            w.into_iter().rev().collect()
+        }
+    };
+    // floors and plateaus in u-ascending order, keyed by walk seq
+    let mut floors: Vec<Vec<usize>> = Vec::new(); // floor 1..=F in RING order
+    let mut plats: Vec<Vec<usize>> = Vec::new(); // plateau 1..=P in RING order
+    for &(lv, r) in seq.iter() {
+        let w = walk_fwd(r.0, r.1);
+        // ring order after the bottom (walking forward) runs u-desc
+        // for the castellation tops (measured); re-orient ascending.
+        let asc = boundary_2d[r.1][0] >= boundary_2d[r.0][0];
+        let chain = if asc { w } else { w.into_iter().rev().collect() };
+        if lv == 1 {
+            floors.push(chain);
+        } else {
+            plats.push(chain);
+        }
+    }
+    // wall segments (ring walk, exclusive of the runs' pts):
+    //  - end walls: c_bottom.last → floors[0] near end; floors[F-1]
+    //    far end → c_bottom.first
+    //  - pocket walls: floors[k] far end → plats[k] near end (up);
+    //    plats[k] far end → floors[k+1] near end (down)
+    let wall_between = |a_end: usize, b_start: usize| -> Vec<usize> {
+        // ring pts strictly after a_end up to b_start
+        let mut out = Vec::new();
+        let mut i = (a_end + 1) % n;
+        while i != b_start {
+            out.push(i);
+            i = (i + 1) % n;
+        }
+        out
+    };
+    // floors are in RING order: floor k (0-based) is left-of-plateau k
+    // in the ring walk; determine which END of each floor chain is
+    // adjacent to which wall by u-position.
+    // For floor k: its "right" end (max u) connects (via wall) to
+    // plateau k's right end; its "left" end (min u) connects to
+    // plateau (k-1)'s left end. From the measured walk: after the
+    // bottom run comes floor 1 whose FIRST ring pt is at the max-u
+    // end; the walk then goes u-desc.
+    // floor chain (u-asc): first = left end, last = right end.
+    // ring order: floor k's right end is walked FIRST (u-desc).
+    // So: wall from floors[k] RIGHT end (ring-adjacent going
+    // forward) leads UP to plats[k]'s RIGHT end; wall from plats[k]
+    // LEFT end leads DOWN to floors[k+1]'s RIGHT end?? — verified
+    // against f39/f41 dumps: floor_k.left-end ↔ wall_up ↔
+    // plateau_k.right-end is WRONG; the correct pairing (ring walk,
+    // u-desc tops): floor_k starts at its RIGHT end, descends to its
+    // LEFT end, wall UP to plateau_k's RIGHT end, plateau descends
+    // to its LEFT end, wall DOWN to floor_{k+1}'s RIGHT end.
+    // In u-asc chain terms:
+    //   tooth k: chord = [floor_{k+1}.last (right end), ...,
+    //                     floor_k.first (left end)]
+    //   wait — floor_{k+1}'s RIGHT end is adjacent (ring) to
+    //   plateau_k's LEFT end; floor_k's LEFT end is adjacent to
+    //   plateau_k's RIGHT end... no: re-derive from ring order.
+    // Ring: [bottom (u-asc)] [floor_1 u-desc: R→L] [wall] [plat_1
+    // u-desc: R→L] [wall] [floor_2 u-desc: R→L] ...
+    // So floor_1's LEFT end (last walked) → wall → plat_1's RIGHT
+    // end (first walked). plat_1's LEFT end (last walked) → wall →
+    // floor_2's RIGHT end (first walked).
+    // Tooth k (1-based) sits between floor_k (right of it in ring
+    // order... in u terms): plat_k spans [platL_k, platR_k];
+    // its RIGHT end connects DOWN to floor_k's LEFT end; its LEFT
+    // end connects DOWN to floor_{k+1}'s RIGHT end.
+    // u-asc chains: floor chain F_k = [Fk_first(left), ..,
+    // Fk_last(right)]; plat chain P_k = [Pk_first(left), ..,
+    // Pk_last(right)].
+    // tooth k walls: right wall = ring pts between Fk_last and
+    // Pk_first?? — ring-adjacency: after floor_k's LAST ring pt
+    // (which is Fk left end? NO — floor_k u-desc in ring: first ring
+    // pt = right end = Fk_last, last ring pt = left end = Fk_first)
+    // → the wall after floor_k leads to plat_k's first ring pt
+    // (plat_k's RIGHT end = Pk_last).
+    // So: wall_up_k = ring pts after F_k's LAST RING PT (= Fk_first,
+    // the left end) up to P_k's FIRST RING PT (= Pk_last, the right
+    // end).
+    // wall_down_k = ring pts after P_k's LAST RING PT (= Pk_first,
+    // left end) up to F_{k+1}'s FIRST RING PT (= F_{k+1}'s right
+    // end = F{k+1}_last).
+    // ring first/last of a seq run r: s = r.0 (first), e = r.1
+    // (last). For floors/plats collected via walk_fwd(r.0, r.1) then
+    // possibly reversed: first ring pt = r.0, last = r.1.
+    let ring_first = |r: &(usize, usize)| r.0;
+    let ring_last = |r: &(usize, usize)| r.1;
+    // For seq entry k we stored the run; recover ring order arrays:
+    let seq_runs: Vec<(u8, (usize, usize))> = seq.clone();
+    let floor_runs: Vec<(usize, usize)> =
+        seq_runs.iter().filter(|x| x.0 == 1).map(|x| x.1).collect();
+    let plat_runs: Vec<(usize, usize)> =
+        seq_runs.iter().filter(|x| x.0 == 2).map(|x| x.1).collect();
+    // ── 5. geometry scale (3D ↔ UV) via surface sampling ────────
+    let sample3d = |u: f64, v: f64| -> [f64; 2] {
+        // returns (arc scale du, axial scale dv) as 3D length per
+        // param unit
+        let e = 1e-3f64.min(0.1 * uspan.max(vspan));
+        let p0 = surface.point_at(u, v);
+        let pu = surface.point_at(u + e, v);
+        let pv = surface.point_at(u, v + e);
+        let du3 = ((pu.x - p0.x).powi(2) + (pu.y - p0.y).powi(2) + (pu.z - p0.z).powi(2)).sqrt();
+        let dv3 = ((pv.x - p0.x).powi(2) + (pv.y - p0.y).powi(2) + (pv.z - p0.z).powi(2)).sqrt();
+        (du3 / e, dv3 / e).into()
+    };
+    let mid_u = 0.5 * (umin + umax);
+    let scales = sample3d(mid_u, 0.5 * (vmin + vmax));
+    let (arc_s, ax_s) = (scales[0], scales[1]);
+    if !(arc_s.is_finite() && ax_s.is_finite() && arc_s > 1e-9 && ax_s > 1e-9) {
+        cast_fail!("bad surface scale");
+    }
+    // FIXED ABSOLUTE sub-band height target — GEOMETRY-ONLY sizing
+    // (pass-independent!). The two converter passes run at different
+    // max_deviation; sizing the lattice from max_dev made pass 1 emit
+    // kA=4 rows and pass 2 kA=7 rows at DIFFERENT positions, and the
+    // inter-pass merge then welded them at merge_tol (0.0153 on the
+    // drill): pass-2 rows collapsed into pass-1, the floor rim
+    // deformed, 62 extra REAL pairs (the s86 v1/v2 regression).
+    // With identical positions both passes merge bit-exactly.
+    // h=0.011 keeps every sub-band 3D height under the drill-class
+    // eff_tol (0.0153) — the apex over any internal edge is ≤ the
+    // sub-band height — while the guard rejects faces whose gaps
+    // cannot be divided into that window (outside the class).
+    const H_TARGET: f64 = 0.011;
+    const H_MIN: f64 = 0.005;
+    const H_MAX: f64 = 0.013;
+    // ── 6. Steiner rows + chords ────────────────────────────────
+    // s86 v7 — RIM-ONLY MODE (default): the Steiner-row lattice was
+    // DISPROVEN BY MEASUREMENT — the inter-pass merge identifies
+    // vertices at merge_tol (0.0153 on the drill = eff_tol), so any
+    // sub-eff_tol row spacing welds the rows together (measured:
+    // 2216 of 2708 lattice tris lost as degenerate/duplicate in the
+    // merge, the region re-repaired into a 492-tri mesh with +31
+    // REAL pairs) while any ≥ merge_tol spacing puts every row-edge
+    // apex over eff_tol — a catch-22 (merge_tol == eff_tol). The
+    // rim-only decomposition keeps the STRUCTURAL win (no triangle
+    // ever spans bottom→plateau across a pocket — the corner-quad
+    // class, 11 of the 19 s85 REAL) with ZERO new points: band A =
+    // the two-chain zipper bottom↔L1-contour (chords as single
+    // edges), teeth = the per-tooth zipper chord-edge↔walls+plateau.
+    // Env DRAPPER_CAST_ROWS=1 opts back into the row lattice
+    // (experimental).
+    let rows_mode = std::env::var("DRAPPER_CAST_ROWS").as_deref() == Ok("1");
+    let mut new_uv: Vec<[f64; 2]> = Vec::new();
+    let push_pt = |uv: [f64; 2], new_uv: &mut Vec<[f64; 2]>| -> usize {
+        new_uv.push(uv);
+        n + new_uv.len() - 1
+    };
+    // band A: rows between v_bot and v_mid, spanning the full
+    // u-range at the contour's ends (global u extremes of the floors)
+    let mut a_lo = f64::INFINITY;
+    let mut a_hi = f64::NEG_INFINITY;
+    for f in floors.iter() {
+        for &ix in f.iter() {
+            a_lo = a_lo.min(boundary_2d[ix][0]);
+            a_hi = a_hi.max(boundary_2d[ix][0]);
+        }
+    }
+    if !(a_hi - a_lo > 1e-9) {
+        cast_fail!("flat band A");
+    }
+    let gap_a_3d = (v_mid - v_bot) * ax_s;
+    let k_a_geom = ((gap_a_3d / H_TARGET).ceil() as usize).clamp(1, 8);
+    let h_sub_a = gap_a_3d / k_a_geom as f64;
+    if h_sub_a < H_MIN || h_sub_a > H_MAX {
+        cast_fail!(format!("band A sub-band height {:.4} outside class", h_sub_a));
+    }
+    let w_row_a = 3.0 * h_sub_a;
+    // rim-only default: single sub-band per region (no rows/chords)
+    let k_a = if rows_mode { k_a_geom } else { 1usize };
+    let n_row_a = (((a_hi - a_lo) * arc_s / w_row_a).ceil() as usize).clamp(2, 400);
+    let mut rows_a: Vec<Vec<usize>> = Vec::new();
+    // end inset: a QUARTER of the row spacing (3D ≈ 0.007 for the
+    // drill class) — the corner-column spokes and the post-weld
+    // wall-cluster fans must keep apex heights < eff_tol; the
+    // half-spacing inset measured 0.0146 3D = marginal 0.015 apexes
+    let inset_a = 0.25 * (a_hi - a_lo) / n_row_a as f64;
+    for k in 1..k_a {
+        let v = v_bot + (v_mid - v_bot) * k as f64 / k_a as f64;
+        let mut row = Vec::with_capacity(n_row_a);
+        for j in 0..n_row_a {
+            let t = if n_row_a == 1 {
+                0.5
+            } else {
+                (inset_a + j as f64 * (a_hi - a_lo - 2.0 * inset_a)
+                    / (n_row_a - 1) as f64)
+                    / (a_hi - a_lo)
+            };
+            let u = a_lo + t * (a_hi - a_lo);
+            row.push(push_pt([u, v], &mut new_uv));
+        }
+        rows_a.push(row);
+    }
+    // teeth: rows between v_mid and v_top inside each tooth's wall
+    // u-range; chords at v_mid across each tooth base
+    let gap_t_3d = (v_top - v_mid) * ax_s;
+    let k_t_geom = ((gap_t_3d / H_TARGET).ceil() as usize).clamp(1, 8);
+    let h_sub_t = gap_t_3d / k_t_geom as f64;
+    if h_sub_t < H_MIN || h_sub_t > H_MAX {
+        cast_fail!(format!("tooth sub-band height {:.4} outside class", h_sub_t));
+    }
+    let w_row_t = 3.0 * h_sub_t;
+    // rim-only default: single sub-band per region (no rows/chords)
+    let k_t = if rows_mode { k_t_geom } else { 1usize };
+    // per tooth: chord pts u-asc, rows, wall chains (u-asc, bottom→top)
+    struct Tooth {
+        chord: Vec<usize>,
+        rows: Vec<Vec<usize>>,
+        wl_asc: Vec<usize>, // left wall pts, bottom(v≈L1)→top(v≈L2)
+        wr_asc: Vec<usize>, // right wall pts, bottom→top
+        plateau: Vec<usize>, // plateau chain u-asc
+        wl_set: Vec<usize>,  // left wall + its base (degenerate guard)
+        wr_set: Vec<usize>,  // right wall + its base
+    }
+    let mut teeth: Vec<Tooth> = Vec::new();
+    for k in 0..n_plat {
+        // u-asc floor chains: floors[] is in RING order — floor k
+        // (ring) is the floor RIGHT of plateau k, floor k+1 the one
+        // LEFT of it (ring: bottom, floor_1, wall, plat_1, wall,
+        // floor_2, ... — floor_{k+1} follows plat_k).
+        let f_k = &floors[k];
+        let f_k1 = &floors[k + 1];
+        // tooth base corners (u-asc): left base = floor_{k+1}'s
+        // RIGHT end (max u of the left floor), right base = floor
+        // k's LEFT end (min u of the right floor)
+        let base_l = *f_k1.last().unwrap();
+        let base_r = *f_k.first().unwrap();
+        let (bl_u, bl_v) = (boundary_2d[base_l][0], boundary_2d[base_l][1]);
+        let (br_u, br_v) = (boundary_2d[base_r][0], boundary_2d[base_r][1]);
+        if br_u - bl_u < 1e-9 {
+            cast_fail!("degenerate tooth base");
+        }
+        // chord: Steiner pts between base_l and base_r — RIM-ONLY
+        // mode emits NONE (the chord is the single edge base_l→base_r
+        // in the band-A contour and the tooth zipper's lower chain)
+        let n_ch = if rows_mode {
+            (((br_u - bl_u) * arc_s / w_row_t).ceil() as usize).clamp(0, 200)
+        } else {
+            0
+        };
+        let mut chord = Vec::with_capacity(n_ch + 2);
+        chord.push(base_l);
+        for j in 1..=n_ch {
+            let t = j as f64 / (n_ch + 1) as f64;
+            let u = bl_u + t * (br_u - bl_u);
+            let v = bl_v + t * (br_v - bl_v);
+            chord.push(push_pt([u, v], &mut new_uv));
+        }
+        chord.push(base_r);
+        // walls (ring-walk derived, see the derivation note above):
+        //   wall_up_k   = ring pts strictly between floor_k's LAST
+        //                ring pt (= its LEFT end, base_r) and plat_k's
+        //                FIRST ring pt (= its RIGHT end) — the RIGHT
+        //                wall of tooth k, bottom→top in ring order.
+        //   wall_down_k = ring pts strictly between plat_k's LAST
+        //                ring pt (= its LEFT end) and floor_{k+1}'s
+        //                FIRST ring pt (= its RIGHT end, base_l) —
+        //                the LEFT wall of tooth k, top→bottom in
+        //                ring order.
+        let wall_up = wall_between(ring_last(&floor_runs[k]), ring_first(&plat_runs[k]));
+        let wall_down = wall_between(ring_last(&plat_runs[k]), ring_first(&floor_runs[k + 1]));
+        let wr_asc = wall_up.clone(); // right wall bottom→top
+        let mut wl_asc = wall_down.clone(); // left wall top→bottom → reverse
+        wl_asc.reverse(); // now bottom→top
+        // rows: u-range lerped between the base corners and the
+        // plateau ends along the walls
+        let pl = *plats[k].first().unwrap();
+        let pr = *plats[k].last().unwrap();
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        for j in 1..k_t {
+            let t = j as f64 / k_t as f64;
+            let v = v_mid + (v_top - v_mid) * t;
+            let lu = bl_u + (boundary_2d[pl][0] - bl_u) * t;
+            let ru = br_u + (boundary_2d[pr][0] - br_u) * t;
+            if !(ru - lu > 1e-9) {
+                cast_fail!("tooth row degenerate");
+            }
+            let n_r = (((ru - lu) * arc_s / w_row_t).ceil() as usize).clamp(2, 200);
+            // quarter-spacing inset from the walls (post-weld
+            // wall-cluster fan apexes stay < eff_tol)
+            let inset = 0.25 * (ru - lu) / n_r as f64;
+            let mut row = Vec::with_capacity(n_r);
+            for q in 0..n_r {
+                let s = (inset + q as f64 * (ru - lu - 2.0 * inset) / (n_r - 1) as f64)
+                    / (ru - lu);
+                row.push(push_pt([lu + s * (ru - lu), v], &mut new_uv));
+            }
+            rows.push(row);
+        }
+        // per-wall sets for the s83 all-on-ONE-wall degenerate guard
+        // (the base corners belong to their own walls' feet)
+        let mut wl_set: Vec<usize> = wl_asc.clone();
+        let mut wr_set: Vec<usize> = wr_asc.clone();
+        wl_set.push(base_l);
+        wr_set.push(base_r);
+        teeth.push(Tooth {
+            chord,
+            rows,
+            wl_asc,
+            wr_asc,
+            plateau: plats[k].clone(),
+            wl_set,
+            wr_set,
+        });
+    }
+    // ── 7. band A upper chain: floors u-asc + chords, u-ascending ──
+    // The L1 contour from the u-min end to the u-max end:
+    //   floor F (u-asc), chord of tooth (F-1)?? — assemble by
+    //   walking teeth from left (u-min) to right: the floors and
+    //   chords interleave in u.
+    // Simplest correct assembly: collect (u, idx) of all floor chain
+    // pts + chord pts, sort by u — the contour. The floor runs are
+    // u-disjoint from each other and from the chords they touch.
+    // point lookup over [ring | new steiner] (contour + zipper + audit)
+    let all_pts = |ix: usize| -> [f64; 2] {
+        if ix < n {
+            boundary_2d[ix]
+        } else {
+            new_uv[ix - n]
+        }
+    };
+    let mut contour: Vec<usize> = Vec::new();
+    {
+        let mut items: Vec<(f64, usize)> = Vec::new();
+        for f in floors.iter() {
+            for &ix in f.iter() {
+                items.push((boundary_2d[ix][0], ix));
+            }
+        }
+        for t in teeth.iter() {
+            for &ix in t.chord.iter().skip(1).take(t.chord.len().saturating_sub(2)) {
+                items.push((all_pts(ix)[0], ix));
+            }
+        }
+        items.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        contour = items.into_iter().map(|x| x.1).collect();
+        // dedup consecutive (chord endpoints == floor ends)
+        contour.dedup_by(|a, b| *a == *b);
+    }
+    if contour.len() < 4 {
+        cast_fail!("contour too short");
+    }
+    // corner pts
+    let corner_bl = *c_bottom.first().unwrap();
+    let corner_br = *c_bottom.last().unwrap();
+    let corner_tl = *contour.first().unwrap();
+    let corner_tr = *contour.last().unwrap();
+    // ── 8. the s83-style zipper ─────────────────────────────────
+    let eps_area = 1e-12 * (uspan * uspan + vspan * vspan);
+    let area2 = |a: usize, b: usize, c: usize| -> f64 {
+        let pa = all_pts(a);
+        let pb = all_pts(b);
+        let pc = all_pts(c);
+        (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])
+    };
+    // two-pointer u-criterion zipper over [lower | upper] chains
+    // (indices must be u-ascending); (wl_set, wr_set) = the LEFT and
+    // RIGHT wall vertex sets — the all-on-ONE-wall degenerate guard
+    // is PER WALL (s83 semantics: a tri with pts on BOTH walls is a
+    // legal cross-tooth tri; the union set would kill the
+    // base_l→base_r chord tris). Emits CCW tris normalized later by
+    // the winding guard.
+    let zipper = |lower: &[usize],
+                  upper: &[usize],
+                  wl_set: &[usize],
+                  wr_set: &[usize],
+                  tris: &mut Vec<usize>| {
+        let (m, nb) = (lower.len(), upper.len());
+        if m < 2 || nb < 2 {
+            return false;
+        }
+        let on_left = |ix: usize| wl_set.contains(&ix);
+        let on_right = |ix: usize| wr_set.contains(&ix);
+        let (mut ia, mut ib) = (0usize, 0usize);
+        let mut guard = 0usize;
+        loop {
+            if ia >= m - 1 && ib >= nb - 1 {
+                break;
+            }
+            let dead_a = ia >= m - 1;
+            let dead_b = ib >= nb - 1;
+            let deg_a = !dead_a
+                && (area2(lower[ia], lower[ia + 1], upper[ib]).abs() <= eps_area
+                    || (on_left(lower[ia])
+                        && on_left(lower[ia + 1])
+                        && on_left(upper[ib]))
+                    || (on_right(lower[ia])
+                        && on_right(lower[ia + 1])
+                        && on_right(upper[ib])));
+            let deg_b = !dead_b
+                && (area2(lower[ia], upper[ib + 1], upper[ib]).abs() <= eps_area
+                    || (on_left(lower[ia])
+                        && on_left(upper[ib + 1])
+                        && on_left(upper[ib]))
+                    || (on_right(lower[ia])
+                        && on_right(upper[ib + 1])
+                        && on_right(upper[ib])));
+            // s78/s83 wall-deadlock guard: A must not step onto its
+            // final RIGHT-WALL anchor while B still has anything to
+            // walk and B's chain ends in a right-wall suffix — the
+            // tail would then have to fan from the anchor (all-wall
+            // degenerates → stuck). B consumes its whole right tail
+            // first (fanning from A's row-last interior pt), then A
+            // takes the final step.
+            let wall_block_a = !dead_a
+                && ia + 1 == m - 1
+                && !dead_b
+                && on_right(lower[m - 1])
+                && on_right(upper[nb - 1]);
+            let can_a = !dead_a && !deg_a && !wall_block_a;
+            let can_b = !dead_b && !deg_b;
+            let take_a = if !can_a {
+                false
+            } else if !can_b {
+                true
+            } else if ia == 0 && ib == 0 && on_left(lower[0]) && on_left(upper[0]) {
+                // opening pair on the LEFT wall: advance A first (the
+                // B head is the wall's next pt — fanning from A's
+                // anchor leaves the wall immediately)
+                true
+            } else {
+                all_pts(lower[ia + 1])[0] <= all_pts(upper[ib + 1])[0]
+            };
+            if take_a {
+                tris.extend_from_slice(&[lower[ia], lower[ia + 1], upper[ib]]);
+                ia += 1;
+            } else if can_b {
+                tris.extend_from_slice(&[lower[ia], upper[ib + 1], upper[ib]]);
+                ib += 1;
+            } else if !dead_a && !deg_a {
+                tris.extend_from_slice(&[lower[ia], lower[ia + 1], upper[ib]]);
+                ia += 1;
+            } else {
+                if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+                    eprintln!(
+                        "[CAST zip stuck] ia={}/{} ib={}/{} dead=({},{}) deg=({},{}) wall_block={}",
+                        ia,
+                        m,
+                        ib,
+                        nb,
+                        dead_a,
+                        dead_b,
+                        deg_a,
+                        deg_b,
+                        wall_block_a
+                    );
+                }
+                return false; // stuck
+            }
+            guard += 1;
+            if guard > 4 * (m + nb) {
+                return false;
+            }
+        }
+        true
+    };
+    // ── 9. assemble band A (s83 pattern: per-sub-band end-wall segs
+    //        + anchors — handles end walls with interior pts, e.g.
+    //        f155's mid-wall step) ─────────────────────────────────
+    let mut tris: Vec<usize> = Vec::new();
+    {
+        if !bot_asc {
+            cast_fail!("bottom run not u-ascending in ring order");
+        }
+        // end-wall INTERIOR pts (bottom→top): right = ring pts after
+        // the bottom's last ring pt (b1) up to floor_1's first ring
+        // pt; left = ring pts after the LAST floor's last ring pt up
+        // to b0 (top→bottom in ring order → reversed).
+        let wr_a = wall_between(b1, ring_first(&floor_runs[0]));
+        let mut wl_a = wall_between(
+            ring_last(floor_runs.last().unwrap()),
+            b0,
+        );
+        wl_a.reverse();
+        // band A "walls": the end walls (left/right) + the corner pts
+        // at their feet — per-wall sets for the degenerate guard
+        let mut wl_set_a: Vec<usize> = wl_a.clone();
+        let mut wr_set_a: Vec<usize> = wr_a.clone();
+        wl_set_a.push(corner_bl);
+        wl_set_a.push(corner_tl);
+        wr_set_a.push(corner_br);
+        wr_set_a.push(corner_tr);
+        let v_lv = |k: usize| v_bot + (v_mid - v_bot) * k as f64 / k_a as f64;
+        let seg = |wall: &[usize], lo: f64, hi: f64| -> Vec<usize> {
+            wall.iter()
+                .copied()
+                .filter(|&ix| {
+                    let v = boundary_2d[ix][1];
+                    v > lo + 1e-12 && v <= hi + 1e-12
+                })
+                .collect()
+        };
+        let anchor = |wall: &[usize], base: usize, lvl: f64| -> usize {
+            let mut best = base;
+            for &ix in wall.iter() {
+                if boundary_2d[ix][1] <= lvl + 1e-12 {
+                    best = ix;
+                } else {
+                    break;
+                }
+            }
+            best
+        };
+        for k in 0..k_a {
+            let (lo, hi) = (v_lv(k), v_lv(k + 1));
+            let mut lower_owned: Vec<usize>;
+            // single-edge end walls (no interior pts): no anchors —
+            // the rows chain directly and the corner columns below
+            // own the end-wall rim edge (an anchor fallback to
+            // corner_bl would create full-band-height spokes: the
+            // s86 v1 regression, spans 0.018-0.027 post-weld)
+            let no_end_walls = wl_a.is_empty() && wr_a.is_empty();
+            let lower: &[usize] = if k == 0 {
+                &c_bottom
+            } else if no_end_walls {
+                &rows_a[k - 1]
+            } else {
+                let al = if wl_a.is_empty() {
+                    corner_bl
+                } else {
+                    anchor(&wl_a, corner_bl, lo)
+                };
+                let ar = if wr_a.is_empty() {
+                    corner_br
+                } else {
+                    anchor(&wr_a, corner_br, lo)
+                };
+                lower_owned = Vec::with_capacity(rows_a[k - 1].len() + 2);
+                lower_owned.push(al);
+                lower_owned.extend(rows_a[k - 1].iter().copied());
+                lower_owned.push(ar);
+                &lower_owned
+            };
+            let wl_seg = seg(&wl_a, lo, hi);
+            let wr_seg = seg(&wr_a, lo, hi);
+            let mut upper: Vec<usize> = Vec::new();
+            upper.extend(wl_seg.iter().copied());
+            if k == k_a - 1 {
+                upper.extend(contour.iter().copied());
+            } else {
+                upper.extend(rows_a[k].iter().copied());
+            }
+            let mut wr_rev = wr_seg.clone();
+            wr_rev.reverse();
+            upper.extend(wr_rev.iter().copied());
+            if lower.len() < 2 || upper.len() < 2 {
+                cast_fail!(format!("band A sub-band degenerate k={}", k));
+            }
+            if !zipper(lower, &upper, &wl_set_a, &wr_set_a, &mut tris) {
+                cast_fail!(format!("band A zipper stuck k={}", k));
+            }
+        }
+        // corner columns for single-edge end walls: the rim edge
+        // (corner_bl, corner_tl) needs exactly one tri; with no wall
+        // interior pts every on-line pt is collinear with it, so the
+        // coverage is the explicit blade fan from the row ends
+        // (spoke apex heights ≈ the end inset ≈ 0.007 3D < eff_tol;
+        // the one blade-vs-bottom-tri pair is a ~90° dihedral — safe)
+        if wl_a.is_empty()
+            && wr_a.is_empty()
+            && !rows_a.is_empty()
+            && k_a > 1
+        {
+            tris.extend_from_slice(&[corner_bl, rows_a[0][0], corner_tl]);
+            for j in 0..rows_a.len() - 1 {
+                tris.extend_from_slice(&[rows_a[j][0], corner_tl, rows_a[j + 1][0]]);
+            }
+            let r0 = *rows_a[0].last().unwrap();
+            tris.extend_from_slice(&[corner_br, corner_tr, r0]);
+            for j in 0..rows_a.len() - 1 {
+                let rj = *rows_a[j].last().unwrap();
+                let rj1 = *rows_a[j + 1].last().unwrap();
+                tris.extend_from_slice(&[rj, rj1, corner_tr]);
+            }
+        }
+    }
+    // ── 10. assemble teeth (s83 pattern: per-sub-band wall segs +
+    //        anchors) ────────────────────────────────────────────
+    for t in teeth.iter() {
+        // v-levels of the tooth sub-bands
+        let v_lo = |j: usize| v_mid + (v_top - v_mid) * j as f64 / k_t as f64;
+        // wall pts with v in (lo, hi], preserving wl/wr order
+        let seg = |wall: &[usize], lo: f64, hi: f64| -> Vec<usize> {
+            wall.iter()
+                .copied()
+                .filter(|&ix| {
+                    let v = boundary_2d[ix][1];
+                    v > lo + 1e-12 && v <= hi + 1e-12
+                })
+                .collect()
+        };
+        // anchor: the wall pt at/below the level (the topmost pt of
+        // the seg below); fallback = the base corner
+        let anchor = |wall: &[usize], base: usize, lvl: f64| -> usize {
+            let mut best = base;
+            for &ix in wall.iter() {
+                if boundary_2d[ix][1] <= lvl + 1e-12 {
+                    best = ix;
+                } else {
+                    break;
+                }
+            }
+            best
+        };
+        for j in 0..k_t {
+            let (lo, hi) = (v_lo(j), v_lo(j + 1));
+            let base_l = *t.chord.first().unwrap();
+            let base_r = *t.chord.last().unwrap();
+            if k_t == 1 {
+                // rim-only mode: the tooth as U-vs-plateau — the
+                // lower chain = the U (left wall down + the chord +
+                // the right wall up), the upper = the plateau. The
+                // 2-pt chord alone cannot anchor the wall fans (the
+                // s86 v7 stuck: the all-wall degenerates with no
+                // interior A pts); the U puts the walls in A and the
+                // SPARSE plateau in B — the wall steps fan from the
+                // plateau ends (legal tris: wall + wall + plateau
+                // never trips the per-wall guard).
+                let mut lower: Vec<usize> = Vec::with_capacity(
+                    t.wl_asc.len() + t.wr_asc.len() + 2,
+                );
+                let mut wl_rev = t.wl_asc.clone();
+                wl_rev.reverse(); // platL-side → base_l
+                lower.extend(wl_rev);
+                lower.push(base_l);
+                lower.push(base_r);
+                lower.extend(t.wr_asc.iter().copied()); // base_r → platR-side
+                if lower.len() < 2 || t.plateau.len() < 2 {
+                    cast_fail!("tooth U/plateau degenerate");
+                }
+                if !zipper(&lower, &t.plateau, &t.wl_set, &t.wr_set, &mut tris) {
+                    cast_fail!("tooth U zipper stuck");
+                }
+                continue;
+            }
+            // lower chain: chord (j=0) or anchor_l + row_{j-1} + anchor_r
+            let mut lower_owned: Vec<usize>;
+            let lower: &[usize] = if j == 0 {
+                &t.chord
+            } else {
+                let al = anchor(&t.wl_asc, base_l, lo);
+                let ar = anchor(&t.wr_asc, base_r, lo);
+                lower_owned = Vec::with_capacity(t.rows[j - 1].len() + 2);
+                lower_owned.push(al);
+                lower_owned.extend(t.rows[j - 1].iter().copied());
+                lower_owned.push(ar);
+                &lower_owned
+            };
+            // upper chain: wl_seg + row_j + wr_seg.rev() — or, for
+            // the top band, wl_seg + plateau + wr_seg.rev()
+            let wl_seg = seg(&t.wl_asc, lo, hi);
+            let wr_seg = seg(&t.wr_asc, lo, hi);
+            let mut upper: Vec<usize> = Vec::new();
+            upper.extend(wl_seg.iter().copied());
+            if j == k_t - 1 {
+                upper.extend(t.plateau.iter().copied());
+            } else {
+                upper.extend(t.rows[j].iter().copied());
+            }
+            let mut wr_rev = wr_seg.clone();
+            wr_rev.reverse();
+            upper.extend(wr_rev.iter().copied());
+            if lower.len() < 2 || upper.len() < 2 {
+                cast_fail!(format!("tooth band degenerate j={}", j));
+            }
+            if !zipper(lower, &upper, &t.wl_set, &t.wr_set, &mut tris) {
+                cast_fail!(format!("tooth zipper stuck j={}", j));
+            }
+        }
+    }
+    if tris.len() < 6 {
+        cast_fail!("empty lattice");
+    }
+    // ── 11. FULL AUDIT ──────────────────────────────────────────
+    {
+        // winding sign of the ring
+        let mut poly_s = 0.0f64;
+        for i in 0..n {
+            let a = boundary_2d[i];
+            let b = boundary_2d[(i + 1) % n];
+            poly_s += a[0] * b[1] - b[0] * a[1];
+        }
+        let sign = if poly_s >= 0.0 { 1.0 } else { -1.0 };
+        // per-tri winding normalize + degenerate drop
+        let mut clean: Vec<usize> = Vec::with_capacity(tris.len());
+        for c in tris.chunks_exact(3) {
+            if c[0] == c[1] || c[1] == c[2] || c[0] == c[2] {
+                continue;
+            }
+            let mut t = [c[0], c[1], c[2]];
+            if area2(t[0], t[1], t[2]) * sign < 0.0 {
+                t.swap(1, 2);
+            }
+            if area2(t[0], t[1], t[2]).abs() <= eps_area {
+                continue;
+            }
+            clean.extend_from_slice(&t);
+        }
+        tris = clean;
+        // edge census
+        let mut ecount: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+                }
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let e = (i.min(j), i.max(j));
+            match ecount.get(&e) {
+                Some(1) => {}
+                _ => cast_fail!(format!("rim edge {:?} count {:?}", e, ecount.get(&e))),
+            }
+        }
+        for (e, c) in ecount.iter() {
+            let is_rim = (e.1 - e.0 == 1 && e.1 < n) || (e.0 == 0 && e.1 == n - 1);
+            if e.0 < n && e.1 < n && is_rim {
+                if *c != 1 {
+                    cast_fail!(format!("rim edge {:?} count {}", e, c));
+                }
+            } else if *c != 2 {
+                cast_fail!(format!("interior edge {:?} count {}", e, c));
+            }
+        }
+        // all rim + steiner pts used
+        let mut used = vec![false; n + new_uv.len()];
+        for c in tris.chunks_exact(3) {
+            for &ix in c {
+                if ix < used.len() {
+                    used[ix] = true;
+                }
+            }
+        }
+        for (ix, u) in used.iter().enumerate() {
+            if !u {
+                cast_fail!(format!("pt {} unused", ix));
+            }
+        }
+        // area ±0.5% — SIGNED (coverage) AND ABSOLUTE (overlap): the
+        // signed sum is blind to overlaps cancelled by inverted tris
+        // (s85 lesson 1 — the two-pointer zipper covered 109.85%
+        // while the signed guard passed); the absolute sum catches
+        // any double coverage.
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| area2(c[0], c[1], c[2]) * 0.5)
+            .sum();
+        if (strip_s - poly_s * 0.5).abs() > 0.005 * (poly_s * 0.5).abs().max(1e-12) {
+            cast_fail!(format!(
+                "area mismatch {:.6} vs {:.6}",
+                strip_s,
+                poly_s * 0.5
+            ));
+        }
+        let strip_abs: f64 = tris
+            .chunks_exact(3)
+            .map(|c| area2(c[0], c[1], c[2]).abs() * 0.5)
+            .sum();
+        if (strip_abs - poly_s.abs() * 0.5).abs()
+            > 0.005 * (poly_s.abs() * 0.5).max(1e-12)
+        {
+            cast_fail!(format!(
+                "ABSOLUTE area mismatch {:.6} vs {:.6} (overlap)",
+                strip_abs,
+                poly_s.abs() * 0.5
+            ));
+        }
+        // folded-quad check (s85 stack-audit invariant): across every
+        // interior edge the two opposite apexes must lie on OPPOSITE
+        // sides of the edge line (same side = the pair folds over /
+        // overlaps — the winding-flip REAL families post-weld).
+        {
+            let mut edge_tris: std::collections::HashMap<(usize, usize), Vec<usize>> =
+                std::collections::HashMap::with_capacity(tris.len());
+            for (ti, c) in tris.chunks_exact(3).enumerate() {
+                for k in 0..3 {
+                    let a = c[k];
+                    let b = c[(k + 1) % 3];
+                    if a != b {
+                        edge_tris.entry((a.min(b), a.max(b))).or_default().push(ti);
+                    }
+                }
+            }
+            for (e, tis) in edge_tris.iter() {
+                if tis.len() != 2 {
+                    continue;
+                }
+                let (t1, t2) = (
+                    &tris[tis[0] * 3..tis[0] * 3 + 3],
+                    &tris[tis[1] * 3..tis[1] * 3 + 3],
+                );
+                let ap1 = match t1.iter().find(|v| **v != e.0 && **v != e.1) {
+                    Some(v) => *v,
+                    None => continue,
+                };
+                let ap2 = match t2.iter().find(|v| **v != e.0 && **v != e.1) {
+                    Some(v) => *v,
+                    None => continue,
+                };
+                let (p, q) = (all_pts(e.0), all_pts(e.1));
+                let s1 = (q[0] - p[0]) * (all_pts(ap1)[1] - p[1])
+                    - (q[1] - p[1]) * (all_pts(ap1)[0] - p[0]);
+                let s2 = (q[0] - p[0]) * (all_pts(ap2)[1] - p[1])
+                    - (q[1] - p[1]) * (all_pts(ap2)[0] - p[0]);
+                if s1 * s2 > 0.0 {
+                    cast_fail!("folded quad (same-side apexes)");
+                }
+            }
+        }
+        // UV needle census
+        for c in tris.chunks_exact(3) {
+            let p = all_pts(c[0]);
+            let q = all_pts(c[1]);
+            let r = all_pts(c[2]);
+            let e1 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
+            let e2 = (q[0] - r[0]).powi(2) + (q[1] - r[1]).powi(2);
+            let e3 = (r[0] - p[0]).powi(2) + (r[1] - p[1]).powi(2);
+            let mx = e1.max(e2).max(e3);
+            let a = area2(c[0], c[1], c[2]).abs() * 0.5;
+            if mx > 0.0 && a < 1e-3 * mx {
+                cast_fail!("UV needle");
+            }
+        }
+    }
+    if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+        eprintln!(
+            "[CAST accept {}] {} tris, {} steiner, floors={} plateaus={} kA={} kT={}",
+            current_face_label(),
+            tris.len() / 3,
+            new_uv.len(),
+            n_floor,
+            n_plat,
+            k_a,
+            k_t
+        );
+    }
+    if let Ok(dir) = std::env::var("DRAPPER_CAST_DUMP") {
+        let _ = std::fs::create_dir_all(&dir);
+        let lbl = current_face_label().replace('/', "_");
+        let path = format!("{}/{}.txt", dir, lbl);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "n={} n_new={}\n",
+            n,
+            new_uv.len()
+        ));
+        for p in new_uv.iter() {
+            out.push_str(&format!("s {:.9} {:.9}\n", p[0], p[1]));
+        }
+        for c in tris.chunks_exact(3) {
+            out.push_str(&format!("t {} {} {}\n", c[0], c[1], c[2]));
+        }
+        let _ = std::fs::write(&path, out);
+    }
+    (tris, new_uv)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_castellation_rim_only_self_proving() {
+        // s86 self-proving test: a synthetic 3-level castellation
+        // (bottom rim / pocket floors / plateaus, near-vertical
+        // staircase walls) decomposed by castellation_row_lattice.
+        // Verifies the FULL audit contract: every rim edge exactly
+        // 1x, every interior edge exactly 2x, all ring pts used, the
+        // signed AND absolute area within 0.5%, no tri spanning
+        // bottom→plateau (the corner-quad class the decomposition
+        // exists to kill), and the kill-switch returning empty.
+        use draper_geometry::{ConeSurface, Surface};
+        // ring geometry (CCW): bottom u-asc, right end wall, then
+        // floor/wall/plateau/wall/floor ... alternating u-desc
+        let (vb, vm, vt) = (0.0f64, 0.0364f64, 0.0705f64);
+        let mut bnd: Vec<[f64; 2]> = Vec::new();
+        // bottom: 32 pts, u 0..π (the end walls are single vertical
+        // edges at u=0/π — no diagonal end edges)
+        for i in 0..32 {
+            bnd.push([i as f64 * (std::f64::consts::PI / 31.0), vb]);
+        }
+        // floors in RING order (after the bottom's u-max end): the
+        // right half-pocket first, then full pockets, the left
+        // half-pocket last. [lo, hi] in u.
+        let floors_u: [[f64; 2]; 4] = [
+            [0.75, std::f64::consts::PI],
+            [0.45, 0.60],
+            [0.15, 0.30],
+            [0.0, 0.06],
+        ];
+        // plateau k sits between floor k and floor k+1: its right
+        // end pairs with floor k's left end, its left end with floor
+        // k+1's right end.
+        let plats_u: [[f64; 2]; 3] = [[0.60, 0.75], [0.30, 0.45], [0.06, 0.15]];
+        let n_floor_pts = 7usize;
+        let n_wall_pts = 6usize;
+        let mut ring_after_bottom: Vec<[f64; 2]> = Vec::new();
+        for k in 0..4 {
+            // floor k: u-desc from its RIGHT end
+            let [lo, hi] = floors_u[k];
+            for i in 0..n_floor_pts {
+                let t = i as f64 / (n_floor_pts - 1) as f64;
+                ring_after_bottom.push([hi - t * (hi - lo), vm]);
+            }
+            if k < 3 {
+                // wall up: floor k's LEFT end → plateau k's RIGHT end
+                let [_plo, phi] = plats_u[k];
+                for i in 0..n_wall_pts {
+                    let t = (i + 1) as f64 / (n_wall_pts + 1) as f64;
+                    ring_after_bottom.push([lo + (phi - lo) * t * 0.05, vm + (vt - vm) * t]);
+                }
+                // plateau k: u-desc
+                let [plo, phi] = plats_u[k];
+                for i in 0..n_floor_pts {
+                    let t = i as f64 / (n_floor_pts - 1) as f64;
+                    ring_after_bottom.push([phi - t * (phi - plo), vt]);
+                }
+                // wall down: plateau k's LEFT end → floor k+1's RIGHT
+                let [nlo, nhi] = floors_u[k + 1];
+                for i in 0..n_wall_pts {
+                    let t = (n_wall_pts - i) as f64 / (n_wall_pts + 1) as f64;
+                    ring_after_bottom.push([plo + (nhi - plo) * t * 0.05, vm + (vt - vm) * t]);
+                }
+            }
+        }
+        bnd.extend(ring_after_bottom);
+        let n = bnd.len();
+        let cone = Surface::Cone(ConeSurface::new_z(0.5, 0.4049));
+        let (tris, new_pts) = castellation_row_lattice(&cone, &bnd);
+        assert!(!tris.is_empty(), "lattice must accept the synthetic castellation");
+        assert!(new_pts.is_empty(), "rim-only mode must add no steiner pts");
+        // edge census
+        let mut ecount: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            assert!(c[0] != c[1] && c[1] != c[2] && c[0] != c[2], "degenerate tri");
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let e = (i.min(j), i.max(j));
+            assert_eq!(
+                ecount.get(&e),
+                Some(&1),
+                "rim edge {:?} count {:?}",
+                e,
+                ecount.get(&e)
+            );
+        }
+        for (e, c) in ecount.iter() {
+            if *c != 2 {
+                let is_rim = (e.1 - e.0 == 1) || (e.0 == 0 && e.1 == n - 1);
+                assert!(is_rim && *c == 1, "interior edge {:?} count {}", e, c);
+            }
+        }
+        // all ring pts used
+        let mut used = vec![false; n];
+        for c in tris.chunks_exact(3) {
+            for &ix in c {
+                used[ix] = true;
+            }
+        }
+        assert!(used.iter().all(|&u| u), "every ring pt must be used");
+        // signed + absolute area
+        let poly_s: f64 = (0..n)
+            .map(|i| {
+                let a = bnd[i];
+                let b = bnd[(i + 1) % n];
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_abs: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                ((b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])).abs()
+            })
+            .sum::<f64>()
+            * 0.5;
+        assert!(
+            (strip_s - poly_s).abs() <= 0.005 * poly_s.abs(),
+            "signed area {:.6} vs {:.6}",
+            strip_s,
+            poly_s
+        );
+        assert!(
+            (strip_abs - poly_s.abs()) <= 0.005 * poly_s.abs(),
+            "ABSOLUTE area {:.6} vs {:.6} (overlap)",
+            strip_abs,
+            poly_s.abs()
+        );
+        // the structural invariant: no tri spans bottom→plateau (the
+        // full strip height — the corner-quad class). Band A tris
+        // legitimately span bottom→floor (vm−vb) and tooth tris
+        // floor→plateau (vt−vm); only a corner quad crosses BOTH.
+        let full_strip = vt - vb;
+        for c in tris.chunks_exact(3) {
+            let vs = [bnd[c[0]][1], bnd[c[1]][1], bnd[c[2]][1]];
+            let span = vs[0].max(vs[1]).max(vs[2]) - vs[0].min(vs[1]).min(vs[2]);
+            assert!(
+                span < 0.75 * full_strip,
+                "tri {:?} spans {:.4} (bottom→plateau corner quad)",
+                c,
+                span
+            );
+        }
+        // kill-switch returns empty
+        std::env::set_var("DRAPPER_CAST_ROW_LATTICE", "0");
+        let (t2, _) = castellation_row_lattice(&cone, &bnd);
+        std::env::remove_var("DRAPPER_CAST_ROW_LATTICE");
+        assert!(t2.is_empty(), "kill-switch must disable the lattice");
+    }
 
     #[test]
     fn test_domain_contains_square() {
