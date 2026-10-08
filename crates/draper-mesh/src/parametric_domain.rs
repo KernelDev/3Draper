@@ -12117,6 +12117,8 @@ pub fn triangulate_surface_consistent(
         //
         // Returns an empty Vec when the polygon does not qualify (holes,
         // non-monotone chains, endpoint mismatch, area mismatch).
+        //
+
         fn two_chain_monotone_strip(boundary_2d: &[[f64; 2]]) -> Vec<usize> {
             let n = boundary_2d.len();
             if n < 4 {
@@ -12165,10 +12167,50 @@ pub fn triangulate_surface_consistent(
                     b_walk.push(i);
                 }
                 let mut b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
-                // both chains must be non-decreasing in the key
+                // both chains must be non-decreasing in the key.
+                // session-85: the monotonicity tolerance is now
+                // RELATIVE to the key span (1e-3 x span, the s76
+                // THIN_STRIP_ZIPPER precedent for rim-Steiner flat
+                // caps) instead of the absolute 1e-12. Root cause of
+                // the drill SLEEVE castellation class (f39/f41/f43/
+                // f155 — the 25-pair (153,155) + 13-pair (41,153)
+                // REAL families, carried since s81): the splined
+                // sleeve's pocket walls are DOVETAILS — they lean
+                // BACKWARD by ~8e-4 of the u-span (undercut grooves:
+                // wider at the top than at the bottom), so the castled
+                // top chain fails the strict 1e-12 check and the face
+                // falls back to earcut's seam-corner mega-fan (apex on
+                // the u=0 seam wall, degree 144, spanning 91% of the
+                // boundary — the fan triangles connect three points of
+                // the shared Plane|Cone ring, lie flat in the ring
+                // plane and fold ~178 deg against the Plane strips
+                // where the true edge is 135 deg; offline audit of the
+                // zipper on both converter passes: rim 1872/1872,
+                // non-rim edges exactly 2x, zero slivers). The area
+                // +-0.5% guard and the s65 sliver guard below still
+                // apply; acceptance stays behind the never-worse
+                // rim/extra gate (strictly better in extra, rim >=),
+                // so clean legacy results keep bit-identity.
+                let (kmin, kmax) = (0..n).fold(
+                    (f64::INFINITY, f64::NEG_INFINITY),
+                    |(lo, hi), k| {
+                        let v = key(&boundary_2d[k]);
+                        (lo.min(v), hi.max(v))
+                    },
+                );
+                let mono_eps = 1e-3 * (kmax - kmin).max(0.0);
+                // kill-switch DRAPPER_CRESCENT_RELAXED=0 restores the
+                // pre-s85 absolute 1e-12 monotonicity (the castellation
+                // class falls back to earcut's seam-corner mega-fan)
+                let relaxed_enabled = std::env::var("DRAPPER_CRESCENT_RELAXED")
+                    .as_deref()
+                    != Ok("0");
                 let mono = |c: &[usize]| -> bool {
-                    c.windows(2)
-                        .all(|w| key(&boundary_2d[w[0]]) <= key(&boundary_2d[w[1]]) + 1e-12)
+                    c.windows(2).all(|w| {
+                        key(&boundary_2d[w[0]])
+                            <= key(&boundary_2d[w[1]])
+                                + if relaxed_enabled { mono_eps } else { 1e-12 }
+                    })
                 };
                 if !mono(&a_chain) || !mono(&b_chain) {
                     continue;
@@ -12181,34 +12223,67 @@ pub fn triangulate_surface_consistent(
                 if a_chain.len() < 2 || b_chain.len() < 2 {
                     continue;
                 }
-                // two-pointer merge strip
-                let mut tris: Vec<usize> = Vec::with_capacity(a_chain.len() + b_chain.len());
-                let mut ia = 0usize;
-                let mut ib = 0usize;
-                while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
-                    let tri = if ia >= a_chain.len() - 1 {
-                        let t = [a_chain[ia], b_chain[ib], b_chain[ib + 1]];
-                        ib += 1;
-                        t
-                    } else if ib >= b_chain.len() - 1 {
-                        let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
-                        ia += 1;
-                        t
-                    } else if key(&boundary_2d[a_chain[ia + 1]])
-                        <= key(&boundary_2d[b_chain[ib + 1]])
-                    {
-                        let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
-                        ia += 1;
-                        t
-                    } else {
-                        let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
-                        ib += 1;
-                        t
-                    };
-                    if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
-                        tris.extend_from_slice(&tri);
+                // session-85: STRICT vs RELAXED emitter split. Faces whose
+                // chains are monotone at the absolute 1e-12 tolerance keep
+                // the s65 two-pointer VERBATIM (bit-frozen: the Z #1086
+                // lune-flap crescent accepts must not change). Faces that
+                // only pass the relaxed eps (dovetail wobbles) go through
+                // the stack-based monotone triangulation with its own
+                // full edge audit — the two-pointer provably overlaps on
+                // wobbly chains (measured: the f155 castellation zipper
+                // covered 109.85% of the polygon while the signed-area
+                // guard still passed — inverted wobble triangles cancel
+                // the overlap in the signed sum, so the s65 area guard is
+                // blind to this failure mode; the stack audit checks
+                // every rim edge exactly 1x, every non-rim edge exactly
+                // 2x, per-tri winding and folded quads instead).
+                let strict = |c: &[usize]| -> bool {
+                    c.windows(2)
+                        .all(|w| key(&boundary_2d[w[0]]) <= key(&boundary_2d[w[1]]) + 1e-12)
+                };
+                let mut tris: Vec<usize> = if strict(&a_chain) && strict(&b_chain) {
+                    // two-pointer merge strip (s65, bit-frozen)
+                    let mut t: Vec<usize> = Vec::with_capacity(a_chain.len() + b_chain.len());
+                    let mut ia = 0usize;
+                    let mut ib = 0usize;
+                    while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
+                        let tri = if ia >= a_chain.len() - 1 {
+                            let u = [a_chain[ia], b_chain[ib], b_chain[ib + 1]];
+                            ib += 1;
+                            u
+                        } else if ib >= b_chain.len() - 1 {
+                            let u = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                            ia += 1;
+                            u
+                        } else if key(&boundary_2d[a_chain[ia + 1]])
+                            <= key(&boundary_2d[b_chain[ib + 1]])
+                        {
+                            let u = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                            ia += 1;
+                            u
+                        } else {
+                            let u = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
+                            ib += 1;
+                            u
+                        };
+                        if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+                            t.extend_from_slice(&tri);
+                        }
                     }
-                }
+                    t
+                } else {
+                    // session-85: stack-based monotone triangulation for
+                    // wobble-tolerant chains (the castellation class).
+                    match monotone_stack_triangulate(
+                        boundary_2d,
+                        &a_chain,
+                        &b_chain,
+                        swap,
+                    ) {
+                        Some(t) => t,
+                        None => continue,
+                    }
+                };
                 if tris.len() < 3 {
                     continue;
                 }
@@ -17006,6 +17081,202 @@ fn merge_coincident_boundary_points(
     (merged_3d, merged_uv)
 }
 
+fn monotone_stack_triangulate(
+    boundary_2d: &[[f64; 2]],
+    a_chain: &[usize],
+    b_chain: &[usize],
+    swap: bool,
+) -> Option<Vec<usize>> {
+    let key = |p: &[f64; 2]| -> f64 {
+        if swap {
+            p[1]
+        } else {
+            p[0]
+        }
+    };
+    let perp = |p: &[f64; 2]| -> f64 {
+        if swap {
+            p[0]
+        } else {
+            p[1]
+        }
+    };
+    let n = boundary_2d.len();
+    let poly_area: f64 = (0..n)
+        .map(|k| {
+            let p = boundary_2d[k];
+            let q = boundary_2d[(k + 1) % n];
+            p[0] * q[1] - q[0] * p[1]
+        })
+        .sum::<f64>()
+        * 0.5;
+    if poly_area.abs() < 1e-18 {
+        return None;
+    }
+    let sign = if poly_area >= 0.0 { 1.0 } else { -1.0 };
+    // chain tags: 0 = lower (smaller perpendicular coordinate at
+    // the chain midpoints), 1 = upper — the ear-pop convexity
+    // sign depends on which side of the polygon the chain is on.
+    let amid = boundary_2d[a_chain[a_chain.len() / 2]];
+    let bmid = boundary_2d[b_chain[b_chain.len() / 2]];
+    let a_tag: u8 = if perp(&amid) <= perp(&bmid) { 0 } else { 1 };
+    let b_tag: u8 = 1 - a_tag;
+    // merged key-sorted walk over the interior vertices of both
+    // chains (the shared endpoints are handled by the stack seed
+    // and the closing fan)
+    let mut merged: Vec<(usize, u8)> = Vec::with_capacity(a_chain.len() + b_chain.len());
+    let mut ia = 1usize;
+    let mut ib = 1usize;
+    while ia < a_chain.len() - 1 || ib < b_chain.len() - 1 {
+        if ib >= b_chain.len() - 1
+            || (ia < a_chain.len() - 1
+                && key(&boundary_2d[a_chain[ia]]) <= key(&boundary_2d[b_chain[ib]]))
+        {
+            merged.push((a_chain[ia], a_tag));
+            ia += 1;
+        } else {
+            merged.push((b_chain[ib], b_tag));
+            ib += 1;
+        }
+    }
+    if merged.is_empty() {
+        return None;
+    }
+    let cross3 = |p: usize, q: usize, r: usize| -> f64 {
+        let (a, b, c) = (boundary_2d[p], boundary_2d[q], boundary_2d[r]);
+        (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+    };
+    let mut tris: Vec<usize> = Vec::with_capacity((a_chain.len() + b_chain.len()) * 3);
+    let mut emit = |vi: usize, w: usize, x: usize| {
+        if vi == w || w == x || vi == x {
+            return;
+        }
+        let mut t = [vi, w, x];
+        if cross3(t[0], t[1], t[2]) * sign < 0.0 {
+            t.swap(1, 2);
+        }
+        tris.extend_from_slice(&t);
+    };
+    // seed the stack with the umin corner — without it the first
+    // fan cuts the corner off (two rim edges missing, replaced
+    // by a corner-cutting diagonal; measured on the f155 dump)
+    let mut stack: Vec<(usize, u8)> = vec![(a_chain[0], a_tag)];
+    for &(vi, tag) in &merged {
+        let top_tag = match stack.last() {
+            Some(&(_, t)) => t,
+            None => {
+                stack.push((vi, tag));
+                continue;
+            }
+        };
+        if tag != top_tag {
+            // opposite chain: the whole stack is visible — fan
+            let fan: Vec<usize> = stack.iter().map(|s| s.0).collect();
+            for k in 0..fan.len() - 1 {
+                emit(vi, fan[k], fan[k + 1]);
+            }
+            let last = *stack.last().unwrap();
+            stack.clear();
+            stack.push(last);
+            stack.push((vi, tag));
+        } else {
+            // same chain: pop clippable ears. Lower chain walks
+            // in boundary direction (left turn = clippable);
+            // upper chain walks reversed (right turn = clippable).
+            while stack.len() >= 2 {
+                let w = stack[stack.len() - 1].0;
+                let x = stack[stack.len() - 2].0;
+                let c = cross3(x, w, vi);
+                let clippable = if tag == 0 { c > 0.0 } else { c < 0.0 };
+                if clippable {
+                    emit(vi, w, x);
+                    stack.pop();
+                } else {
+                    break;
+                }
+            }
+            stack.push((vi, tag));
+        }
+    }
+    // close at the umax corner: fan across the remaining stack
+    let vmax = *a_chain.last().unwrap();
+    let fan: Vec<usize> = stack.iter().map(|s| s.0).collect();
+    for k in 0..fan.len().saturating_sub(1) {
+        emit(vmax, fan[k], fan[k + 1]);
+    }
+    if tris.len() < 3 {
+        return None;
+    }
+    // FULL EDGE AUDIT — makes any residual stack bug safe:
+    // reject (None) keeps the legacy result bit-exactly.
+    let mut edge_cnt: std::collections::HashMap<(usize, usize), usize> =
+        std::collections::HashMap::with_capacity(tris.len());
+    let mut edge_tris: std::collections::HashMap<(usize, usize), Vec<usize>> =
+        std::collections::HashMap::with_capacity(tris.len());
+    for (ti, c) in tris.chunks_exact(3).enumerate() {
+        for k in 0..3 {
+            let a = c[k];
+            let b = c[(k + 1) % 3];
+            if a == b {
+                continue;
+            }
+            let e = (a.min(b), a.max(b));
+            *edge_cnt.entry(e).or_insert(0) += 1;
+            edge_tris.entry(e).or_default().push(ti);
+        }
+    }
+    for k in 0..n {
+        let i = k;
+        let j = (k + 1) % n;
+        let e = (i.min(j), i.max(j));
+        match edge_cnt.get(&e) {
+            Some(1) => {}
+            _ => return None, // rim edge missing or doubled
+        }
+    }
+    for (e, c) in &edge_cnt {
+        let is_rim =
+            (e.1 - e.0 == 1) || (e.0 == 0 && e.1 == n - 1);
+        if is_rim {
+            if *c != 1 {
+                return None;
+            }
+        } else if *c != 2 {
+            return None; // non-rim one-sided (slit) or 3x (overlap)
+        }
+    }
+    // folded-quad check: across every interior edge the two
+    // opposite apexes must lie on OPPOSITE sides of the edge
+    // line (same side = the pair folds over, the s85 f39/f43
+    // regression class)
+    for (e, tis) in &edge_tris {
+        if tis.len() != 2 {
+            continue;
+        }
+        let (t1, t2) = (
+            &tris[tis[0] * 3..tis[0] * 3 + 3],
+            &tris[tis[1] * 3..tis[1] * 3 + 3],
+        );
+        let ap1 = match t1.iter().find(|v| **v != e.0 && **v != e.1) {
+            Some(v) => *v,
+            None => continue,
+        };
+        let ap2 = match t2.iter().find(|v| **v != e.0 && **v != e.1) {
+            Some(v) => *v,
+            None => continue,
+        };
+        let (p, q) = (boundary_2d[e.0], boundary_2d[e.1]);
+        let s1 = (q[0] - p[0]) * (boundary_2d[ap1][1] - p[1])
+            - (q[1] - p[1]) * (boundary_2d[ap1][0] - p[0]);
+        let s2 = (q[0] - p[0]) * (boundary_2d[ap2][1] - p[1])
+            - (q[1] - p[1]) * (boundary_2d[ap2][0] - p[0]);
+        if s1 * s2 > 0.0 {
+            return None; // folded quad
+        }
+    }
+    Some(tris)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -21083,6 +21354,124 @@ mod tests {
         assert!(
             tris.is_empty(),
             "a rim finer than 0.35*max_dev must be rejected (weld-collapse class)"
+        );
+    }
+
+    #[test]
+    fn test_monotone_stack_castellation_dovetail() {
+        // session-85: the drill SLEEVE castellation class (f39/f41/f43/
+        // f155) — a u-monotone band whose top chain carries DOVETAIL
+        // pockets (walls lean backward ~2.5e-4 of the u-span, wider at
+        // the top). The s65 two-pointer overlaps on such chains (measured
+        // +9.85% coverage on the real f155 dump, masked from the signed
+        // area guard by wobble-triangle cancellation); the stack sweep
+        // must produce full coverage with every rim edge exactly 1x,
+        // every interior edge exactly 2x, uniform winding, and the
+        // ABSOLUTE triangle-area sum equal to the polygon area (the
+        // overlap catcher).
+        let pi = std::f64::consts::PI;
+        let mut bnd: Vec<[f64; 2]> = Vec::new();
+        // bottom chain (array indices 0..=32): u 0..pi at v=0
+        for k in 0..=32usize {
+            bnd.push([pi * k as f64 / 32.0, 0.0]);
+        }
+        // right seam up to the pocket-A bottom level; every run below
+        // is CONTIGUOUS with the next (runs include their far endpoint,
+        // walls start one step past it — mirroring the real dump where
+        // H runs end exactly where V runs begin)
+        bnd.push([pi, 0.006]);
+        // pocket A bottom: u pi..2.4 at v=0.006 (walk leftward)
+        for k in 1..=8usize {
+            let t = k as f64 / 8.0;
+            bnd.push([pi + (2.4 - pi) * t, 0.006]);
+        }
+        // wall-up at u≈2.4: u DRIFTS +1.2e-3 against the walk (dovetail)
+        bnd.push([2.4 + 2.7e-4, 0.009]);
+        bnd.push([2.4 + 5.3e-4, 0.012]);
+        bnd.push([2.4 + 8.0e-4, 0.015]);
+        bnd.push([2.4 + 1.2e-3, 0.0212]);
+        // plateau A: u 2.4012..1.7 at v=0.0212
+        for k in 1..=8usize {
+            let t = k as f64 / 8.0;
+            bnd.push([2.4 + 1.2e-3 + (1.7 - 2.4 - 1.2e-3) * t, 0.0212]);
+        }
+        // wall-down at u≈1.7: u drifts +1.2e-3 against the walk
+        bnd.push([1.7 + 2.7e-4, 0.018]);
+        bnd.push([1.7 + 5.3e-4, 0.012]);
+        bnd.push([1.7 + 8.0e-4, 0.009]);
+        bnd.push([1.7 + 1.2e-3, 0.006]);
+        // pocket B bottom: u 1.7012..1.0 at v=0.006
+        for k in 1..=8usize {
+            let t = k as f64 / 8.0;
+            bnd.push([1.7 + 1.2e-3 + (1.0 - 1.7 - 1.2e-3) * t, 0.006]);
+        }
+        // wall-up at u≈1.0 (dovetail)
+        bnd.push([1.0 + 2.7e-4, 0.009]);
+        bnd.push([1.0 + 5.3e-4, 0.012]);
+        bnd.push([1.0 + 8.0e-4, 0.015]);
+        bnd.push([1.0 + 1.2e-3, 0.0212]);
+        // plateau B: u 1.0012..0 at v=0.0212 (down to the left seam)
+        for k in 1..=8usize {
+            let t = k as f64 / 8.0;
+            bnd.push([1.0 + 1.2e-3 + (0.0 - 1.0 - 1.2e-3) * t, 0.0212]);
+        }
+        let n = bnd.len();
+        // chains: a = the bottom run 0..=32; b = [0] + reversed tail + [32]
+        let a_chain: Vec<usize> = (0..=32usize).collect();
+        let mut b_chain: Vec<usize> = vec![0usize];
+        b_chain.extend((33..n).rev());
+        b_chain.push(32);
+        let tris =
+            monotone_stack_triangulate(&bnd, &a_chain, &b_chain, false).expect("castellation strip");
+        assert_eq!(tris.len(), 3 * (n - 2), "a full triangulation has n-2 tris");
+        // edge census
+        use std::collections::HashMap;
+        let mut ecnt: HashMap<(usize, usize), usize> = HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                *ecnt.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+            }
+        }
+        for k in 0..n {
+            let i = k;
+            let j = (k + 1) % n;
+            let e = (i.min(j), i.max(j));
+            assert_eq!(ecnt.get(&e), Some(&1), "rim edge {e:?} must be exactly 1x");
+        }
+        for (e, c) in &ecnt {
+            let is_rim = (e.1 - e.0 == 1) || (e.0 == 0 && e.1 == n - 1);
+            if !is_rim {
+                assert_eq!(*c, 2, "non-rim edge {e:?} must be exactly 2x");
+            }
+        }
+        // winding + ABSOLUTE area (the overlap catcher)
+        let cross = |a: usize, b: usize, c: usize| -> f64 {
+            let (p, q, r) = (bnd[a], bnd[b], bnd[c]);
+            (q[0] - p[0]) * (r[1] - p[1]) - (r[0] - p[0]) * (q[1] - p[1])
+        };
+        let poly: f64 = (0..n)
+            .map(|k| {
+                let p = bnd[k];
+                let q = bnd[(k + 1) % n];
+                p[0] * q[1] - q[0] * p[1]
+            })
+            .sum::<f64>()
+            * 0.5;
+        let mut abs_sum = 0.0f64;
+        for c in tris.chunks_exact(3) {
+            let a = cross(c[0], c[1], c[2]);
+            assert!(
+                a * poly > 0.0,
+                "winding must match the polygon sign on every tri"
+            );
+            abs_sum += 0.5 * a.abs();
+        }
+        assert!(
+            (abs_sum - poly.abs()) <= 1e-9 * poly.abs().max(1.0),
+            "absolute tri-area sum {abs_sum} must equal the polygon area {} (no overlaps)",
+            poly.abs()
         );
     }
 }
