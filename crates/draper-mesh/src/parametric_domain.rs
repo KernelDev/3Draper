@@ -12654,6 +12654,78 @@ pub fn triangulate_surface_consistent(
                     } else {
                         (Vec::new(), Vec::new())
                     };
+                    // session-84: LEGACY LATTICE RESCUE — the residual
+                    // interior-drop class that NO existing arm covers:
+                    // legacy earcut used every ring vertex (n_unused==0),
+                    // every band constructor rejected the face (nfb/
+                    // sail/lune candidates all empty — drill HOUSING
+                    // f49: NFB "no level count passes" K=5..8), so the
+                    // acceptance chain below never even ENTERS (its
+                    // condition needs n_unused>0 or a non-empty
+                    // candidate) and the s70 CDT fallback with it — the
+                    // face keeps the legacy result with the interior
+                    // lattice dropped (f49: 35 of 341, the (49,49)/
+                    // (49,178) REAL fold families) plus its legitimate
+                    // spike-chain one-sided edges (f49: extra_bnd=412 —
+                    // the s52 design, NOT debt; crescent/band arms are
+                    // not gated on it here). This calls the s83
+                    // STRUCTURAL lattice DIRECTLY on the original
+                    // boundary+interior arrays — no CDT pipeline, no
+                    // Delaunay, no new points. The full s83 guard set
+                    // applies INSIDE (all points used / EVERY rim edge
+                    // exactly 1x / non-rim exactly 2x / uniform winding
+                    // / area ±0.5% / zero UV needles — strictly stronger
+                    // than the s64 ring-count gate); any failure keeps
+                    // the legacy result bit-exactly. Torus/Cylinder/
+                    // Plane are excluded on purpose: the s84 census
+                    // measured the remaining torus ring-only results
+                    // (529-point lattices fully dropped) as FOLD-CLEAN —
+                    // replacing them is risk without reward (s83 lesson
+                    // 1: every healthy face is a fold lottery).
+                    // Kill-switch: DRAPPER_LEGACY_LATTICE=0 (plus the
+                    // shared DRAPPER_LATTICE_BAND=0 inside).
+                    let legacy_lattice_tris: Vec<usize> = if n_unused == 0
+                        && holes_2d.is_empty()
+                        && matches!(surface, Surface::Nurbs(_))
+                        && n_interior_dropped >= 4
+                        && nurbs_band_strip.0.is_empty()
+                        && sail_band_strip.0.is_empty()
+                        && lune_band_strip.0.is_empty()
+                        && !sail_cdt_candidate
+                        && std::env::var("DRAPPER_LEGACY_LATTICE").as_deref() != Ok("0")
+                    {
+                        match crate::custom_cdt::structural_lattice_rescue_legacy(
+                            &boundary_2d,
+                            &interior_2d,
+                        ) {
+                            Some(t) => {
+                                if std::env::var("DRAPPER_LATTICE_DEBUG").is_ok() {
+                                    eprintln!(
+                                        "[LATTICE legacy-accept {}] {} tris replace legacy {} ({} interior drops)",
+                                        current_face_label(),
+                                        t.len(),
+                                        tris.len() / 3,
+                                        n_interior_dropped
+                                    );
+                                }
+                                t.iter()
+                                    .flat_map(|t| [t[0] as usize, t[1] as usize, t[2] as usize])
+                                    .collect()
+                            }
+                            None => Vec::new(),
+                        }
+                    } else {
+                        Vec::new()
+                    };
+                    if !legacy_lattice_tris.is_empty() {
+                        tris = legacy_lattice_tris;
+                        // the structured result has no one-sided slit and
+                        // no unused ring vertices by construction — the
+                        // CDT fallback / band gates / P2 complement below
+                        // must not touch it (same flag the band
+                        // acceptances set).
+                        rescued_by_cdt = true;
+                    }
                     if n_unused > 0
                         || !crescent_strip.is_empty()
                         || !cyl_band_strip.is_empty()
