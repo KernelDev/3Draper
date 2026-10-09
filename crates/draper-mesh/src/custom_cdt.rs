@@ -2993,4 +2993,204 @@ mod s82_tests {
         assert!(pos + neg > 0, "all-zero areas");
     }
 
+
+    /// session-88: the TORUS WINDMILL class — a half-torus fillet band
+    /// (single loop, ~150 rim points, wavy rims, u span pi) + a dense
+    /// interior Steiner lattice. The legacy spike-chain pass appends the
+    /// row-major lattice after the rim; the chain entry lands DIAGONALLY
+    /// opposite the ring's closure vertex and earcutr fills the notch
+    /// with domain-spanning fans — measured on transmission BOOT
+    /// f38-class: 530 non-rim boundary edges, hub vertices of degree 69,
+    /// long slivers that fold over the curved tube (2041 >170 deg pairs
+    /// on BOOT alone). The CDT must triangulate the same inputs with a
+    /// complete rim, a hole-free interior, every Steiner point used, and
+    /// ZERO same-face >170 deg pairs on the curved surface (the s51
+    /// "Delaunay near the rim folds" concern, answered per-class).
+    #[test]
+    fn test_torus_windmill_band_cdt_no_folds() {
+        use draper_geometry::{Point3d, Surface, TorusSurface};
+        use std::collections::HashMap;
+        use std::f64::consts::PI;
+
+        // Local copy of the tests-module helper (this module nests one
+        // level deeper; keeping the test self-contained).
+        fn count_interior_boundary_edges(
+            triangles: &[[u32; 3]],
+            n_rim: usize,
+        ) -> usize {
+            let mut usage: HashMap<(u32, u32), u32> = HashMap::new();
+            for tri in triangles {
+                for i in 0..3 {
+                    let a = tri[i].min(tri[(i + 1) % 3]);
+                    let b = tri[i].max(tri[(i + 1) % 3]);
+                    *usage.entry((a, b)).or_insert(0) += 1;
+                }
+            }
+            usage
+                .iter()
+                .filter(|(&(a, b), &c)| {
+                    c == 1 && a as usize >= n_rim && b as usize >= n_rim
+                })
+                .count()
+        }
+
+        // Half-torus band, R=13 r=2 (the BOOT fillet class): u in [0, pi],
+        // v in [-pi/2, pi/2] with WAVY rims (amplitude 0.35 rad) like the
+        // real intersection-curve rims.
+        let mut rim: Vec<[f64; 2]> = Vec::new();
+        let nu = 30;
+        let nv = 7;
+        // bottom rim: u 0 -> pi, v = -1.1 + 0.35*sin(3u)
+        for i in 0..nu {
+            let u = PI * (i as f64) / ((nu - 1) as f64);
+            let v = -1.1 + 0.12 * (3.0 * u as f64).sin();
+            rim.push([u, v]);
+        }
+        // right edge: u=pi, v -1.1..1.1 (sampled through the wavy ends)
+        for j in 1..nv {
+            let v = -1.1 + 2.2 * (j as f64) / (nv as f64);
+            rim.push([PI, v]);
+        }
+        // top rim: u pi -> 0, v = 1.1 + 0.35*sin(3u + 0.7)
+        for i in 0..nu {
+            let u = PI - PI * (i as f64) / ((nu - 1) as f64);
+            let v = 1.1 + 0.12 * (3.0 * u as f64 + 0.7).sin();
+            rim.push([u, v]);
+        }
+        // left edge: u=0, v 1.1..-1.1
+        for j in 1..nv {
+            let v = 1.1 - 2.2 * (j as f64) / (nv as f64);
+            rim.push([0.0, v]);
+        }
+        let n_rim = rim.len();
+
+        // Interior lattice: 23 x 23 grid, shrunk inside the wavy rims
+        // (the STRICT-INTERIOR domain filter result).
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for a in 1..=23 {
+            for b in 1..=23 {
+                let u = 0.12 + (PI - 0.24) * (a as f64) / 24.0;
+                let v = -0.65 + 1.3 * (b as f64) / 24.0;
+                interior.push([u, v]);
+            }
+        }
+
+        // ── Legacy spike-chain pass (row-major append) ────────────────
+        let mut coords: Vec<f64> = Vec::new();
+        for p in rim.iter().chain(interior.iter()) {
+            coords.push(p[0]);
+            coords.push(p[1]);
+        }
+        let legacy = crate::earcut_adapter::triangulate_polygon_with_holes(&coords, &[]);
+        let legacy_tris: Vec<[u32; 3]> = legacy
+            .chunks(3)
+            .filter_map(|c| {
+                if c.len() < 3 {
+                    return None;
+                }
+                let (a, b, cc) = (c[0] as u32, c[1] as u32, c[2] as u32);
+                if a == b || b == cc || a == cc {
+                    return None;
+                }
+                Some([a, b, cc])
+            })
+            .collect();
+        let legacy_gaps = count_interior_boundary_edges(&legacy_tris, n_rim);
+
+        // ── CDT pass ──────────────────────────────────────────────────
+        let cdt = triangulate_polygon_cdt(&rim, &[], &interior);
+        let cdt_gaps = count_interior_boundary_edges(&cdt, n_rim);
+
+        // The legacy path demonstrably guts this class (windmill slits).
+        assert!(
+            legacy_gaps > 100,
+            "legacy spike-chain should gut the half-torus band (got {}              non-rim boundary edges) — if it no longer does, the earcut              adapter changed; re-audit the production path",
+            legacy_gaps
+        );
+        // The CDT is hole-free.
+        assert_eq!(cdt_gaps, 0, "CDT must leave no non-rim boundary edges");
+        // Every interior Steiner point is used.
+        let mut used = vec![false; n_rim + interior.len()];
+        for t in &cdt {
+            for &i in t {
+                used[i as usize] = true;
+            }
+        }
+        let dropped = (n_rim..n_rim + interior.len())
+            .filter(|&i| !used[i])
+            .count();
+        assert_eq!(dropped, 0, "CDT must insert every Steiner point");
+
+        // ── Emission-fold audit on the curved torus (the s51 concern) ─
+        let torus = Surface::Torus(TorusSurface::new_z(Point3d::ORIGIN, 13.0, 2.0));
+        let all_pts: Vec<[f64; 2]> = rim.iter().cloned().chain(interior.iter().cloned()).collect();
+        let count_folds = |tris: &[[u32; 3]]| -> usize {
+            let mut p3: HashMap<u32, [f64; 3]> = HashMap::new();
+            for t in tris {
+                for &i in t {
+                    if !p3.contains_key(&i) {
+                        let q = torus.point_at(all_pts[i as usize][0], all_pts[i as usize][1]);
+                        p3.insert(i, [q.x, q.y, q.z]);
+                    }
+                }
+            }
+            let mut edge_tris: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+            for (ti, t) in tris.iter().enumerate() {
+                for k in 0..3 {
+                    let x = t[k];
+                    let y = t[(k + 1) % 3];
+                    if x != y {
+                        edge_tris.entry((x.min(y), x.max(y))).or_default().push(ti);
+                    }
+                }
+            }
+            let nrm = |t: &[u32; 3]| -> Option<[f64; 3]> {
+                let a = p3[&t[0]];
+                let b = p3[&t[1]];
+                let d = p3[&t[2]];
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ad = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+                let nn = [
+                    ab[1] * ad[2] - ab[2] * ad[1],
+                    ab[2] * ad[0] - ab[0] * ad[2],
+                    ab[0] * ad[1] - ab[1] * ad[0],
+                ];
+                let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                if l > 1e-18 {
+                    Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                } else {
+                    None
+                }
+            };
+            let mut folds = 0usize;
+            for ts in edge_tris.values() {
+                if ts.len() != 2 {
+                    continue;
+                }
+                if let (Some(n1), Some(n2)) = (nrm(&tris[ts[0]]), nrm(&tris[ts[1]])) {
+                    let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                    if dot.acos().to_degrees() > 170.0 {
+                        folds += 1;
+                    }
+                }
+            }
+            folds
+        };
+        let legacy_folds = count_folds(&legacy_tris);
+        let cdt_folds = count_folds(&cdt);
+        assert!(
+            legacy_folds > 0,
+            "the windmill class must demonstrably fold on the curved torus \
+             (got {} emission folds) — if it no longer does, the class \
+             signature drifted; re-audit",
+            legacy_folds
+        );
+        assert_eq!(
+            cdt_folds, 0,
+            "CDT must emit ZERO same-face >170 deg pairs on this class \
+             (the s51 concern, answered per-class; got {})",
+            cdt_folds
+        );
+    }
+
 }

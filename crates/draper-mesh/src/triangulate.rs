@@ -5416,6 +5416,31 @@ fn triangulate_torus_face(face: &StagedFace, torus: &TorusSurface, params: &Tria
             &boundary_3d, &boundary_uvs, &hole_polylines, &hole_uvs,
         );
 
+    // session-88 diagnostics: per-face dump of the torus boundary UVs
+    // AFTER unwrap, tagged with the face id (DRAPPER_DUMP_TORUS_FACES).
+    if let Ok(dir) = std::env::var("DRAPPER_DUMP_TORUS_FACES") {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static TORUS_FACE_CALL: AtomicU32 = AtomicU32::new(0);
+        let n = TORUS_FACE_CALL.fetch_add(1, Ordering::SeqCst);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# face_id={} forward={} R={} r={} bnd={} holes={}\n",
+            face.id.to_u64(), face.forward,
+            torus.major_radius, torus.minor_radius,
+            boundary_uvs_eff.len(), hole_uvs_eff.len(),
+        ));
+        for p in &boundary_uvs_eff {
+            out.push_str(&format!("o {:.9} {:.9}\n", p.u, p.v));
+        }
+        for (hi, h) in hole_uvs_eff.iter().enumerate() {
+            for p in h {
+                out.push_str(&format!("h{} {:.9} {:.9}\n", hi, p.u, p.v));
+            }
+        }
+        let _ = std::fs::write(format!("{}/tface_{:04}.txt", dir, n), out);
+    }
+
     crate::parametric_domain::triangulate_surface_consistent(
         &surface,
         &boundary_3d_eff,
@@ -8124,33 +8149,81 @@ fn point_in_polygon_2d(point: &Point2d, polygon: &[Point2d]) -> bool {
 /// Normalize UV polygon for periodic surfaces.
 /// Handles wrap-around when boundary points cross the ±π seam.
 pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option<f64>, v_period: Option<f64>) {
+    // session-88: CONTIGUITY GUARD.
+    //
+    // The cluster-gap shift below was written for polygons whose points
+    // sit on MIXED branches of the periodic axis (a real wrap tear:
+    // consecutive loop points jump by ~±period). But its trigger —
+    // `range > period/2` — also fires on polygons that are ALREADY
+    // contiguous in one unwrapped window but simply SPAN more than half
+    // a period (e.g. a 240° torus fillet band whose cached rim UVs live
+    // in [1.83π, 3.16π]). For those, the gap-shift picks the largest
+    // SAMPLING gap (as small as the rim step, ~0.076) and shifts half
+    // the polygon by −2π, TEARING a perfectly valid polygon in two.
+    // The torn form then spans ~2π and hits the proactive seam-split,
+    // whose "low" walk degenerates to a zero-area v-const strip — the
+    // re-projection fallback emits flipped-winding triangles (measured:
+    // TRANS_HOUSING f89, 55% of 4277 tris inverted, 2137 fold pairs
+    // >170°, the dominant transmission debt class).
+    //
+    // Fix: if every consecutive loop step (INCLUDING the closing edge)
+    // is within half a period, the polygon is contiguous — leave the
+    // axis untouched. Real wrap tears (full rings closing across the
+    // seam, mixed-branch edges) still take the gap-shift path below,
+    // so full-wrap bands keep reaching the proactive seam-split exactly
+    // as before.
+    fn axis_is_contiguous(uv: &[Point2d], axis: fn(&Point2d) -> f64, period: f64) -> bool {
+        let n = uv.len();
+        if n < 2 {
+            return true;
+        }
+        let half = period * 0.5;
+        for i in 0..n {
+            let a = axis(&uv[i]);
+            let b = axis(&uv[(i + 1) % n]);
+            if (b - a).abs() > half {
+                return false;
+            }
+        }
+        true
+    }
+
     // Handle u-periodicity
     if let Some(period) = u_period {
-        // Find the largest gap and normalize
-        let mut us: Vec<f64> = boundary_uv.iter().map(|p| p.u).collect();
-        us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // session-88 kill-switch: DRAPPER_NORM_CONTIG_GUARD=0 restores the
+        // pre-s88 behavior (gap-shift fires on any range > period/2, even
+        // for contiguous unwrapped windows — the tear that produced the
+        // transmission torus windmill).
+        let guard_on = std::env::var("DRAPPER_NORM_CONTIG_GUARD")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if !guard_on || !axis_is_contiguous(boundary_uv, |p| p.u, period) {
+            // Find the largest gap and normalize
+            let mut us: Vec<f64> = boundary_uv.iter().map(|p| p.u).collect();
+            us.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Check for wrap-around: if the range is close to the period,
-        // shift values that are far from the cluster
-        let u_range = us.last().copied().unwrap_or(0.0) - us.first().copied().unwrap_or(0.0);
-        if u_range > period * 0.5 {
-            // Find the largest gap — points on the other side of the gap
-            // should be shifted by ±period
-            let mut max_gap = 0.0f64;
-            let mut gap_idx = 0;
-            for i in 0..us.len() - 1 {
-                let gap = us[i + 1] - us[i];
-                if gap > max_gap {
-                    max_gap = gap;
-                    gap_idx = i;
+            // Check for wrap-around: if the range is close to the period,
+            // shift values that are far from the cluster
+            let u_range = us.last().copied().unwrap_or(0.0) - us.first().copied().unwrap_or(0.0);
+            if u_range > period * 0.5 {
+                // Find the largest gap — points on the other side of the gap
+                // should be shifted by ±period
+                let mut max_gap = 0.0f64;
+                let mut gap_idx = 0;
+                for i in 0..us.len() - 1 {
+                    let gap = us[i + 1] - us[i];
+                    if gap > max_gap {
+                        max_gap = gap;
+                        gap_idx = i;
+                    }
                 }
-            }
-            // Points after the gap should be shifted down by period
-            // (they wrapped from +period to -period)
-            let threshold = us[gap_idx];
-            for p in boundary_uv.iter_mut() {
-                if p.u > threshold + max_gap * 0.5 {
-                    p.u -= period;
+                // Points after the gap should be shifted down by period
+                // (they wrapped from +period to -period)
+                let threshold = us[gap_idx];
+                for p in boundary_uv.iter_mut() {
+                    if p.u > threshold + max_gap * 0.5 {
+                        p.u -= period;
+                    }
                 }
             }
         }
@@ -8158,24 +8231,29 @@ pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option
 
     // Handle v-periodicity
     if let Some(period) = v_period {
-        let mut vs: Vec<f64> = boundary_uv.iter().map(|p| p.v).collect();
-        vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let guard_on = std::env::var("DRAPPER_NORM_CONTIG_GUARD")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if !guard_on || !axis_is_contiguous(boundary_uv, |p| p.v, period) {
+            let mut vs: Vec<f64> = boundary_uv.iter().map(|p| p.v).collect();
+            vs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
-        let v_range = vs.last().copied().unwrap_or(0.0) - vs.first().copied().unwrap_or(0.0);
-        if v_range > period * 0.5 {
-            let mut max_gap = 0.0f64;
-            let mut gap_idx = 0;
-            for i in 0..vs.len() - 1 {
-                let gap = vs[i + 1] - vs[i];
-                if gap > max_gap {
-                    max_gap = gap;
-                    gap_idx = i;
+            let v_range = vs.last().copied().unwrap_or(0.0) - vs.first().copied().unwrap_or(0.0);
+            if v_range > period * 0.5 {
+                let mut max_gap = 0.0f64;
+                let mut gap_idx = 0;
+                for i in 0..vs.len() - 1 {
+                    let gap = vs[i + 1] - vs[i];
+                    if gap > max_gap {
+                        max_gap = gap;
+                        gap_idx = i;
+                    }
                 }
-            }
-            let threshold = vs[gap_idx];
-            for p in boundary_uv.iter_mut() {
-                if p.v > threshold + max_gap * 0.5 {
-                    p.v -= period;
+                let threshold = vs[gap_idx];
+                for p in boundary_uv.iter_mut() {
+                    if p.v > threshold + max_gap * 0.5 {
+                        p.v -= period;
+                    }
                 }
             }
         }
@@ -13736,5 +13814,85 @@ mod torus_strip_tests {
             "stack endpoints");
         assert_eq!(strip.ring_a.len(), 12);
         assert_eq!(strip.ring_b.len(), 12);
+    }
+}
+
+#[cfg(test)]
+mod normalize_contiguity_guard_tests {
+    use super::*;
+
+    /// session-88 regression: a CONTIGUOUS periodic polygon whose window
+    /// simply spans more than half a period (the transmission TRANS_HOUSING
+    /// f89 class: a 240° torus fillet band whose cached rim UVs live in
+    /// [1.83π, 3.16π]) must pass normalize_uv_polygon UNCHANGED. The
+    /// pre-s88 gap-shift tore it at the largest SAMPLING gap and the torn
+    /// form hit the proactive seam-split, whose degenerate v-const child
+    /// produced a 55%-flipped-winding mesh (2137 fold pairs on f89).
+    #[test]
+    fn test_contiguous_over_pi_window_untouched() {
+        // Band rim: bottom arc v=0.5 from u=5.76..9.90, right edge,
+        // top arc v=2.5 back, left edge. All consecutive |du| <= 0.08 —
+        // contiguous in the unwrapped window [5.76, 9.90] (span 4.14 > π).
+        let mut poly: Vec<Point2d> = Vec::new();
+        let n = 50;
+        for i in 0..n {
+            let u = 5.76 + 4.14 * (i as f64) / ((n - 1) as f64);
+            poly.push(Point2d::new(u, 0.5));
+        }
+        for j in 1..6 {
+            let v = 0.5 + 2.0 * (j as f64) / 6.0;
+            poly.push(Point2d::new(9.90, v));
+        }
+        for i in 0..n {
+            let u = 9.90 - 4.14 * (i as f64) / ((n - 1) as f64);
+            poly.push(Point2d::new(u, 2.5));
+        }
+        for j in 1..6 {
+            let v = 2.5 - 2.0 * (j as f64) / 6.0;
+            poly.push(Point2d::new(5.76, v));
+        }
+        let before = poly.clone();
+        normalize_uv_polygon(&mut poly, Some(2.0 * PI), Some(2.0 * PI));
+        assert_eq!(
+            poly, before,
+            "contiguous unwrapped window (>pi span, beyond 2pi) must be \
+             returned bit-unchanged by the s88 contiguity guard"
+        );
+    }
+
+    /// A REAL wrap tear (mixed branches: consecutive loop points jump by
+    /// ~±2π — the classic cylinder seam case) must still take the
+    /// gap-shift path (the guard must not disable legitimate unwrapping).
+    #[test]
+    fn test_mixed_branch_tear_still_shifted() {
+        // Points near u=6.27 followed by points near u=0.01 (loop order),
+        // with a big jump at the transition — the seam-wrap signature.
+        let mut poly: Vec<Point2d> = Vec::new();
+        for i in 0..10 {
+            poly.push(Point2d::new(6.27 - 0.02 * i as f64, 0.1));
+        }
+        for i in 0..10 {
+            poly.push(Point2d::new(0.01 + 0.02 * i as f64, 0.4));
+        }
+        let before = poly.clone();
+        normalize_uv_polygon(&mut poly, Some(2.0 * PI), None);
+        assert_ne!(
+            poly, before,
+            "mixed-branch polygon must still be shifted by the gap path"
+        );
+        // Result must be contiguous: no consecutive jump over half a period.
+        for w in poly.windows(2) {
+            assert!(
+                (w[1].u - w[0].u).abs() <= PI,
+                "normalized polygon must be contiguous, got jump {} -> {}",
+                w[0].u,
+                w[1].u
+            );
+        }
+        // And the total span must shrink below the period.
+        let us: Vec<f64> = poly.iter().map(|p| p.u).collect();
+        let span = us.iter().cloned().fold(f64::MIN, f64::max)
+            - us.iter().cloned().fold(f64::MAX, f64::min);
+        assert!(span < 2.0 * PI, "span must be under one period, got {}", span);
     }
 }

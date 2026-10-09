@@ -10289,6 +10289,34 @@ pub fn triangulate_surface_consistent(
         return TriangleMesh::new();
     }
 
+    // Session-88 diagnostics (DRAPPER_DUMP_UVPOLY): dump the raw UV
+    // polygon (outer loop + holes) this call received, for offline
+    // self-intersection / earcut-condition analysis. One file per call.
+    if let Ok(dir) = std::env::var("DRAPPER_DUMP_UVPOLY") {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static UVPOLY_CALL: AtomicU32 = AtomicU32::new(0);
+        let n = UVPOLY_CALL.fetch_add(1, Ordering::SeqCst);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# surface={:?} forward={} depth={} outer={} holes={}\n",
+            surface.type_name(),
+            forward,
+            depth,
+            boundary_uvs.len(),
+            hole_uvs.len()
+        ));
+        for p in boundary_uvs {
+            out.push_str(&format!("o {:.9} {:.9}\n", p.u, p.v));
+        }
+        for (hi, h) in hole_uvs.iter().enumerate() {
+            for p in h {
+                out.push_str(&format!("h{} {:.9} {:.9}\n", hi, p.u, p.v));
+            }
+        }
+        let _ = std::fs::write(format!("{}/uvpoly_{:04}.txt", dir, n), out);
+    }
+
     // Length mismatch between 3D points and UVs indicates a bug in the caller
     if boundary_points_3d.len() != boundary_uvs.len() {
         log::warn!(
@@ -12527,6 +12555,30 @@ pub fn triangulate_surface_consistent(
                             .count()
                     };
                     let legacy_extra_bnd = extra_boundary_edges(&tris);
+                    // session-88 diagnostics: dump the LEGACY earcut
+                    // triangulation (indices + UV + 3D) for offline flip
+                    // analysis (DRAPPER_DUMP_LEGACY).
+                    if let Ok(dir) = std::env::var("DRAPPER_DUMP_LEGACY") {
+                        use std::sync::atomic::{AtomicU32, Ordering};
+                        static LEGACY_CALL: AtomicU32 = AtomicU32::new(0);
+                        let ln = LEGACY_CALL.fetch_add(1, Ordering::SeqCst);
+                        let _ = std::fs::create_dir_all(&dir);
+                        let mut out = String::new();
+                        out.push_str(&format!(
+                            "# surface={} n_uv={} n_tris={} extra_bnd={}\n",
+                            surface.type_name(),
+                            all_uv.len(),
+                            tris.len() / 3,
+                            legacy_extra_bnd
+                        ));
+                        for uv in &all_uv {
+                            out.push_str(&format!("uv {:.9} {:.9}\n", uv.u, uv.v));
+                        }
+                        for c in tris.chunks_exact(3) {
+                            out.push_str(&format!("t {} {} {}\n", c[0], c[1], c[2]));
+                        }
+                        let _ = std::fs::write(format!("{}/legacy_{:04}.txt", dir, ln), out);
+                    }
                     // session-77: NURBS SAIL class — interior Steiner
                     // points dropped by the legacy earcutr pass (the
                     // s76 "twin-fan" unmasking: f215/f224-class sails
@@ -12842,6 +12894,17 @@ pub fn triangulate_surface_consistent(
                         || !sail_band_strip.0.is_empty()
                         || !lune_band_strip.0.is_empty()
                         || sail_cdt_candidate
+                        // s88: debt-laden torus faces with NO unused ring
+                        // verts and NO accepted strip candidate still need
+                        // the CDT fallback — the windmill class (all ring
+                        // verts used, extra_bnd 530+: domain-spanning earcut
+                        // fans around the diagonal spike-chain entry).
+                        // Gated inside by the s88 never-worsen + fold gate;
+                        // kill-switch DRAPPER_TORUS_CDT_RESCUE=0.
+                        || (matches!(surface, Surface::Torus(_))
+                            && legacy_extra_bnd > 0
+                            && std::env::var("DRAPPER_TORUS_CDT_RESCUE").as_deref()
+                                != Ok("0"))
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -13469,10 +13532,31 @@ pub fn triangulate_surface_consistent(
                         // (drill HOUSING pairs −140, bnd −2700 on the
                         // strip-reject population). The s65 crescent
                         // stays Nurbs-excluded (no fold guard).
-                        // s69: the CDT fallback stays Torus-excluded
-                        // (s51: Delaunay near the torus rim creates more
-                        // fold pairs, drill HM 4105→5470 — measured).
-                        if !strip_accepted && !matches!(surface, Surface::Torus(_)) {
+                        // s88: the CDT fallback now reaches Torus faces
+                        // too. The s51 blanket torus exclusion (drill HM
+                        // 4105→5470, "Delaunay near the rim") predated
+                        // the never-worsen gates AND predated the
+                        // windmill diagnosis: on half-torus fillet bands
+                        // (transmission BOOT f38-class: 156-pt single-loop
+                        // rim + 529-pt Steiner lattice) the legacy
+                        // row-major spike chain enters the ring seam
+                        // DIAGONALLY and earcutr fills the notch with
+                        // domain-spanning fans — measured 530 non-rim
+                        // boundary edges, hub vertices of degree 69, and
+                        // sliver fans that fold over the curved tube
+                        // (BOOT alone: 2041 >170° pairs). The CDT
+                        // (constraint rim + Bowyer-Watson interior) is
+                        // the structurally correct triangulation for
+                        // this class. The s51 fold concern is answered
+                        // with a NEW emission-fold gate below: for torus
+                        // faces the CDT is accepted only when its
+                        // same-face >170° pair count (3D-resolved
+                        // through point_at) does not exceed the legacy
+                        // count. Kill-switch: DRAPPER_TORUS_CDT_RESCUE=0.
+                        let torus_cdt_ok = !matches!(surface, Surface::Torus(_))
+                            || std::env::var("DRAPPER_TORUS_CDT_RESCUE").as_deref()
+                                != Ok("0");
+                        if !strip_accepted && torus_cdt_ok {
                             let cdt2 = crate::custom_cdt::triangulate_polygon_cdt(
                                 &boundary_2d,
                                 &holes_2d,
@@ -13689,6 +13773,100 @@ pub fn triangulate_surface_consistent(
                                     && cdt_overlap > 3.0 * legacy_overlap + 0.05);
                             let crescent_fallback = n_unused == 0 && !crescent_strip.is_empty();
                             let sail_fallback = sail_cdt_candidate;
+                            // s88: TORUS WINDMILL class — the legacy
+                            // spike-chain gutted the face (non-rim bnd
+                            // edges from domain-spanning earcut fans).
+                            // Accept the CDT when it keeps the rim
+                            // (>= ring edges), strictly reduces the
+                            // extra boundary edges, inserts every
+                            // interior Steiner point, and passes the
+                            // s51 ANSWER: the emission-fold gate —
+                            // same-face >170° pairs, 3D-resolved via
+                            // point_at, must not exceed the legacy
+                            // count. All comparisons are per-face
+                            // never-worsen; the count itself is a sum
+                            // over a HashMap-iterated edge map
+                            // (order-independent), so determinism holds.
+                            let torus_windmill = matches!(surface, Surface::Torus(_))
+                                && legacy_extra_bnd > 0
+                                && cdt_ring_edges >= legacy_ring_edges
+                                && cdt_extra_bnd < legacy_extra_bnd
+                                && cdt_interior_dropped == 0;
+                            let (torus_fold_ok, legacy_emission_folds, cdt_emission_folds) =
+                                if torus_windmill {
+                                    let count_folds = |flat: &[usize]| -> usize {
+                                        use std::collections::HashMap;
+                                        // Resolve 3D for every used vertex.
+                                        let mut p3: HashMap<usize, [f64; 3]> =
+                                            HashMap::with_capacity(flat.len());
+                                        for &i in flat {
+                                            if !p3.contains_key(&i) {
+                                                let uv = all_uv[i];
+                                                let q = surface.point_at(uv.u, uv.v);
+                                                p3.insert(i, [q.x, q.y, q.z]);
+                                            }
+                                        }
+                                        let mut edge_tris: HashMap<(usize, usize), Vec<usize>> =
+                                            HashMap::new();
+                                        for (ti, c) in flat.chunks_exact(3).enumerate() {
+                                            for k in 0..3 {
+                                                let x = c[k];
+                                                let y = c[(k + 1) % 3];
+                                                if x != y {
+                                                    edge_tris
+                                                        .entry((x.min(y), x.max(y)))
+                                                        .or_default()
+                                                        .push(ti);
+                                                }
+                                            }
+                                        }
+                                        let tri_n = |t: usize| -> Option<[f64; 3]> {
+                                            let c = &flat[t * 3..t * 3 + 3];
+                                            let a = p3[&c[0]];
+                                            let b = p3[&c[1]];
+                                            let d = p3[&c[2]];
+                                            let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                                            let ad = [d[0] - a[0], d[1] - a[1], d[2] - a[2]];
+                                            let nn = [
+                                                ab[1] * ad[2] - ab[2] * ad[1],
+                                                ab[2] * ad[0] - ab[0] * ad[2],
+                                                ab[0] * ad[1] - ab[1] * ad[0],
+                                            ];
+                                            let l = (nn[0] * nn[0]
+                                                + nn[1] * nn[1]
+                                                + nn[2] * nn[2])
+                                                .sqrt();
+                                            if l > 1e-18 {
+                                                Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                                            } else {
+                                                None
+                                            }
+                                        };
+                                        let mut folds = 0usize;
+                                        for ts in edge_tris.values() {
+                                            if ts.len() != 2 {
+                                                continue;
+                                            }
+                                            if let (Some(n1), Some(n2)) =
+                                                (tri_n(ts[0]), tri_n(ts[1]))
+                                            {
+                                                let dot = (n1[0] * n2[0]
+                                                    + n1[1] * n2[1]
+                                                    + n1[2] * n2[2])
+                                                    .clamp(-1.0, 1.0);
+                                                if dot.acos().to_degrees() > 170.0 {
+                                                    folds += 1;
+                                                }
+                                            }
+                                        }
+                                        folds
+                                    };
+                                    let lf = count_folds(&tris);
+                                    let cf = count_folds(&cdt_flat);
+                                    (cf <= lf, lf, cf)
+                                } else {
+                                    (true, 0, 0)
+                                };
                             let cdt_improves = !cdt2.is_empty()
                                 && overlap_ok
                                 && (cdt_ring_edges > legacy_ring_edges
@@ -13698,10 +13876,12 @@ pub fn triangulate_surface_consistent(
                                     || (sail_fallback
                                         && cdt_ring_edges == legacy_ring_edges
                                         && cdt_extra_bnd == 0
-                                        && cdt_interior_dropped == 0));
+                                        && cdt_interior_dropped == 0)
+                                    || (torus_windmill
+                                        && torus_fold_ok));
                             if cdt_improves {
                                 log::warn!(
-                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris)",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris{}, emission folds {} → {})",
                                 current_face_label(),
                                 n_unused,
                                 legacy_extra_bnd,
@@ -13710,7 +13890,10 @@ pub fn triangulate_surface_consistent(
                                 legacy_extra_bnd,
                                 cdt_extra_bnd,
                                 tris.len() / 3,
-                                cdt2.len()
+                                cdt2.len(),
+                                if torus_windmill { " [TORUS WINDMILL]" } else { "" },
+                                legacy_emission_folds,
+                                cdt_emission_folds,
                             );
                                 tris = cdt_flat;
                                 rescued_by_cdt = true;
