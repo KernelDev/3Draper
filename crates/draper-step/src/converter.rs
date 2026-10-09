@@ -6419,6 +6419,200 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // ─── Session-90: post-weld surface-normal winding audit ────────
+        // The emission-level CCW normalization + local winding audit
+        // guarantee correct windings BEFORE the merge — but the weld can
+        // INVERT thin fan blades AFTER the fact: welding shifts boundary
+        // vertices by up to res_tol (measured 0.19 on HEX_CAP_SCREW
+        // f19, more than the 0.055 thickness of the far-side full-wheel
+        // fan blades), and a shift larger than a blade's thickness
+        // flips the blade's effective normal (the surviving blade
+        // [155,190,192]: local parent (0,84,85) area 0.075 correctly
+        // wound → welded blade area 0.47 with normal ANTI-parallel to
+        // the plane). These sub-tolerance blade inversions are exactly
+        // the WINDING-FLIP >170° pairs (opposite-side apexes, so the
+        // s89 removal pass correctly refuses them — removal would lose
+        // coverage; a winding FLIP loses nothing).
+        //
+        // The audit is exact for analytic surfaces: the outward unit
+        // normal at each triangle's centroid is computable in closed
+        // form (Plane / Cylinder / Cone / Torus / Sphere — the same
+        // formulas the fold_face_probe snAng uses, single source of
+        // truth in spirit). The expected sign is +normal for forward
+        // faces, −normal for !forward (the healed flag). Flip any
+        // disagreeing triangle (swap indices 1,2) — no coverage, area,
+        // or topology change; only orientation. Faces on surfaces
+        // without a closed-form normal (Nurbs/Revolution/...) are left
+        // untouched — a partial fix measured to be a NET REGRESSION
+        // (planar-only flipped 5 blades into disagreement with
+        // weld-inverted cone neighbors: 1 → 5 REAL pairs; the
+        // cross-surface class demands the full analytic set).
+        //
+        // Kill-switch: DRAPPER_POSTWELD_PLANAR_WIND=0 (bit-exact legacy;
+        // name kept for continuity with the planar-only prototype).
+        // Diagnostics: DRAPPER_PLANAR_CCW_DEBUG=1 prints the flip count.
+        {
+            let enabled = std::env::var("DRAPPER_POSTWELD_PLANAR_WIND")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            if enabled {
+                if let Some(ref fids) = mesh.triangle_face_ids {
+                    // face_id → (surface ref clone is cheap enough via
+                    // index; borrow instead) — collect face_id → index
+                    let mut face_surf: std::collections::HashMap<u64, (&Surface, bool, &str)> =
+                        std::collections::HashMap::new();
+                    for fi in &face_infos {
+                        face_surf.insert(fi.face_id, (&fi.surface, fi.forward, &fi.surface_type));
+                    }
+                    // The BREP's effective vertex resolution (merge + all
+                    // weld passes, s74) — the thickness gate reference.
+                    let res_tol_audit = self.last_brep_eff_tol.get();
+                    let nv = mesh.vertices.len();
+                    // ── v4: pair-targeted, surface-normal-aware flip ──
+                    // Scan usage-2 edges for the WINDING-FLIP signature
+                    // (>170 deg dihedral + topo-flipped traversal) and
+                    // flip the side whose winding disagrees with its
+                    // face's analytic normal at all three vertices.
+                    // Topo-consistent faces — even absolutely-inverted
+                    // ones (the drill's BFS-unified equilibrium) — are
+                    // never touched: the blanket face audit measured
+                    // 290 -> 1361 REAL there by breaking topo consistency
+                    // in the name of absolute orientation.
+                    use std::collections::HashMap as SDHashMap;
+                    let mut edge_map: SDHashMap<(u32, u32), Vec<(usize, u32, u32)>> =
+                        SDHashMap::new();
+                    for (ti, tri) in mesh.triangles.iter().enumerate() {
+                        let (a, b, c) = (tri[0], tri[1], tri[2]);
+                        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+                            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                            edge_map.entry(key).or_default().push((ti, v0, v1));
+                        }
+                    }
+                    let mut edges: Vec<(&(u32, u32), &Vec<(usize, u32, u32)>)> =
+                        edge_map.iter().collect();
+                    edges.sort_unstable_by_key(|(e, _)| **e); // determinism (s87)
+
+                    let tri_disagrees = |surf: &Surface, forward: bool, t: &[u32; 3]| -> Option<bool> {
+                        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                        if a >= nv || b >= nv || c >= nv {
+                            return None;
+                        }
+                        let pa = &mesh.vertices[a];
+                        let pb = &mesh.vertices[b];
+                        let pc = &mesh.vertices[c];
+                        let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+                        let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                        if (nx * nx + ny * ny + nz * nz).sqrt() < 1e-15 {
+                            return None;
+                        }
+                        // Thickness gate: sub-res_tol triangles are weld
+                        // noise; flipping just relabels the pair class.
+                        let area = 0.5 * (nx * nx + ny * ny + nz * nz).sqrt();
+                        let l01 = pa.distance_to(pb);
+                        let l12 = pb.distance_to(pc);
+                        let l20 = pc.distance_to(pa);
+                        let shortest = l01.min(l12).min(l20);
+                        if shortest <= 1e-15 {
+                            return None;
+                        }
+                        if 2.0 * area / shortest < res_tol_audit {
+                            return Some(false); // too thin — never flip
+                        }
+                        let fsign = if forward { 1.0 } else { -1.0 };
+                        let mut disagree = 0usize;
+                        for pv in [pa, pb, pc] {
+                            if let Some(sn) = surface_normal_at_point(surf, pv) {
+                                if (nx * sn[0] + ny * sn[1] + nz * sn[2]) * fsign < 0.0 {
+                                    disagree += 1;
+                                }
+                            } else {
+                                return None; // a vertex without a normal — skip
+                            }
+                        }
+                        Some(disagree == 3)
+                    };
+
+                    let mut flip_set: std::collections::BTreeSet<usize> =
+                        std::collections::BTreeSet::new();
+                    for (_edge, owners) in &edges {
+                        if owners.len() != 2 {
+                            continue;
+                        }
+                        let (t0, da0, db0) = owners[0];
+                        let (t1, da1, db1) = owners[1];
+                        // topo-flipped: same traversal direction
+                        if !((da0 == da1) && (db0 == db1)) {
+                            continue;
+                        }
+                        let tri0 = mesh.triangles[t0];
+                        let tri1 = mesh.triangles[t1];
+                        // >170 deg dihedral
+                        let nrm = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
+                            let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                            if a >= nv || b >= nv || c >= nv {
+                                return None;
+                            }
+                            let pa = &mesh.vertices[a];
+                            let pb = &mesh.vertices[b];
+                            let pc = &mesh.vertices[c];
+                            let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+                            let e2 = (pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
+                            let n = (
+                                e1.1 * e2.2 - e1.2 * e2.1,
+                                e1.2 * e2.0 - e1.0 * e2.2,
+                                e1.0 * e2.1 - e1.1 * e2.0,
+                            );
+                            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+                            if l < 1e-15 {
+                                None
+                            } else {
+                                Some((n.0 / l, n.1 / l, n.2 / l))
+                            }
+                        };
+                        let (Some(n0), Some(n1)) = (nrm(&tri0), nrm(&tri1)) else {
+                            continue;
+                        };
+                        let cos = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+                        if cos.clamp(-1.0, 1.0).acos().to_degrees() <= 170.0 {
+                            continue;
+                        }
+                        // WINDING-FLIP pair: pick the analytically-wrong side.
+                        let Some((surf0, fwd0, _)) = face_surf.get(&fids[t0]) else { continue };
+                        let Some((surf1, fwd1, _)) = face_surf.get(&fids[t1]) else { continue };
+                        let (Some(bad0), Some(bad1)) = (
+                            tri_disagrees(surf0, *fwd0, &tri0),
+                            tri_disagrees(surf1, *fwd1, &tri1),
+                        ) else {
+                            continue;
+                        };
+                        if bad0 && !bad1 {
+                            flip_set.insert(t0);
+                        } else if bad1 && !bad0 {
+                            flip_set.insert(t1);
+                        }
+                        // both or neither disagree: ambiguous — leave alone
+                    }
+                    if !flip_set.is_empty() {
+                        let n_flipped = flip_set.len();
+                        for ti in &flip_set {
+                            mesh.triangles[*ti].swap(1, 2);
+                        }
+                        log::info!(
+                            "BREP #{} detailed: surface-normal winding flip repaired {} WINDING-FLIP pairs",
+                            brep_id, n_flipped,
+                        );
+                        if std::env::var("DRAPPER_PLANAR_CCW_DEBUG").is_ok() {
+                            eprintln!("POSTWELD_SURF_WIND: flipped {} triangles", n_flipped);
+                        }
+                        draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-postweldwind");
+                    }
+                }
+            }
+        }
+
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {
@@ -13646,6 +13840,88 @@ impl<'a> StepConverter<'a> {
     /// This connects each hole to the outer boundary with a pair of coincident edges,
     /// creating a single polygon that can be ear-clipped.
     /// Triangulate a planar face with holes using the edge cache for consistent boundary points.
+    /// session-90: planar winding audit — correct-by-construction orientation.
+    ///
+    /// Every triangle of a planar face lies in the plane, so its winding
+    /// normal is exactly ±plane.normal; the expected sign is +normal for
+    /// forward faces, −normal for !forward (the healed flag — the same
+    /// authority every emission path already uses). Any triangle whose
+    /// normal disagrees is flipped (swap indices 1,2).
+    ///
+    /// Closes the last winding hole of the planar path: ear_clip ears at
+    /// PINCHED rings (chamfer-doubled boundaries — measured on
+    /// HEX_CAP_SCREW BREP#57938 f19: after the CCW normalization 5 of 54
+    /// triangles were still inverted, both arcs around the apex pinch
+    /// where the boundary chain doubles back through near-welded
+    /// chamfer points). The audit is exact for planar geometry — no
+    /// consensus heuristics — and a no-op for already-correct meshes.
+    /// Zero-area triangles are left untouched (dot == 0, filtered
+    /// downstream).
+    ///
+    /// Kill-switch: DRAPPER_PLANAR_WIND_AUDIT=0 (bit-exact legacy).
+    fn audit_planar_winding(mesh: &mut TriangleMesh, plane: &Plane, forward: bool) -> usize {
+        let enabled = std::env::var("DRAPPER_PLANAR_WIND_AUDIT")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        if !enabled || mesh.triangles.is_empty() {
+            return 0;
+        }
+        let n = &plane.normal;
+        let expect: [f64; 3] = if forward {
+            [n.x, n.y, n.z]
+        } else {
+            [-n.x, -n.y, -n.z]
+        };
+        let nv = mesh.vertices.len();
+        let mut flipped = 0usize;
+        for t in mesh.triangles.iter_mut() {
+            let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+            if a >= nv || b >= nv || c >= nv {
+                continue;
+            }
+            let pa = &mesh.vertices[a];
+            let pb = &mesh.vertices[b];
+            let pc = &mesh.vertices[c];
+            let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+            let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+            let dot = nx * expect[0] + ny * expect[1] + nz * expect[2];
+            if dot < 0.0 {
+                t.swap(1, 2);
+                flipped += 1;
+            }
+        }
+        if std::env::var("DRAPPER_PLANAR_CCW_DEBUG").is_ok() {
+            eprintln!(
+                "PLANAR_WIND_AUDIT: flipped {} of {} triangles (forward={})",
+                flipped,
+                mesh.triangles.len(),
+                forward
+            );
+        }
+        // session-90 diagnostics: dump the FACE-LOCAL planar emission
+        // (pre-merge) for offline winding forensics.
+        if let Ok(dir) = std::env::var("DRAPPER_DUMP_PLANAR_LOCAL") {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static LOCAL_DUMP_N: AtomicUsize = AtomicUsize::new(0);
+            let n = LOCAL_DUMP_N.fetch_add(1, Ordering::SeqCst);
+            let label = draper_mesh::parametric_domain::current_face_label();
+            let path = format!("{}/local_{:04}_{}.obj", dir, n, if label.is_empty() { "x".into() } else { label });
+            let _ = std::fs::create_dir_all(&dir);
+            let mut out = String::with_capacity(1 << 16);
+            for v in &mesh.vertices {
+                out.push_str(&format!("v {:.9} {:.9} {:.9}\n", v.x, v.y, v.z));
+            }
+            for t in &mesh.triangles {
+                out.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+            let _ = std::fs::write(&path, out);
+        }
+        flipped
+    }
+
     fn triangulate_planar_face_with_holes_cached(
         &self,
         plane: &Plane,
@@ -13808,6 +14084,75 @@ impl<'a> StepConverter<'a> {
 
         // Same triangulation logic as the non-cached version
         if hole_points_2d.is_empty() {
+        // ── session-90: outer-ring CCW normalization (signed area) ────
+        //
+        // ROOT CAUSE of the cross-face WINDING-FLIP fastener class
+        // (HEX_CAP_SCREW/10_MHCS/4_5_MHCS ×35, transmission 179-tail):
+        // the planar fast paths (thin_strip_zipper / convex fan /
+        // ear_clip) emit triangles that FOLLOW THE RING ORDER, applying
+        // only the `forward` flag swap — they assume a CCW ring in the
+        // plane's (u_dir, v_dir) frame. But the collected ring can be
+        // CW: `resolve_face_bound_with_step_ids` has a DEAD .F. reversal
+        // (the param loop returns on the EDGE_LOOP ref — params[1] —
+        // BEFORE reading the orientation enum — params[2]), so faces
+        // whose stored EDGE_LOOP walks CW in (u,v) with a .F. bound flag
+        // hand a CW ring to this function. Measured on HEX_CAP_SCREW
+        // BREP#57938 face 10 (hex flat): raw loop CW in (u,v) (signed
+        // area −1.44), collected ring CW (−1.56), fan emission INVERTED
+        // (normals anti-parallel to the plane axis) for forward=.T.
+        //
+        // The parametric path is immune (its own CCW normalization at
+        // parametric_domain Step 1.25), and the earcutr fallback branch
+        // normalizes inside earcutr_triangulate_planar_converter — only
+        // the fast paths lack it. The BFS (fix_inconsistent_winding)
+        // then propagates the inversion from the lowest-index triangle
+        // of the component: on the screws, face 1 (an inverted plane)
+        // is the reference, so the ENTIRE correctly-emitted cone/
+        // cylinder majority gets flipped inside-out, and the few
+        // correct triangles left at chamfer boundaries become the
+        // WINDING-FLIP >170° pairs (opposite-side apexes, topo-flipped
+        // shared edge).
+        //
+        // Fix: normalize by GEOMETRY, not by file convention — if the
+        // outer ring's signed area in (u,v) is negative (CW), reverse
+        // outer_2d AND outer_points_3d in sync (UV↔3D correspondence
+        // preserved by index). This mirrors the parametric path's
+        // normalization exactly and is dialect-agnostic: a .F.-bound
+        // file with CCW-stored loops is untouched (no reversal), a
+        // .T.-bound file with CCW loops is untouched, only genuinely
+        // CW rings flip. Holes are NOT reversed here: the earcutr
+        // branch normalizes them relative to the (now CCW) outer
+        // internally, and the fast paths are hole-less.
+        //
+        // Kill-switch: DRAPPER_PLANAR_CCW_NORM=0 (bit-exact legacy).
+        // Diagnostics: DRAPPER_PLANAR_CCW_DEBUG=1 prints every reversal.
+        {
+            let ccw_norm = std::env::var("DRAPPER_PLANAR_CCW_NORM")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            if ccw_norm && outer_2d.len() >= 3 {
+                let mut signed_area = 0.0_f64;
+                for i in 0..outer_2d.len() {
+                    let j = (i + 1) % outer_2d.len();
+                    signed_area += outer_2d[i].u * outer_2d[j].v
+                        - outer_2d[j].u * outer_2d[i].v;
+                }
+                if signed_area < 0.0 {
+                    if std::env::var("DRAPPER_PLANAR_CCW_DEBUG").is_ok() {
+                        eprintln!(
+                            "PLANAR_CCW_NORM: reversing CW outer ring ({} pts, signed area {:.6}, forward={})",
+                            outer_2d.len(),
+                            signed_area * 0.5,
+                            forward
+                        );
+                    }
+                    outer_2d.reverse();
+                    outer_points_3d.reverse();
+                }
+            }
+        }
+
+
             // ── session-76: thin monotone strip zipper (default OFF) ──
             // ear_clip's greedy first-ear loop fans a corner vertex
             // across thin strip domains (drill HM f105 / HOUSING f224
@@ -13839,6 +14184,7 @@ impl<'a> StepConverter<'a> {
                         mesh.add_triangle(tri[0], tri[2], tri[1]);
                     }
                 }
+                Self::audit_planar_winding(&mut mesh, plane, forward);
                 return mesh;
             }
             // For convex polygons, use fast fan triangulation O(n).
@@ -13894,9 +14240,10 @@ impl<'a> StepConverter<'a> {
                     }
                 } else {
                     // Fallback to earcutr if ear_clip fails
-                    if let Some(m) = earcutr_triangulate_planar_converter(
+                    if let Some(mut m) = earcutr_triangulate_planar_converter(
                         &outer_2d, &outer_points_3d, &[], &[], forward, plane,
                     ) {
+                        Self::audit_planar_winding(&mut m, plane, forward);
                         return m;
                     }
                     // Last resort: fan from centroid
@@ -13993,7 +14340,7 @@ impl<'a> StepConverter<'a> {
             // by construction). Non-annulus inputs return None and fall
             // through to earcutr unchanged.
             if hole_points_2d.len() == 1 && hole_points_3d[0].len() == hole_points_2d[0].len() {
-                if let Some(m) = try_radial_zipper_annulus(
+                if let Some(mut m) = try_radial_zipper_annulus(
                     &outer_2d,
                     &outer_points_3d,
                     &hole_points_2d[0],
@@ -14001,12 +14348,14 @@ impl<'a> StepConverter<'a> {
                     forward,
                     plane,
                 ) {
+                    Self::audit_planar_winding(&mut m, plane, forward);
                     return m;
                 }
             }
-            if let Some(m) = earcutr_triangulate_planar_converter(
+            if let Some(mut m) = earcutr_triangulate_planar_converter(
                 &outer_2d, &outer_points_3d, &hole_points_2d, &hole_points_3d, forward, plane,
             ) {
+                Self::audit_planar_winding(&mut m, plane, forward);
                 return m;
             }
 
@@ -14042,6 +14391,7 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        Self::audit_planar_winding(&mut mesh, plane, forward);
         let normal = if forward { plane.normal } else {
             Direction3d::new(-plane.normal.x, -plane.normal.y, -plane.normal.z).unwrap_or(Direction3d::Z)
         };
@@ -15215,6 +15565,85 @@ fn try_radial_zipper_annulus(
 ///
 /// Returns None if the input is degenerate, in which case the caller should
 /// fall back to bridge-edge ear-clip.
+///
+/// session-90: closed-form outward unit normal of an analytic surface at a
+/// 3D point (BREP-local space, same as the surface params). Returns None
+/// for surfaces without a closed form (Nurbs, Revolution, ...) and at
+/// singular points (cone apex, torus/cylinder axis, sphere center).
+/// Formulas mirror tools/src/surf_exempt.rs::surface_unit_normal (the
+/// fold_face_probe snAng authority) plus the Sphere case.
+fn surface_normal_at_point(surf: &Surface, p: &Point3d) -> Option<[f64; 3]> {
+    let unit = |v: [f64; 3]| -> Option<[f64; 3]> {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l < 1e-15 {
+            None
+        } else {
+            Some([v[0] / l, v[1] / l, v[2] / l])
+        }
+    };
+    match surf {
+        Surface::Plane(pl) => unit([pl.normal.x, pl.normal.y, pl.normal.z]),
+        Surface::Cylinder(cy) => {
+            let d = [p.x - cy.origin.x, p.y - cy.origin.y, p.z - cy.origin.z];
+            let a = [cy.axis.x, cy.axis.y, cy.axis.z];
+            let t = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+            unit([d[0] - t * a[0], d[1] - t * a[1], d[2] - t * a[2]])
+        }
+        Surface::Cone(co) => {
+            let d = [p.x - co.origin.x, p.y - co.origin.y, p.z - co.origin.z];
+            let a = [co.axis.x, co.axis.y, co.axis.z];
+            let t = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+            let perp = [d[0] - t * a[0], d[1] - t * a[1], d[2] - t * a[2]];
+            let Some(pr) = unit(perp) else { return None }; // on the axis
+            let tan = co.half_angle.tan();
+            // Both cone kinds WIDEN toward +axis (standard: r = radius +
+            // v·tan(h) with the apex at v = −radius/tan(h), see
+            // ConeSurface::apex_v; expanding: apex at origin, radius
+            // grows with v). The struct comment "axis from base toward
+            // apex" is stale — the math is authoritative. Outward
+            // normal (verified on HEX_CAP_SCREW chamfer f17: the
+            // physical normal points up-and-out, x-component −sin(h)):
+            // n = cos(h)·radial − sin(h)·axis, for BOTH kinds.
+            let r_t = if co.expanding {
+                t.abs() * tan
+            } else {
+                co.radius + t * tan
+            };
+            if r_t <= 1e-9 {
+                return None; // apex singularity
+            }
+            let ch = co.half_angle.cos();
+            let sh = co.half_angle.sin();
+            unit([
+                ch * pr[0] - sh * a[0],
+                ch * pr[1] - sh * a[1],
+                ch * pr[2] - sh * a[2],
+            ])
+        }
+        Surface::Torus(to) => {
+            let d = [p.x - to.center.x, p.y - to.center.y, p.z - to.center.z];
+            let a = [to.axis.x, to.axis.y, to.axis.z];
+            let h = d[0] * a[0] + d[1] * a[1] + d[2] * a[2];
+            let q = [d[0] - h * a[0], d[1] - h * a[1], d[2] - h * a[2]];
+            let ql = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2]).sqrt();
+            if ql < 1e-12 {
+                return None; // on the torus axis
+            }
+            let ring = [
+                to.center.x + to.major_radius * q[0] / ql,
+                to.center.y + to.major_radius * q[1] / ql,
+                to.center.z + to.major_radius * q[2] / ql,
+            ];
+            unit([p.x - ring[0], p.y - ring[1], p.z - ring[2]])
+        }
+        Surface::Sphere(sp) => {
+            let d = [p.x - sp.center.x, p.y - sp.center.y, p.z - sp.center.z];
+            unit(d)
+        }
+        _ => None,
+    }
+}
+
 fn earcutr_triangulate_planar_converter(
     outer_2d: &[Point2d],
     outer_3d: &[Point3d],
@@ -17283,6 +17712,130 @@ fn merge_holes_into_polygon(
     }
 
     (poly_2d, poly_3d)
+}
+
+// ============================================================
+// session-90 unit tests: surface_normal_at_point
+// ============================================================
+#[cfg(test)]
+mod s90_surface_normal_tests {
+    use super::*;
+
+    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// Plane: the outward normal is the plane normal at any point.
+    #[test]
+    fn plane_normal_is_constant() {
+        let pl = Plane {
+            origin: Point3d::new(0.0, 0.0, 5.0),
+            u_dir: Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+            v_dir: Direction3d::new(0.0, 1.0, 0.0).unwrap(),
+            normal: Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+        };
+        let s = Surface::Plane(pl);
+        let p = Point3d::new(3.0, -2.0, 5.0);
+        let n = surface_normal_at_point(&s, &p).expect("plane normal");
+        assert!(dot(n, [0.0, 0.0, 1.0]) > 0.999, "plane normal must be +z, got {:?}", n);
+    }
+
+    /// Cylinder: the outward normal is the radial unit vector.
+    #[test]
+    fn cylinder_normal_is_radial() {
+        let cy = CylinderSurface::new_with_frame(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            2.0,
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+        );
+        let s = Surface::Cylinder(cy);
+        let p = Point3d::new(2.0, 0.0, 7.0); // on the surface at angle 0
+        let n = surface_normal_at_point(&s, &p).expect("cylinder normal");
+        assert!(dot(n, [1.0, 0.0, 0.0]) > 0.999, "cylinder normal at angle 0 must be +x, got {:?}", n);
+        // off-surface point: radial direction still well-defined
+        let q = Point3d::new(0.0, 5.0, -3.0);
+        let n2 = surface_normal_at_point(&s, &q).expect("cylinder normal off-surface");
+        assert!(dot(n2, [0.0, 1.0, 0.0]) > 0.999, "cylinder normal at +y must be +y, got {:?}", n2);
+    }
+
+    /// Cone (the s90 sign-fix regression): a NON-expanding cone along +z
+    /// with base radius r at v=0 WIDENS toward +axis (apex at negative v,
+    /// see ConeSurface::apex_v). The outward normal at a surface point is
+    /// cos(h)·radial − sin(h)·axis — the radial component is positive and
+    /// the axial component NEGATIVE (pointing away from the widening
+    /// direction). Verified geometrically on HEX_CAP_SCREW's chamfer
+    /// (semi 60°, physical normal up-and-out).
+    #[test]
+    fn cone_normal_sign_convention() {
+        // cone along +z, half-angle 45°, radius 1 at v=0
+        let co = ConeSurface::new_with_frame(
+            Point3d::new(0.0, 0.0, 0.0),
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+        );
+        assert!(!co.expanding, "test premise: non-expanding cone");
+        // point on the surface at v=1: radius = 1 + 1·tan(45°) = 2
+        let p = Point3d::new(2.0, 0.0, 1.0);
+        let n = surface_normal_at_point(&Surface::Cone(co), &p).expect("cone normal");
+        let sh = (std::f64::consts::FRAC_PI_4).sin();
+        let ch = (std::f64::consts::FRAC_PI_4).cos();
+        // expected outward: (ch, 0, −sh)
+        assert!(
+            dot(n, [ch, 0.0, -sh]) > 0.999,
+            "cone outward normal must be (cos, 0, -sin), got {:?}",
+            n
+        );
+    }
+
+    /// Sphere: the outward normal is (p − center) normalized.
+    #[test]
+    fn sphere_normal_is_radial() {
+        let sp = SphereSurface::new(Point3d::new(1.0, 2.0, 3.0), 4.0);
+        let s = Surface::Sphere(sp);
+        let p = Point3d::new(5.0, 2.0, 3.0); // +x from center
+        let n = surface_normal_at_point(&s, &p).expect("sphere normal");
+        assert!(dot(n, [1.0, 0.0, 0.0]) > 0.999, "sphere normal must be +x, got {:?}", n);
+    }
+
+    /// Torus: the outward normal points away from the ring circle.
+    #[test]
+    fn torus_normal_points_away_from_ring() {
+        let to = TorusSurface::new(
+            Point3d::ORIGIN,
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            4.0, // major
+            1.0, // minor
+        );
+        let s = Surface::Torus(to);
+        // outermost point: ring at (4,0,0), surface point (5,0,0)
+        let p = Point3d::new(5.0, 0.0, 0.0);
+        let n = surface_normal_at_point(&s, &p).expect("torus normal");
+        assert!(dot(n, [1.0, 0.0, 0.0]) > 0.999, "torus outer normal must be +x, got {:?}", n);
+        // top of the tube: ring at (4,0,0), surface point (4,0,1)
+        let q = Point3d::new(4.0, 0.0, 1.0);
+        let n2 = surface_normal_at_point(&s, &q).expect("torus normal");
+        assert!(dot(n2, [0.0, 0.0, 1.0]) > 0.999, "torus top normal must be +z, got {:?}", n2);
+    }
+
+    /// Singularities return None (no flip decision possible).
+    #[test]
+    fn singular_points_return_none() {
+        let co = ConeSurface::new_with_frame(
+            Point3d::ORIGIN,
+            Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            1.0,
+            std::f64::consts::FRAC_PI_4,
+            Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+        );
+        // axis point of the cone: no radial direction
+        assert!(surface_normal_at_point(&Surface::Cone(co), &Point3d::new(0.0, 0.0, 5.0)).is_none());
+        // Nurbs surfaces have no closed form — None
+        // (constructing a Nurbs here is heavy; the _ => None arm is covered
+        //  by the surface match's exhaustiveness)
+    }
 }
 
 #[cfg(test)]
