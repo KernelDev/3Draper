@@ -138,4 +138,24 @@ fn main() {
     let it_res =
         draper_mesh::earcut_adapter::triangulate_with_itriangle_fallback(&coords, &[]);
     stats("E i_triangle_fallback", &pts, &it_res);
+
+    // s87: dump the stage-C alt tris (the guard's actual alt mesh) for
+    // offline degree-shaving flip analysis
+    if let Ok(dir) = std::env::var("DRAPPER_REPLAY_DUMP") {
+        let label = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ring");
+        let out_path = format!("{}/{}_altC.txt", dir, label);
+        let mut out = String::new();
+        out.push_str(&format!("m={}\n", m));
+        for p in &pts {
+            out.push_str(&format!("p {:.9} {:.9}\n", p.0, p.1));
+        }
+        for t in flipped.chunks_exact(3) {
+            out.push_str(&format!("t {} {} {}\n", t[0], t[1], t[2]));
+        }
+        let _ = std::fs::write(&out_path, out);
+        println!("dumped stage-C alt to {}", out_path);
+    }
 }

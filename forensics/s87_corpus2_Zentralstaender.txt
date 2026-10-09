@@ -1,0 +1,3 @@
+Loading STEP file: test/Zentralstaender.stp
+
+===== GRAND HISTOGRAM (class | surfA | surfB) =====

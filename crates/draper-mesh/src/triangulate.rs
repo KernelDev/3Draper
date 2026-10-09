@@ -10535,13 +10535,252 @@ pub fn planar_fan_guard(
             adeg[v as usize] += 1;
         }
     }
-    let alt_max = *adeg.iter().max()? as usize;
+    let mut alt_max = *adeg.iter().max()? as usize;
     if alt_max >= max_deg {
-        if fan_debug {
-            eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} fan_max={}",
-                crate::parametric_domain::current_face_label(), alt_max, max_deg);
+        // ── s87: DEGREE SHAVING ─────────────────────────────────
+        // The earcut alt on thin domains can come out ONE degree
+        // worse than the fan at a single wheel vertex (HOUSING f3:
+        // alt 108 at v* vs fan 107 — while the second-highest alt
+        // degree is 53; the mirror twin HM f3 accepts the SAME alt
+        // because its fan is looser, 158/179). The alt mesh is the
+        // better triangulation (HM post-weld f3 debt = 5 REAL vs
+        // the fan's 29 on HOUSING) — reject-by-one-degree throws
+        // that away. Shaving: local convex edge flips on INTERIOR
+        // edges incident to v* only — each flip removes one v*-tri
+        // and preserves the area EXACTLY (convex quad re-split),
+        // rim coverage (never touches rim edges) and vertex usage
+        // (removes no vertex); replacement winding is oriented to
+        // the partner's stored sign (the s81 flip_zero_area_ears
+        // lesson — never assume, orient). Bounded: only the max
+        // vertex, at most (alt_max - fan_max + 1) + 2 extra flips,
+        // re-validated fully after; any miss = bit-exact legacy
+        // fallback. Kill-switch: DRAPPER_FAN_DEG_SHAVE=0.
+        if std::env::var("DRAPPER_FAN_DEG_SHAVE").as_deref() == Ok("0") {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} fan_max={} (shave off)",
+                    crate::parametric_domain::current_face_label(), alt_max, max_deg);
+            }
+            return None;
         }
-        return None;
+        let need = alt_max - max_deg + 1; // flips to get strictly below
+        if need > 8 {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} fan_max={} (gap too wide)",
+                    crate::parametric_domain::current_face_label(), alt_max, max_deg);
+            }
+            return None;
+        }
+        let v_star = adeg.iter().copied().position(|d| d as usize == alt_max)?;
+        // second-highest degree (excluding v_star): shaving v* alone
+        // cannot help if another vertex already sits at >= fan_max
+        let second = adeg
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != v_star)
+            .map(|(_, d)| *d as usize)
+            .max()
+            .unwrap_or(0);
+        if second >= max_deg {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} second={} fan_max={} (multi-vertex)",
+                    crate::parametric_domain::current_face_label(), alt_max, second, max_deg);
+            }
+            return None;
+        }
+        // live interior-edge map (edges shared by exactly 2 tris)
+        let mut edge_tris: std::collections::HashMap<(u32, u32), Vec<usize>> =
+            std::collections::HashMap::with_capacity(alt.len() * 3);
+        for (ti, t) in alt.iter().enumerate() {
+            for k in 0..3 {
+                let a = t[k];
+                let b = t[(k + 1) % 3];
+                if a != b {
+                    edge_tris.entry((a.min(b), a.max(b))).or_default().push(ti);
+                }
+            }
+        }
+        let is_rim = |a: u32, b: u32| -> bool {
+            let (lo, hi) = (a.min(b), a.max(b));
+            hi == lo + 1 || (lo == 0 && hi == m as u32 - 1)
+        };
+        let cr = |o: (f64, f64), a: (f64, f64), b: (f64, f64)| -> f64 {
+            (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+        };
+        let pt = |i: u32| -> (f64, f64) {
+            let p = &points[i as usize];
+            (p.u, p.v)
+        };
+        let sign_of = |tri: &[u32; 3]| -> f64 {
+            cr(pt(tri[0]), pt(tri[1]), pt(tri[2]))
+        };
+        let mut flipped = 0usize;
+        let mut remaining = need;
+        'shave: for _ in 0..(need + 2) {
+            if remaining == 0 {
+                break;
+            }
+            // v*-incident interior edges from the CURRENT topology
+            // (SORTED — HashMap iteration order is run-random and the
+            // first-valid-edge choice must be deterministic)
+            let mut star: Vec<((u32, u32), usize, usize)> = edge_tris
+                .iter()
+                .filter(|(e, tis)| {
+                    tis.len() == 2
+                        && (e.0 as usize == v_star || e.1 as usize == v_star)
+                        && !is_rim(e.0, e.1)
+                })
+                .map(|(e, tis)| (*e, tis[0], tis[1]))
+                .collect();
+            star.sort();
+            let mut progressed = false;
+            for (e, ti1, ti2) in star {
+                if remaining == 0 {
+                    break 'shave;
+                }
+                let (a, b) = e;
+                let t1 = alt[ti1];
+                let t2 = alt[ti2];
+                let c = match t1.iter().find(|&&x| x != a && x != b) {
+                    Some(&x) => x,
+                    None => continue,
+                };
+                let d = match t2.iter().find(|&&x| x != a && x != b) {
+                    Some(&x) => x,
+                    None => continue,
+                };
+                // the flip edge (c,d) must not already exist (a
+                // duplicate would create a 4-tri non-manifold edge)
+                if edge_tris
+                    .get(&(c.min(d), c.max(d)))
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                // strictly convex quad (both diagonals' apexes on
+                // opposite sides)
+                let (pa, pb, pc, pd) = (pt(a), pt(b), pt(c), pt(d));
+                let s1 = cr(pa, pc, pd);
+                let s2 = cr(pb, pc, pd);
+                let s3 = cr(pc, pa, pb);
+                let s4 = cr(pd, pa, pb);
+                let eps = 1e-12;
+                if !(s1 * s2 < -eps && s3 * s4 < -eps) {
+                    continue;
+                }
+                // replacements oriented to EACH partner's stored sign
+                // (s81 lesson: never assume, orient)
+                let mut n1 = [c, a, d];
+                let mut n2 = [c, d, b];
+                let (w1, w2) = (sign_of(&t1), sign_of(&t2));
+                if sign_of(&n1) * w1 < 0.0 {
+                    n1.swap(1, 2);
+                }
+                if sign_of(&n2) * w2 < 0.0 {
+                    n2.swap(1, 2);
+                }
+                if sign_of(&n1).abs() < 1e-18
+                    || sign_of(&n2).abs() < 1e-18
+                    || sign_of(&n1) * w1 <= 0.0
+                    || sign_of(&n2) * w2 <= 0.0
+                {
+                    continue; // degenerate / sign-mismatched replacement
+                }
+                // the +1 apexes must stay strictly below fan_max
+                if adeg[c as usize] as usize + 1 >= max_deg
+                    || adeg[d as usize] as usize + 1 >= max_deg
+                {
+                    continue;
+                }
+                // apply: replace t1/t2 with n1/n2, update edge map
+                alt[ti1] = n1;
+                alt[ti2] = n2;
+                for t in [&t1, &t2] {
+                    for k in 0..3 {
+                        let x = t[k];
+                        let y = t[(k + 1) % 3];
+                        if x != y {
+                            if let Some(v) = edge_tris.get_mut(&(x.min(y), x.max(y))) {
+                                v.retain(|&ti| ti != ti1 && ti != ti2);
+                            }
+                        }
+                        adeg[x as usize] -= 1;
+                    }
+                }
+                for (t, slot) in [(&n1, ti1), (&n2, ti2)] {
+                    for k in 0..3 {
+                        let x = t[k];
+                        let y = t[(k + 1) % 3];
+                        if x != y {
+                            edge_tris
+                                .entry((x.min(y), x.max(y)))
+                                .or_default()
+                                .push(slot);
+                        }
+                        adeg[x as usize] += 1;
+                    }
+                }
+                flipped += 1;
+                remaining -= 1;
+                progressed = true;
+                break; // re-scan the star (topology changed)
+            }
+            if !progressed {
+                break; // no flippable v*-edge left — cannot shave further
+            }
+        }
+        // re-validate the shaved mesh COMPLETELY (area, rim, used, deg)
+        let mut ok = remaining == 0;
+        if ok {
+            let a2 = area2(&alt);
+            let rel2 = ((a2 - ring_area2).abs()) / ring_area2.abs().max(1e-30);
+            ok = rel2 <= 1e-6;
+        }
+        if ok {
+            let mut es: std::collections::HashSet<(u32, u32)> =
+                std::collections::HashSet::with_capacity(alt.len() * 3);
+            let mut us = vec![false; m];
+            for t in &alt {
+                for k in 0..3 {
+                    let a = t[k];
+                    let b = t[(k + 1) % 3];
+                    es.insert((a.min(b), a.max(b)));
+                }
+                for &v in t {
+                    us[v as usize] = true;
+                }
+            }
+            for i in 0..m {
+                let a = i as u32;
+                let b = ((i + 1) % m) as u32;
+                let e = (a.min(b), a.max(b));
+                if !es.contains(&e) || !us[i] {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            alt_max = *adeg.iter().max().unwrap_or(&0) as usize;
+            ok = alt_max < max_deg;
+        }
+        if !ok {
+            if fan_debug {
+                eprintln!("FAN_GUARD reject [{}] alt_deg_not_lower alt_max={} fan_max={} (shave failed)",
+                    crate::parametric_domain::current_face_label(), alt_max, max_deg);
+            }
+            return None;
+        }
+        if fan_debug {
+            eprintln!(
+                "FAN_GUARD shaved [{}] {} flips: fan_deg={} alt_deg={} alt_tris={}",
+                crate::parametric_domain::current_face_label(),
+                flipped,
+                max_deg,
+                alt_max,
+                alt.len()
+            );
+        }
     }
     if fan_debug {
         eprintln!(
@@ -11214,6 +11453,88 @@ mod degen_strip_zipper_tests {
                 alt.iter().map(|t| tri_area2(&pts, t)).sum();
             assert!((tri_sum - ring_a).abs() < 1e-6 * ring_a.abs());
         }
+    }
+
+    /// s87: DEGREE SHAVING — when the earcut alt comes out ONE (or a
+    /// few) degrees WORSE than the fan at a single wheel vertex (the
+    /// HOUSING f3 class: alt 108 vs fan 107, second-highest 53 — the
+    /// mirror twin HM f3 accepts the SAME alt because its fan is
+    /// looser), the guard must shave the alt below the fan degree via
+    /// local convex interior-edge flips at v* instead of rejecting.
+    /// The shaved mesh must satisfy the FULL contract: strictly lower
+    /// max degree, every rim edge, every vertex used, area preserved
+    /// (exactly — convex quad re-splits), and the kill-switch
+    /// DRAPPER_FAN_DEG_SHAVE=0 restores the strict reject.
+    #[test]
+    fn planar_fan_guard_degree_shaving() {
+        // thin convex strip: bottom on a downward-bulging arc (the
+        // strictly-convex quads the flips need), top flat. earcut's
+        // alt on this ring has max degree 17 at v0 (measured via
+        // earcut_replay); the hand-built partial wheel fan below has
+        // degree 16 → the guard must enter the shaving branch and
+        // flip 2 spokes to reach 15 < 16.
+        let mut pts: Vec<Point2d> = Vec::new();
+        let n_bot = 28;
+        let n_top = 14;
+        for i in 0..n_bot {
+            let t = i as f64 / (n_bot - 1) as f64;
+            pts.push(p(
+                10.0 * t,
+                -0.12 * (std::f64::consts::PI * t).sin(),
+            ));
+        }
+        for i in 0..n_top {
+            let t = 1.0 - i as f64 / (n_top - 1) as f64;
+            pts.push(p(9.0 * t + 0.5, 0.8));
+        }
+        let m = pts.len();
+        assert_eq!(m, 42);
+        // partial wheel at v0, degree 16 (within the trigger window:
+        // >= max(8, m/8) and <= 0.9*(m-2))
+        let fan: Vec<[u32; 3]> = (1..=16u32)
+            .map(|i| [0, i, i + 1])
+            .collect();
+        assert_eq!(max_degree(&fan, m), 16);
+        let alt = planar_fan_guard(&pts, &fan)
+            .expect("shaving must bring the alt under the fan degree");
+        let alt_deg = max_degree(&alt, m);
+        assert!(alt_deg < 16, "shaved alt max degree {} not < 16", alt_deg);
+        // full contract
+        let mut edges = std::collections::HashSet::new();
+        let mut used = vec![false; m];
+        for t in &alt {
+            for k in 0..3 {
+                let a = t[k];
+                let b = t[(k + 1) % 3];
+                edges.insert((a.min(b), a.max(b)));
+            }
+            for &v in t {
+                used[v as usize] = true;
+            }
+        }
+        for i in 0..m {
+            let a = i as u32;
+            let b = ((i + 1) % m) as u32;
+            assert!(
+                edges.contains(&(a.min(b), a.max(b))),
+                "rim edge {} missing after shaving",
+                i
+            );
+            assert!(used[i], "vertex {} unused after shaving", i);
+        }
+        let ring_a = cycle_area2(&pts);
+        let tri_sum: f64 = alt.iter().map(|t| tri_area2(&pts, t)).sum();
+        assert!(
+            (tri_sum - ring_a).abs() < 1e-9 * ring_a.abs(),
+            "shaved area drift {} vs {}",
+            tri_sum,
+            ring_a
+        );
+        // kill-switch: the strict reject returns
+        std::env::set_var("DRAPPER_FAN_DEG_SHAVE", "0");
+        let alt2 = planar_fan_guard(&pts, &fan);
+        std::env::remove_var("DRAPPER_FAN_DEG_SHAVE");
+        assert!(alt2.is_none(), "kill-switch must restore the strict reject");
     }
 }
 

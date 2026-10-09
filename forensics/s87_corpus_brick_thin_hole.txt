@@ -1,0 +1,3 @@
+Loading STEP file: test/brick_thin_hole.stp
+
+===== GRAND HISTOGRAM (class | surfA | surfB) =====

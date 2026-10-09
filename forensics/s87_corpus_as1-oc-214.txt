@@ -1,0 +1,3 @@
+Loading STEP file: test/as1-oc-214.stp
+
+===== GRAND HISTOGRAM (class | surfA | surfB) =====

@@ -1,0 +1,33 @@
+Loading STEP file: test/brick_thin_round.stp
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=177.94 faces=(32,32) types=(Cylinder,Cylinder) step=(1294,1294) tris=([133, 1056, 134],[132, 133, 1056]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=2.07e-4 d10=2.24e-4 self=(2.07e-4,2.24e-4) owners=(7(Cylinder)+32(Cylinder),7(Cylinder)+32(Cylinder)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPSLIVER] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(12,12) types=(Plane!fwd,Plane!fwd) step=(1015,1015) tris=([1026, 928, 929],[1028, 929, 1026]) areas=(0.0000,0.0000) h=(0.0000,0.0001) snAng=0.000/mid=0.000 COINCIDENT owners=(7(Cylinder)+12(Plane),7(Cylinder)+12(Plane)) mid=(-0.01,0.00,-0.00)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=174.19 faces=(26,26) types=(Cylinder!fwd,Cylinder!fwd) step=(1196,1196) tris=([1343, 1614, 1342],[1342, 1615, 1614]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=1.36e-6 d10=1.36e-6 self=(1.36e-6,1.36e-6) owners=(7(Cylinder)+26(Cylinder),7(Cylinder)+26(Cylinder)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=178.85 faces=(11,11) types=(Cylinder,Cylinder) step=(963,963) tris=([126, 127, 604],[125, 604, 126]) areas=(0.0000,0.0000) h=(0.0002,0.0002) snAng=0.000/mid=0.000 d01=3.46e-7 d10=1.04e-6 self=(3.46e-7,1.04e-6) owners=(7(Cylinder)+11(Cylinder),7(Cylinder)+11(Cylinder)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(12,12) types=(Plane!fwd,Plane!fwd) step=(1015,1015) tris=([1198, 1199, 1339],[1197, 1339, 1198]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 COINCIDENT owners=(7(Cylinder)+12(Plane),7(Cylinder)+12(Plane)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=179.83 faces=(32,32) types=(Cylinder,Cylinder) step=(1294,1294) tris=([731, 730, 1056],[732, 1056, 731]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=2.86e-3 d10=2.91e-3 self=(2.86e-3,2.91e-3) owners=(7(Cylinder)+32(Cylinder),7(Cylinder)+32(Cylinder)) mid=(-0.01,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=174.19 faces=(19,19) types=(Cylinder!fwd,Cylinder!fwd) step=(1107,1107) tris=([1200, 1199, 1447],[1199, 1447, 1448]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=1.36e-6 d10=1.36e-6 self=(1.36e-6,1.36e-6) owners=(7(Cylinder)+19(Cylinder),7(Cylinder)+19(Cylinder)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPSLIVER SUBTOL] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(3,3) types=(Plane!fwd,Plane!fwd) step=(758,758) tris=([95, 133, 134],[95, 133, 132]) areas=(0.0000,0.0000) h=(0.0000,0.0000) snAng=0.000/mid=0.000 COINCIDENT owners=(3(Plane),3(Plane)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=174.19 faces=(25,25) types=(Cylinder,Cylinder) step=(1183,1183) tris=([1331, 1330, 1564],[1330, 1564, 1565]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=1.36e-6 d10=1.36e-6 self=(1.36e-6,1.36e-6) owners=(7(Cylinder)+25(Cylinder),7(Cylinder)+25(Cylinder)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=174.19 faces=(20,20) types=(Cylinder,Cylinder) step=(1120,1120) tris=([1220, 1489, 1219],[1219, 1490, 1489]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 d01=1.36e-6 d10=1.36e-6 self=(1.36e-6,1.36e-6) owners=(7(Cylinder)+20(Cylinder),7(Cylinder)+20(Cylinder)) mid=(-0.00,0.00,-0.00)
+[WINDING-FLIPSLIVER] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(3,3) types=(Plane!fwd,Plane!fwd) step=(758,758) tris=([95, 126, 125],[95, 124, 125]) areas=(0.0000,0.0000) h=(0.0000,0.0001) snAng=0.000/mid=0.000 COINCIDENT owners=(3(Plane),3(Plane)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPSLIVER] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(12,12) types=(Plane!fwd,Plane!fwd) step=(1015,1015) tris=([1197, 1342, 1343],[1180, 1343, 1197]) areas=(0.0000,0.0000) h=(0.0000,0.0014) snAng=0.000/mid=0.000 COINCIDENT owners=(7(Cylinder)+12(Plane),7(Cylinder)+12(Plane)) mid=(-0.00,0.00,-0.01)
+[FOLD-OVERFAT] brep_idx=0 BREP#1498 BREP#1498 ang=174.07 faces=(11,12) types=(Cylinder,Plane!fwd) step=(963,1015) tris=([1026, 603, 928],[1026, 928, 929]) areas=(0.0000,0.0000) h=(0.0123,0.0053) snAng=90.000/mid=90.000 d01=4.23e-4 d10=1.28e-3 self=(3.51e-3,1.52e-18) owners=(7(Cylinder)+11(Cylinder),7(Cylinder)+12(Plane)) mid=(-0.01,0.00,-0.00)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(12,12) types=(Plane!fwd,Plane!fwd) step=(1015,1015) tris=([1069, 1330, 1329],[1069, 1330, 1331]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 COINCIDENT owners=(7(Cylinder)+12(Plane),7(Cylinder)+12(Plane)) mid=(-0.00,0.00,-0.01)
+[WINDING-FLIPFAT] brep_idx=0 BREP#1498 BREP#1498 ang=180.00 faces=(21,21) types=(Plane,Plane) step=(1130,1130) tris=([1433, 1445, 1446],[1433, 1447, 1446]) areas=(0.0000,0.0000) h=(0.0001,0.0001) snAng=0.000/mid=0.000 COINCIDENT owners=(7(Cylinder)+21(Plane),7(Cylinder)+21(Plane)) mid=(-0.00,0.00,-0.00)
+--- brep_idx=0 BREP#1498 BREP#1498: 15 pairs >170° (0 tangent-exempt, 1 sub-tol weld-noise, 14 real) eff_tol=0.0000
+                             FAT | Cylinder | Cylinder : 5
+                        SLIVER | Plane!fwd | Plane!fwd : 3
+                     FAT | Cylinder!fwd | Cylinder!fwd : 2
+                           FAT | Plane!fwd | Plane!fwd : 2
+                            FAT | Cylinder | Plane!fwd : 1
+                                   FAT | Plane | Plane : 1
+                 SUBTOL+SLIVER | Plane!fwd | Plane!fwd : 1
+
+===== GRAND HISTOGRAM (class | surfA | surfB) =====
+                        WINDING-FLIP+FAT | Cylinder | Cylinder : 5
+              WINDING-FLIP+COIN+SLIVER | Plane!fwd | Plane!fwd : 3
+                WINDING-FLIP+FAT | Cylinder!fwd | Cylinder!fwd : 2
+                 WINDING-FLIP+COIN+FAT | Plane!fwd | Plane!fwd : 2
+       SUBTOL WINDING-FLIP+COIN+SLIVER | Plane!fwd | Plane!fwd : 1
+                         WINDING-FLIP+COIN+FAT | Plane | Plane : 1
+                          FOLD-OVER+FAT | Cylinder | Plane!fwd : 1
