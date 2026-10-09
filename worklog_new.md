@@ -14138,3 +14138,137 @@ TRANS_HOUSING 773→6, TOP_COVER 28→0, GEAR_SKELETON −1, SHIFT_ROD_END −1;
    0 инверсий winding, но 530 внутренних разрывов и хабы deg-69.
    Структурные инварианты (степени, односторонние рёбра) вскрывают то,
    что площадь скрывает.
+## Сессия 89 (trace 1a120bf541117f35): CROSS-FACE FOLD-FLAP CLEANUP —
+## суб-толерантный класс крепежа убит пост-сварочной чисткой:
+## transmission REAL 349→179 (−49%), drill REAL 614→290 (−53%),
+## transmission angle FAIL 63→39, корпус иначе идентичен, сьюты 0 fail
+## (2026-10-09)
+
+Контекст входа: git pull = 31b8cda (s88; sandbox снова восстановлен из
+бэкапа — отставание ~40 сессий, Rust 1.98.1 переустановлен, 13-й сброс).
+Baseline воспроизведён бит-точно: transmission 690/349, drill 2723/614
+(13/6, 65/50, 198/107, 1149/244, 1298/207 — REAL сумма точно 614,
+raw off-by-one в s88-записи: 2723, не 2722).
+
+### 1. Анатомия хвоста 349: 262 FOLD-OVER / 87 WINDING-FLIP
+
+Цензус классов 349 REAL: FOLD-OVER FAT 259 + SLIVER 3 (74%),
+WINDING-FLIP FAT 85 + SLIVER 2. Распределение min(h) пары: 123 < 0.15,
+плюс 80 пар с ratio площадей > 0.98 (coincident-класс) = 203/262
+кандидата на безопасное удаление.
+
+### 2. КОРЕНЬ 1 (винты, 35 инстанций × 3 REAL): chordal ear
+
+HEX_CAP_SCREW BREP#57938 (10_MHCS/4_5_MHCS — та же геометрия в другом
+масштабе): Plane(12)×Cone(22) ang=180.00, tris [133,180,181]/
+[180,182,181]. Все 3 вершины cone-треугольника лежат НА ОДНОЙ граничной
+кривой (flat12∩cone гипербола, share между плоскостью и конусом) →
+треугольник целиком В ПЛОСКОСТИ грани 12 (dist 0.000000 у всех трёх,
+проверено фит-плоскостью по финальному OBJ-дампу + конус-тест локально:
+вершины ДЕЙСТВИТЕЛЬНО на конусе, отклонения ~1e-5 — это не off-surface,
+а деградация САМОГО треугольника). Механизм: chamfer-кольцо (slant
+0.13) МЕНЬШЕ weld-допа (eff_tol=0.1532) — UV-полигон конуса (141 точка,
+боковые кривые по 55 точек) сваривается в 7 трис, и остаточный
+boundary-ear (h=0.0085, area 0.0007 против лопасти 0.078) ложится в
+плоскость соседа → FOLD-OVER против fan-лопастей [133,180,181]/
+[133,181,182]. Урок трансформ-инверсии: при разборе дампов world→local
+обратная матрица считается через ОБЕ строки (первая попытка дала
+«вершины вне конуса» из-за перепутанного порядка — пере-проверка
+опрокинула вывод; ВСЕГДА перепроверяй инверсию второй точкой).
+
+### 3. КОРЕНЬ 2 (гайки, 29 × 2 REAL): coincident duplicate
+
+HEX_NUT BREP#59948: Cylinder(4)×Cylinder(5) ang=179-180, areas
+ТОЧНО равны (0.0304/0.0304), h равны (0.60), snAng=0.000 — резьбовой
+V-вырез уже сварочного допуска, обе flank-поверхности триангулируют
+ОДНУ физическую область, зеркальные треугольники совпадают. Пара
+[278,340,309]/[279,309,340] — общее ребро, апексы 278/279 на расстоянии
+weld-а. FOLD-OVER (same-side) = двойное покрытие.
+
+### 4. ПАСС: remove_cross_face_fold_flaps (watertight.rs, s89)
+
+fix_inconsistent_winding Step 1 (s41) чистит ТОЛЬКО same-face 170°-пары.
+Новый пасс — кросс-фейсовые FOLD-OVER (topo-consistent + same-side
+apexes + >170° — таксономия probe): same-side доказывает ПЕРЕКРЫТИЕ,
+удаление не теряет покрытие. Два критерия:
+(a) суб-резолюционный ear: thickness (2·area/shortest_edge) < res_tol И
+    area < 0.5·партнёра (длинный razor-sliver большой площади не
+    трогаем);
+(b) coincident duplicate: |areas| ≤ 2% И centroid-dist < res_tol →
+    удаляем ВЫСОКИЙ индекс (детерминизм).
+res_tol = last_brep_eff_tol (merge + все weld-проходы, s74). Вызов в
+конце triangulate_brep_detailed (после final T-junction, до пересчёта
+нормалей) + пересборка triangle_range. Итерация рёбер СОРТИРОВАНА
+(урок s87-1). Kill-switch DRAPPER_FOLD_FLAP_CLEANUP=0, диагностика
+DRAPPER_FLAP_DEBUG. WINDING-FLIP пары НЕ трогаем (opposite-side = нет
+перекрытия, удаление потеряло бы покрытие; 87 пар — кандидат s90).
+
+### 5. Результаты
+
+- transmission 690/349 → 377/179 (−49% REAL): HEX_NUT 2→0 (×29),
+  винты 3→1 (×35, остались WINDING-FLIP), MAIN_SHAFT 66→30,
+  SHIFT_ROD_R_L 43→24, SPEEDOMETER 53→48; GEAR_LEVER 32 =
+  (Sphere×Sphere — не тонкие и не coincident, как и задумано).
+  207 удалений. Регрессий по BREP: 0 из 66.
+- drill 2723/614 → 1553/290 (−53%): HOUSING 244→115, HM 207→55,
+  SLEEVE 107→86, GEAR 50→28, SHAFT 6=. Семейный дифф: 86 улучшений
+  (−325), 1 регрессия +1 (HOUSING (19,17) WINDING-FLIP микро,
+  area 0.0003, 14-граньный welded-region — weld-reshuffle уровень).
+- transmission angle: FAIL 63 → 39 (−24 BREP), sharp 89642→89292,
+  extreme 30157→29808, subtol 341→198.
+- drill angle: 5 FAIL хроника =, sharp 22942→21521, extreme
+  12626→11362 (лучше).
+
+### 6. Корпус-верификация (default ON vs kill-switch OFF)
+
+- Z 0/0 PASS, as1 0/0 PASS, comp 12/12 = (angle 2 FAIL хроника =),
+  brick_thin/hole 0/0 =, brick_round 15/14 = (angle 1 FAIL хроника =
+  при обоих режимах — пасс его не трогает).
+- Kill-switch OFF: transmission 690/349, drill 2723/614 — бит-точно
+  базлайн. Детерминизм: двойной прогон transmission sorted-md5 равен.
+- Сьюты: mesh 373/0 (+4 новых), geometry 259/0, topology 274/0,
+  core/прочие 0 fail, step 224/0 (lib 163/0 256с + integration,
+  RUST_MIN_STACK=16777216 — «16M» cargo не принимает, только байты).
+
+### 7. Новые тесты (самодоказывающие, FLAP_ENV_LOCK сериализация)
+
+- flap_cleanup_removes_subtol_ear: синтетический boundary-arc
+  (P0,P1,P2) + fan-лопкости + ear [P0,P2,P1] — удалён, лопкости живы,
+  kill-switch OFF = бит-идентично (env-flip сериализован).
+- flap_cleanup_removes_coincident_duplicate: ε-смещённый дубликат,
+  equal-area + centroid < res_tol → удалён ВЫСОКИЙ индекс.
+- flap_cleanup_leaves_winding_flip_pairs: opposite-side пара не
+  тронута.
+- flap_cleanup_keeps_thin_large_sliver: thin+small удаляется,
+  not-thin/not-small (area = 50% партнёра, thickness ≥ res_tol) живёт.
+
+### Осталось (сессия 90)
+
+1. transmission остаток 179: SPEEDOMETER 48 (Nurbs 60x4 same-face
+   self-fold + Plane×Nurbs h=9.8), GEAR_LEVER 32 (Sphere×Sphere
+   equator-шов), MAIN_SHAFT 30, SHIFT_ROD_R_L 24, винты 35 WINDING-FLIP
+   (нужен surface-normal-aware флип — BFS не видит usage>2→2 переходы),
+   SPRING 4, TRANS_HOUSING 6.
+2. WINDING-FLIP класс (87 пар): флип по консенсусу нормалей грани или
+   re-run fix_inconsistent_winding после финального dedup (usage-3→2
+   переходы после удаления дубликатов не пере-сканируются).
+3. Абсолютная площадь как аудит ВСЕХ band-эмиттеров (перенос s88).
+4. Стаггер-решётка за DRAPPER_CAST_ROWS=1 (перенос).
+5. eff_tol-инфляция как метрика качества сварки (перенос s88).
+
+### Уроки
+
+1. «Same-side apexes = двойное покрытие» — геометрическое ДОКАЗАТЕЛЬСТВО
+   безопасности удаления, сильнее любого структурного гейта: FOLD-OVER
+   пары можно удалять без потери покрытия по определению.
+2. Суб-толерантные фичи (chamfer < weld_tol) НЕ «чинятся»
+   триангуляцией (s84/s87 вердикты) — но их ВЫБРОСЫ чистятся
+   пост-сварочно: correct-by-construction подход к классу.
+3. Инверсия трансформа — два независимых вычисления (первое дало
+   неверный вывод «вершины вне конуса», второе опрокинуло): при ручной
+   математике дампов ВСЕГДА сверяй обратную матрицу контрольной точкой.
+4. «h» в probe-выводе = 2·area/shortest_edge (высота на коротчайшее
+   ребро = толщина сливера) — совпадает с толщиной для тонких
+   треугольников, но НЕ равно max-edge: не путать при дизайне критериев.
+5. cargo отклоняет RUST_MIN_STACK=16M («should be a number of bytes») —
+   только 16777216; «16M» в старых записях — сокращение, не литерал.

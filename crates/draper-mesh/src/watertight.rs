@@ -1443,6 +1443,229 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
     flipped_count
 }
 
+/// Session-89: cross-face FOLD-OVER flap cleanup (post-weld, post-winding).
+///
+/// `fix_inconsistent_winding` Step 1 only removes SAME-face 180° overlap
+/// pairs (guarded, s41). The weld collapse of sub-tolerance features
+/// (transmission fastener chamfer rings, HEX_NUT thread flanks) creates
+/// CROSS-face fold pairs that survive every existing pass:
+///
+/// - **Ear class** — a triangle whose 3 vertices all lie on ONE boundary
+///   curve shared with the neighbouring face (e.g. the flat12∩cone
+///   hyperbola of a hex-cap-screw chamfer). The chordal ear lands exactly
+///   in the neighbour's plane and folds 180° against the neighbour's fan
+///   blades. Measured on HEX_CAP_SCREW BREP#57938: ear h=0.0085 vs
+///   eff_tol=0.1532, area 0.0007 vs blade 0.078.
+/// - **Coincident-duplicate class** — the thread V-notch of a nut is
+///   narrower than the weld tolerance, so both flank faces triangulate
+///   the same physical region; the two equal-area mirrored triangles end
+///   up coplanar and overlapping (HEX_NUT BREP#59948: areas 0.0304/0.0304,
+///   snAng=0.000).
+///
+/// Both are FOLD-OVER pairs under the probe's taxonomy: topologically
+/// consistent (opposite traversal of the shared edge) + same-side apexes
+/// + >170° normal angle. Same-side apexes mean the pair physically
+/// OVERLAPS — the region is covered twice — so removing one triangle
+/// cannot lose coverage (unlike a WINDING-FLIP pair, which is NOT
+/// touched here).
+///
+/// Removal criteria (both preserve double→single coverage):
+/// 1. **Sub-resolution ear**: the thinner triangle's altitude over its
+///    shortest edge is below `res_tol` AND its area is < 50% of the
+///    partner's (a long razor sliver of a big face stays untouched).
+/// 2. **Coincident duplicate**: areas equal within 2% AND centroid
+///    distance < `res_tol` (near-identical geometry, different vertex
+///    indices). The HIGHER triangle index is removed (deterministic).
+///
+/// Determinism: candidate edges are visited in sorted order (s87 lesson
+/// 1 — never choose from HashMap iteration order). Each pair decides
+/// independently; a triangle flagged once is skipped for the rest of the
+/// pass.
+///
+/// Kill-switch: `DRAPPER_FOLD_FLAP_CLEANUP=0` (default ON).
+/// Diagnostics: `DRAPPER_FLAP_DEBUG` prints every removal decision.
+pub fn remove_cross_face_fold_flaps(mesh: &mut TriangleMesh, res_tol: f64) -> usize {
+    if std::env::var("DRAPPER_FOLD_FLAP_CLEANUP")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
+        return 0;
+    }
+    let debug = std::env::var("DRAPPER_FLAP_DEBUG").is_ok();
+    if res_tol <= 0.0 || mesh.triangles.is_empty() {
+        return 0;
+    }
+    let Some(ref fids) = mesh.triangle_face_ids else {
+        return 0;
+    };
+    if fids.len() != mesh.triangles.len() {
+        return 0;
+    }
+
+    // edge (sorted) → list of (tri_idx, directed a, directed b)
+    use std::collections::HashMap;
+    let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            edge_map.entry(key).or_default().push((ti, v0, v1));
+        }
+    }
+    // Deterministic visitation order (s87 lesson 1).
+    let mut edges: Vec<(&(u32, u32), &Vec<(usize, u32, u32)>)> = edge_map.iter().collect();
+    edges.sort_unstable_by_key(|(e, _)| **e);
+
+    let mut removed: Vec<bool> = vec![false; mesh.triangles.len()];
+    let mut n_removed = 0usize;
+
+    let p = |vi: u32| &mesh.vertices[vi as usize];
+    let centroid_of = |t: &[u32; 3]| {
+        let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+        (
+            (a.x + b.x + c.x) / 3.0,
+            (a.y + b.y + c.y) / 3.0,
+            (a.z + b.z + c.z) / 3.0,
+        )
+    };
+    // Altitude of a triangle over its shortest edge (the "thickness").
+    let thickness_of = |t: &[u32; 3], area: f64| -> f64 {
+        let l01 = p(t[0]).distance_to(p(t[1]));
+        let l12 = p(t[1]).distance_to(p(t[2]));
+        let l20 = p(t[2]).distance_to(p(t[0]));
+        let shortest = l01.min(l12).min(l20);
+        if shortest > 1e-15 {
+            2.0 * area / shortest
+        } else {
+            0.0
+        }
+    };
+
+    for (edge, owners) in edges {
+        if owners.len() != 2 {
+            continue;
+        }
+        let (t0, da0, db0) = owners[0];
+        let (t1, da1, db1) = owners[1];
+        if removed[t0] || removed[t1] {
+            continue;
+        }
+        let (fid0, fid1) = (fids[t0], fids[t1]);
+        // Cross-face only (same-face flaps are fix_inconsistent_winding's
+        // guarded territory).
+        if fid0 == fid1 {
+            continue;
+        }
+        // FOLD-OVER prerequisite: topologically consistent (opposite
+        // traversal of the shared edge).
+        if !((da0 == db1) && (db0 == da1)) {
+            continue;
+        }
+        let tri0 = mesh.triangles[t0];
+        let tri1 = mesh.triangles[t1];
+        let (Some(n0), Some(n1)) = (
+            compute_tri_normal(&mesh.vertices, &tri0),
+            compute_tri_normal(&mesh.vertices, &tri1),
+        ) else {
+            continue;
+        };
+        let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+        let len0 = (n0.0 * n0.0 + n0.1 * n0.1 + n0.2 * n0.2).sqrt();
+        let len1 = (n1.0 * n1.0 + n1.1 * n1.1 + n1.2 * n1.2).sqrt();
+        if len0 < 1e-15 || len1 < 1e-15 {
+            continue;
+        }
+        let cos_angle = (dot / (len0 * len1)).max(-1.0).min(1.0);
+        if cos_angle.acos().to_degrees() <= 170.0 {
+            continue;
+        }
+        // Same-side apex test (FOLD-OVER = genuine overlap).
+        let apex_of = |t: &[u32; 3], ea: u32, eb: u32| -> u32 {
+            for &v in t {
+                if v != ea && v != eb {
+                    return v;
+                }
+            }
+            u32::MAX
+        };
+        let (ea, eb) = *edge;
+        let (ap0, ap1) = (apex_of(&tri0, ea, eb), apex_of(&tri1, ea, eb));
+        if ap0 == u32::MAX || ap1 == u32::MAX {
+            continue;
+        }
+        let (pa, pb, q0, q1) = (p(ea), p(eb), p(ap0), p(ap1));
+        let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+        let side = |q: &Point3d| {
+            let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+            (
+                e.1 * d.2 - e.2 * d.1,
+                e.2 * d.0 - e.0 * d.2,
+                e.0 * d.1 - e.1 * d.0,
+            )
+        };
+        let (s0, s1) = (side(&q0), side(&q1));
+        if s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2 <= 0.0 {
+            continue; // opposite sides — WINDING-FLIP territory, not ours
+        }
+
+        // ── Removal decision ─────────────────────────────────────────
+        let (area0, area1) = (tri_area(&mesh.vertices, &tri0), tri_area(&mesh.vertices, &tri1));
+        if area0 <= 0.0 || area1 <= 0.0 {
+            continue;
+        }
+        let (th0, th1) = (thickness_of(&tri0, area0), thickness_of(&tri1, area1));
+        let remove_idx = if (th0 < res_tol || th1 < res_tol)
+            && (area0 < 0.5 * area1 || area1 < 0.5 * area0)
+        {
+            // Sub-resolution ear: remove the thin/small side.
+            if area0 < area1 { t0 } else { t1 }
+        } else {
+            let max_area = area0.max(area1);
+            if (area0 - area1).abs() <= 0.02 * max_area {
+                let (c0, c1) = (centroid_of(&tri0), centroid_of(&tri1));
+                let cd = ((c0.0 - c1.0).powi(2)
+                    + (c0.1 - c1.1).powi(2)
+                    + (c0.2 - c1.2).powi(2))
+                .sqrt();
+                if cd < res_tol {
+                    // Coincident duplicate: remove the higher index.
+                    t0.max(t1)
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+        };
+
+        removed[remove_idx] = true;
+        n_removed += 1;
+        if debug {
+            let (rt, keep) = if remove_idx == t0 { (&tri0, &tri1) } else { (&tri1, &tri0) };
+            eprintln!(
+                "FLAPRM: removed tri {} {:?} (fid {}) keeping {} {:?} (fid {}), \
+                 areas=({:.4},{:.4}) h=({:.4},{:.4}) res_tol={:.4}",
+                remove_idx, rt, fids[remove_idx],
+                if remove_idx == t0 { t1 } else { t0 }, keep,
+                fids[if remove_idx == t0 { t1 } else { t0 }],
+                area0, area1, th0, th1, res_tol,
+            );
+        }
+    }
+
+    if n_removed > 0 {
+        let kept: Vec<(usize, [u32; 3])> = mesh
+            .triangles
+            .iter()
+            .enumerate()
+            .filter(|(ti, _)| !removed[*ti])
+            .map(|(ti, tri)| (ti, *tri))
+            .collect();
+        rebuild_triangles_with_attrs(mesh, &kept);
+    }
+    n_removed
+}
+
 /// Get the directed edge (a, b) for edge (ev0, ev1) in triangle [v0, v1, v2].
 /// Returns Some((a, b)) where the edge goes a→b in the triangle's winding.
 /// Returns None if the edge is not part of the triangle.
@@ -4551,5 +4774,146 @@ mod tests {
             "flap on an interior (usage-2) shared edge must be KEPT — \
              removal would open the shared edge (never-worsen, session-41)"
         );
+    }
+
+    /// Serializes the flap-cleanup tests: one of them flips the
+    /// DRAPPER_FOLD_FLAP_CLEANUP env var (process-global — set_var is
+    /// not thread-isolated), which would intermittently zero out the
+    /// pass inside the concurrently-running siblings (the s87
+    /// CAST_ENV_LOCK lesson).
+    static FLAP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// session-89: cross-face FOLD-OVER ear removal (the fastener
+    /// chamfer class). Two plane-face fan blades over a curved boundary
+    /// chain + a cone-face chordal ear whose 3 verts lie on the same
+    /// chain, wound so it folds 180° against the blades (topo-consistent,
+    /// same-side apexes — the probe's FOLD-OVER taxonomy). The ear is
+    /// sub-resolution (thickness < res_tol) and small-area → removed;
+    /// the blades stay.
+    #[test]
+    fn flap_cleanup_removes_subtol_ear() {
+        let _g = FLAP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = TriangleMesh::new();
+        // Boundary chain (shallow arc, mimicking the flat12∩cone
+        // hyperbola): P0, P1, P2.
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0 = P0
+        mesh.add_vertex(Point3d::new(1.0, 0.1, 0.0)); // 1 = P1
+        mesh.add_vertex(Point3d::new(2.0, 0.4, 0.0)); // 2 = P2
+        mesh.add_vertex(Point3d::new(1.0, 1.0, 0.0)); // 3 = A (fan apex)
+        // Plane face (fid 1): two fan blades.
+        mesh.add_triangle(3, 0, 1); // blade1 [A,P0,P1]
+        mesh.add_triangle(3, 1, 2); // blade2 [A,P1,P2]
+        // Cone face (fid 2): the chordal ear [P0,P2,P1] — all 3 verts on
+        // the boundary chain, opposite winding → 180° fold vs blades.
+        mesh.add_triangle(0, 2, 1); // ear [P0,P2,P1]
+        mesh.triangle_face_ids = Some(vec![1u64, 1, 2]);
+
+        let n = remove_cross_face_fold_flaps(&mut mesh, 1.0);
+        assert_eq!(n, 1, "exactly the ear must be removed");
+        assert_eq!(mesh.triangle_count(), 2, "both blades survive");
+        let fids = mesh.triangle_face_ids.as_ref().unwrap();
+        assert!(fids.iter().all(|&f| f == 1), "only plane-face tris remain");
+
+        // Kill-switch: the same mesh is left bit-identical.
+        let mut mesh2 = TriangleMesh::new();
+        mesh2.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh2.add_vertex(Point3d::new(1.0, 0.1, 0.0));
+        mesh2.add_vertex(Point3d::new(2.0, 0.4, 0.0));
+        mesh2.add_vertex(Point3d::new(1.0, 1.0, 0.0));
+        mesh2.add_triangle(3, 0, 1);
+        mesh2.add_triangle(3, 1, 2);
+        mesh2.add_triangle(0, 2, 1);
+        mesh2.triangle_face_ids = Some(vec![1u64, 1, 2]);
+        std::env::set_var("DRAPPER_FOLD_FLAP_CLEANUP", "0");
+        let n_off = remove_cross_face_fold_flaps(&mut mesh2, 1.0);
+        std::env::remove_var("DRAPPER_FOLD_FLAP_CLEANUP");
+        assert_eq!(n_off, 0, "kill-switch must disable the pass");
+        assert_eq!(mesh2.triangle_count(), 3);
+    }
+
+    /// session-89: coincident-duplicate removal (the HEX_NUT thread-flank
+    /// class). Two cross-face triangles of near-equal area whose centroids
+    /// are within res_tol, topo-consistent + same-side (mirrored overlap)
+    /// → the higher triangle index is removed, deterministically.
+    #[test]
+    fn flap_cleanup_removes_coincident_duplicate() {
+        let _g = FLAP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0 = P0
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 1 = P1
+        mesh.add_vertex(Point3d::new(0.5, 1.0, 0.0)); // 2 = P2
+        mesh.add_vertex(Point3d::new(0.001, 0.0, 0.0)); // 3 = P0' (ε off P0)
+        mesh.add_triangle(0, 1, 2); // fid 4 [P0,P1,P2]
+        mesh.add_triangle(3, 2, 1); // fid 5 [P0',P2,P1] mirrored overlap
+        mesh.triangle_face_ids = Some(vec![4u64, 5]);
+
+        let n = remove_cross_face_fold_flaps(&mut mesh, 0.01);
+        assert_eq!(n, 1, "one of the coincident pair must go");
+        assert_eq!(mesh.triangle_count(), 1);
+        // Deterministic: the HIGHER index was removed.
+        let fids = mesh.triangle_face_ids.as_ref().unwrap();
+        assert_eq!(fids[0], 4, "the lower-index triangle survives");
+    }
+
+    /// session-89: WINDING-FLIP pairs (topo-consistent but OPPOSITE-side
+    /// apexes) are NOT overlaps — each triangle covers its own side — so
+    /// the pass must leave them untouched.
+    #[test]
+    fn flap_cleanup_leaves_winding_flip_pairs() {
+        let _g = FLAP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = TriangleMesh::new();
+        mesh.add_vertex(Point3d::new(0.0, 1.0, 0.0)); // 0 = apex above
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 1
+        mesh.add_vertex(Point3d::new(1.0, 0.0, 0.0)); // 2
+        mesh.add_vertex(Point3d::new(0.5, -1.0, 0.0)); // 3 = apex below
+        // Shared edge (1,2); T0 above, T1 below, topo-consistent.
+        mesh.add_triangle(0, 1, 2); // fid 1
+        mesh.add_triangle(3, 2, 1); // fid 2
+        mesh.triangle_face_ids = Some(vec![1u64, 2]);
+
+        let n = remove_cross_face_fold_flaps(&mut mesh, 10.0);
+        assert_eq!(n, 0, "opposite-side pairs are winding territory");
+        assert_eq!(mesh.triangle_count(), 2);
+    }
+
+    /// session-89: a thin but LARGE-area sliver (area ≥ 50% of the
+    /// partner) is a legitimate long strip, not a sub-resolution ear —
+    /// the area guard must keep it.
+    #[test]
+    fn flap_cleanup_keeps_thin_large_sliver() {
+        let _g = FLAP_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut mesh = TriangleMesh::new();
+        // Big blade: base 10, height 1 → area 5.
+        mesh.add_vertex(Point3d::new(0.0, 0.0, 0.0)); // 0
+        mesh.add_vertex(Point3d::new(10.0, 0.0, 0.0)); // 1
+        mesh.add_vertex(Point3d::new(5.0, 1.0, 0.0)); // 2
+        // Thin partner over edge (0,1): apex 0.001 above the base →
+        // area 0.005, thickness ~0.001 — thin BUT area ratio 0.001 < 0.5
+        // → this IS removable... invert: make the thin tri's area 60% of
+        // the partner by making the partner small instead.
+        mesh.add_vertex(Point3d::new(5.0, 0.02, 0.0)); // 3 (thin apex)
+        mesh.add_triangle(0, 1, 2); // fid 1, area 5
+        mesh.add_triangle(1, 0, 3); // fid 2, area 0.1, thickness 0.04
+        mesh.triangle_face_ids = Some(vec![1u64, 2]);
+        // Thin (0.04 < res_tol 0.05) AND small-area (0.1 < 0.5·5) → the
+        // ear path removes it.
+        let n = remove_cross_face_fold_flaps(&mut mesh, 0.05);
+        assert_eq!(n, 1, "thin + small-area sliver is removed (ear path)");
+        assert_eq!(mesh.triangle_count(), 1);
+
+        // NOT-thin variant: thickness above res_tol → kept even though
+        // the pair folds.
+        let mut mesh2 = TriangleMesh::new();
+        mesh2.add_vertex(Point3d::new(0.0, 0.0, 0.0));
+        mesh2.add_vertex(Point3d::new(10.0, 0.0, 0.0));
+        mesh2.add_vertex(Point3d::new(5.0, 1.0, 0.0));
+        mesh2.add_vertex(Point3d::new(5.0, 0.5, 0.0)); // thickness 1.0
+        mesh2.add_triangle(0, 1, 2); // area 5
+        mesh2.add_triangle(1, 0, 3); // area 2.5
+        mesh2.triangle_face_ids = Some(vec![1u64, 2]);
+        // thickness 1.0 ≥ res_tol 0.1 AND area 2.5 not < 0.5·5 → kept.
+        let n2 = remove_cross_face_fold_flaps(&mut mesh2, 0.1);
+        assert_eq!(n2, 0, "not-thin, not-small pair stays");
+        assert_eq!(mesh2.triangle_count(), 2);
     }
 }

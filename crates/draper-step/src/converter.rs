@@ -6382,6 +6382,43 @@ impl<'a> StepConverter<'a> {
             }
         }
 
+        // ─── Session-89: cross-face fold-flap cleanup ──────────────────
+        // The weld collapse of sub-tolerance features (fastener chamfer
+        // rings, thread flanks) leaves cross-face FOLD-OVER overlaps that
+        // survive fix_inconsistent_winding (same-face only) and every
+        // dedup pass: a chordal ear lying in the neighbour's plane, or a
+        // coincident duplicate from two flank faces covering the same
+        // collapsed region. Same-side apexes prove double coverage, so
+        // removing the flap loses nothing. res_tol = the BREP's effective
+        // vertex resolution (merge + every weld pass, s74).
+        {
+            let res_tol = self.last_brep_eff_tol.get();
+            let n_flaps = draper_mesh::remove_cross_face_fold_flaps(&mut mesh, res_tol);
+            if n_flaps > 0 {
+                log::info!(
+                    "BREP #{} detailed: removed {} cross-face fold flaps (res_tol={:.2e})",
+                    brep_id, n_flaps, res_tol,
+                );
+                draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-flapclean");
+                // Rebuild triangle ranges (index shifts from removals).
+                if let Some(ref fids) = mesh.triangle_face_ids {
+                    let mut fid_ranges: std::collections::HashMap<u64, (usize, usize)> =
+                        std::collections::HashMap::new();
+                    for (ti, &fid) in fids.iter().enumerate() {
+                        let entry = fid_ranges.entry(fid).or_insert((ti, ti));
+                        entry.1 = ti + 1;
+                    }
+                    for fi in &mut face_infos {
+                        if let Some(&(start, end)) = fid_ranges.get(&fi.face_id) {
+                            fi.triangle_range = (start, end);
+                        } else {
+                            fi.triangle_range = (0, 0);
+                        }
+                    }
+                }
+            }
+        }
+
         let adaptive_tol = edge_cache.adaptive_tolerance().merge_tolerance();
         let report_before = validate_watertight(&mesh, false);
         if !report_before.is_watertight() {
