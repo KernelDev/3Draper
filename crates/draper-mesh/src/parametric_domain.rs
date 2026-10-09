@@ -17471,6 +17471,20 @@ fn castellation_row_lattice(
     if uspan <= 0.0 || vspan <= 0.0 {
         cast_fail!("flat domain");
     }
+    if let Ok(dir) = std::env::var("DRAPPER_CAST_DUMP") {
+        // s87 diagnostics: dump the input ring on every call (accepted
+        // or rejected) so offline forensics can replay the structure
+        // detection on rejected faces.
+        let _ = std::fs::create_dir_all(&dir);
+        let lbl = current_face_label().replace('/', "_");
+        let mut out = String::new();
+        out.push_str(&format!("ring n={}\n", n));
+        for p in boundary_2d.iter() {
+            out.push_str(&format!("r {:.9} {:.9}\n", p[0], p[1]));
+        }
+        let path = format!("{}/{}_ring.txt", dir, lbl);
+        let _ = std::fs::write(&path, out);
+    }
     // ── 1. H/V edge classes ─────────────────────────────────────
     let edge_class = |i: usize| -> u8 {
         let a = boundary_2d[i];
@@ -18430,17 +18444,104 @@ fn castellation_row_lattice(
             }
         }
         // UV needle census
-        for c in tris.chunks_exact(3) {
-            let p = all_pts(c[0]);
-            let q = all_pts(c[1]);
-            let r = all_pts(c[2]);
-            let e1 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
-            let e2 = (q[0] - r[0]).powi(2) + (q[1] - r[1]).powi(2);
-            let e3 = (r[0] - p[0]).powi(2) + (r[1] - p[1]).powi(2);
-            let mx = e1.max(e2).max(e3);
-            let a = area2(c[0], c[1], c[2]).abs() * 0.5;
-            if mx > 0.0 && a < 1e-3 * mx {
-                cast_fail!("UV needle");
+        {
+            // s87: RIM-EDGE NEEDLE EXEMPTION — MEASURED AND REJECTED
+            // as a default (kept opt-in for future tolerance regimes).
+            // The census exists to catch emitter-created slivers that
+            // SURVIVE the weld. A needle whose SHORTEST edge is an
+            // INPUT rim edge (consecutive ring pts) does collapse in
+            // the weld itself (the converter over-samples the fine
+            // boundary chains far below merge_tol — SLEEVE floors
+            // 0.0011 UV vs the 0.1013 bottom), and f41/f155 (cone B,
+            // pockets 3.3x shallower than the accepted f39/f43) trip
+            // the 1e-3 census on exactly this class: the same fans
+            // over the same 0.0011 rim edges pass on f39/f43 only
+            // because the deeper pockets lift the ratio to 1.9e-3 —
+            // the threshold was depth-relative by accident. BUT the
+            // post-weld A/B (s87) measured the full-face acceptance
+            // NET-NEGATIVE: drill SLEEVE 107 -> 114 REAL ((41,41)
+            // 3->0 as hoped, but (43,43) +5, (147,147) +2, (62,214)
+            // +2, (10,10)/(11,11) +1) — f41/f155's whole band is at
+            // merge_tol scale (final z-ext 0.0318, pockets ~0.016 =
+            // merge_tol 0.0153), the weld collapses it into a
+            // near-2D annulus and the region repair re-meshes across
+            // the f43/f147 rims with full-band-height fans (h up to
+            // 0.13) — the s84 sub-tolerance verdict again: NO
+            // pre-weld triangulation of f41/f155 can win. The strict
+            // census keeps the s85 fallback whose post-weld mesh is
+            // strictly better. Opt-in DRAPPER_CAST_NEEDLE_RELAX=1
+            // re-enables the exemption (for the day merge_tol is
+            // decoupled from eff_tol, s86 catch-22); default OFF.
+            let relax =
+                std::env::var("DRAPPER_CAST_NEEDLE_RELAX").as_deref() == Ok("1");
+            let is_rim_pair = |ia: usize, ib: usize| -> bool {
+                ia < n && ib < n && (ib == (ia + 1) % n || ia == (ib + 1) % n)
+            };
+            let mut rim_exempt = 0usize;
+            for c in tris.chunks_exact(3) {
+                let p = all_pts(c[0]);
+                let q = all_pts(c[1]);
+                let r = all_pts(c[2]);
+                let e1 = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
+                let e2 = (q[0] - r[0]).powi(2) + (q[1] - r[1]).powi(2);
+                let e3 = (r[0] - p[0]).powi(2) + (r[1] - p[1]).powi(2);
+                let mx = e1.max(e2).max(e3);
+                let a = area2(c[0], c[1], c[2]).abs() * 0.5;
+                if mx > 0.0 && a < 1e-3 * mx {
+                    // shortest edge → (ia, ib)
+                    let (ia, ib) = if e1 <= e2 && e1 <= e3 {
+                        (c[0], c[1])
+                    } else if e2 <= e3 {
+                        (c[1], c[2])
+                    } else {
+                        (c[2], c[0])
+                    };
+                    if relax && is_rim_pair(ia, ib) {
+                        rim_exempt += 1;
+                        continue;
+                    }
+                    if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+                        // s87 diagnostics: full anatomy of the offending tri
+                        eprintln!(
+                            "[CAST needle {}] tri=({},{},{}) uv=({:.6},{:.6})/({:.6},{:.6})/({:.6},{:.6}) sq_edges=({:.3e},{:.3e},{:.3e}) area={:.3e} ratio={:.3e}",
+                            current_face_label(),
+                            c[0],
+                            c[1],
+                            c[2],
+                            p[0], p[1],
+                            q[0], q[1],
+                            r[0], r[1],
+                            e1, e2, e3,
+                            a,
+                            a / mx
+                        );
+                        // local ring context around the needle (indices are
+                        // ring pts — rim-only emits no Steiners)
+                        let lo = c[0].min(c[1]).min(c[2]).saturating_sub(4);
+                        let hi = (c[0].max(c[1]).max(c[2]) + 5).min(n);
+                        let mut ctx = String::new();
+                        for k in lo..hi {
+                            ctx.push_str(&format!(
+                                "\n    ring[{}] = ({:.6},{:.6})",
+                                k, boundary_2d[k][0], boundary_2d[k][1]
+                            ));
+                        }
+                        eprintln!(
+                            "[CAST needle ctx {}] ring n={} context:{}",
+                            current_face_label(),
+                            n,
+                            ctx
+                        );
+                    }
+                    cast_fail!("UV needle");
+                }
+            }
+            if rim_exempt > 0 && std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+                eprintln!(
+                    "[CAST needle-exempt {}] {} rim-edge needles exempt (weld-collapsed input chains)",
+                    current_face_label(),
+                    rim_exempt
+                );
             }
         }
     }
@@ -18480,6 +18581,11 @@ fn castellation_row_lattice(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // s87: serialize the env-var windows of the castellation tests
+    // (set_var/remove_var are process-global; cargo runs tests in
+    // parallel threads).
+    static CAST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn test_castellation_rim_only_self_proving() {
@@ -18548,6 +18654,7 @@ mod tests {
         bnd.extend(ring_after_bottom);
         let n = bnd.len();
         let cone = Surface::Cone(ConeSurface::new_z(0.5, 0.4049));
+        let _g = CAST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (tris, new_pts) = castellation_row_lattice(&cone, &bnd);
         assert!(!tris.is_empty(), "lattice must accept the synthetic castellation");
         assert!(new_pts.is_empty(), "rim-only mode must add no steiner pts");
@@ -18644,6 +18751,137 @@ mod tests {
         let (t2, _) = castellation_row_lattice(&cone, &bnd);
         std::env::remove_var("DRAPPER_CAST_ROW_LATTICE");
         assert!(t2.is_empty(), "kill-switch must disable the lattice");
+    }
+
+    #[test]
+    fn test_castellation_needle_census_and_optin_relax() {
+        // s87 self-proving test: the SHALLOW castellation class (cone
+        // B f41/f155 — pockets 0.0106, fine 0.0011-spaced floor chains
+        // vs the 0.1013 bottom) MUST be rejected by the strict UV
+        // needle census (post-weld A/B measured the acceptance
+        // net-negative: +7 REAL via weld-region collateral on the
+        // f43/f147 rims), and the opt-in DRAPPER_CAST_NEEDLE_RELAX=1
+        // path must still deliver the FULL audit contract when
+        // enabled (rim 1x / non-rim 2x / all pts / both areas).
+        use draper_geometry::{ConeSurface, Surface};
+        // serialize env-var windows against the s86 test above
+        let _g = CAST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (vb, vm, vt) = (0.0f64, 0.0106f64, 0.0212f64);
+        let mut bnd: Vec<[f64; 2]> = Vec::new();
+        // bottom: 32 coarse pts (0.1013 spacing), u 0..π
+        for i in 0..32 {
+            bnd.push([i as f64 * (std::f64::consts::PI / 31.0), vb]);
+        }
+        // u-layout right→left: floor(0.0616) | wall | plateau | wall |
+        // floor | ... | floor ending at u=0 — the walls are EXACTLY
+        // vertical (floor k's left end == plateau k's right end)
+        let floor_w = 0.0616f64;
+        let plat_w = (std::f64::consts::PI - 4.0 * floor_w) / 3.0;
+        let n_floor_pts = 56usize; // 0.0011 spacing — the fine input class
+        let n_plat_pts = 7usize;
+        let n_wall_pts = 6usize;
+        let mut u_cursor = std::f64::consts::PI;
+        let mut ring_after_bottom: Vec<[f64; 2]> = Vec::new();
+        for k in 0..4 {
+            // floor k: 56 FINE pts, u-desc
+            let hi = u_cursor;
+            let lo = hi - floor_w;
+            for i in 0..n_floor_pts {
+                let t = i as f64 / (n_floor_pts - 1) as f64;
+                ring_after_bottom.push([hi - t * (hi - lo), vm]);
+            }
+            u_cursor = lo;
+            if k < 3 {
+                // wall up at u=lo (vertical)
+                for i in 0..n_wall_pts {
+                    let t = (i + 1) as f64 / (n_wall_pts + 1) as f64;
+                    ring_after_bottom.push([lo, vm + (vt - vm) * t]);
+                }
+                // plateau k: 7 sparse pts, u-desc
+                let phi = u_cursor;
+                let plo = phi - plat_w;
+                for i in 0..n_plat_pts {
+                    let t = i as f64 / (n_plat_pts - 1) as f64;
+                    ring_after_bottom.push([phi - t * (phi - plo), vt]);
+                }
+                u_cursor = plo;
+                // wall down at u=plo (vertical)
+                for i in 0..n_wall_pts {
+                    let t = (n_wall_pts - i) as f64 / (n_wall_pts + 1) as f64;
+                    ring_after_bottom.push([plo, vm + (vt - vm) * t]);
+                }
+            }
+        }
+        assert!(u_cursor.abs() < 1e-9, "layout must close at u=0, got {}", u_cursor);
+        bnd.extend(ring_after_bottom);
+        let n = bnd.len();
+        let cone = Surface::Cone(ConeSurface::new_z(0.5, 0.4049));
+        // 1. strict default: the fine-chain fans over the shallow
+        // pockets are UV needles (ratio ~5.6e-4 < 1e-3) → reject
+        let (tris, new_pts) = castellation_row_lattice(&cone, &bnd);
+        assert!(tris.is_empty(), "strict census must reject the shallow fine-chain castellation");
+        // 2. opt-in exemption: accepted, and the full audit contract
+        // holds (the exemption is a census carve-out, not an audit
+        // bypass — the rim/interior/area checks ran before it)
+        std::env::set_var("DRAPPER_CAST_NEEDLE_RELAX", "1");
+        let (tris, new_pts) = castellation_row_lattice(&cone, &bnd);
+        std::env::remove_var("DRAPPER_CAST_NEEDLE_RELAX");
+        assert!(!tris.is_empty(), "opt-in relax must accept the class");
+        assert!(new_pts.is_empty(), "rim-only mode adds no steiner pts");
+        let mut ecount: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            assert!(c[0] != c[1] && c[1] != c[2] && c[0] != c[2], "degenerate tri");
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let e = (i.min(j), i.max(j));
+            assert_eq!(ecount.get(&e), Some(&1), "rim edge {:?} count {:?}", e, ecount.get(&e));
+        }
+        for (e, c) in ecount.iter() {
+            if *c != 2 {
+                let is_rim = (e.1 - e.0 == 1) || (e.0 == 0 && e.1 == n - 1);
+                assert!(is_rim && *c == 1, "interior edge {:?} count {}", e, c);
+            }
+        }
+        let mut used = vec![false; n];
+        for c in tris.chunks_exact(3) {
+            for &ix in c {
+                used[ix] = true;
+            }
+        }
+        assert!(used.iter().all(|&u| u), "every ring pt must be used");
+        let poly_s: f64 = (0..n)
+            .map(|i| {
+                let a = bnd[i];
+                let b = bnd[(i + 1) % n];
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_abs: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                ((b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])).abs()
+            })
+            .sum::<f64>()
+            * 0.5;
+        assert!((strip_s - poly_s).abs() <= 0.005 * poly_s.abs(), "signed area");
+        assert!((strip_abs - poly_s.abs()) <= 0.005 * poly_s.abs(), "ABSOLUTE area (overlap)");
     }
 
     #[test]
