@@ -1,0 +1,106 @@
+pairs ON=190 OFF=401
+NEW=32  GONE=243  RECLASSIFIED=0
+REAL ON=35 OFF=75 delta=-40
+
+=== REAL delta per BREP (name) ===
+  brep 0 GEAR_SKELETON: real 0 -> 0 (+0), census 17 -> 6
+  brep 1 SHIFTER2: real 0 -> 0 (+0), census 17 -> 2
+  brep 2 GEAR_LEVER: real 32 -> 0 (-32), census 33 -> 1
+  brep 8 SHIFT_ROD_END: real 0 -> 0 (+0), census 17 -> 6
+  brep 10 SHIFT_ROD_R_L: real 22 -> 21 (-1), census 43 -> 50
+  brep 11 COUNTERSHAFT: real 0 -> 0 (+0), census 3 -> 0
+  brep 13 REV_SHAFT: real 0 -> 0 (+0), census 3 -> 0
+  brep 19 TRANS_HOUSING: real 5 -> 0 (-5), census 5 -> 5
+  brep 22 MAIN_SHAFT: real 3 -> 1 (-2), census 11 -> 3
+  brep 50 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 51 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 52 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 53 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 54 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 55 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 56 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 57 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 60 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 61 HEX_CAP_SCREW: real 0 -> 0 (+0), census 2 -> 0
+  brep 94 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 95 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 96 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 97 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 98 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 99 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 100 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 101 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 102 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 103 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 104 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 105 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 106 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 107 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 108 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 109 10_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 110 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 111 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 112 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 113 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 114 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 115 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 116 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 117 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 118 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 119 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 120 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 121 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 122 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 123 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 124 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 125 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 138 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 139 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 140 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 141 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 142 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 143 4_5_MHCS: real 0 -> 0 (+0), census 2 -> 0
+  brep 144 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 145 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 146 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 147 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 148 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 149 HEX_NUT: real 0 -> 0 (+0), census 2 -> 0
+  brep 151 SPEEDOMETER: real 8 -> 8 (+0), census 137 -> 110
+
+=== NEW pairs that count as REAL (the regression core) ===
+  (total NEW-real: 0)
+
+=== NEW pairs census by class ===
+  WINDING-FLIP/SUBTOL: 28
+  FOLD-OVER/SUBTOL: 4
+
+=== GONE pairs census by class (was) ===
+  WINDING-FLIP: 98
+  WINDING-FLIP/SUBTOL: 58
+  FOLD-OVER/SUBTOL: 47
+  FOLD-OVER: 40
+
+=== RECLASSIFIED pairs (OFF -> ON) ===
+
+=== GONE pairs detail (audit-repaired WINDING-FLIPs — intended wins) ===
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=10 SHIFT_ROD_R_L faces=('24', '24') h=(0.817, 0.817)
+  brep=22 MAIN_SHAFT faces=('27', '27') h=(0.015, 0.4638)
+  brep=22 MAIN_SHAFT faces=('27', '27') h=(0.015, 0.4638)
+  brep=50 HEX_CAP_SCREW faces=('17', '19') h=(0.1327, 0.3673)
+  brep=50 HEX_CAP_SCREW faces=('19', '19') h=(0.3131, 0.1545)
+  brep=51 HEX_CAP_SCREW faces=('17', '19') h=(0.1327, 0.3673)
+  brep=51 HEX_CAP_SCREW faces=('19', '19') h=(0.3131, 0.1545)
+  brep=52 HEX_CAP_SCREW faces=('17', '19') h=(0.1327, 0.3673)
+  brep=52 HEX_CAP_SCREW faces=('19', '19') h=(0.3131, 0.1545)
+  brep=53 HEX_CAP_SCREW faces=('17', '19') h=(0.1327, 0.3673)

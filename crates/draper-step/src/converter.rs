@@ -6456,9 +6456,7 @@ impl<'a> StepConverter<'a> {
                 .map(|v| v != "0")
                 .unwrap_or(true);
             if enabled {
-                if let Some(ref fids) = mesh.triangle_face_ids {
-                    // face_id → (surface ref clone is cheap enough via
-                    // index; borrow instead) — collect face_id → index
+                if let Some(fids) = mesh.triangle_face_ids.clone() {
                     let mut face_surf: std::collections::HashMap<u64, (&Surface, bool, &str)> =
                         std::collections::HashMap::new();
                     for fi in &face_infos {
@@ -6467,148 +6465,13 @@ impl<'a> StepConverter<'a> {
                     // The BREP's effective vertex resolution (merge + all
                     // weld passes, s74) — the thickness gate reference.
                     let res_tol_audit = self.last_brep_eff_tol.get();
-                    let nv = mesh.vertices.len();
-                    // ── v4: pair-targeted, surface-normal-aware flip ──
-                    // Scan usage-2 edges for the WINDING-FLIP signature
-                    // (>170 deg dihedral + topo-flipped traversal) and
-                    // flip the side whose winding disagrees with its
-                    // face's analytic normal at all three vertices.
-                    // Topo-consistent faces — even absolutely-inverted
-                    // ones (the drill's BFS-unified equilibrium) — are
-                    // never touched: the blanket face audit measured
-                    // 290 -> 1361 REAL there by breaking topo consistency
-                    // in the name of absolute orientation.
-                    use std::collections::HashMap as SDHashMap;
-                    let mut edge_map: SDHashMap<(u32, u32), Vec<(usize, u32, u32)>> =
-                        SDHashMap::new();
-                    for (ti, tri) in mesh.triangles.iter().enumerate() {
-                        let (a, b, c) = (tri[0], tri[1], tri[2]);
-                        for (v0, v1) in [(a, b), (b, c), (c, a)] {
-                            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
-                            edge_map.entry(key).or_default().push((ti, v0, v1));
-                        }
-                    }
-                    let mut edges: Vec<(&(u32, u32), &Vec<(usize, u32, u32)>)> =
-                        edge_map.iter().collect();
-                    edges.sort_unstable_by_key(|(e, _)| **e); // determinism (s87)
-
-                    let tri_disagrees = |surf: &Surface, forward: bool, t: &[u32; 3]| -> Option<bool> {
-                        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
-                        if a >= nv || b >= nv || c >= nv {
-                            return None;
-                        }
-                        let pa = &mesh.vertices[a];
-                        let pb = &mesh.vertices[b];
-                        let pc = &mesh.vertices[c];
-                        let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
-                        let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
-                        let nx = e1[1] * e2[2] - e1[2] * e2[1];
-                        let ny = e1[2] * e2[0] - e1[0] * e2[2];
-                        let nz = e1[0] * e2[1] - e1[1] * e2[0];
-                        if (nx * nx + ny * ny + nz * nz).sqrt() < 1e-15 {
-                            return None;
-                        }
-                        // Thickness gate: sub-res_tol triangles are weld
-                        // noise; flipping just relabels the pair class.
-                        let area = 0.5 * (nx * nx + ny * ny + nz * nz).sqrt();
-                        let l01 = pa.distance_to(pb);
-                        let l12 = pb.distance_to(pc);
-                        let l20 = pc.distance_to(pa);
-                        let shortest = l01.min(l12).min(l20);
-                        if shortest <= 1e-15 {
-                            return None;
-                        }
-                        if 2.0 * area / shortest < res_tol_audit {
-                            return Some(false); // too thin — never flip
-                        }
-                        let fsign = if forward { 1.0 } else { -1.0 };
-                        let mut disagree = 0usize;
-                        for pv in [pa, pb, pc] {
-                            if let Some(sn) = surface_normal_at_point(surf, pv) {
-                                if (nx * sn[0] + ny * sn[1] + nz * sn[2]) * fsign < 0.0 {
-                                    disagree += 1;
-                                }
-                            } else {
-                                return None; // a vertex without a normal — skip
-                            }
-                        }
-                        Some(disagree == 3)
-                    };
-
-                    let mut flip_set: std::collections::BTreeSet<usize> =
-                        std::collections::BTreeSet::new();
-                    for (_edge, owners) in &edges {
-                        if owners.len() != 2 {
-                            continue;
-                        }
-                        let (t0, da0, db0) = owners[0];
-                        let (t1, da1, db1) = owners[1];
-                        // topo-flipped: same traversal direction
-                        if !((da0 == da1) && (db0 == db1)) {
-                            continue;
-                        }
-                        let tri0 = mesh.triangles[t0];
-                        let tri1 = mesh.triangles[t1];
-                        // >170 deg dihedral
-                        let nrm = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
-                            let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
-                            if a >= nv || b >= nv || c >= nv {
-                                return None;
-                            }
-                            let pa = &mesh.vertices[a];
-                            let pb = &mesh.vertices[b];
-                            let pc = &mesh.vertices[c];
-                            let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
-                            let e2 = (pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
-                            let n = (
-                                e1.1 * e2.2 - e1.2 * e2.1,
-                                e1.2 * e2.0 - e1.0 * e2.2,
-                                e1.0 * e2.1 - e1.1 * e2.0,
-                            );
-                            let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
-                            if l < 1e-15 {
-                                None
-                            } else {
-                                Some((n.0 / l, n.1 / l, n.2 / l))
-                            }
-                        };
-                        let (Some(n0), Some(n1)) = (nrm(&tri0), nrm(&tri1)) else {
-                            continue;
-                        };
-                        let cos = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
-                        if cos.clamp(-1.0, 1.0).acos().to_degrees() <= 170.0 {
-                            continue;
-                        }
-                        // WINDING-FLIP pair: pick the analytically-wrong side.
-                        let Some((surf0, fwd0, _)) = face_surf.get(&fids[t0]) else { continue };
-                        let Some((surf1, fwd1, _)) = face_surf.get(&fids[t1]) else { continue };
-                        let (Some(bad0), Some(bad1)) = (
-                            tri_disagrees(surf0, *fwd0, &tri0),
-                            tri_disagrees(surf1, *fwd1, &tri1),
-                        ) else {
-                            continue;
-                        };
-                        if bad0 && !bad1 {
-                            flip_set.insert(t0);
-                        } else if bad1 && !bad0 {
-                            flip_set.insert(t1);
-                        }
-                        // both or neither disagree: ambiguous — leave alone
-                    }
-                    if !flip_set.is_empty() {
-                        let n_flipped = flip_set.len();
-                        for ti in &flip_set {
-                            mesh.triangles[*ti].swap(1, 2);
-                        }
-                        log::info!(
-                            "BREP #{} detailed: surface-normal winding flip repaired {} WINDING-FLIP pairs",
-                            brep_id, n_flipped,
-                        );
-                        if std::env::var("DRAPPER_PLANAR_CCW_DEBUG").is_ok() {
-                            eprintln!("POSTWELD_SURF_WIND: flipped {} triangles", n_flipped);
-                        }
-                        draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-postweldwind");
-                    }
+                    postweld_component_winding_audit(
+                        &mut mesh,
+                        &fids,
+                        &face_surf,
+                        res_tol_audit,
+                        brep_id,
+                    );
                 }
             }
         }
@@ -15643,6 +15506,369 @@ fn surface_normal_at_point(surf: &Surface, p: &Point3d) -> Option<[f64; 3]> {
         _ => None,
     }
 }
+
+/// session-91 (v5): post-weld COMPONENT winding audit.
+///
+/// The s90 per-pair flip repaired one mixed edge and manufactured new
+/// mixed edges on the flipped member's OTHER edges whenever the bad
+/// region was larger than one triangle (measured drill: audit +23 REAL =
+/// 71 new non-subtol pairs vs 48 repaired; HOUSING +12, HM +12, GEAR +1,
+/// SLEEVE −2). The inverted state is a CLUSTER property, not a pair
+/// property — this function flips whole connected components:
+///
+///   1) vote every triangle analytically (3/3 vertex disagreement with
+///      the face's closed-form surface normal — Plane/Cylinder/Cone/
+///      Torus/Sphere; no thickness in the vote);
+///   2) connect vote-bad triangles across shared interior edges into
+///      components (adjacency by BADNESS — a thin bad cluster merges
+///      into its solid neighbor, never splits it);
+///   3) flip a component iff it has a solid member (thickness ≥
+///      res_tol): an all-thin cluster is weld noise — the s90
+///      per-blade lesson (flipping it just relabels the pair class);
+///   4) boundary fixpoint over the tentative flip set: for every
+///      interior edge with exactly one side flipped whose as-wound
+///      normals sit under 10° apart (i.e. >170° once that side flips —
+///      a NEW census pair) and which is not sub-tolerance:
+///        · other side vote-None (degenerate sliver / surface without
+///          a closed-form normal — unreliable winding): ABSORB it into
+///          the flip set;
+///        · other side vote-good (the flip would EXPOSE a hidden
+///          genuine fold as a FOLD-OVER pair) or bad-but-unflipped
+///          (defensive — adjacency merging makes this impossible):
+///          BLOCK the flipped side — poison it, refuse the flip, the
+///          pair stays exactly as it was.
+///      Iterate to a fixpoint. Never-worsen by construction: the final
+///      flip set admits no harmful boundary edge, so no new census pair
+///      can appear; every pre-existing mixed-edge pair at a flipped
+///      boundary drops out of the >170° window (as-wound 180°−θ).
+///
+/// Measured (drill, vs audit-off): −115 non-subtol pairs repaired, +1
+/// manufactured (HM (3,243) Plane×Nurbs — h0 = res_tol to 4 digits, a
+/// tolerance-boundary case); transmission: −138 repaired, +0
+/// manufactured (GEAR_LEVER 32→0 — the weld-inverted sphere band).
+/// Kill-switch at the CALL SITE: DRAPPER_POSTWELD_PLANAR_WIND=0.
+/// Diagnostics: DRAPPER_POSTWELD_DEBUG=1 (component census),
+/// DRAPPER_PLANAR_CCW_DEBUG=1 (flip summary).
+pub fn postweld_component_winding_audit(
+    mesh: &mut TriangleMesh,
+    fids: &[u64],
+    face_surf: &std::collections::HashMap<u64, (&Surface, bool, &str)>,
+    res_tol_audit: f64,
+    brep_id: i64,
+) -> usize {
+    let nv = mesh.vertices.len();
+    use std::collections::HashMap as SDHashMap;
+    let mut edge_map: SDHashMap<(u32, u32), Vec<(usize, u32, u32)>> =
+        SDHashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            edge_map.entry(key).or_default().push((ti, v0, v1));
+        }
+    }
+    let mut edges: Vec<(&(u32, u32), &Vec<(usize, u32, u32)>)> =
+        edge_map.iter().collect();
+    edges.sort_unstable_by_key(|(e, _)| **e); // determinism (s87)
+
+    // ── v5 (s91): component flip. The inverted state is a
+    // CLUSTER property, not a pair property: the s90 per-pair
+    // flip repaired one mixed edge and manufactured new mixed
+    // edges on the flipped member's OTHER edges whenever the
+    // bad region was larger than one triangle (measured drill:
+    // audit +23 REAL = 71 new non-subtol pairs vs 48 repaired;
+    // HOUSING +12, HM +12, GEAR +1, SLEEVE −2). v5:
+    //   1) vote every triangle analytically (3/3 vertex
+    //      disagreement, no thickness in the vote);
+    //   2) connect vote-bad triangles across shared interior
+    //      edges into components (adjacency by BADNESS — a
+    //      thin bad cluster merges into its solid neighbor,
+    //      never splits it);
+    //   3) flip a component iff it has a solid member
+    //      (thickness ≥ res_tol): an all-thin cluster is weld
+    //      noise — the s90 per-blade lesson (flipping it just
+    //      relabels the pair class);
+    //   4) boundary fixpoint over the tentative flip set:
+    //      for every interior edge with exactly one side
+    //      flipped whose as-wound normals sit under 10° apart
+    //      (i.e. >170° once that side flips — a NEW census
+    //      pair) and which is not sub-tolerance:
+    //        · other side vote-None (degenerate sliver /
+    //          surface without a closed-form normal — the
+    //          winding there is unreliable): ABSORB it into
+    //          the flip set;
+    //        · other side vote-good (the flip would EXPOSE a
+    //          hidden genuine fold as a FOLD-OVER pair) or
+    //          bad-but-unflipped (defensive — adjacency
+    //          merging should make this impossible): BLOCK
+    //          the flipped side — poison it, refuse the flip,
+    //          the pair stays exactly as it was.
+    //      Iterate to a fixpoint. Never-worsen by construction:
+    //      the final flip set admits no harmful boundary edge,
+    //      so no new census pair can appear; every pre-existing
+    //      mixed-edge pair at a flipped boundary drops out of
+    //      the >170° window (as-wound angle 180°−θ → θ>170
+    //      becomes <10).
+    let tri_vote = |surf: &Surface, forward: bool, t: &[u32; 3]| -> Option<bool> {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if a >= nv || b >= nv || c >= nv {
+            return None;
+        }
+        let pa = &mesh.vertices[a];
+        let pb = &mesh.vertices[b];
+        let pc = &mesh.vertices[c];
+        let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+        let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+        let nx = e1[1] * e2[2] - e1[2] * e2[1];
+        let ny = e1[2] * e2[0] - e1[0] * e2[2];
+        let nz = e1[0] * e2[1] - e1[1] * e2[0];
+        if (nx * nx + ny * ny + nz * nz).sqrt() < 1e-15 {
+            return None;
+        }
+        let fsign = if forward { 1.0 } else { -1.0 };
+        let mut disagree = 0usize;
+        for pv in [pa, pb, pc] {
+            if let Some(sn) = surface_normal_at_point(surf, pv) {
+                if (nx * sn[0] + ny * sn[1] + nz * sn[2]) * fsign < 0.0 {
+                    disagree += 1;
+                }
+            } else {
+                return None; // a vertex without a normal — skip
+            }
+        }
+        Some(disagree == 3)
+    };
+    // Thickness as a separate per-triangle fact: the vote is
+    // truth, solidity is an ANCHOR requirement (component-
+    // level). 2·area/shortest — the probe's h measure (s89
+    // lesson 4).
+    let tri_thick = |t: &[u32; 3]| -> Option<bool> {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if a >= nv || b >= nv || c >= nv {
+            return None;
+        }
+        let pa = &mesh.vertices[a];
+        let pb = &mesh.vertices[b];
+        let pc = &mesh.vertices[c];
+        let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+        let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let area = 0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let shortest = pa
+            .distance_to(pb)
+            .min(pb.distance_to(pc))
+            .min(pc.distance_to(pa));
+        if shortest <= 1e-15 {
+            return None;
+        }
+        Some(2.0 * area / shortest >= res_tol_audit)
+    };
+    let n_tris = mesh.triangles.len();
+    let mut vote: Vec<Option<bool>> = vec![None; n_tris];
+    let mut thick: Vec<Option<bool>> = vec![None; n_tris];
+    for ti in 0..n_tris {
+        if let Some(fs) = fids.get(ti).and_then(|fid| face_surf.get(fid)) {
+            vote[ti] = tri_vote(fs.0, fs.1, &mesh.triangles[ti]);
+        }
+        thick[ti] = tri_thick(&mesh.triangles[ti]);
+    }
+    // adjacency among vote-bad triangles over interior edges
+    let mut adj: Vec<std::collections::BTreeSet<usize>> =
+        vec![std::collections::BTreeSet::new(); n_tris];
+    for (_edge, owners) in &edges {
+        if owners.len() != 2 {
+            continue;
+        }
+        let (t0, _, _) = owners[0];
+        let (t1, _, _) = owners[1];
+        if t0 < n_tris
+            && t1 < n_tris
+            && vote[t0] == Some(true)
+            && vote[t1] == Some(true)
+        {
+            adj[t0].insert(t1);
+            adj[t1].insert(t0);
+        }
+    }
+    // components (BFS from sorted seeds — determinism, s87)
+    let mut visited = vec![false; n_tris];
+    let mut flip_set: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    let dbg_on = std::env::var("DRAPPER_POSTWELD_DEBUG").is_ok();
+    let mut n_comps = 0usize;
+    let mut n_thin_skipped = 0usize;
+    for seed in 0..n_tris {
+        if visited[seed] || vote[seed] != Some(true) {
+            continue;
+        }
+        let mut stack = vec![seed];
+        visited[seed] = true;
+        let mut members: Vec<usize> = Vec::new();
+        while let Some(x) = stack.pop() {
+            members.push(x);
+            for &nb in &adj[x] {
+                if !visited[nb] {
+                    visited[nb] = true;
+                    stack.push(nb);
+                }
+            }
+        }
+        members.sort_unstable();
+        n_comps += 1;
+        let has_solid = members.iter().any(|&m| thick[m] == Some(true));
+        if has_solid {
+            for &m in &members {
+                flip_set.insert(m);
+            }
+        } else {
+            n_thin_skipped += 1;
+        }
+        if dbg_on {
+            let faces: std::collections::BTreeSet<u64> = members
+                .iter()
+                .filter_map(|&m| fids.get(m).copied())
+                .collect();
+            eprintln!(
+                "POSTWELD_V5 brep#{} comp#{} size={} solid={} flip={} faces={:?}",
+                brep_id, n_comps, members.len(), has_solid, has_solid, faces
+            );
+        }
+    }
+    // boundary fixpoint
+    let cos10: f64 = 0.9848077530122080; // cos(10°)
+    let nrm_of = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
+        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+        if a >= nv || b >= nv || c >= nv {
+            return None;
+        }
+        let pa = &mesh.vertices[a];
+        let pb = &mesh.vertices[b];
+        let pc = &mesh.vertices[c];
+        let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+        let e2 = (pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
+        let n = (
+            e1.1 * e2.2 - e1.2 * e2.1,
+            e1.2 * e2.0 - e1.0 * e2.2,
+            e1.0 * e2.1 - e1.1 * e2.0,
+        );
+        let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+        if l < 1e-15 {
+            None
+        } else {
+            Some((n.0 / l, n.1 / l, n.2 / l))
+        }
+    };
+    let mut poisoned: std::collections::BTreeSet<usize> =
+        std::collections::BTreeSet::new();
+    let mut n_absorbed = 0usize;
+    let mut n_blocked = 0usize;
+    loop {
+        let mut grew = false;
+        for (_edge, owners) in &edges {
+            if owners.len() != 2 {
+                continue;
+            }
+            let (t0, _, _) = owners[0];
+            let (t1, _, _) = owners[1];
+            if t0 >= n_tris || t1 >= n_tris {
+                continue;
+            }
+            let (p, q) = if flip_set.contains(&t0) && !flip_set.contains(&t1) {
+                (t0, t1)
+            } else if flip_set.contains(&t1) && !flip_set.contains(&t0) {
+                (t1, t0)
+            } else {
+                continue;
+            };
+            // as-wound normals under 10° apart → >170° once
+            // the flipped side flips: a new census pair.
+            let (Some(np), Some(nq)) = (
+                nrm_of(&mesh.triangles[p]),
+                nrm_of(&mesh.triangles[q]),
+            ) else {
+                continue;
+            };
+            if np.0 * nq.0 + np.1 * nq.1 + np.2 * nq.2 <= cos10 {
+                continue; // ≥10° apart: post-flip ≤170° — no new pair
+            }
+            // sub-tolerance pair: free relabeling — skip.
+            // Two measured variants (s91): the probe's exact
+            // apex-height-over-shared-edge measure is the
+            // STRICTER subset (h_shared ≥ 2·area/shortest
+            // always) — gating on it blocked whole clusters
+            // via the poison cascade (drill 155→162,
+            // HOUSING subtol census 796→1539: boundary edges
+            // at short shared bases became 'harmful' and
+            // un-flipped their clusters). The thickness
+            // measure leaves exactly ONE borderline pair
+            // manufactured (HM (3,243) Plane×Nurbs, h0 =
+            // res_tol to 4 digits) — net −115 repaired vs +1
+            // manufactured on drill. Thickness wins.
+            if thick[p] == Some(false) && thick[q] == Some(false) {
+                continue;
+            }
+            if vote[q] == Some(false) || vote[q] == Some(true) {
+                // good neighbor (the flip would expose a hidden
+                // genuine fold as a FOLD-OVER pair), or a
+                // bad-but-unflipped neighbor (defensive):
+                // BLOCK the flipped side — refuse the flip.
+                flip_set.remove(&p);
+                poisoned.insert(p);
+                n_blocked += 1;
+                grew = true;
+            } else if poisoned.contains(&q) {
+                // vote-None but poisoned earlier: refuse too.
+                flip_set.remove(&p);
+                poisoned.insert(p);
+                n_blocked += 1;
+                grew = true;
+            } else {
+                // vote-None (degenerate sliver / surface without
+                // a closed-form normal — unreliable winding):
+                // absorb into the flip set.
+                flip_set.insert(q);
+                n_absorbed += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let n_flipped = flip_set.len();
+    if !flip_set.is_empty() {
+        for ti in &flip_set {
+            mesh.triangles[*ti].swap(1, 2);
+        }
+        log::info!(
+            "BREP #{} detailed: surface-normal winding flip (v5 components) repaired {} triangles ({} components, {} thin-skipped, {} absorbed, {} blocked)",
+            brep_id,
+            n_flipped,
+            n_comps,
+            n_thin_skipped,
+            n_absorbed,
+            n_blocked,
+        );
+        if std::env::var("DRAPPER_PLANAR_CCW_DEBUG").is_ok() {
+            eprintln!(
+                "POSTWELD_SURF_WIND v5: flipped {} (comps {}, thin-skip {}, absorbed {}, blocked {})",
+                n_flipped, n_comps, n_thin_skipped, n_absorbed, n_blocked
+            );
+        }
+        draper_mesh::scan_fold_pairs_stage(mesh, "d-after-postweldwind");
+    } else if dbg_on {
+        eprintln!(
+            "POSTWELD_V5 brep#{}: no flips ({} comps, {} thin-skipped, {} absorbed, {} blocked)",
+            brep_id, n_comps, n_thin_skipped, n_absorbed, n_blocked
+        );
+    }
+    n_flipped
+}
+
 
 fn earcutr_triangulate_planar_converter(
     outer_2d: &[Point2d],

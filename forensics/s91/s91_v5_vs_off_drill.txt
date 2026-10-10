@@ -1,0 +1,48 @@
+pairs ON=1606 OFF=1396
+NEW=750  GONE=540  RECLASSIFIED=0
+REAL ON=84 OFF=137 delta=-53
+
+=== REAL delta per BREP (name) ===
+  brep 0 DRILL_SHAFT: real 6 -> 1 (-5), census 13 -> 6
+  brep 1 GEAR: real 29 -> 12 (-17), census 62 -> 20
+  brep 2 SHAFT_SLEEVE: real 60 -> 36 (-24), census 163 -> 103
+  brep 3 HOUSING: real 21 -> 17 (-4), census 611 -> 844
+  brep 4 HOUSING_MIRROR: real 21 -> 18 (-3), census 547 -> 633
+
+=== NEW pairs that count as REAL (the regression core) ===
+  (total NEW-real: 0)
+
+=== NEW pairs census by class ===
+  WINDING-FLIP/SUBTOL: 614
+  FOLD-OVER/SUBTOL: 135
+  WINDING-FLIP: 1
+
+=== GONE pairs census by class (was) ===
+  WINDING-FLIP/SUBTOL: 230
+  FOLD-OVER/SUBTOL: 194
+  WINDING-FLIP: 63
+  FOLD-OVER: 53
+
+=== RECLASSIFIED pairs (OFF -> ON) ===
+
+=== GONE pairs detail (audit-repaired WINDING-FLIPs — intended wins) ===
+  brep=1 GEAR faces=('1', '1') h=(0.0173, 0.018)
+  brep=1 GEAR faces=('421', '421') h=(0.0169, 0.0169)
+  brep=1 GEAR faces=('11', '11') h=(0.0162, 0.0123)
+  brep=1 GEAR faces=('12', '12') h=(0.0165, 0.132)
+  brep=1 GEAR faces=('12', '12') h=(0.1208, 0.0084)
+  brep=1 GEAR faces=('12', '12') h=(0.015, 0.0161)
+  brep=1 GEAR faces=('12', '12') h=(0.0134, 0.1041)
+  brep=1 GEAR faces=('63', '63') h=(0.0624, 0.0603)
+  brep=1 GEAR faces=('63', '63') h=(0.0155, 0.017)
+  brep=1 GEAR faces=('12', '12') h=(0.0148, 0.0166)
+  brep=1 GEAR faces=('12', '12') h=(0.0154, 0.0132)
+  brep=1 GEAR faces=('12', '12') h=(0.0004, 0.0173)
+  brep=1 GEAR faces=('429', '429') h=(0.0276, 0.0169)
+  brep=1 GEAR faces=('429', '429') h=(0.0206, 0.0169)
+  brep=1 GEAR faces=('429', '429') h=(0.015, 0.0164)
+  brep=2 SHAFT_SLEEVE faces=('41', '41') h=(0.0688, 0.0201)
+  brep=2 SHAFT_SLEEVE faces=('67', '67') h=(0.0188, 0.0059)
+  brep=2 SHAFT_SLEEVE faces=('303', '304') h=(0.1342, 0.017)
+  brep=3 HOUSING faces=('13', '13') h=(0.3231, 0.0117)
+  brep=3 HOUSING faces=('3', '241') h=(0.1861, 0.0058)

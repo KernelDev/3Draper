@@ -1,0 +1,9 @@
+=== Zentralstaender ===
+=== as1-oc-214 ===
+=== compressor-13920_top ===
+BREP#1889: 35 pairs >170° (0 tangent-exempt, 31 sub-tol weld-noise, 4 real) eff_tol=0.0759
+BREP#2860: 16 pairs >170° (0 tangent-exempt, 8 sub-tol weld-noise, 8 real) eff_tol=0.0671
+=== brick_thin ===
+=== brick_thin_hole ===
+=== brick_thin_round ===
+BREP#1498: 13 pairs >170° (0 tangent-exempt, 2 sub-tol weld-noise, 11 real) eff_tol=0.0000
