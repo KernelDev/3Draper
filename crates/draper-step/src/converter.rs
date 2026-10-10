@@ -15507,6 +15507,183 @@ fn surface_normal_at_point(surf: &Surface, p: &Point3d) -> Option<[f64; 3]> {
     }
 }
 
+// ── session-92: NURBS normal oracle for the post-weld winding audit ──
+//
+// The v5 audit votes every triangle against its face's closed-form
+// surface normal — analytic surfaces only. Nurbs faces voted None
+// (no closed form at a 3D point) and their same-face WINDING-FLIP
+// census pairs survived untouched (SPEEDOMETER s91 exit census: 24
+// REAL pairs on Nurbs(62x4)/Nurbs(60x4) blend faces, 27 total).
+//
+// The emission reference is consistent across ALL Nurbs tessellation
+// paths: the canonical CDT (surface_canonical.rs extract_face_mesh)
+// and the legacy UV-grid emitter (triangulate.rs) both emit
+// CCW-in-UV triangles for forward faces and swap the winding for
+// !forward. So the analytic du×dv normal at a vertex's (u,v) is the
+// same single source of truth the hand-derived surface normals are.
+//
+// Inversion cost: Surface::project_point does a fresh 11×11 grid +
+// Newton (~150 evaluations) per vertex. Instead build ONE coarse
+// grid per FACE, then per-vertex pick the nearest node and refine
+// with a few Gauss-Newton steps, caching by vertex index (vertices
+// are shared across a face's triangles). Measured SPEEDOMETER face 8:
+// ~1.1K unique vertices → a few thousand evaluations, sub-second.
+struct NurbsNormalOracle {
+    /// Coarse grid samples: (u, v, x, y, z).
+    samples: Vec<[f64; 5]>,
+    u_min: f64,
+    u_max: f64,
+    v_min: f64,
+    v_max: f64,
+    /// Reject threshold: a vertex farther than this from the surface
+    /// does not belong to it (grid Newton converged to a wrong basin).
+    dist_gate: f64,
+    /// vertex index → unit du×dv normal (None: degenerate / rejected).
+    cache: std::collections::HashMap<u32, Option<[f64; 3]>>,
+}
+
+impl NurbsNormalOracle {
+    fn new(nurbs: &NurbsSurface, res_tol_audit: f64) -> Self {
+        let (u_min, u_max) = nurbs.u_range();
+        let (v_min, v_max) = nurbs.v_range();
+        let res = 24usize;
+        let mut samples = Vec::with_capacity((res + 1) * (res + 1));
+        let (mut lo, mut hi) = (
+            [f64::MAX; 3],
+            [f64::MIN; 3],
+        );
+        for i in 0..=res {
+            for j in 0..=res {
+                let u = u_min + (u_max - u_min) * i as f64 / res as f64;
+                let v = v_min + (v_max - v_min) * j as f64 / res as f64;
+                let p = nurbs.point_at(u, v);
+                if p.x.is_finite() && p.y.is_finite() && p.z.is_finite() {
+                    for k in 0..3 {
+                        let c = [p.x, p.y, p.z][k];
+                        lo[k] = lo[k].min(c);
+                        hi[k] = hi[k].max(c);
+                    }
+                    samples.push([u, v, p.x, p.y, p.z]);
+                }
+            }
+        }
+        let diag = (0..3)
+            .map(|k| (hi[k] - lo[k]) * (hi[k] - lo[k]))
+            .sum::<f64>()
+            .sqrt();
+        // A real tessellation vertex sits on the surface up to the
+        // chord sag + the weld shift (≤ res_tol each) — a wrong-basin
+        // Newton hit is orders of magnitude farther. 4·res_tol with a
+        // bbox-relative floor; degenerate (flat) surfaces fall back to
+        // an absolute floor so the gate never trivially passes.
+        let dist_gate = (4.0 * res_tol_audit).max(1e-9).min(0.01 * diag.max(1e-12));
+        Self {
+            samples,
+            u_min,
+            u_max,
+            v_min,
+            v_max,
+            dist_gate,
+            cache: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Unit du×dv surface normal at the surface point nearest to the
+    /// mesh vertex `vi` (cached by vertex index).
+    fn vertex_normal(
+        &mut self,
+        nurbs: &NurbsSurface,
+        vi: u32,
+        p: &Point3d,
+    ) -> Option<[f64; 3]> {
+        if let Some(hit) = self.cache.get(&vi) {
+            return *hit;
+        }
+        let r = self.compute(nurbs, p);
+        self.cache.insert(vi, r);
+        r
+    }
+
+    fn compute(&self, nurbs: &NurbsSurface, p: &Point3d) -> Option<[f64; 3]> {
+        if self.samples.is_empty() {
+            return None;
+        }
+        // 1) nearest coarse-grid node
+        let mut bu = self.samples[0][0];
+        let mut bv = self.samples[0][1];
+        let mut best_d = f64::MAX;
+        for s in &self.samples {
+            let dx = s[2] - p.x;
+            let dy = s[3] - p.y;
+            let dz = s[4] - p.z;
+            let d = dx * dx + dy * dy + dz * dz;
+            if d < best_d {
+                best_d = d;
+                bu = s[0];
+                bv = s[1];
+            }
+        }
+        // 2) Gauss-Newton refinement (same shape as project_point's
+        //    phase 3, tighter because the start is grid-nearest)
+        let u_span = self.u_max - self.u_min;
+        let v_span = self.v_max - self.v_min;
+        if !(u_span > 0.0 && v_span > 0.0) {
+            return None;
+        }
+        let mut cur_d = best_d;
+        for _ in 0..8 {
+            let der = nurbs.derivatives_at(bu, bv);
+            let dx = der.point.x - p.x;
+            let dy = der.point.y - p.y;
+            let dz = der.point.z - p.z;
+            let gu = der.du.x * dx + der.du.y * dy + der.du.z * dz;
+            let gv = der.dv.x * dx + der.dv.y * dy + der.dv.z * dz;
+            let hu_u = der.du.x * der.du.x + der.du.y * der.du.y + der.du.z * der.du.z;
+            let hu_v = der.du.x * der.dv.x + der.du.y * der.dv.y + der.du.z * der.dv.z;
+            let hv_v = der.dv.x * der.dv.x + der.dv.y * der.dv.y + der.dv.z * der.dv.z;
+            let det = hu_u * hv_v - hu_v * hu_v;
+            if det.abs() < 1e-20 {
+                break;
+            }
+            let su = -(hv_v * gu - hu_v * gv) / det;
+            let sv = -(-hu_v * gu + hu_u * gv) / det;
+            let su = su.clamp(-0.1 * u_span, 0.1 * u_span);
+            let sv = sv.clamp(-0.1 * v_span, 0.1 * v_span);
+            let nu = (bu + su).clamp(self.u_min, self.u_max);
+            let nv = (bv + sv).clamp(self.v_min, self.v_max);
+            let np = nurbs.point_at(nu, nv);
+            let nd = (np.x - p.x).powi(2) + (np.y - p.y).powi(2) + (np.z - p.z).powi(2);
+            if nd < cur_d {
+                let converged = (cur_d - nd) < 1e-12 * cur_d.max(1e-20);
+                bu = nu;
+                bv = nv;
+                cur_d = nd;
+                if converged {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        // 3) wrong-basin gate
+        if cur_d.sqrt() > self.dist_gate {
+            return None;
+        }
+        // 4) analytic du×dv
+        let der = nurbs.derivatives_at(bu, bv);
+        let n = (
+            der.du.y * der.dv.z - der.du.z * der.dv.y,
+            der.du.z * der.dv.x - der.du.x * der.dv.z,
+            der.du.x * der.dv.y - der.du.y * der.dv.x,
+        );
+        let l = (n.0 * n.0 + n.1 * n.1 + n.2 * n.2).sqrt();
+        if l < 1e-12 {
+            return None; // degenerate pole / collapsed patch
+        }
+        Some([n.0 / l, n.1 / l, n.2 / l])
+    }
+}
+
 /// session-91 (v5): post-weld COMPONENT winding audit.
 ///
 /// The s90 per-pair flip repaired one mixed edge and manufactured new
@@ -15670,9 +15847,76 @@ pub fn postweld_component_winding_audit(
     let n_tris = mesh.triangles.len();
     let mut vote: Vec<Option<bool>> = vec![None; n_tris];
     let mut thick: Vec<Option<bool>> = vec![None; n_tris];
+    // ── session-92: Nurbs faces join the vote ──
+    // The 3/3 vertex disagreement against the analytic du×dv normal
+    // (inverted per-vertex via the oracle's grid+Newton, cached by
+    // vertex). Same 3/3 semantics as the analytic path: any vertex
+    // without a normal (degenerate pole, wrong-basin gate) → None.
+    // Kill-switch: DRAPPER_POSTWELD_NURBS_VOTE=0 (separate LAYER —
+    // the s91 lesson 5: switches must enumerate layers, not count
+    // them).
+    let nurbs_vote_on = std::env::var("DRAPPER_POSTWELD_NURBS_VOTE")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    let mut oracles: SDHashMap<u64, NurbsNormalOracle> = SDHashMap::new();
     for ti in 0..n_tris {
-        if let Some(fs) = fids.get(ti).and_then(|fid| face_surf.get(fid)) {
-            vote[ti] = tri_vote(fs.0, fs.1, &mesh.triangles[ti]);
+        if let Some(fid) = fids.get(ti) {
+            if let Some(fs) = face_surf.get(fid) {
+                vote[ti] = match fs.0 {
+                    Surface::Nurbs(n) if nurbs_vote_on => {
+                        let fsign = if fs.1 { 1.0 } else { -1.0 };
+                        let t = &mesh.triangles[ti];
+                        let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
+                        if a >= nv || b >= nv || c >= nv {
+                            None
+                        } else {
+                            let pa = &mesh.vertices[a];
+                            let pb = &mesh.vertices[b];
+                            let pc = &mesh.vertices[c];
+                            let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+                            let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+                            let nx = e1[1] * e2[2] - e1[2] * e2[1];
+                            let ny = e1[2] * e2[0] - e1[0] * e2[2];
+                            let nz = e1[0] * e2[1] - e1[1] * e2[0];
+                            if (nx * nx + ny * ny + nz * nz).sqrt() < 1e-15 {
+                                None
+                            } else {
+                                let oracle = oracles
+                                    .entry(*fid)
+                                    .or_insert_with(|| NurbsNormalOracle::new(n, res_tol_audit));
+                                let mut disagree = 0usize;
+                                let mut ok = true;
+                                for &vi in t {
+                                    match oracle.vertex_normal(
+                                        n,
+                                        vi,
+                                        &mesh.vertices[vi as usize],
+                                    ) {
+                                        Some(sn) => {
+                                            if (nx * sn[0] + ny * sn[1] + nz * sn[2])
+                                                * fsign
+                                                < 0.0
+                                            {
+                                                disagree += 1;
+                                            }
+                                        }
+                                        None => {
+                                            ok = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                                if ok {
+                                    Some(disagree == 3)
+                                } else {
+                                    None
+                                }
+                            }
+                        }
+                    }
+                    _ => tri_vote(fs.0, fs.1, &mesh.triangles[ti]),
+                };
+            }
         }
         thick[ti] = tri_thick(&mesh.triangles[ti]);
     }
@@ -15720,7 +15964,39 @@ pub fn postweld_component_winding_audit(
         members.sort_unstable();
         n_comps += 1;
         let has_solid = members.iter().any(|&m| thick[m] == Some(true));
-        if has_solid {
+        // ── session-92: coplanar same-face thin exemption ──
+        // The all-thin skip was measured on CROSS-SURFACE weld noise
+        // (s90: flipping thin Nurbs×Plane blades just relabeled the
+        // pair class — the dihedral stays ~180° on curved pairs). A
+        // bad cluster confined to ONE PLANAR face is a different
+        // animal: every interior edge it shares with the face's
+        // good triangles is COPLANAR, so a flip takes the as-wound
+        // dihedral from 180° to exactly 0° — the pair disappears,
+        // no relabeling is possible. Measured members of this class:
+        // GEAR f1 ×2 and SPEEDOMETER f1/f6 ×3 COINCIDENT WINDING-FLIP
+        // REAL pairs (s92 twin_check: third vertices are NOT
+        // coincident — the s91 dedup hypothesis is refuted; these
+        // are thin inverted blades in a coplanar fan that the
+        // solid-anchor gate skips). Cross-face boundary edges of a
+        // flipped thin cluster remain governed by the fixpoint
+        // below (BLOCK on a vote-good neighbor).
+        // Kill-switch: DRAPPER_POSTWELD_PLANAR_THIN_FLIP=0.
+        let planar_thin_flip_on = std::env::var("DRAPPER_POSTWELD_PLANAR_THIN_FLIP")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let coplanar_same_face = !has_solid && planar_thin_flip_on && {
+            match members.first().and_then(|&m| fids.get(m).copied()) {
+                Some(fid0) => {
+                    members.iter().all(|&m| fids.get(m).copied() == Some(fid0))
+                        && matches!(
+                            face_surf.get(&fid0),
+                            Some((Surface::Plane(_), _, _))
+                        )
+                }
+                None => false,
+            }
+        };
+        if has_solid || coplanar_same_face {
             for &m in &members {
                 flip_set.insert(m);
             }
@@ -15733,13 +16009,36 @@ pub fn postweld_component_winding_audit(
                 .filter_map(|&m| fids.get(m).copied())
                 .collect();
             eprintln!(
-                "POSTWELD_V5 brep#{} comp#{} size={} solid={} flip={} faces={:?}",
-                brep_id, n_comps, members.len(), has_solid, has_solid, faces
+                "POSTWELD_V5 brep#{} comp#{} size={} solid={} coplanar_thin={} flip={} faces={:?}",
+                brep_id, n_comps, members.len(), has_solid, coplanar_same_face, has_solid || coplanar_same_face, faces
             );
         }
     }
     // boundary fixpoint
     let cos10: f64 = 0.9848077530122080; // cos(10°)
+    // session-92 forensics: DRAPPER_POSTWELD_TRACE=<fid> dumps the
+    // per-triangle vote/thickness/flip decision for ONE face.
+    let trace_fid: Option<u64> = std::env::var("DRAPPER_POSTWELD_TRACE")
+        .ok()
+        .and_then(|v| v.parse().ok());
+    if let Some(tf) = trace_fid {
+        for ti in 0..n_tris {
+            if fids.get(ti).copied() == Some(tf) {
+                eprintln!(
+                    "PWTRACE brep#{} fid={} t{}=[{},{},{}] vote={:?} thick={:?} in_flip_set={}",
+                    brep_id,
+                    tf,
+                    ti,
+                    mesh.triangles[ti][0],
+                    mesh.triangles[ti][1],
+                    mesh.triangles[ti][2],
+                    vote[ti],
+                    thick[ti],
+                    flip_set.contains(&ti)
+                );
+            }
+        }
+    }
     let nrm_of = |t: &[u32; 3]| -> Option<(f64, f64, f64)> {
         let (a, b, c) = (t[0] as usize, t[1] as usize, t[2] as usize);
         if a >= nv || b >= nv || c >= nv {
@@ -15768,7 +16067,7 @@ pub fn postweld_component_winding_audit(
     let mut n_blocked = 0usize;
     loop {
         let mut grew = false;
-        for (_edge, owners) in &edges {
+        for (edge, owners) in &edges {
             if owners.len() != 2 {
                 continue;
             }
@@ -15808,7 +16107,52 @@ pub fn postweld_component_winding_audit(
             // manufactured (HM (3,243) Plane×Nurbs, h0 =
             // res_tol to 4 digits) — net −115 repaired vs +1
             // manufactured on drill. Thickness wins.
-            if thick[p] == Some(false) && thick[q] == Some(false) {
+            //
+            // session-92 refinement: the probe's SUBTOL verdict
+            // is the apex height over the SHARED EDGE, not the
+            // thickness — a thin STRIP with a long shared base
+            // is thin by 2·area/shortest but FAT by h. Skipping
+            // such edges as "free" manufactured +7 non-subtol
+            // WINDING-FLIP pairs on drill (HOUSING cylinder
+            // ladders h≈0.12, HM Nurbs ladders h≈0.19 vs
+            // res_tol 0.030). The skip now requires BOTH h
+            // measures under tolerance (genuinely free pairs);
+            // thin-but-h-fat edges fall through to the BLOCK /
+            // ABSORB branches below. Not the v5b mistake: the
+            // thickness measure still governs component
+            // solidity and absorbs — only the free-skip test
+            // aligns with the census's own semantics.
+            let h_over_shared = |t: &[u32; 3]| -> f64 {
+                let ea = &mesh.vertices[edge.0 as usize];
+                let eb = &mesh.vertices[edge.1 as usize];
+                let third = t
+                    .iter()
+                    .find(|&&v| v != edge.0 && v != edge.1)
+                    .map(|&v| &mesh.vertices[v as usize]);
+                match third {
+                    Some(pc) => {
+                        let abx = eb.x - ea.x;
+                        let aby = eb.y - ea.y;
+                        let abz = eb.z - ea.z;
+                        let apx = pc.x - ea.x;
+                        let apy = pc.y - ea.y;
+                        let apz = pc.z - ea.z;
+                        let cx = aby * apz - abz * apy;
+                        let cy = abz * apx - abx * apz;
+                        let cz = abx * apy - aby * apx;
+                        let base = (abx * abx + aby * aby + abz * abz).sqrt();
+                        if base <= 1e-15 {
+                            f64::INFINITY
+                        } else {
+                            (cx * cx + cy * cy + cz * cz).sqrt() / base
+                        }
+                    }
+                    None => f64::INFINITY,
+                }
+            };
+            let hp = h_over_shared(&mesh.triangles[p]);
+            let hq = h_over_shared(&mesh.triangles[q]);
+            if hp < res_tol_audit && hq < res_tol_audit {
                 continue;
             }
             if vote[q] == Some(false) || vote[q] == Some(true) {

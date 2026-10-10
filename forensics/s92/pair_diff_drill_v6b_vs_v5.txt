@@ -1,0 +1,48 @@
+pairs ON=1422 OFF=1606
+NEW=946  GONE=1130  RECLASSIFIED=0
+REAL ON=40 OFF=84 delta=-44
+
+=== REAL delta per BREP (name) ===
+  brep 0 DRILL_SHAFT: real 1 -> 1 (+0), census 6 -> 2
+  brep 1 GEAR: real 12 -> 10 (-2), census 20 -> 22
+  brep 2 SHAFT_SLEEVE: real 36 -> 23 (-13), census 103 -> 50
+  brep 3 HOUSING: real 17 -> 5 (-12), census 844 -> 652
+  brep 4 HOUSING_MIRROR: real 18 -> 1 (-17), census 633 -> 696
+
+=== NEW pairs that count as REAL (the regression core) ===
+  (total NEW-real: 0)
+
+=== NEW pairs census by class ===
+  WINDING-FLIP/SUBTOL: 720
+  FOLD-OVER/SUBTOL: 223
+  WINDING-FLIP: 3
+
+=== GONE pairs census by class (was) ===
+  WINDING-FLIP/SUBTOL: 761
+  FOLD-OVER/SUBTOL: 264
+  WINDING-FLIP: 61
+  FOLD-OVER: 44
+
+=== RECLASSIFIED pairs (OFF -> ON) ===
+
+=== GONE pairs detail (audit-repaired WINDING-FLIPs — intended wins) ===
+  brep=1 GEAR faces=('1', '1') h=(0.0177, 0.0166)
+  brep=2 SHAFT_SLEEVE faces=('94', '95') h=(0.0323, 0.0375)
+  brep=2 SHAFT_SLEEVE faces=('100', '100') h=(0.0253, 0.0126)
+  brep=2 SHAFT_SLEEVE faces=('186', '186') h=(0.0217, 0.0351)
+  brep=2 SHAFT_SLEEVE faces=('186', '186') h=(0.0415, 0.0415)
+  brep=2 SHAFT_SLEEVE faces=('200', '200') h=(0.0161, 0.013)
+  brep=2 SHAFT_SLEEVE faces=('214', '214') h=(0.013, 0.0161)
+  brep=2 SHAFT_SLEEVE faces=('214', '214') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('221', '221') h=(0.013, 0.0161)
+  brep=2 SHAFT_SLEEVE faces=('221', '221') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('235', '235') h=(0.013, 0.0161)
+  brep=2 SHAFT_SLEEVE faces=('235', '235') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('242', '242') h=(0.013, 0.0161)
+  brep=2 SHAFT_SLEEVE faces=('242', '242') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('249', '249') h=(0.0161, 0.013)
+  brep=2 SHAFT_SLEEVE faces=('277', '277') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('284', '284') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('298', '298') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('305', '305') h=(0.0342, 0.0171)
+  brep=2 SHAFT_SLEEVE faces=('151', '151') h=(0.0177, 0.0222)

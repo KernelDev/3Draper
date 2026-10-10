@@ -124,14 +124,28 @@ fn s91_component_flip_repairs_whole_cluster() {
     assert_eq!((pos, neg), (4, 0), "all triangles must wind +z after the cluster flip");
 }
 
+/// Serializes env-var mutation (cargo test runs threads in-process).
+static S91_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn s91_allthin_cluster_is_skipped() {
+    // session-92 note: the v5 all-thin skip now has a coplanar
+    // same-face exemption (see s92_winding_tests) — a thin bad
+    // cluster confined to ONE PLANAR face flips (the flip takes the
+    // shared-edge dihedral to exactly 0° — no relabeling possible).
+    // The v5 semantics this test encoded are restored by the s92
+    // layer's kill-switch; the CURVED-surface skip (the actual s90
+    // weld-noise lesson) is covered by s92_cylinder_allthin_cluster_
+    // still_skipped.
+    let _guard = S91_ENV_LOCK.lock().unwrap();
+    std::env::set_var("DRAPPER_POSTWELD_PLANAR_THIN_FLIP", "0");
     let mut mesh = synthetic_cluster_mesh();
     let fids = mesh.triangle_face_ids.clone().unwrap();
     let face_surf = plane_face_surf();
     // res_tol ABOVE every triangle's thickness (1.0): the bad cluster is
     // all-thin weld noise — the solid-anchor gate must skip it.
     let flipped = postweld_component_winding_audit(&mut mesh, &fids, &face_surf, 10.0, 42);
+    std::env::remove_var("DRAPPER_POSTWELD_PLANAR_THIN_FLIP");
     assert_eq!(flipped, 0, "an all-thin (weld-noise) cluster must NOT be flipped");
     let (pos, neg) = winding_census(&mesh);
     assert_eq!((pos, neg), (2, 2), "windings must be untouched");

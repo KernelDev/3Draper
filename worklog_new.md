@@ -14604,3 +14604,182 @@ h). Отвергнуто измерением; толщинная мера ос�
   (компонентный цензус DRAPPER_POSTWELD_DEBUG=1).
 - /tmp/s89check worktree: pristine 0193c68 probe (бит-точный s89 =
   290 — эталон для kill-switch матрицы).
+
+## Сессия 92 (trace 1a125e7ab060c6d5): NURBS-ГОЛОСОВАНИЕ +
+## КОПЛАНАРНЫЙ THIN-FLIP + h-ГЕЙТ В FIXPOINT — drill REAL 155→53
+## (−66%), transmission 57→30 (−47%), SPEEDOMETER 27→1, HM 34→1,
+## SLEEVE 58→23, HOUSING 48→19; twin-дедуп-гипотеза s91 ОПРОВЕРГНУТА
+## измерением; never-worsen drill −105/+3, trans −19/+0; сьюты 0 fail
+## (2026-10-10)
+
+Контекст входа: git pull = 7159316 (s91; sandbox N-й сброс, Rust
+1.99.0 переустановлен, target/ вычищен, fold_face_probe release
+пересобран 8m11s). Baseline s91 воспроизведён бит-точно: drill 155
+REAL (SHAFT 1, GEAR 14, SLEEVE 58, HOUSING 48, HM 34), transmission
+57 (SPEEDOMETER 27, SHIFT_ROD_R_L 21, SPRING 4, SHIFT_FORK 3,
+MAIN_SHAFT 2), corpus: comp 3, brick_round 7, Z 0/0 PASS, as1 0/0
+PASS.
+
+### 0. Опровержение twin-дедуп-гипотезы (пункт 2 плана s91) ДО кодинга
+
+s91 предполагал «2 COINCIDENT-твина на face 1 → разворот-инвариантный
+дедуп». Новый инструмент tools/src/bin/twin_check.rs (same-face
+однонаправленные пары: d_third, бит-равенство, edge_owners, nz-знаки):
+drill 3108 пар / transmission 812 пар — bit=0, eps(<1e-9)=0 СОВПАДЕНИЙ
+третьих вершин НЕТ (GEAR f1 t109/t116 d_third=3.6e-2, SPEEDOMETER
+0.15-4.6). Дедуп невозможен в принципе: это НЕ area-дубликаты, а
+тонкие инвертированные лопасти в копланарном веере. edge_owners=2
+везде — manifold, non-manifold-теория тоже отвергнута. Урок: s91
+хотел чинить класс, которого не существует — измеряй механику ДО
+выбора фикса.
+
+### 1. Root cause остатка: ТРИ подкласса вне v5
+
+а) SPEEDOMETER 24 Nurbs same-face (faces 2/7/8, blend-ленты 60x4/
+62x4): tri_vote=None (нет замкнутой нормали) → кластеры не строятся.
+б) Копланарные same-face thin-ласты (SPEEDOMETER 3 Plane COINCIDENT
++ GEAR 1): all-thin кластеры skip'ались solid-гейтом (v5-семантика
+«thin = weld noise»), НО на ПЛАНАРНОЙ грани флип лопасти конструктивно
+чинит: каждое внутреннее ребро с good-соседями той же плоскости после
+флипа даёт диэдр ровно 0° (не 180°−θ как на кривых) — relabel
+невозможен. Урок s90 «thin flip = relabel» верен ТОЛЬКО для кривых
+поверхностей.
+в) +7 новых non-subtol пар в первой итерации (v6 без h-гейта):
+thin-thin скип в fixpoint использовал толщину 2·area/shortest, а
+probe-субтол — высоту h над ОБЩИМ ребром; тонкая ЛЕНТА с длинным
+основанием thin по толщине, но fat по h (HOUSING cylinder-лестницы
+h≈0.12, HM Nurbs-лестницы h≈0.19 при res_tol 0.030) → флип против
+good-соседа производил non-subtol пару мимо BLOCK-защиты.
+
+### 2. ФИКС (три слоя, каждый со своим kill-switch — урок s91-5)
+
+1) NURBS VOTE (DRAPPER_POSTWELD_NURBS_VOTE=0): NurbsNormalOracle —
+   один coarse-grid 25×25 на ГРАНЬ + per-vertex Gauss-Newton (та же
+   форма, что project_point phase 3) + кэш по вершине; нормаль =
+   unit(du×dv) аналитически. Референс согласован со ВСЕМИ путями
+   тесселяции (canonical CDT extract_face_mesh и legacy grid оба
+   эмитят CCW-in-UV для forward — проверено по коду). Wrong-basin
+   гейт dist ≤ min(4·res_tol, 1% bbox diag); degenerate du×dv → None
+   (3/3-семантика сохранена: любая вершина без нормали → vote None).
+2) PLANAR THIN FLIP (DRAPPER_POSTWELD_PLANAR_THIN_FLIP=0): all-thin
+   кластер флипается, если все члены на ОДНОЙ fid и её поверхность
+   Plane (копланарность гарантирует диэдр → 0°). Кросс-фейсовые
+   граничные рёбра остаются под fixpoint-блоком.
+3) h-ГЕЙТ В FIXPOINT: free-skip требует h_p < res_tol И h_q < res_tol
+   (h = высота третьей вершины над ЛИНИЕЙ общего ребра — семантика
+   самого цензуса); thin-but-h-fat рёбра идут в BLOCK/ABSORB. НЕ v5b:
+   толщина по-прежнему правит solidity-гейтом и absorb-путями —
+   выровнен только free-skip тест. Измерено: drill +7 → +3 новых
+   non-subtol, и ПОЧИНЕНО больше (72→53: блок-каскад корректно
+   отсекает мусорные флипы).
+
+### 3. Результаты (v6b, default)
+
+- drill 155→53 (−66%): SLEEVE 58→23, HOUSING 48→19, HM 34→1, GEAR
+  14→12 (один (1,1) COINCIDENT-твин починен планарным thin-flip),
+  SHAFT 1=.
+- transmission 57→30 (−47%): SPEEDOMETER 27→1 (24 Nurbs killed,
+  3 COINCIDENT killed, 1 остаток), остальное = (SPRING 4,
+  SHIFT_ROD_R_L 21, SHIFT_FORK 3, MAIN_SHAFT 2 — не тронуты).
+- Пар-уровень (vs v5, frozenset-ключ): drill −105 non-subtol
+  починено / +3 создано; transmission −19 / +0. Субтол-цензус:
+  drill 1451→1369 (s91-инфляция частично вылечена h-гейтом),
+  transmission 83→128 (переклассификация Nurbs-флипов — рост
+  subtol, REAL-долга нет).
+- Corpus: comp 3=, brick_round 7→6, Z 0/0 PASS =, as1 0/0 PASS =,
+  brick_thin/hole WATERTIGHT =; BUG-строки drill 10=10,
+  brick_round 2=2 хроника.
+- angle_check: drill FAIL 5 (хроника) =, sharp 22203→21041 (−1162),
+  extreme 11909→9370 (−2539); transmission FAIL 5→4, sharp
+  90920→91397 (+477), extreme 31585→32320 (+735) — переклассификация
+  от Nurbs-флипов; comp FAIL 1 =, brick_round FAIL 1 (хроника) =.
+- Kill-switch матрица (СЛОИ ПЕРЕЧИСЛЕНЫ): {POSTWELD, CCW_NORM,
+  PLANAR_WIND_AUDIT} все OFF → drill 290 / transmission 179 —
+  бит-точно s89; {NURBS_VOTE, PLANAR_THIN_FLIP} OFF → drill 155 /
+  transmission 57 — пары sorted-бит-идентичны v5 (дифф только
+  недетерминированный HashMap-порядок диагностических pos/near-miss
+  строк); default → 53 / 30.
+- Детерминизм: двойной прогон drill/transmission sorted-md5 равны.
+- Стоимость: Nurbs-оракул ~625 grid-оценок на грань + ~20 на вершину
+  (кэш) — прогон probe замедлился незаметно.
+
+### 4. Диагностика остатка
+
+- SPEEDOMETER 1 REAL: тонкая Nurbs-лопатка h=(0.589,0.019) на face 8
+  (62x4) — thin-кластер на КРИВОЙ поверхности, планарное исключение
+  не применимо (relabel-риск s90).
+- GEAR 2 REAL (1,1): PWTRACE показал t109 bad+solid в flip_set, но
+  fixpoint BLOCK отменил — кросс-фейсовое ребро к соседу у кромки
+  дырки (s62 зигзаг-сварка) запрещает флип. Класс «cross-face
+  constrained flip» — отдельная работа.
+- drill +3 новых non-subtol: кросс-фейсовые Cylinder×Nurbs /
+  Plane×Nurbs пары h≈0.06-0.19 у границы res_tol — цена расширения
+  покрытия (−105 против +3).
+
+### 5. Тесты (crates/draper-step/tests/s92_winding_tests.rs, +7; s91 +0 net)
+
+- s92_nurbs_vote_flips_inverted_nurbs_triangle: билинейный Nurbs-
+  патч (deg 1/1, 2x2 cps), инвертированный треугольник → флип.
+- s92_nurbs_vote_killswitch_disables_layer: NURBS_VOTE=0 → v5-слой
+  (vote None, 0 флипов).
+- s92_nurbs_vote_forward_false_expects_opposite: !forward грань,
+  эмит CCW → оптовый флип (знак fsign против du×dv).
+- s92_planar_allthin_cluster_flips: планарный all-thin кластер
+  (res_tol 10) → флип (v5 skip'ал бы).
+- s92_planar_allthin_killswitch_restores_v5_skip.
+- s92_cylinder_allthin_cluster_still_skipped: КРИВАЯ поверхность —
+  all-thin skip сохранён (урок s90 для кривых).
+- s92_hgate_blocks_thin_strip_with_long_base: тонкая лента с длинным
+  основанием против good-соседа → BLOCK (не free-skip).
+- s91_allthin_cluster_is_skipped переписан под kill-switch-режим
+  (семантика v5 восстановлена env'ом; комментарий объясняет эволюцию).
+
+### Осталось (сессия 93)
+
+1. transmission остаток 30: SHIFT_ROD_R_L 21, SPRING 4, SHIFT_FORK 3,
+   MAIN_SHAFT 2, SPEEDOMETER 1 — классы вне аудита (thin на кривых,
+   кросс-фейсовые).
+2. drill остаток 53: SLEEVE 23, HOUSING 19, HM 1, GEAR 12 (фланки
+   зубьев — хроника s79 + cross-face constrained flip у кромок дырок,
+   s92 §4), SHAFT 1.
+3. transmission субтол-инфляция 83→128: manufactured-пары от Nurbs-
+   флипов (free по метрике, грязнят цензус) — кандидат: fixpoint-распространение
+   BLOCK на vote-None Nurbs-соседей после h-гейта.
+4. GEAR cross-face constrained flip: thin bad-лопатка у кромки дырки
+   зажата (внутри грани хочет флипа, кросс-ребро запрещает) —
+   кандидат: двухфазный флип с инверсией кросс-пары.
+5. Переносы s90/s91: ABS-площадь как аудит band-эмиттеров,
+   стаггер-решётка DRAPPER_CAST_ROWS=1, watertight BUG-строки drill
+   (10, хроника).
+
+### Уроки
+
+1. Измеряй механику ДО фикса: twin-дедуп s91 опровергнут одним
+   инструментом (twin_check, 30 минут) — «COINCIDENT-твины» не
+   дубликаты, а тонкие лопасти. Классификация ≠ природа (урок s91-1
+   на новом материале).
+2. «Thin flip = relabel» — свойство КРИВИЗНЫ, не толщины: на плоскости
+   флип меняет диэдр на ровно 0°, на кривой — на 180°−θ. Обобщай
+   уроки по ГЕОМЕТРИЧЕСКОМУ механизму, не по симптому.
+3. Гейт обязан говорить на языке метрики, которую защищает: probe-
+   субтол смотрит h над общим ребром, fixpoint-скип смотрел толщину —
+   расхождение производило +7 non-subtol пар мимо BLOCK. Но мера
+   должна остаться в СВОЁМ месте (v5b: замена толщины в solidity
+   дала poison-каскад) — выравнивай семантику, не заменяй меру везде.
+4. Индексы вершин нестабильны между стадиями (cleanup переиндексирует
+   ПОСЛЕ аудита) — трассировка по вершинным индексам между PWTRACE и
+   probe-дампом нерелевантна; сравнивай по позициям/ключам пар.
+5. HashMap-порядок диагностических строк (pos/near-miss) недетерминирован
+   между прогонами — бит-сравнение только по пар-строкам (frozenset
+   сортированных вершинных троек), не по сырому выводу.
+
+### Артефакты диагностики
+
+- tools/src/bin/twin_check.rs: same-face однонаправленный пар-сканер
+  (d_third, бит-равенство, edge_owners, nz) + TWIN_CHECK_BREP=<id>
+  полный дамп одного BREP.
+- forensics/s92/: baseline (s91-бит-эквивалент), v6 pre-hgate (drill
+  72 с +7), v6b final (53/30), pair_diff_*_v6b_vs_v5, twin_check_*
+  (опровержение дедупа).
+- PWTRACE: DRAPPER_POSTWELD_TRACE=<fid> — per-triangle vote/thick/
+  flip дамп одной грани (использован для GEAR t109/t116 root cause).

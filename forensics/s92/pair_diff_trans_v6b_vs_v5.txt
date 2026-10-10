@@ -1,0 +1,47 @@
+pairs ON=254 OFF=190
+NEW=139  GONE=75  RECLASSIFIED=0
+REAL ON=27 OFF=35 delta=-8
+
+=== REAL delta per BREP (name) ===
+  brep 0 GEAR_SKELETON: real 0 -> 0 (+0), census 6 -> 7
+  brep 8 SHIFT_ROD_END: real 0 -> 0 (+0), census 6 -> 7
+  brep 10 SHIFT_ROD_R_L: real 21 -> 21 (+0), census 50 -> 51
+  brep 19 TRANS_HOUSING: real 0 -> 0 (+0), census 5 -> 48
+  brep 22 MAIN_SHAFT: real 1 -> 1 (+0), census 3 -> 2
+  brep 151 SPEEDOMETER: real 8 -> 0 (-8), census 110 -> 129
+
+=== NEW pairs that count as REAL (the regression core) ===
+  (total NEW-real: 0)
+
+=== NEW pairs census by class ===
+  WINDING-FLIP/SUBTOL: 89
+  FOLD-OVER/SUBTOL: 50
+
+=== GONE pairs census by class (was) ===
+  WINDING-FLIP/SUBTOL: 47
+  WINDING-FLIP: 19
+  FOLD-OVER: 8
+  FOLD-OVER/SUBTOL: 1
+
+=== RECLASSIFIED pairs (OFF -> ON) ===
+
+=== GONE pairs detail (audit-repaired WINDING-FLIPs — intended wins) ===
+  brep=151 SPEEDOMETER faces=('1', '1') h=(0.0094, 1.7067)
+  brep=151 SPEEDOMETER faces=('6', '6') h=(0.0384, 0.2936)
+  brep=151 SPEEDOMETER faces=('6', '6') h=(0.0025, 0.3039)
+  brep=151 SPEEDOMETER faces=('2', '2') h=(0.4389, 0.4005)
+  brep=151 SPEEDOMETER faces=('2', '2') h=(0.4204, 1.4068)
+  brep=151 SPEEDOMETER faces=('2', '2') h=(0.1786, 1.407)
+  brep=151 SPEEDOMETER faces=('2', '2') h=(0.1189, 1.407)
+  brep=151 SPEEDOMETER faces=('2', '2') h=(0.0112, 0.3312)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.5891, 0.019)
+  brep=151 SPEEDOMETER faces=('7', '7') h=(0.0407, 0.509)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.3235, 0.3533)
+  brep=151 SPEEDOMETER faces=('7', '7') h=(0.5004, 0.5445)
+  brep=151 SPEEDOMETER faces=('7', '7') h=(0.4429, 2.0262)
+  brep=151 SPEEDOMETER faces=('7', '7') h=(0.033, 0.4006)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.5891, 0.019)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.5891, 0.019)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.019, 0.5891)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.5891, 0.019)
+  brep=151 SPEEDOMETER faces=('8', '8') h=(0.5892, 0.019)
