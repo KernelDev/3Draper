@@ -14783,3 +14783,143 @@ good-соседа производил non-subtol пару мимо BLOCK-защ
   (опровержение дедупа).
 - PWTRACE: DRAPPER_POSTWELD_TRACE=<fid> — per-triangle vote/thick/
   flip дамп одной грани (использован для GEAR t109/t116 root cause).
+
+## Сессия 93 (trace 1a12c7532588dc5d): НАПРАВЛЕННОЕ STEP-CORNER ПРАВИЛО В
+## CYL_RULED_BAND — transmission REAL 30→4 (−87%), drill 53= бит-идентичен;
+## SHIFT_ROD_R_L 21→0, SHIFT_FORK 3→0, MAIN_SHAFT 2→0; angle_check trans
+## FAIL 4→1; сьюты 0 fail (2026-10-11)
+
+Контекст входа: git pull = 787428b (s92; sandbox N-й сброс — rustc/cargo
+пропали из PATH, тулчейн выжил в /tmp/my-project/.cargo [rustc 1.98.1],
+rustup потерял default — лечится export RUSTUP_HOME; target/release
+бинарей нет — пересборка draper-diag 4m). Baseline s92 воспроизведён
+бит-точно: drill 53 REAL (SHAFT 1, GEAR 11, SLEEVE 23, HOUSING 13, HM 5),
+transmission 30 (SHIFT_ROD_R_L 21, SPRING 4, SHIFT_FORK 3, MAIN_SHAFT 2),
+corpus: comp 3, brick_round 6, Z 0/0 PASS, as1 0/0 PASS.
+
+### 0. Переклассификация остатка s92 (до какого-либо кодинга)
+
+Все 21 REAL SHIFT_ROD_R_L + 3 SHIFT_FORK + 2 MAIN_SHAFT — НЕ winding-
+классы, а ГЕОМЕТРИЧЕСКИЕ FOLD-OVER/span-треугольники от earcutr
+fan-mode на сложных UV-доменах (подтверждение плана s92 «классы вне
+аудита»). Инструменты: DRAPPER_DUMP_FINAL_OBJS (OBJ+fmap по BREP),
+DRAPPER_DUMP_UVPOLY (raw UV-полигон на вызов), DRAPPER_DUMP_LEGACY
+(legacy earcut-результат), новые Python-репро /home/z/my-project/scripts/
+s93_*.py (full guard-suite воспроизведение вне Rust — быстро, без
+ребилдов).
+
+- SHIFT_ROD_R_L f49 (Cylinder R=7.5, полу-цилиндр u[40°,220°]): домен
+  Г-образный — слот [40°,72°]×v[0,1.5] вырезан снизу; Steiner-ряд v=1.25
+  подвешен как шип между дальними ring-вершинами (диагональ через
+  домен), earcutr вокруг шипов = 4 чередующихся угловых веера (86/120
+  треугольников с угловым размахом до 180°, apex 3745/3746/298/263).
+  21 REAL = веера × спицы крышек (planes 10/53) + same-face веерные
+  перекрытия.
+- SHIFT_FORK f5 (Cylinder R=3.75): ЗЕРКАЛЬНЫЙ домен — слот у ПРАВОГО
+  конца, стенка u=2.881 ВОСХОДЯЩАЯ v0→1.5 (полная высота ПОЗАДИ).
+- MAIN_SHAFT f27 (R=3.5): кастелляция — чередующиеся зубья v=12.2/23.2
+  (6 нисходящих стенок).
+- SLEEVE f152 (R=0.496, кольцо 5131 pt): СПИРАЛЬНЫЙ ПАЗ — 2 плотные
+  винтовые кривые (v 0.004→0.014 и 0.074→0.084, ~1000 pt каждая) +
+  плотный ряд v=0.084 (715 pt) + верхний обод (32 pt); цепи
+  немонотонны (56 back-steps у шва) — ruled band отклоняет на mono.
+- SPRING f2/f3 (Nurbs 9x69, кольцо 330 pt, extra_bnd ~980): near-дубли
+  площадей (0.7797/0.7790) — ДУБЛИРОВАННАЯ cross-face эмиссия полосы
+  (обе грани триангулируют одну область).
+
+### 1. Root cause ruled-band отказа на step-доменах
+
+two-pointer walk в cylinder_ruled_band_strip ломается на СТУПЕНЕ:
+вертикальная (constant-u) стенка домена. Walk пересекал стенку, пока
+якорь другой цепи был ПОЗАДИ стенки → треугольник
+[a_behind, b_bottom, b_top] накрывал вырезанную область → fold guard
+(2 пары 178-180°) отклонял ВЕСЬ strip → грань оставалась на legacy
+earcutr-веерах. Триггер (extra_bnd>0) при этом СРАБАТЫВАЛ — отказ был
+именно в walk (Python-репро на uvpoly_0076: все прочие guard'ы
+проходили: edge-audit ok, area 1.000000, sliver 0, chord 0.65<0.77).
+
+### 2. ФИКС: направленное step-corner правило (две итерации)
+
+V1 (коммит 395729c): перед пересечением вертикальной стенки принудить
+отстающую цепь дойти до u стенки. ROD f49: 2 folds→0, strip принят
+(15→0 extra_bnd, 107→108 rim, 120→106 tris) → SHIFT_ROD_R_L 21→0.
+НО: FORK f5 получил 2 НОВЫХ fold-пары — его стенка ВОСХОДЯЩАЯ, u-rule
+сам по себе безопасен, force гнал A за стенку → пролив в полку.
+V2 (коммит 0d72df5): НАПРАВЛЕННОЕ правило — force только при
+НИСХОДЯЩЕЙ стенке (shelf→bottom, полная высота ВПЕРЕДИ, u_w);
+при ВОСХОДЯЩЕЙ (bottom→shelf, полная высота ПОЗАДИ) — не вмешиваться
+(u-rule держит A ≤ u_w, апекс в полной полосе). SHAFT f27 (зубья):
+12 folds→0 (6 нисходящих стенок). ROD: 0 folds (unchanged), FORK: 0.
+
+### 3. Результаты (V2, default)
+
+- transmission 30→4 (−87%): SHIFT_ROD_R_L 21→0 (субтол 51→16 пар),
+  SHIFT_FORK 3→0, MAIN_SHAFT 2→0; SPRING 4 = (Nurbs, вне класса).
+  Остальные BREP бит-идентичны (diff только 2 удалённые строки).
+- drill 53= бит-идентичен (SLEEVE f152 спиральный паз — mono reject,
+  отдельный подпроект).
+- Субтол trans 262→244; corpus comp 3=, brick_round 6=, brick_thin/
+  hole 0=, as1 0/0 PASS=, Z пуст=.
+- angle_check: trans FAIL 4→1 (остался SPRING), drill 5= хроника;
+  trans sharp/extreme = (метрики сдвинулись в пределах переклассификации).
+- Сьюты: mesh+geom+topo+core 1259/0, step lib 169/0 (259s), step
+  integration 242/0.
+
+### 4. Тесты (+2, crates/draper-mesh/src/parametric_domain.rs)
+
+- test_cyl_ruled_band_step_corner_self_proving: синтетический ROD-класс
+  домен (нисходящая стенка): strip принят, edge census (rim 1×/interior
+  2×), signed+ABS area (no-overlap = no-spill), 0 3D fold-пар,
+  апекс пересечения стенки ≥ u_w.
+- test_cyl_ruled_band_rising_wall_no_force: зеркальный FORK-класс
+  (восходящая стенка): strip принят, 0 fold-пар, edge census.
+
+### Осталось (сессия 94)
+
+1. transmission остаток 4: SPRING f2/f3 — дублированная cross-face
+   эмиссия на Nurbs 9x69 (extra_bnd 984/972, NFB отклонил; near-дубли
+   площадей 0.7797/0.7790) — кандидат: NFB/sail расширение или дедуп
+   полос по shared-edge контракту.
+2. drill остаток 53: SLEEVE 23 (f152 спиральный паз — mono-reject,
+   нужен helical-groove band или pre-clean зигзага шва БЕЗ ломки
+   rim-контракта), HOUSING 13 + HM 5 (cross-face Plane/Cyl×Nurbs),
+   GEAR 11 (фланки s79 хроника + cross-face constrained flip s92 §4),
+   SHAFT 1 (Sphere same-face h=0.0299 ≈ 2×tol — маргинал).
+3. Переносы s90-92: ABS-площадь как аудит band-эмиттеров (SPRING —
+   прямой кандидат), стаггер-решётка DRAPPER_CAST_ROWS=1, watertight
+   BUG-строки drill (10, хроника).
+4. Урок V1→V2 (направление ступени) — обобщить на TORUS/NURBS band
+   walks (та же two-pointer машина в TFB/NFB/sail): проверить их
+   вертикали на направление.
+
+### Уроки
+
+1. Переклассифицируй остаток ДО кодинга: 26 из 30 transmission-пар
+   оказались НЕ winding-классом, а span-веерами earcutr — один
+   walk-фикс закрыл все три BREP. Классификация цензуса ≠ механизм
+   эмиссии.
+2. Step-corner асимметричен: безопасная сторона пересечения стенки
+   определяется направлением (нисходящая = полная высота впереди →
+   force; восходящая = позади → не трогать). Проверяй зеркальные
+   кейсы ДО коммита: V1 чинил ROD и ломал FORK — V2 чинит оба.
+3. Индексы треугольников тоже нестабильны между стадиями (PWTRACE
+   t-индексы ≠ цензусные): корреляция только по вершинным тройкам
+   (дополнение урока s92-4).
+4. Python-репро guard-suite на UV-дампах (uvpoly+legacy) экономит
+   циклы ребилдов: обе итерации правила отлажены в Python (минуты),
+   Rust-ребилд только для финальной верификации.
+5. Sandbox-сброс не стирает /tmp: тулчейн выжил в /tmp/my-project/
+   .cargo — протокол восстановления = export PATH+RUSTUP_HOME+
+   CARGO_HOME (scripts/rust_env.sh), rustup default не нужен.
+
+### Артефакты диагностики
+
+- forensics/s93/: base_drill/trans (бит-s92), fix1_* (V1), fix2_*
+  (V2 финал); objs/ (23M OBJ+fmap дампы, .gitignore — вне git).
+- /home/z/my-project/scripts/: rust_env.sh (тулчейн-протокол),
+  s93_rod_face49.py, s93_rod_pairs_dump.py, s93_rod_slicers.py,
+  s93_rod_rings.py, s93_ruledband_repro.py, s93_sleeve_f152_repro.py
+  (Python guard-suite репро), s93_rod_face49.py патчен под fmap
+  формат.
+- CYLBDBG (DRAPPER_CYL_BAND_DEBUG=1): триггер-трейс + per-guard REJECT
+  причины для cylinder_ruled_band_strip (оставлен в коде).
