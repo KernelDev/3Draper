@@ -1,0 +1,265 @@
+f 1 Nurbs(deg=3/3, cps=6x8) 52606 false
+f 2 Nurbs(deg=3/3, cps=7x8) 52673 false
+f 3 Plane 52736 false
+f 4 Nurbs(deg=3/3, cps=7x13) 52842 true
+f 5 Plane 52864 true
+f 6 Cylinder 52878 true
+f 7 Plane 52935 false
+f 8 Plane 53057 false
+f 9 Cylinder 53071 false
+f 10 Cylinder 53083 true
+f 11 Cylinder 53097 false
+f 12 Plane 53110 false
+f 13 Cylinder 53216 true
+f 14 Plane 53234 false
+f 15 Plane 53255 false
+f 16 Plane 53277 false
+f 17 Cylinder 53292 false
+f 18 Nurbs(deg=3/3, cps=4x4) 53325 true
+f 19 Cylinder 53337 true
+f 20 Nurbs(deg=3/3, cps=4x11) 53391 true
+f 21 Cylinder 53405 true
+f 22 Nurbs(deg=3/3, cps=4x7) 53443 true
+f 23 Cylinder 53457 true
+f 24 Nurbs(deg=3/3, cps=4x7) 53495 true
+f 25 Nurbs(deg=3/3, cps=4x4) 53565 true
+f 26 Nurbs(deg=3/3, cps=4x10) 53616 true
+f 27 Nurbs(deg=3/3, cps=4x5) 53645 true
+f 28 Nurbs(deg=3/3, cps=4x7) 53682 true
+f 29 Nurbs(deg=3/3, cps=4x7) 53719 true
+f 30 Nurbs(deg=3/3, cps=4x10) 53766 true
+f 31 Plane 53798 false
+f 32 Nurbs(deg=3/3, cps=4x20) 53887 true
+f 33 Nurbs(deg=3/3, cps=11x19) 54106 false
+f 34 Nurbs(deg=3/3, cps=4x15) 54173 false
+f 35 Cylinder 54194 true
+f 36 Plane 54221 false
+f 37 Cylinder 54236 false
+f 38 Cylinder 54249 true
+f 39 Plane 54265 false
+f 40 Cylinder 54280 false
+f 41 Plane 54297 false
+f 42 Cylinder 54312 false
+f 43 Plane 54339 false
+f 44 Cylinder 54351 true
+f 45 Cylinder 54366 true
+f 46 Nurbs(deg=3/3, cps=4x11) 54420 true
+f 47 Cylinder 54435 false
+f 48 Plane 54452 true
+f 49 Cylinder 54465 false
+f 50 Cylinder 54485 true
+f 51 Cylinder 54501 true
+f 52 Nurbs(deg=3/3, cps=4x12) 54558 false
+f 53 Cylinder 54572 false
+f 54 Sphere 54585 false
+f 55 Cylinder 54600 false
+f 56 Plane 54615 false
+f 57 Plane 54645 false
+f 58 Nurbs(deg=3/3, cps=4x10) 54696 true
+f 59 Nurbs(deg=3/3, cps=4x4) 54765 true
+f 60 Nurbs(deg=3/3, cps=4x5) 54795 true
+f 61 Cylinder 54896 true
+f 62 Plane 54914 false
+f 63 Plane 54935 false
+f 64 Plane 54956 false
+f 65 Cylinder 54971 false
+f 66 Nurbs(deg=3/3, cps=4x4) 55004 true
+f 67 Cylinder 55016 true
+f 68 Nurbs(deg=3/3, cps=4x11) 55070 true
+f 69 Cylinder 55083 true
+f 70 Nurbs(deg=3/3, cps=4x7) 55121 true
+f 71 Nurbs(deg=3/3, cps=4x7) 55159 true
+f 72 Nurbs(deg=3/3, cps=4x7) 55196 true
+f 73 Nurbs(deg=3/3, cps=4x7) 55234 true
+f 74 Nurbs(deg=3/3, cps=4x10) 55281 true
+f 75 Cylinder 55293 true
+f 76 Plane 55305 true
+f 77 Cylinder 55318 true
+f 78 Plane 55329 false
+f 79 Plane 55341 true
+f 80 Cylinder 55354 false
+f 81 Plane 55365 false
+f 82 Cylinder 55379 false
+f 83 Cylinder 55391 true
+f 84 Cylinder 55405 false
+f 85 Cylinder 55417 true
+f 86 Cylinder 55431 false
+f 87 Cylinder 55445 true
+f 88 Nurbs(deg=3/3, cps=4x15) 55513 false
+f 89 Nurbs(deg=3/3, cps=9x17) 55675 false
+f 90 Nurbs(deg=3/3, cps=4x20) 55763 true
+f 91 Cylinder 55775 true
+f 92 Plane 55787 false
+f 93 Torus 55801 false
+f 94 Plane 55817 true
+f 95 Cylinder 55832 true
+f 96 Nurbs(deg=3/3, cps=4x4) 55858 true
+f 97 Cylinder 55871 true
+f 98 Plane 55885 false
+f 99 Nurbs(deg=3/3, cps=4x8) 55927 false
+f 100 Nurbs(deg=3/3, cps=9x9) 56024 false
+f 101 Nurbs(deg=3/3, cps=4x5) 56055 false
+f 102 Sphere 56068 true
+f 103 Nurbs(deg=3/3, cps=4x11) 56121 true
+f 104 Nurbs(deg=3/3, cps=4x8) 56163 true
+f 105 Plane 56181 false
+f 106 Cylinder 56198 true
+f 107 Nurbs(deg=3/3, cps=8x8) 56271 false
+f 108 Nurbs(deg=3/3, cps=8x9) 56353 false
+f 109 Nurbs(deg=3/3, cps=8x12) 56459 false
+f 110 Nurbs(deg=3/3, cps=8x7) 56525 false
+f 111 Nurbs(deg=3/3, cps=8x15) 56655 false
+f 112 Cylinder 56668 true
+f 113 Nurbs(deg=3/3, cps=9x9) 56758 false
+f 114 Nurbs(deg=3/3, cps=4x15) 56826 true
+f 115 Nurbs(deg=3/3, cps=6x15) 56929 false
+f 116 Plane 56941 true
+f 117 Nurbs(deg=3/3, cps=7x4) 56979 true
+f 118 Nurbs(deg=3/3, cps=6x12) 57061 false
+f 119 Nurbs(deg=3/3, cps=6x9) 57128 false
+f 120 Nurbs(deg=3/3, cps=7x8) 57193 false
+f 121 Nurbs(deg=3/3, cps=7x13) 57293 false
+f 122 Nurbs(deg=3/3, cps=7x6) 57344 true
+f 123 Nurbs(deg=3/3, cps=7x6) 57401 true
+f 124 Nurbs(deg=3/3, cps=4x6) 57436 true
+f 125 Nurbs(deg=3/3, cps=4x8) 57478 true
+f 126 Nurbs(deg=3/3, cps=4x9) 57523 true
+f 127 Nurbs(deg=3/3, cps=4x4) 57551 false
+f 128 Plane 57565 true
+f 129 Nurbs(deg=3/3, cps=4x4) 57591 false
+f 130 Cylinder 57607 false
+f 131 Nurbs(deg=3/3, cps=4x9) 57652 true
+f 132 Nurbs(deg=3/3, cps=4x13) 57714 true
+f 133 Nurbs(deg=3/3, cps=5x8) 57764 true
+f 134 Nurbs(deg=3/3, cps=4x8) 57805 true
+f 135 Plane 57820 true
+f 136 Cylinder 57831 false
+f 137 Cylinder 57843 false
+f 138 Cylinder 57857 true
+f 139 Plane 57870 true
+f 140 Cylinder 57883 true
+f 141 Nurbs(deg=3/3, cps=4x14) 57947 false
+f 142 Nurbs(deg=3/3, cps=4x13) 58007 false
+f 143 Plane 58021 true
+f 144 Cylinder 58034 true
+f 145 Plane 58047 false
+f 146 Cylinder 58059 false
+f 147 Plane 58073 true
+f 148 Cylinder 58085 true
+f 149 Plane 58099 true
+f 150 Plane 58112 false
+f 151 Plane 58125 false
+f 152 Plane 58137 true
+f 153 Plane 58151 true
+f 154 Plane 58164 false
+f 155 Plane 58177 false
+f 156 Plane 58189 true
+f 157 Plane 58203 true
+f 158 Plane 58216 false
+f 159 Plane 58229 false
+f 160 Plane 58241 true
+f 161 Torus 58256 true
+f 162 Torus 58267 true
+f 163 Torus 58282 true
+f 164 Torus 58293 true
+f 165 Torus 58308 true
+f 166 Torus 58319 true
+f 167 Torus 58334 true
+f 168 Torus 58345 true
+f 169 Torus 58360 true
+f 170 Torus 58371 true
+f 171 Plane 58385 false
+f 172 Cylinder 58398 false
+f 173 Plane 58410 true
+f 174 Cylinder 58424 true
+f 175 Plane 58436 false
+f 176 Sphere 58448 true
+f 177 Cylinder 58460 true
+f 178 Cylinder 58472 true
+f 179 Cylinder 58487 true
+f 180 Sphere 58500 true
+f 181 Cylinder 58514 true
+f 182 Plane 58527 false
+f 183 Cylinder 58541 false
+f 184 Plane 58556 true
+f 185 Cylinder 58568 true
+f 186 Cylinder 58581 false
+f 187 Nurbs(deg=3/3, cps=4x11) 58633 true
+f 188 Plane 58647 false
+f 189 Cylinder 58660 true
+f 190 Sphere 58673 false
+f 191 Cylinder 58686 false
+f 192 Plane 58700 true
+f 193 Cylinder 58714 false
+f 194 Nurbs(deg=3/3, cps=4x12) 58771 false
+f 195 Cylinder 58785 true
+f 196 Plane 58798 false
+f 197 Cylinder 58810 false
+f 198 Torus 58825 true
+f 199 Torus 58836 true
+f 200 Torus 58851 true
+f 201 Torus 58862 true
+f 202 Torus 58877 true
+f 203 Torus 58888 true
+f 204 Torus 58903 true
+f 205 Torus 58914 true
+f 206 Torus 58929 true
+f 207 Torus 58940 true
+f 208 Plane 58952 false
+f 209 Cylinder 58965 true
+f 210 Plane 58976 true
+f 211 Plane 58988 true
+f 212 Cylinder 59001 false
+f 213 Plane 59012 false
+f 214 Nurbs(deg=3/3, cps=4x15) 59082 true
+f 215 Nurbs(deg=3/3, cps=9x9) 59173 false
+f 216 Plane 59192 false
+f 217 Nurbs(deg=3/3, cps=9x9) 59289 false
+f 218 Nurbs(deg=3/3, cps=4x5) 59320 false
+f 219 Nurbs(deg=3/3, cps=4x14) 59386 false
+f 220 Nurbs(deg=3/3, cps=4x8) 59427 false
+f 221 Plane 59441 false
+f 222 Cylinder 59455 true
+f 223 Plane 59471 true
+f 224 Cylinder 59486 true
+f 225 Nurbs(deg=3/3, cps=4x13) 59548 false
+f 226 Torus 59560 false
+f 227 Cylinder 59574 true
+f 228 Plane 59587 true
+f 229 Cylinder 59600 true
+f 230 Torus 59612 true
+f 231 Sphere 59624 true
+f 232 Nurbs(deg=3/3, cps=4x11) 59677 true
+f 233 Nurbs(deg=3/3, cps=4x8) 59717 true
+f 234 Cylinder 59734 true
+f 235 Nurbs(deg=3/3, cps=7x9) 59808 false
+f 236 Nurbs(deg=3/3, cps=8x7) 59874 false
+f 237 Nurbs(deg=3/3, cps=7x10) 59954 false
+f 238 Nurbs(deg=3/3, cps=6x9) 60020 false
+f 239 Nurbs(deg=3/3, cps=6x5) 60060 true
+f 240 Nurbs(deg=3/3, cps=6x6) 60109 true
+f 241 Nurbs(deg=3/3, cps=4x13) 60172 true
+f 242 Nurbs(deg=3/3, cps=4x9) 60218 true
+f 243 Nurbs(deg=3/3, cps=7x9) 60291 true
+f 244 Cylinder 60306 false
+f 245 Torus 60320 false
+f 246 Plane 60334 true
+f 247 Torus 60350 false
+f 248 Nurbs(deg=3/3, cps=4x9) 60396 true
+f 249 Nurbs(deg=3/3, cps=7x6) 60455 true
+f 250 Nurbs(deg=3/3, cps=4x6) 60490 true
+f 251 Nurbs(deg=3/3, cps=4x8) 60531 true
+f 252 Plane 60546 true
+f 253 Cylinder 60558 false
+f 254 Cylinder 60570 false
+f 255 Nurbs(deg=3/3, cps=4x8) 60610 true
+f 256 Nurbs(deg=3/3, cps=6x6) 60656 true
+f 257 Nurbs(deg=3/3, cps=6x13) 60744 false
+f 258 Nurbs(deg=3/3, cps=6x6) 60790 false
+f 259 Nurbs(deg=3/3, cps=6x6) 60837 false
+f 260 Nurbs(deg=3/3, cps=5x6) 60877 false
+f 261 Nurbs(deg=3/3, cps=7x6) 60928 false
+f 262 Nurbs(deg=3/3, cps=7x7) 60986 false
+f 263 Nurbs(deg=3/3, cps=5x8) 61039 false
+f 264 Nurbs(deg=3/3, cps=6x10) 61107 false
+f 265 Cylinder 61119 true

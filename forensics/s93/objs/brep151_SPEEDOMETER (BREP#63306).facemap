@@ -1,0 +1,12 @@
+f 1 Plane 61968 false
+f 2 Nurbs(deg=3/3, cps=60x4) 62229 true
+f 3 Cylinder 62244 true
+f 4 Cylinder 62259 true
+f 5 Cylinder 62273 true
+f 6 Plane 62293 true
+f 7 Nurbs(deg=3/3, cps=62x4) 62556 true
+f 8 Nurbs(deg=3/3, cps=62x4) 62812 true
+f 9 Cylinder 62825 true
+f 10 Cylinder 62837 true
+f 11 Cylinder 62851 true
+f 12 Cylinder 62863 true

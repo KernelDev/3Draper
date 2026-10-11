@@ -5765,6 +5765,24 @@ fn cylinder_ruled_band_strip(
         let mut ia = 0usize;
         let mut ib = 0usize;
         while ia < na - 1 || ib < nb - 1 {
+            // session-93 STEP-CORNER rule: B's next edge may be a
+            // VERTICAL wall (constant-u step, e.g. the SHIFT_ROD_R_L
+            // slot wall at u=1.26 running v 1.5→0) while A's anchor
+            // is still BEHIND the wall's u. Crossing the wall now
+            // emits [a_behind, b_bottom, b_top] — a triangle spilling
+            // over the step into the removed region (measured
+            // transmission fbrep10888_f49: 2 fold pairs 178-180°, the
+            // fold guard rejected the WHOLE strip → the earcutr corner
+            // fans survived as 21 REAL cross-face FOLD-OVER pairs).
+            // Force A to advance until its anchor reaches the wall's
+            // u; the u-rule below then crosses the wall with a safe
+            // apex (at/past the wall). Symmetric for a vertical on A.
+            let b_vert = ib < nb - 1
+                && (us[b_chain[ib + 1]] - us[b_chain[ib]]).abs() <= eps_u
+                && boundary_2d[b_chain[ib + 1]][1] != boundary_2d[b_chain[ib]][1];
+            let a_vert = ia < na - 1
+                && (us[a_chain[ia + 1]] - us[a_chain[ia]]).abs() <= eps_u
+                && boundary_2d[a_chain[ia + 1]][1] != boundary_2d[a_chain[ia]][1];
             let tri: [usize; 3] = if ia >= na - 1 {
                 let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
                 ib += 1;
@@ -5772,6 +5790,14 @@ fn cylinder_ruled_band_strip(
             } else if ib >= nb - 1 {
                 let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
                 ia += 1;
+                t
+            } else if b_vert && us[a_chain[ia]] < us[b_chain[ib]] - eps_u {
+                let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
+                ia += 1;
+                t
+            } else if a_vert && us[b_chain[ib]] < us[a_chain[ia]] - eps_u {
+                let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
+                ib += 1;
                 t
             } else if us[a_chain[ia + 1]] <= us[b_chain[ib + 1]] {
                 let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
@@ -12664,6 +12690,21 @@ pub fn triangulate_surface_consistent(
                         (Vec::new(), Vec::new())
                     };
                     // session-68: CYL_RULED_BAND candidate — the cylinder
+                    // session-93 debug: DRAPPER_CYL_BAND_DEBUG=1 traces the
+                    // trigger decision for Cylinder faces with debt.
+                    if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok()
+                        && matches!(surface, Surface::Cylinder(_))
+                    {
+                        eprintln!(
+                            "[CYLBDBG {}] n_unused={} extra_bnd={} holes={} nb={} trig={}",
+                            current_face_label(),
+                            n_unused,
+                            legacy_extra_bnd,
+                            holes_2d.len(),
+                            boundary_2d.len(),
+                            holes_2d.is_empty() && (n_unused > 0 || legacy_extra_bnd > 0)
+                        );
+                    }
                     // patch class (rim = 2 u-monotone chains + short side
                     // lines; s67 root cause: the appended interior Steiner
                     // lattice leaves one-sided slit seams = the 81.5%
@@ -18934,6 +18975,199 @@ mod tests {
         let (t2, _) = castellation_row_lattice(&cone, &bnd);
         std::env::remove_var("DRAPPER_CAST_ROW_LATTICE");
         assert!(t2.is_empty(), "kill-switch must disable the lattice");
+    }
+
+    #[test]
+    fn test_cyl_ruled_band_step_corner_self_proving() {
+        // s93 self-proving test: a synthetic stepped cylinder domain
+        // (the SHIFT_ROD_R_L f49 class — a slot cut from the bottom up
+        // to v=vm over u∈[u0,u1], full height over u∈[u1,u3]). The
+        // two-pointer walk must not cross the step wall (the constant-u
+        // edge at u1) while the top chain's anchor is still behind the
+        // wall: the crossing triangle [a_behind, b_bottom, b_top]
+        // spills over the step and folds (measured f49: 2 pairs
+        // 178-180°, the fold guard rejected the strip → the earcutr
+        // corner fans survived as 21 REAL cross-face pairs). Verifies:
+        // strip accepted, edge census (rim 1x / interior 2x), signed
+        // AND absolute area (no overlap = no spill), zero same-face
+        // folds in 3D, and the walk crossing the wall with an apex at
+        // or past the wall's u.
+        use draper_geometry::{CylinderSurface, Surface};
+        let (v0, vm, vt) = (0.0f64, 1.5f64, 2.5f64);
+        let (u0, u1, u3) = (0.698f64, 1.26f64, 3.84f64);
+        let mut bnd: Vec<[f64; 2]> = Vec::new();
+        // top arc: u0 → u3 at v=vt (36 pts, ~5° steps — sparse)
+        for i in 0..36 {
+            bnd.push([u0 + (u3 - u0) * (i as f64 / 35.0), vt]);
+        }
+        // wall down at u3 (single edge v vt → v0)
+        bnd.push([u3, v0]);
+        // bottom arc: u3 → u1 at v=v0 (35 pts, ~4° steps)
+        for i in 0..35 {
+            bnd.push([u3 - (u3 - u1) * (i as f64 / 34.0), v0]);
+        }
+        // wall up at u1 (single edge v v0 → vm) — THE STEP
+        bnd.push([u1, vm]);
+        // middle arc: u1 → u0 at v=vm (36 pts, ~0.5° steps — dense,
+        // the slot floor discretization)
+        for i in 0..36 {
+            bnd.push([u1 - (u1 - u0) * (i as f64 / 35.0), vm]);
+        }
+        // wall up at u0 (single edge v vm → vt) closes the ring
+        bnd.push([u0, vt]);
+        let n = bnd.len();
+        let cyl = CylinderSurface::new_z(7.5);
+        let tris = cylinder_ruled_band_strip(&cyl, &bnd, 0.01);
+        assert!(
+            !tris.is_empty(),
+            "ruled band must accept the stepped domain (s93 step-corner fix)"
+        );
+        // edge census: every ring edge exactly 1x, all others 2x
+        let mut ecount: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            assert!(c[0] != c[1] && c[1] != c[2] && c[0] != c[2], "degenerate tri");
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let e = (i.min(j), i.max(j));
+            assert_eq!(
+                ecount.get(&e).copied(),
+                Some(1),
+                "ring edge {:?} must be used exactly once",
+                e
+            );
+        }
+        for (e, c) in &ecount {
+            let is_rim = (e.0 + 1) % n == e.1 || (e.1 + 1) % n == e.0;
+            if !is_rim {
+                assert_eq!(*c, 2, "interior edge {:?} must be used twice", e);
+            }
+        }
+        // signed + ABSOLUTE area (absolute == signed magnitude ⇔ no
+        // overlap — the spill triangle double-covers the step region)
+        let poly_s: f64 = (0..n)
+            .map(|i| {
+                let a = bnd[i];
+                let b = bnd[(i + 1) % n];
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_s: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                (b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])
+            })
+            .sum::<f64>()
+            * 0.5;
+        let strip_abs: f64 = tris
+            .chunks_exact(3)
+            .map(|c| {
+                let (a, b, cc) = (bnd[c[0]], bnd[c[1]], bnd[c[2]]);
+                ((b[0] - a[0]) * (cc[1] - a[1]) - (b[1] - a[1]) * (cc[0] - a[0])).abs()
+            })
+            .sum::<f64>()
+            * 0.5;
+        assert!(
+            (strip_s - poly_s).abs() <= 0.005 * poly_s.abs(),
+            "signed area {:.6} vs {:.6}",
+            strip_s,
+            poly_s
+        );
+        assert!(
+            (strip_abs - poly_s.abs()) <= 0.005 * poly_s.abs(),
+            "ABSOLUTE area {:.6} vs {:.6} — overlap/spill over the step",
+            strip_abs,
+            poly_s
+        );
+        // zero same-face folds in 3D (the guard the old walk tripped)
+        let surf = Surface::Cylinder(cyl);
+        let p3 = |k: usize| surf.point_at(bnd[k][0], bnd[k][1]);
+        let tri_n = |c: &[usize]| -> Option<[f64; 3]> {
+            let a = p3(c[0]);
+            let b = p3(c[1]);
+            let d = p3(c[2]);
+            let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+            let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+            let nn = [
+                ab[1] * ad[2] - ab[2] * ad[1],
+                ab[2] * ad[0] - ab[0] * ad[2],
+                ab[0] * ad[1] - ab[1] * ad[0],
+            ];
+            let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+            if l > 1e-18 {
+                Some([nn[0] / l, nn[1] / l, nn[2] / l])
+            } else {
+                None
+            }
+        };
+        let mut edge_tris: std::collections::HashMap<(usize, usize), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (ti, c) in tris.chunks_exact(3).enumerate() {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    edge_tris
+                        .entry((a.min(b), a.max(b)))
+                        .or_default()
+                        .push(ti);
+                }
+            }
+        }
+        for ts in edge_tris.values() {
+            if ts.len() != 2 {
+                continue;
+            }
+            let (n1, n2) = (
+                tri_n(&tris[ts[0] * 3..ts[0] * 3 + 3]),
+                tri_n(&tris[ts[1] * 3..ts[1] * 3 + 3]),
+            );
+            if let (Some(n1), Some(n2)) = (n1, n2) {
+                let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                assert!(
+                    dot.acos().to_degrees() <= 170.0,
+                    "same-face fold pair {:?} {:?} — the step-crossing apex is behind the wall",
+                    &tris[ts[0] * 3..ts[0] * 3 + 3],
+                    &tris[ts[1] * 3..ts[1] * 3 + 3]
+                );
+            }
+        }
+        // the step-wall ring edge (the single vertical at u1) must be
+        // used by a triangle whose OTHER vertex is at u ≥ u1 (apex at
+        // or past the wall — the s93 invariant)
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        let wall_bottom = (0..n).find(|&k| near(bnd[k][0], u1) && near(bnd[k][1], v0)).unwrap();
+        let wall_top = (0..n).find(|&k| near(bnd[k][0], u1) && near(bnd[k][1], vm)).unwrap();
+        let wall = (wall_bottom.min(wall_top), wall_bottom.max(wall_top));
+        for (ti, c) in tris.chunks_exact(3).enumerate() {
+            let has_wall = (0..3).any(|k| {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                (a.min(b), a.max(b)) == wall
+            });
+            if has_wall {
+                let apex = c
+                    .iter()
+                    .find(|&&k| k != wall.0 && k != wall.1)
+                    .copied()
+                    .unwrap();
+                assert!(
+                    bnd[apex][0] >= u1 - 1e-9,
+                    "tri {} crosses the step wall with apex u={:.4} < wall u={:.4}",
+                    ti,
+                    bnd[apex][0],
+                    u1
+                );
+            }
+        }
     }
 
     #[test]
