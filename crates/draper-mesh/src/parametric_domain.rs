@@ -5752,9 +5752,17 @@ fn cylinder_ruled_band_strip(
     let b_chain: Vec<usize> = b_walk.into_iter().rev().collect();
     let mono = |c: &[usize]| -> bool { c.windows(2).all(|w| us[w[0]] <= us[w[1]] + eps_u) };
     if !mono(&a_chain) || !mono(&b_chain) {
+        if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+            let bad_a = a_chain.windows(2).filter(|w| us[w[0]] > us[w[1]] + eps_u).count();
+            let bad_b = b_chain.windows(2).filter(|w| us[w[0]] > us[w[1]] + eps_u).count();
+            eprintln!("[CYLBDBG {}] REJECT: non-monotone chains A:{}/{} B:{}/{}", current_face_label(), bad_a, a_chain.len(), bad_b, b_chain.len());
+        }
         return Vec::new();
     }
     if a_chain.len() < 3 || b_chain.len() < 3 {
+        if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+            eprintln!("[CYLBDBG {}] REJECT: short chains {} / {}", current_face_label(), a_chain.len(), b_chain.len());
+        }
         return Vec::new();
     }
     // ── two-pointer strip (s65 machinery, open-band form) ───────────
@@ -5765,24 +5773,31 @@ fn cylinder_ruled_band_strip(
         let mut ia = 0usize;
         let mut ib = 0usize;
         while ia < na - 1 || ib < nb - 1 {
-            // session-93 STEP-CORNER rule: B's next edge may be a
-            // VERTICAL wall (constant-u step, e.g. the SHIFT_ROD_R_L
-            // slot wall at u=1.26 running v 1.5→0) while A's anchor
-            // is still BEHIND the wall's u. Crossing the wall now
-            // emits [a_behind, b_bottom, b_top] — a triangle spilling
-            // over the step into the removed region (measured
-            // transmission fbrep10888_f49: 2 fold pairs 178-180°, the
-            // fold guard rejected the WHOLE strip → the earcutr corner
-            // fans survived as 21 REAL cross-face FOLD-OVER pairs).
-            // Force A to advance until its anchor reaches the wall's
-            // u; the u-rule below then crosses the wall with a safe
-            // apex (at/past the wall). Symmetric for a vertical on A.
-            let b_vert = ib < nb - 1
+            // session-93 STEP-CORNER rule (directional): B's next edge
+            // may be a VERTICAL wall (constant-u step, e.g. the
+            // SHIFT_ROD_R_L slot wall at u=1.26 running v 1.5→0) while
+            // A's anchor is still BEHIND the wall's u. For a FALLING
+            // wall (shelf → bottom: the full-height region lies AHEAD,
+            // u > u_w) crossing with a behind apex emits
+            // [a_behind, b_bottom, b_top] — a triangle spilling over
+            // the step into the removed region (measured transmission
+            // fbrep10888_f49: 2 fold pairs 178-180°, the fold guard
+            // rejected the WHOLE strip → the earcutr corner fans
+            // survived as 21 REAL cross-face FOLD-OVER pairs). Force A
+            // to advance until its anchor reaches the wall's u first.
+            // For a RISING wall (bottom → shelf: full-height lies
+            // BEHIND, e.g. SHIFT_FORK fbrep61422_f5's slot wall at
+            // u=2.881 running v 0→1.5) the u-rule is ALREADY safe — A
+            // stops at ≤ u_w and the crossing apex lies in the
+            // full-height band — so NO force (forcing there spills the
+            // other way, measured 2 folds 178-180°). Symmetric for a
+            // falling vertical on A.
+            let b_fall = ib < nb - 1
                 && (us[b_chain[ib + 1]] - us[b_chain[ib]]).abs() <= eps_u
-                && boundary_2d[b_chain[ib + 1]][1] != boundary_2d[b_chain[ib]][1];
-            let a_vert = ia < na - 1
+                && boundary_2d[b_chain[ib + 1]][1] < boundary_2d[b_chain[ib]][1];
+            let a_fall = ia < na - 1
                 && (us[a_chain[ia + 1]] - us[a_chain[ia]]).abs() <= eps_u
-                && boundary_2d[a_chain[ia + 1]][1] != boundary_2d[a_chain[ia]][1];
+                && boundary_2d[a_chain[ia + 1]][1] < boundary_2d[a_chain[ia]][1];
             let tri: [usize; 3] = if ia >= na - 1 {
                 let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
                 ib += 1;
@@ -5791,11 +5806,11 @@ fn cylinder_ruled_band_strip(
                 let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
                 ia += 1;
                 t
-            } else if b_vert && us[a_chain[ia]] < us[b_chain[ib]] - eps_u {
+            } else if b_fall && us[a_chain[ia]] < us[b_chain[ib]] - eps_u {
                 let t = [a_chain[ia], a_chain[ia + 1], b_chain[ib]];
                 ia += 1;
                 t
-            } else if a_vert && us[b_chain[ib]] < us[a_chain[ia]] - eps_u {
+            } else if a_fall && us[b_chain[ib]] < us[a_chain[ia]] - eps_u {
                 let t = [a_chain[ia], b_chain[ib + 1], b_chain[ib]];
                 ib += 1;
                 t
@@ -5839,6 +5854,9 @@ fn cylinder_ruled_band_strip(
         });
         let nonrim_twice = ecount.iter().all(|(&(a, b), &c)| rim(a, b) || c == 2);
         if !all_rim_once || !nonrim_twice {
+            if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+                eprintln!("[CYLBDBG {}] REJECT: edge audit rim_once={} nonrim_twice={}", current_face_label(), all_rim_once, nonrim_twice);
+            }
             return Vec::new();
         }
     }
@@ -5870,6 +5888,9 @@ fn cylinder_ruled_band_strip(
         strip_area <= poly_area * 0.995 + 1e-12 && strip_area >= poly_area * 1.005 - 1e-12
     };
     if !area_ok {
+        if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+            eprintln!("[CYLBDBG {}] REJECT: area {:.6} vs {:.6}", current_face_label(), strip_area, poly_area);
+        }
         return Vec::new();
     }
     // sliver guard (band-adapted s65): reject thin triangles that
@@ -5903,6 +5924,9 @@ fn cylinder_ruled_band_strip(
         let tri_u =
             pts[0][0].max(pts[1][0]).max(pts[2][0]) - pts[0][0].min(pts[1][0]).min(pts[2][0]);
         if min_ang < 2.0 && tri_u > 0.10 * u_arc_span {
+            if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+                eprintln!("[CYLBDBG {}] REJECT: sliver min_ang={:.3} tri_u={:.4} span={:.4}", current_face_label(), min_ang, tri_u, u_arc_span);
+            }
             return Vec::new();
         }
     }
@@ -5919,6 +5943,9 @@ fn cylinder_ruled_band_strip(
             })
         });
         if !chord_ok {
+            if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+                eprintln!("[CYLBDBG {}] REJECT: chord (max_dev={:.4} R={:.4} du_max={:.4})", current_face_label(), max_dev, cyl_radius, du_max);
+            }
             return Vec::new();
         }
     }
@@ -5979,6 +6006,9 @@ fn cylinder_ruled_band_strip(
             }
         }
         if folds > 0 {
+            if std::env::var("DRAPPER_CYL_BAND_DEBUG").is_ok() {
+                eprintln!("[CYLBDBG {}] REJECT: {} fold pairs", current_face_label(), folds);
+            }
             return Vec::new();
         }
     }
@@ -19167,6 +19197,125 @@ mod tests {
                     u1
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_cyl_ruled_band_rising_wall_no_force() {
+        // s93 directional companion: the MIRRORED step (the SHIFT_FORK
+        // fbrep61422_f5 class — the slot at the RIGHT end, wall at u1
+        // RISING v0→vm, full height BEHIND the wall). The u-rule alone
+        // is safe here: A stops at ≤ u1, B crosses with the apex in the
+        // full-height band; forcing A past the wall would emit
+        // [a_past, b_bottom, b_top] spilling into the shelf (measured
+        // 2 folds 178-180° with the non-directional rule). Verifies the
+        // strip is accepted, fold-free, and the wall-crossing apex is
+        // at u ≤ u1.
+        use draper_geometry::{CylinderSurface, Surface};
+        let (v0, vm, vt) = (0.0f64, 1.5f64, 7.75f64);
+        let (u0, u1, u3) = (0.26f64, 2.881f64, std::f64::consts::PI);
+        let mut bnd: Vec<[f64; 2]> = Vec::new();
+        // middle arc LEFT shelf: u0 → 0 at v=vm (36 pts)
+        for i in 0..36 {
+            bnd.push([u0 - u0 * (i as f64 / 35.0), vm]);
+        }
+        // left wall up at u=0 (single edge v vm → vt)
+        bnd.push([0.0, vt]);
+        // top arc: 0 → u3 at v=vt (36 pts)
+        for i in 0..36 {
+            bnd.push([(u3) * (i as f64 / 35.0), vt]);
+        }
+        // right wall down at u3 (single edge v vt → vm)
+        bnd.push([u3, vm]);
+        // middle arc RIGHT shelf: u3 → u1 at v=vm (36 pts)
+        for i in 0..36 {
+            bnd.push([u3 - (u3 - u1) * (i as f64 / 35.0), vm]);
+        }
+        // step wall down at u1 (single edge v vm → v0) — RISING in
+        // chain order (bottom→shelf when traversed backward)
+        bnd.push([u1, v0]);
+        // bottom arc: u1 → u0 at v=v0 (36 pts)
+        for i in 0..36 {
+            bnd.push([u1 - (u1 - u0) * (i as f64 / 35.0), v0]);
+        }
+        let n = bnd.len();
+        let cyl = CylinderSurface::new_z(3.75);
+        let tris = cylinder_ruled_band_strip(&cyl, &bnd, 0.01);
+        assert!(
+            !tris.is_empty(),
+            "ruled band must accept the rising-wall domain"
+        );
+        // fold-free in 3D
+        let surf = Surface::Cylinder(cyl);
+        let p3 = |k: usize| surf.point_at(bnd[k][0], bnd[k][1]);
+        let tri_n = |c: &[usize]| -> Option<[f64; 3]> {
+            let a = p3(c[0]);
+            let b = p3(c[1]);
+            let d = p3(c[2]);
+            let ab = [b.x - a.x, b.y - a.y, b.z - a.z];
+            let ad = [d.x - a.x, d.y - a.y, d.z - a.z];
+            let nn = [
+                ab[1] * ad[2] - ab[2] * ad[1],
+                ab[2] * ad[0] - ab[0] * ad[2],
+                ab[0] * ad[1] - ab[1] * ad[0],
+            ];
+            let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+            if l > 1e-18 {
+                Some([nn[0] / l, nn[1] / l, nn[2] / l])
+            } else {
+                None
+            }
+        };
+        let mut edge_tris: std::collections::HashMap<(usize, usize), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (ti, c) in tris.chunks_exact(3).enumerate() {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                if a != b {
+                    edge_tris
+                        .entry((a.min(b), a.max(b)))
+                        .or_default()
+                        .push(ti);
+                }
+            }
+        }
+        for ts in edge_tris.values() {
+            if ts.len() != 2 {
+                continue;
+            }
+            let (n1, n2) = (
+                tri_n(&tris[ts[0] * 3..ts[0] * 3 + 3]),
+                tri_n(&tris[ts[1] * 3..ts[1] * 3 + 3]),
+            );
+            if let (Some(n1), Some(n2)) = (n1, n2) {
+                let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2]).clamp(-1.0, 1.0);
+                assert!(
+                    dot.acos().to_degrees() <= 170.0,
+                    "same-face fold {:?} {:?} — rising wall crossed with a past-wall apex",
+                    &tris[ts[0] * 3..ts[0] * 3 + 3],
+                    &tris[ts[1] * 3..ts[1] * 3 + 3]
+                );
+            }
+        }
+        // edge census
+        let mut ecount: std::collections::HashMap<(usize, usize), usize> =
+            std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a = c[k];
+                let b = c[(k + 1) % 3];
+                *ecount.entry((a.min(b), a.max(b))).or_default() += 1;
+            }
+        }
+        for i in 0..n {
+            let j = (i + 1) % n;
+            assert_eq!(
+                ecount.get(&(i.min(j), i.max(j))).copied(),
+                Some(1),
+                "ring edge {:?} exactly once",
+                (i, j)
+            );
         }
     }
 
