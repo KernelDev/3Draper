@@ -38,3 +38,4 @@ tool-results/
 dist-wasm/
 gh-pages-worktree/
 trace_*.log
+forensics/s93/objs/
