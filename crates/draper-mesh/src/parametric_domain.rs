@@ -1901,9 +1901,10 @@ fn check_uv_polygon_validity(uv_points: &[Point2d]) -> bool {
     let area = polygon_area_2d(uv_points);
     if area.abs() < 1e-12 {
         log::error!(
-            "UV polygon validity: zero area (degenerate), area={:.2e}, n={}",
+            "UV polygon validity: zero area (degenerate), area={:.2e}, n={} [{}]",
             area,
-            n
+            n,
+            current_face_label()
         );
         return false;
     }
@@ -12083,7 +12084,8 @@ pub fn triangulate_surface_consistent(
             }
 
             log::error!(
-                "triangulate_surface_consistent: invalid UV polygon and 3D area is zero — returning empty mesh"
+                "triangulate_surface_consistent: invalid UV polygon and 3D area is zero — returning empty mesh [{}]",
+                current_face_label()
             );
             return TriangleMesh::new();
         }

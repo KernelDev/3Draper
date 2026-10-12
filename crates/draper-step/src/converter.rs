@@ -4681,6 +4681,43 @@ impl<'a> StepConverter<'a> {
         tol_ctx: &ToleranceContext,
         edge_cache: &mut EdgeDiscretizationCache,
     ) -> TriangulationParams {
+        // ── s95: publish the vertex resolution + canonical vertex leaders
+        // BEFORE any discretization (this pre-pass, the canonical-CDT
+        // pre-pass and the face loop all share the cache — they must all
+        // see the SAME decimated polylines). merge_tol here is the exact
+        // expression the three triangulation paths compute later
+        // (vertex_merge_tolerance().max(sewing_tol) — both inputs are
+        // final by this point), so the later re-sets are idempotent.
+        //
+        // The vertex-leader MAP (canonical endpoint substitution) is
+        // OPT-IN (DRAPPER_VERT_UNIFY=1): measured on drill it matched
+        // the decimation-only REAL counts (35) but LOST extra coverage
+        // (SLEEVE 4370 vs 4594 tris) — the lex-greedy leaders collapse
+        // thin micro-faces a frame earlier than the merge would. The
+        // DECIMATION alone (default on, DRAPPER_EDGE_DECIM=0 to disable)
+        // carries the wins; the map stays available for the future
+        // groove-decimation work.
+        let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
+        draper_mesh::parametric_domain::set_vertex_resolution_tol(merge_tol);
+        if std::env::var("DRAPPER_VERT_UNIFY").as_deref() == Ok("1") {
+            let leader_map = self.build_vertex_leader_map(face_data_list, merge_tol);
+            let bits = |p: &Point3d| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            let n_clusters = leader_map
+                .values()
+                .map(bits)
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            if leader_map.len() > n_clusters {
+                log::info!(
+                    "BREP #{}: vertex-leader map: {} vertices → {} leaders ({} unified away, tol={:.2e})",
+                    brep_id, leader_map.len(), n_clusters, leader_map.len() - n_clusters, merge_tol,
+                );
+            }
+            edge_cache.set_vertex_leader_map(Some(leader_map));
+        } else {
+            edge_cache.set_vertex_leader_map(None);
+        }
+
         // ─── Adaptive LOD: compute per-face triangle budget ─────────────
         // When adaptive_lod_enabled is set in the viewer, compute a per-face
         // budget from total_budget / face_count so that each face gets a fair
@@ -9662,6 +9699,127 @@ impl<'a> StepConverter<'a> {
         }
     }
 
+    /// s95: canonical vertex-leader map for sub-resolution boundary
+    /// clusters (the spiral-groove class — see
+    /// `EdgeDiscretizationCache::decimate_sub_resolution`).
+    ///
+    /// Clustering = lex-ordered greedy (the merge's first-arrival
+    /// semantics with a CANONICAL arrival order): vertices are processed
+    /// in lexicographic (x, y, z) order; each joins the NEAREST existing
+    /// leader within `tol`, otherwise it becomes a leader itself.
+    /// Non-transitive by construction — a chain A–B–C (each link < tol,
+    /// A–C > tol) collapses to {A, C} exactly like the mesh merge does
+    /// (B welds into A; C finds no vertex within tol and survives) —
+    /// unlike a transitive union-find, which would kill C and every
+    /// face around it (measured: 94 zero-area faces on drill). Leaders
+    /// stay pairwise ≥ tol apart, so rings built from leaders never
+    /// collapse in-flight. The lex order makes the result a pure
+    /// function of the vertex set — every face and every traversal
+    /// direction agrees, preserving the watertight contract.
+    ///
+    /// Returns the map for EVERY vertex (identity entries included) so
+    /// the cache can do a single lookup per endpoint.
+    fn build_vertex_leader_map(
+        &self,
+        face_data_list: &[FaceData],
+        tol: f64,
+    ) -> std::collections::HashMap<[u64; 3], Point3d> {
+        use std::collections::{HashMap, HashSet};
+
+        let bits = |p: &Point3d| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+
+        // Collect unique topological vertex points (bit-exact dedup).
+        let mut pts: Vec<Point3d> = Vec::new();
+        let mut seen: HashSet<[u64; 3]> = HashSet::new();
+        for fd in face_data_list {
+            for e in &fd.edges {
+                if let Some(p) = e.start_vertex_point.as_ref() {
+                    if seen.insert(bits(p)) {
+                        pts.push(*p);
+                    }
+                }
+                if let Some(p) = e.end_vertex_point.as_ref() {
+                    if seen.insert(bits(p)) {
+                        pts.push(*p);
+                    }
+                }
+            }
+        }
+        let n = pts.len();
+        let mut map: HashMap<[u64; 3], Point3d> = HashMap::with_capacity(n);
+        if n == 0 || !(tol > 0.0) || !tol.is_finite() {
+            for p in &pts {
+                map.insert(bits(p), *p);
+            }
+            return map;
+        }
+
+        // Lexicographic processing order (canonical arrival).
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by(|&a, &b| {
+            let (p, q) = (&pts[a], &pts[b]);
+            (p.x, p.y, p.z)
+                .partial_cmp(&(q.x, q.y, q.z))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Leader registry with a spatial hash (cell = tol). Leaders are
+        // pairwise ≥ tol apart, so a 3x3x3 neighborhood query finds every
+        // leader within tol of the probe point.
+        let inv = 1.0 / tol;
+        let cell = |p: &Point3d| {
+            (
+                (p.x * inv).floor() as i64,
+                (p.y * inv).floor() as i64,
+                (p.z * inv).floor() as i64,
+            )
+        };
+        let mut leader_grid: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+        let mut leader_of: Vec<usize> = vec![usize::MAX; n];
+        let tol_sq = tol * tol;
+
+        for &vi in &order {
+            let p = &pts[vi];
+            let (cx, cy, cz) = cell(p);
+            let mut best: Option<(f64, usize)> = None;
+            for dx in -1i64..=1 {
+                for dy in -1i64..=1 {
+                    for dz in -1i64..=1 {
+                        if let Some(cands) = leader_grid.get(&(cx + dx, cy + dy, cz + dz)) {
+                            for &li in cands {
+                                let q = &pts[li];
+                                let ddx = p.x - q.x;
+                                let ddy = p.y - q.y;
+                                let ddz = p.z - q.z;
+                                let d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+                                if d2 < tol_sq {
+                                    // strict `<`: ties go to the
+                                    // lex-smaller leader (processed first)
+                                    match best {
+                                        Some((b2, _)) if b2 <= d2 => {}
+                                        _ => best = Some((d2, li)),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            match best {
+                Some((_, li)) => leader_of[vi] = li,
+                None => {
+                    leader_of[vi] = vi;
+                    leader_grid.entry(cell(p)).or_default().push(vi);
+                }
+            }
+        }
+
+        for (i, p) in pts.iter().enumerate() {
+            map.insert(bits(p), pts[leader_of[i]]);
+        }
+        map
+    }
+
     /// Compute an automatic sewing tolerance based on the BREP's actual vertex
     /// distribution — the OpenCascade Shape Healing approach.
     ///
@@ -10077,6 +10235,58 @@ impl<'a> StepConverter<'a> {
                     let dist_b = ((bi.x - bj.x).powi(2) + (bi.y - bj.y).powi(2) + (bi.z - bj.z).powi(2)).sqrt();
 
                     if dist_a < seam_tol && dist_b < seam_tol {
+                        // session-95 RELATIVE-OFFSET GUARD (tooth-pitch
+                        // chain kill): a genuine seam twin (u=0 vs u=2π of
+                        // the same boundary) or a pre-weld slit-lip pair
+                        // connects the SAME two boundary regions — its
+                        // endpoint offset is tiny relative to the edge's
+                        // own extent (drill measurements: slit lips
+                        // min_chord/max_off ≈ 87, exact twins ≈ 1e6). The
+                        // spiral-groove class (SLEEVE STEP #27996 f152 /
+                        // #25173): the CAD polylined the helix into 296
+                        // micro-edges whose CHORDS (0.010-0.014mm) are
+                        // comparable to the tooth pitch — and both are
+                        // below sewing_tol (0.0153 = 2×max vertex gap).
+                        // Adjacent teeth pass the absolute vertex-pair
+                        // test AND the s80 deviation guard (curve dev ≈
+                        // pitch < 2×tol), so the pass glued tooth N's
+                        // diagonal (#27726 B→C) to tooth N-1's arc
+                        // (#27343 A→B): the cache then returns the WRONG
+                        // polyline, the ring walks the arc twice and
+                        // never visits C (jumps B→A, B→C), the UV polygon
+                        // back-steps (CYL_RULED_BAND "non-monotone
+                        // A:32/5100"), the CDT-rescue output collapses at
+                        // merge around the duplicate-point hub → the 9
+                        // REAL fold fans (SLEEVE 16). Discriminator: the
+                        // groove teeth sit at min_chord/max_off ≈ 0.7-1.2
+                        // — reject when min_chord < K×max_off. Bit-identi-
+                        // cal for every pair the absolute tests already
+                        // separate cleanly. Kill-switch:
+                        // DRAPPER_SEAM_REL_GUARD=0; tunable K:
+                        // DRAPPER_SEAM_REL_K (default 3.0).
+                        let rel_guard_on = std::env::var("DRAPPER_SEAM_REL_GUARD")
+                            .as_deref()
+                            != Ok("0");
+                        if rel_guard_on {
+                            let rel_k = std::env::var("DRAPPER_SEAM_REL_K")
+                                .ok()
+                                .and_then(|v| v.parse::<f64>().ok())
+                                .filter(|k| k.is_finite() && *k > 0.0)
+                                .unwrap_or(3.0);
+                            let chord_i =
+                                ((ai.x - bi.x).powi(2) + (ai.y - bi.y).powi(2) + (ai.z - bi.z).powi(2)).sqrt();
+                            let chord_j =
+                                ((aj.x - bj.x).powi(2) + (aj.y - bj.y).powi(2) + (aj.z - bj.z).powi(2)).sqrt();
+                            let max_off = dist_a.max(dist_b);
+                            let min_chord = chord_i.min(chord_j);
+                            if min_chord < rel_k * max_off {
+                                log::info!(
+                                    "BREP: seam alias REJECTED by relative-offset guard: #{} vs #{} (chords {:.4}/{:.4} vs offsets {:.4}/{:.4} — tooth-pitch-scale pair, not a boundary twin)",
+                                    sid_i, sid_j, chord_i, chord_j, dist_a, dist_b
+                                );
+                                continue;
+                            }
+                        }
                         // session-80 DEVIATION GUARD (general): same vertex
                         // pair does NOT imply the same physical boundary.
                         // The legacy pass glued EVERY same-vertex-pair pair

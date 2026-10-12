@@ -471,6 +471,17 @@ pub struct EdgeDiscretizationCache {
     shared_edges: usize,
     /// Number of step_id alias lookups that resulted in a cache hit.
     alias_hits: usize,
+    /// ── s95: canonical vertex-leader map (sub-resolution unification) ──
+    /// Maps a topological vertex point (bit-exact key) to its cluster
+    /// LEADER point. Built once per BREP by the converter
+    /// (`build_vertex_leader_map`) after merge_tol is known: clusters are
+    /// the connected components of the vertex set under pairwise
+    /// distance < merge_tol, leader = lexicographic (x,y,z) minimum —
+    /// a canonical choice every face agrees on, so the simplified rings
+    /// stay consistent across faces sharing an edge (the watertight
+    /// contract). Consumed by `decimate_sub_resolution()` on every cache
+    /// miss. `None` (tests, direct calls, kill-switch) → no substitution.
+    vertex_leader_map: Option<HashMap<[u64; 3], Point3d>>,
 }
 
 /// Statistics from the edge discretization cache, used for debugging
@@ -562,6 +573,7 @@ impl EdgeDiscretizationCache {
             cache_misses: 0,
             shared_edges: 0,
             alias_hits: 0,
+            vertex_leader_map: None,
         }
     }
 
@@ -582,6 +594,7 @@ impl EdgeDiscretizationCache {
             cache_misses: 0,
             shared_edges: 0,
             alias_hits: 0,
+            vertex_leader_map: None,
         }
     }
 
@@ -602,7 +615,115 @@ impl EdgeDiscretizationCache {
             cache_misses: 0,
             shared_edges: 0,
             alias_hits: 0,
+            vertex_leader_map: None,
         }
+    }
+
+    /// s95: install the canonical vertex-leader map (see field docs).
+    /// Must be called BEFORE any ring discretization (the converter does
+    /// it in `setup_brep_edge_cache`, before the face loop). Passing
+    /// `None` disables endpoint substitution (decimation still applies
+    /// while the thread-local vertex resolution is set).
+    pub fn set_vertex_leader_map(&mut self, map: Option<HashMap<[u64; 3], Point3d>>) {
+        self.vertex_leader_map = map;
+    }
+
+    /// s95: sub-resolution decimation + canonical endpoint substitution,
+    /// applied to every cache-MISS polyline (canonical direction — both
+    /// faces sharing the edge get the identical result regardless of
+    /// their traversal direction).
+    ///
+    /// Root cause (drill SLEEVE f152 spiral groove): the CAD polylined
+    /// the helix into 296 micro-edges; the LOD sampler gives every
+    /// B-spline 56 and every circle 32 points REGARDLESS of edge length —
+    /// 0.0003-0.0024mm steps on 0.010-0.027mm edges, 6-60× finer than
+    /// merge_tol (0.0153). The merge then welds the sub-tolerance
+    /// vertices, collapsing 4959/5139 CDT triangles into 180 rudimentary
+    /// slivers whose fold fans are the REAL audit debt. The junction
+    /// vertices themselves are also sub-tolerance apart (0.010-0.014) —
+    /// fixed by the leader substitution: every topological vertex is
+    /// replaced by its cluster's lex-min leader, so edges fully inside a
+    /// cluster contribute [L, L] (dropped as a bit-exact junction dup)
+    /// and surviving ring points are ≥ vres apart — nothing collapses at
+    /// merge, faces keep full coverage at the model's declared
+    /// resolution.
+    ///
+    /// Bit-identical no-op when the thread-local vertex resolution is
+    /// unset (tests, direct calls). Kill-switches: DRAPPER_EDGE_DECIM=0
+    /// (skip interior decimation), DRAPPER_VERT_UNIFY=0 (converter skips
+    /// building the leader map — endpoint substitution off).
+    fn decimate_sub_resolution(
+        &self,
+        points_3d: &mut Vec<Point3d>,
+        params: &mut Vec<f64>,
+    ) {
+        let vres = crate::parametric_domain::vertex_resolution_tol();
+        if vres <= 0.0 {
+            return;
+        }
+        if std::env::var("DRAPPER_EDGE_DECIM").as_deref() == Ok("0") {
+            return;
+        }
+        let n = points_3d.len();
+        if n == 0 || params.len() != n {
+            // params must stay index-parallel to points; anything else is
+            // a malformed discretization — leave it untouched.
+            return;
+        }
+        let key = |p: &Point3d| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+        let lead = |p: &Point3d| -> Point3d {
+            match &self.vertex_leader_map {
+                Some(m) => m.get(&key(p)).copied().unwrap_or(*p),
+                None => *p,
+            }
+        };
+        if n == 1 {
+            points_3d[0] = lead(&points_3d[0]);
+            return;
+        }
+        let p0 = lead(&points_3d[0]);
+        let pn = lead(&points_3d[n - 1]);
+        if n == 2 {
+            points_3d[0] = p0;
+            points_3d[n - 1] = pn;
+            return;
+        }
+        let mut new_pts: Vec<Point3d> = Vec::with_capacity(n);
+        let mut new_par: Vec<f64> = Vec::with_capacity(n);
+        new_pts.push(p0);
+        new_par.push(params[0]);
+        let mut last = p0;
+        // s95 follow-up: thin threshold factor — 1.0 (thin at the full
+        // vertex resolution) measured BEST on drill (REAL 46→35, HM 24
+        // vs 68 at 0.5: partial thinning leaves mismatched junction
+        // padding — the sub-tolerance slivers on one side of a seam
+        // weld while the thinned side does not). Tunable:
+        // DRAPPER_EDGE_DECIM_FACTOR (default 1.0).
+        let decim_factor = std::env::var("DRAPPER_EDGE_DECIM_FACTOR")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|f| f.is_finite() && *f > 0.0 && *f <= 1.0)
+            .unwrap_or(1.0);
+        let thin = vres * decim_factor;
+        for i in 1..n - 1 {
+            let p = points_3d[i];
+            // Keep interior points only when they survive the merge:
+            // ≥ thin from the last kept point AND from the (final)
+            // end leader — anything closer welds away anyway.
+            if p.distance_to(&last) < thin {
+                continue;
+            }
+            if p.distance_to(&pn) < thin {
+                continue;
+            }
+            new_pts.push(p);
+            new_par.push(params[i]);
+            last = p;
+        }
+        new_pts.push(pn);
+        new_par.push(params[n - 1]);
+        *points_3d = new_pts;
+        *params = new_par;
     }
 
     /// Get or compute the discretization for an edge.
@@ -766,7 +887,7 @@ impl EdgeDiscretizationCache {
                 edge.clone()
             };
 
-            let (mut points_3d, params) = self.adaptive_discretize(&forward_edge, n_samples.max(2));
+            let (mut points_3d, mut params) = self.adaptive_discretize(&forward_edge, n_samples.max(2));
 
             // Apply deterministic rounding
             for p in &mut points_3d {
@@ -794,6 +915,10 @@ impl EdgeDiscretizationCache {
                 }
             }
 
+            // s95: sub-resolution decimation + canonical leader
+            // substitution (no-op without the thread-local vertex
+            // resolution — tests and direct calls stay bit-identical).
+            self.decimate_sub_resolution(&mut points_3d, &mut params);
             self.entries.insert(key, EdgeDiscretization {
                 points_3d,
                 uv_per_face: HashMap::new(),
