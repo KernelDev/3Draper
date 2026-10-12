@@ -280,6 +280,7 @@ fn main() {
         let mut brep_pairs = 0usize;
         let mut brep_exempt = 0usize;
         let mut brep_subtol = 0usize;
+        let mut brep_knife = 0usize;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -548,11 +549,36 @@ fn main() {
                 brep_subtol += 1;
             }
             let subtol_str = if subtol { " SUBTOL" } else { "" };
+            // session-94: KNIFE-FIN (thin-wall pinch) exemption — a
+            // cross-face FOLD-OVER pair that is two offset copies
+            // stacked across a resolvable wall gap (the flattened-tube
+            // pinch; transmission SPRING f2/f3). Not debt.
+            // Kill-switch: DRAPPER_KNIFE_FIN=0.
+            let (knife, knife_why) = if !tangent_exempt
+                && !subtol
+                && class == "FOLD-OVER"
+                && fid0 != fid1
+                && std::env::var("DRAPPER_KNIFE_FIN").as_deref() != Ok("0")
+            {
+                surf_exempt::knife_fin(
+                    &mesh.vertices,
+                    &mesh.triangles[t0],
+                    &mesh.triangles[t1],
+                    eff_tol.unwrap_or(0.0),
+                )
+            } else {
+                (false, String::new())
+            };
+            if knife {
+                brep_knife += 1;
+            }
+            let knife_str = if knife { " KNIFE-FIN" } else { "" };
             println!(
-                "[{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 subtol_str,
+                knife_str,
                 exempt_str,
                 i,
                 inst.name,
@@ -573,6 +599,7 @@ fn main() {
                 sn_str,
                 coincident_str,
                 owner_note,
+                if knife { &knife_why } else { "" },
                 params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
@@ -581,9 +608,10 @@ fn main() {
 
             *hist
                 .entry(format!(
-                    "{}{}{} | {} | {}",
+                    "{}{}{}{} | {} | {}",
                     if tangent_exempt { "EXEMPT+" } else { "" },
                     if subtol { "SUBTOL+" } else { "" },
+                    if knife { "KNIFE-FIN+" } else { "" },
                     sliver_class,
                     st0,
                     st1
@@ -591,9 +619,10 @@ fn main() {
                 .or_insert(0) += 1;
             *grand
                 .entry(format!(
-                    "{}{}{}{}+{} | {} | {}",
+                    "{}{}{}{}{}+{} | {} | {}",
                     if tangent_exempt { "TANGENT-EXEMPT " } else { "" },
                     if subtol { "SUBTOL " } else { "" },
+                    if knife { "KNIFE-FIN " } else { "" },
                     class,
                     if coincide { "+COIN" } else { "" },
                     sliver_class,
@@ -646,14 +675,15 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} real){}",
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} real){}",
                 i,
                 inst.name,
                 inst.brep_id,
                 brep_pairs,
                 brep_exempt,
                 brep_subtol,
-                brep_pairs - brep_exempt - brep_subtol,
+                brep_knife,
+                brep_pairs - brep_exempt - brep_subtol - brep_knife,
                 eff_tol
                     .map(|t| format!(" eff_tol={:.4}", t))
                     .unwrap_or_default()

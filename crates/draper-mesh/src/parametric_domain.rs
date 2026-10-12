@@ -10285,6 +10285,57 @@ pub fn nurbs_sail_band_strip(
             sail_fail!(format!("winding inversion {} pos / {} neg", pos, neg));
         }
     }
+    // s94 forensics: dump the accepted sail lattice (walls/caps/ring/new
+    // pts in UV + 3D + triangles) for offline overlap analysis of
+    // seam-sharing face pairs (SPRING f2/f3). Kill-switch: unset env.
+    if let Ok(dir) = std::env::var("DRAPPER_SAIL_DUMP") {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SAIL_CALL: AtomicU32 = AtomicU32::new(0);
+        let n = SAIL_CALL.fetch_add(1, Ordering::SeqCst);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut out = String::new();
+        out.push_str(&format!(
+            "# sail {} n_raw={} n_new={} u_range=({:.6},{:.6}) v_range=({:.6},{:.6}) u_closed={} v_closed={} u_period={:.6} v_period={:.6}\n",
+            current_face_label(),
+            n_raw,
+            new_pts.len(),
+            u0d,
+            u1d,
+            v0d,
+            v1d,
+            nurbs.u_closed,
+            nurbs.v_closed,
+            u_period,
+            v_period
+        ));
+        out.push_str(&format!(
+            "# walls L={:?} R={:?}\n# bottom_cap={:?}\n# top_cap={:?}\n",
+            wall_l_asc, wall_r_asc, bottom_cap, top_cap
+        ));
+        for k in 0..n_raw {
+            let p = nurbs.point_at(boundary_2d[k][0], boundary_2d[k][1]);
+            out.push_str(&format!(
+                "r {} {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                k, boundary_2d[k][0], boundary_2d[k][1], p.x, p.y, p.z
+            ));
+        }
+        for (k, p) in new_pts.iter().enumerate() {
+            let q = nurbs.point_at(p[0], p[1]);
+            out.push_str(&format!(
+                "n {} {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                n_raw + k,
+                p[0],
+                p[1],
+                q.x,
+                q.y,
+                q.z
+            ));
+        }
+        for c in tris.chunks_exact(3) {
+            out.push_str(&format!("t {} {} {}\n", c[0], c[1], c[2]));
+        }
+        let _ = std::fs::write(format!("{}/sail_{:04}.txt", dir, n), out);
+    }
     (tris, new_pts)
 }
 pub fn triangulate_surface_consistent(

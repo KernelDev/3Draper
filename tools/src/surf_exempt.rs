@@ -427,3 +427,315 @@ pub fn evaluate(
         reason,
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// session-94: KNIFE-FIN (thin-wall pinch) test.
+//
+// A FOLD-OVER-class pair (topo-consistent manifold winding + BOTH
+// apexes on the SAME side of the shared edge) whose two triangles are
+// near-coincident OFFSET COPIES — apexes a wall-thickness apart along
+// the surface normal, at the same hinge distance — is the two sides
+// of a thin solid wall pinched at the shared edge (the flattened-tube
+// pinch / knife edge). A faithful mesh of that geometry NECESSARILY
+// shows ~180° between the raw triangle normals: not a bug.
+// Measured origin: transmission SPRING f2/f3 (two Nurbs 9x69 halves
+// of a coiled 0.75mm × 0.043mm flattened-tube ribbon sharing both
+// pinch curves) — the sail-lattice corner needles at the end-cap
+// corners pair up across the pinch with apex gaps exactly the wall
+// thickness (0.0427mm vs eff_tol 0.0043mm) and equal hinge distances.
+//
+// Guards (all must hold):
+//   1. topo-consistent: the shared edge is traversed in opposite
+//      directions (a manifold pair — a duplicated emission traverses
+//      it the same way and stays WINDING-FLIP);
+//   2. same-side apexes (the FOLD-OVER class gate);
+//   3. offset copies: |c0−c1| ≤ 0.1 · min(hinge distance of each
+//      apex to the shared-edge SEGMENT) — the apexes sit at the same
+//      reach from the pinch, a wall-thickness apart, not at unrelated
+//      spots of a hovering flap;
+//   4. resolvable perpendicular gaps: both apexes strictly off the
+//      other triangle's plane by ≥ min_gap (the caller passes the
+//      BREP eff_tol). Note this also PROVES disjointness: any point
+//      of tri0's open interior has signed distance γ·g0 (γ>0) to
+//      tri1's plane, so with g0>0 no interior point can lie IN tri1 —
+//      the only possible interior contact is the coplanar g=0 case,
+//      excluded here;
+//   5. normal-dominant offset: |c0−c1| ≤ 3·max(g0,g1) — the copies
+//      are STACKED across the wall, not shifted along the surface.
+//
+// Callers gate on: cross-face (fid0 != fid1), >170°, and the
+// DRAPPER_KNIFE_FIN=0 kill-switch. Same-face fins (a face folding
+// onto itself) stay flagged.
+pub fn knife_fin(
+    verts: &[Point3d],
+    tri0: &[u32; 3],
+    tri1: &[u32; 3],
+    min_gap: f64,
+) -> (bool, String) {
+    // --- shared edge + apexes (same extraction as evaluate) ---
+    let dirs = |t: &[u32; 3]| -> [(u32, u32); 3] {
+        [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])]
+    };
+    let d0 = dirs(tri0);
+    let d1 = dirs(tri1);
+    let mut shared: Option<((u32, u32), (u32, u32))> = None;
+    for e0 in &d0 {
+        for e1 in &d1 {
+            if e0.0 == e1.0 && e0.1 == e1.1 {
+                shared = Some((*e0, *e1));
+            } else if e0.0 == e1.1 && e0.1 == e1.0 && shared.is_none() {
+                shared = Some((*e0, *e1));
+            }
+        }
+    }
+    let Some(((ea0, eb0), (ea1, eb1))) = shared else {
+        return (false, "no-shared-edge".to_string());
+    };
+    // guard 1: opposite traversal (manifold winding)
+    if !(ea0 == eb1 && eb0 == ea1) {
+        return (false, "winding".to_string());
+    }
+    let a = verts[ea0 as usize];
+    let b = verts[eb0 as usize];
+    let apex_of = |t: &[u32; 3]| -> Point3d {
+        for &v in t {
+            if v != ea0 && v != eb0 {
+                return verts[v as usize];
+            }
+        }
+        verts[t[0] as usize]
+    };
+    let c0 = apex_of(tri0);
+    let c1 = apex_of(tri1);
+
+    // guard 2: same-side apexes (the FOLD-OVER class shape)
+    let e = [b.x - a.x, b.y - a.y, b.z - a.z];
+    let base_len = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+    if base_len <= 1e-30 {
+        return (false, "degenerate-edge".to_string());
+    }
+    let side = |q: &Point3d| -> [f64; 3] {
+        let d = [q.x - a.x, q.y - a.y, q.z - a.z];
+        [
+            e[1] * d[2] - e[2] * d[1],
+            e[2] * d[0] - e[0] * d[2],
+            e[0] * d[1] - e[1] * d[0],
+        ]
+    };
+    let s0 = side(&c0);
+    let s1 = side(&c1);
+    if s0[0] * s1[0] + s0[1] * s1[1] + s0[2] * s1[2] <= 0.0 {
+        return (false, "opposite-side".to_string());
+    }
+
+    // guard 3: offset copies — apex-apex distance vs hinge reach
+    let seg_dist = |q: &Point3d| -> f64 {
+        let ap = [q.x - a.x, q.y - a.y, q.z - a.z];
+        let t =
+            ((ap[0] * e[0] + ap[1] * e[1] + ap[2] * e[2]) / (base_len * base_len)).clamp(0.0, 1.0);
+        let cx = a.x + t * e[0] - q.x;
+        let cy = a.y + t * e[1] - q.y;
+        let cz = a.z + t * e[2] - q.z;
+        (cx * cx + cy * cy + cz * cz).sqrt()
+    };
+    let d_h0 = seg_dist(&c0);
+    let d_h1 = seg_dist(&c1);
+    let d_min = d_h0.min(d_h1).max(1e-30);
+    let c01 = ((c0.x - c1.x).powi(2) + (c0.y - c1.y).powi(2) + (c0.z - c1.z).powi(2)).sqrt();
+    if c01 > 0.1 * d_min {
+        return (false, format!("apex-offset {:.4} > 0.1·hinge {:.4}", c01, 0.1 * d_min));
+    }
+
+    // guard 4: resolvable perpendicular gaps (also proves disjointness)
+    let plane_dist = |q: &Point3d, p: &Point3d, u: &Point3d, v: &Point3d| -> f64 {
+        let e1 = [u.x - p.x, u.y - p.y, u.z - p.z];
+        let e2 = [v.x - p.x, v.y - p.y, v.z - p.z];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        if l <= 1e-30 {
+            return f64::INFINITY;
+        }
+        let dq = [q.x - p.x, q.y - p.y, q.z - p.z];
+        (n[0] * dq[0] + n[1] * dq[1] + n[2] * dq[2]) / l
+    };
+    let (t1a, t1b, t1c) = (
+        verts[tri1[0] as usize],
+        verts[tri1[1] as usize],
+        verts[tri1[2] as usize],
+    );
+    let (t0a, t0b, t0c) = (
+        verts[tri0[0] as usize],
+        verts[tri0[1] as usize],
+        verts[tri0[2] as usize],
+    );
+    let g0 = plane_dist(&c0, &t1a, &t1b, &t1c).abs();
+    let g1 = plane_dist(&c1, &t0a, &t0b, &t0c).abs();
+    let gap_floor = min_gap.max(1e-9);
+    if g0 < gap_floor || g1 < gap_floor {
+        return (false, format!("gap {:.6}/{:.6} < floor {:.6}", g0, g1, gap_floor));
+    }
+
+    // guard 5: normal-dominant offset (stacked, not shifted along)
+    if c01 > 3.0 * g0.max(g1) {
+        return (false, format!("apex-offset {:.4} not wall-normal (g {:.4}/{:.4})", c01, g0, g1));
+    }
+
+    (
+        true,
+        format!(
+            "knife-fin: gap {:.4}/{:.4} hinge {:.3}/{:.3} apex-d {:.4}",
+            g0, g1, d_h0, d_h1, c01
+        ),
+    )
+}
+
+#[cfg(test)]
+mod knife_fin_tests {
+    use super::*;
+
+    fn v(x: f64, y: f64, z: f64) -> Point3d {
+        Point3d::new(x, y, z)
+    }
+
+    /// The SPRING shape: shared edge along +X, both apexes on the same
+    /// side (+Y reach), stacked across a small wall gap in Z — the two
+    /// sides of a pinched thin wall. Accepted at any resolvable gap.
+    #[test]
+    fn accepts_offset_copy_pair() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),  // 0: edge start
+            v(1.0, 0.0, 0.0),  // 1: edge end
+            v(0.5, 2.5, 0.0),  // 2: tri0 apex (lower copy)
+            v(0.5, 2.5, 0.04), // 3: tri1 apex (wall gap 0.04)
+        ];
+        // topo-consistent: the shared edge traversed in OPPOSITE directions
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(ok, "should accept the knife-fin: {}", why);
+    }
+
+    /// A duplicated emission (same-direction traversal) stays WINDING-FLIP.
+    #[test]
+    fn rejects_same_direction_winding() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, 2.5, 0.04),
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [0u32, 1, 3]; // edge 0→1 SAME direction
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("winding"), "reason: {}", why);
+    }
+
+    /// A smooth continuation (apexes on opposite sides of the hinge) is
+    /// the CURVED-180 class, not a fin.
+    #[test]
+    fn rejects_opposite_side_apexes() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, -2.5, 0.04),
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("opposite-side"), "reason: {}", why);
+    }
+
+    /// A hovering flap: the other face's apex at a DIFFERENT hinge
+    /// reach — not an offset copy of this triangle.
+    #[test]
+    fn rejects_hovering_flap() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, 0.25, 0.04), // apex at hinge reach 0.25 vs 2.5
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("apex-offset"), "reason: {}", why);
+    }
+
+    /// Coincident copies (zero gap) are the double-emission signature,
+    /// not a wall — coplanar g=0 also admits interior overlap.
+    #[test]
+    fn rejects_coincident_copies() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, 2.5, 0.0), // gap 0
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("gap"), "reason: {}", why);
+    }
+
+    /// A wall thinner than the mesh's vertex resolution (eff_tol)
+    /// cannot be represented — not a resolvable fin.
+    #[test]
+    fn rejects_subresolution_gap() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, 2.5, 0.000001),
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.01);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("gap"), "reason: {}", why);
+    }
+
+    /// Same hinge reach but a LATERAL shift dominating the offset —
+    /// the copies slide along the surface, they are not stacked across
+    /// a wall.
+    #[test]
+    fn rejects_lateral_shift() {
+        // |c0−c1| = 0.2 (lateral 0.196 + gap 0.04): passes the
+        // 0.1·hinge gate (0.2 ≤ 0.25) but 0.2 > 3·gap = 0.12.
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(1.0, 0.0, 0.0),
+            v(0.5, 2.5, 0.0),
+            v(0.5, 2.696, 0.04),
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("wall-normal"), "reason: {}", why);
+    }
+
+    /// Degenerate shared edge (zero length) — no fin decision.
+    #[test]
+    fn rejects_degenerate_edge() {
+        let verts = vec![
+            v(0.0, 0.0, 0.0),
+            v(0.0, 0.0, 0.0), // zero-length edge
+            v(0.5, 2.5, 0.0),
+            v(0.5, 2.5, 0.04),
+        ];
+        let tri0 = [0u32, 1, 2];
+        let tri1 = [1u32, 0, 3];
+        let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("degenerate"), "reason: {}", why);
+    }
+}

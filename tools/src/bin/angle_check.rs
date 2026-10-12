@@ -155,13 +155,14 @@ fn main() {
     let mut total_extreme_angles = 0; // > 90 degrees
     let mut total_surf_exempt = 0; // >170° but justified by surface geometry
     let mut total_subtol = 0; // >170° non-exempt but under the BREP eff_tol (session-74)
+    let mut total_knife = 0; // >170° thin-wall pinch fins, two offset copies across a resolvable gap (session-94)
 
-    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, max_nonexempt)
-    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, f64)> = Vec::new();
+    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, knife>170, max_nonexempt)
+    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, usize, f64)> = Vec::new();
 
     println!("\n{:-<139}", "");
-    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>12}",
-        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "Outliers");
+    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>12}",
+        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "KnifeFin", "Outliers");
     println!("{:-<139}", "");
 
     for (i, p) in pending.iter().enumerate() {
@@ -220,8 +221,9 @@ fn main() {
             let mut extreme_count = 0; // > 90 degrees
             let mut exempt_count = 0; // >170° justified by surface geometry
             let mut subtol_count = 0; // >170° non-exempt but under eff_tol (session-74)
+            let mut knife_count = 0; // >170° thin-wall pinch fins (session-94)
             let mut max_angle_nonexempt: f64 = 0.0;
-            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, String)> = Vec::new();
+            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, bool, String)> = Vec::new();
 
             for (edge, tris) in &edge_to_tris {
                 if tris.len() != 2 { continue; }
@@ -243,6 +245,7 @@ fn main() {
                         // raw triangle normals — not a bug (session-46).
                         let mut exempt = false;
                         let mut subtol = false;
+                        let mut knife = false;
                         let mut reason = String::new();
                         if angle_deg > 170.0 {
                             let fid0 = face_ids.and_then(|ids| ids.get(tris[0]).copied()).unwrap_or(0);
@@ -272,7 +275,28 @@ fn main() {
                                 subtol = h0 < tol && h1 < tol;
                                 if subtol {
                                     subtol_count += 1;
-                                } else {
+                                } else if fid0 != fid1
+                                    && std::env::var("DRAPPER_KNIFE_FIN").as_deref() != Ok("0")
+                                {
+                                    // session-94: KNIFE-FIN (thin-wall pinch).
+                                    // Cross-face offset copies stacked across a
+                                    // resolvable wall gap (the flattened-tube
+                                    // pinch; transmission SPRING f2/f3) — a
+                                    // faithful mesh necessarily shows ~180°
+                                    // there. Not debt.
+                                    let (kf, why) = surf_exempt::knife_fin(
+                                        &mesh.vertices,
+                                        &mesh.triangles[tris[0]],
+                                        &mesh.triangles[tris[1]],
+                                        tol,
+                                    );
+                                    if kf {
+                                        knife = true;
+                                        reason = why;
+                                        knife_count += 1;
+                                    }
+                                }
+                                if !subtol && !knife {
                                     max_angle_nonexempt = max_angle_nonexempt.max(angle_deg);
                                 }
                             } else {
@@ -287,7 +311,7 @@ fn main() {
                             mesh.triangles[tris[0]],
                             mesh.triangles[tris[1]],
                             fid0, fid1,
-                            exempt, subtol, reason,
+                            exempt, subtol, knife, reason,
                         ));
                     }
                 }
@@ -299,6 +323,7 @@ fn main() {
             total_extreme_angles += extreme_count;
             total_surf_exempt += exempt_count;
             total_subtol += subtol_count;
+            total_knife += knife_count;
 
             // Use a simple outlier criterion: angles beyond 3σ from the mean
             let mean = if !angles.is_empty() {
@@ -312,12 +337,12 @@ fn main() {
             let outlier_count = angles.iter().filter(|&&a| a > threshold && a > 30.0).count();
             total_outlier_angles += outlier_count;
 
-            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, max_angle_nonexempt));
+            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, knife_count, max_angle_nonexempt));
 
             let is_wt = interior_count > 0 && extreme_count == 0;
             if is_wt { total_watertight += 1; } else { total_not_watertight += 1; }
 
-            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>12}",
+            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>8} {:>12}",
                 i + 1,
                 inst.name,
                 interior_count,
@@ -326,13 +351,14 @@ fn main() {
                 max_angle,
                 exempt_count,
                 subtol_count,
+                knife_count,
                 outlier_count,
             );
 
             // Print details for worst outliers
             if !outlier_edges.is_empty() {
                 outlier_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, reason) in outlier_edges.iter().take(5) {
+                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, knife, reason) in outlier_edges.iter().take(5) {
                     let p0 = &mesh.vertices[*v0 as usize];
                     let p1 = &mesh.vertices[*v1 as usize];
                     let mid = Point3d::new(
@@ -350,6 +376,8 @@ fn main() {
                             format!(" [surf-exempt: {}]", reason)
                         } else if *subtol {
                             " [sub-tol weld-noise]".to_string()
+                        } else if *knife {
+                            format!(" [knife-fin pinch: {}]", reason)
                         } else {
                             " *** BAD ***".to_string()
                         }
@@ -379,12 +407,13 @@ fn main() {
     println!("  Statistical outliers:   {}", total_outlier_angles);
     println!("  Surf-exempt (>170°):    {} (tangency/shallow junctions — not bugs)", total_surf_exempt);
     println!("  Sub-tol weld-noise:     {} (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)", total_subtol);
+    println!("  Knife-fin pinch:        {} (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)", total_knife);
 
     // Count truly extreme angles (>170°) NOT justified by surface
     // geometry — these are actual bugs (back-to-back triangles with
     // opposite normals on non-tangent surfaces)
     let mut truly_extreme = 0;
-    for (_, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
+    for (_, _, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
         if *max_nonexempt > 170.0 { truly_extreme += 1; }
     }
 
