@@ -5118,6 +5118,11 @@ impl<'a> StepConverter<'a> {
         let merge_tol = tol_ctx.vertex_merge_tolerance().max(tol_ctx.sewing_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices = 0usize;
+        // s94: publish the vertex resolution to the mesh layer — the
+        // band rim gates (weld-collapse class) read it as the DIRECT
+        // reference (the sag proxy varies across passes; merge_tol
+        // does not).
+        draper_mesh::parametric_domain::set_vertex_resolution_tol(merge_tol);
         for (fi, face_data) in face_data_list.iter().enumerate() {
             let surface_type = match &face_data.surface {
                 Surface::Plane(_) => "Plane",
@@ -5805,6 +5810,11 @@ impl<'a> StepConverter<'a> {
         self.last_brep_eff_tol.set(merge_tol);
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         let mut total_face_vertices_detailed = 0usize;
+        // s94: publish the vertex resolution to the mesh layer — the
+        // band rim gates (weld-collapse class) read it as the DIRECT
+        // reference (the sag proxy varies across passes; merge_tol
+        // does not).
+        draper_mesh::parametric_domain::set_vertex_resolution_tol(merge_tol);
         let mut face_infos = Vec::new();
         let mut next_face_id: u64 = 1;
         let mut skipped_faces = 0;

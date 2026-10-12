@@ -5599,6 +5599,37 @@ pub fn clear_shared_nurbs_grid() {
     SHARED_NURBS_GRID.with(|g| *g.borrow_mut() = None);
 }
 
+// Thread-local vertex-resolution tolerance (session-94). Set by the STEP
+// converter (the BREP's merge_tol — the dedup/weld vertex resolution)
+// before triangulating a BREP's faces, cleared after. The band rim gates
+// (sail §3.5 / lune §3.4 weld-collapse class) use it as the DIRECT
+// resolution reference — the sag (max_dev) proxy breaks across the
+// converter's two passes (the same ring at ratio 0.244/0.489 across
+// max_dev 0.010/0.005 while merge_tol stays 0.0153, measured on the
+// SLEEVE 4x8 family). Unset (tests, direct callers) → 0.0 → the gates
+// fall back to the legacy sag proxy only, bit-identical to s78-s93.
+thread_local! {
+    static VERTEX_RESOLUTION_TOL: std::cell::RefCell<f64> =
+        const { std::cell::RefCell::new(0.0) };
+}
+
+/// Set the vertex-resolution tolerance (the BREP merge/weld tolerance)
+/// for the current thread. Must be called BEFORE the per-face
+/// triangulation calls; pair with `clear_vertex_resolution_tol`.
+pub fn set_vertex_resolution_tol(tol: f64) {
+    VERTEX_RESOLUTION_TOL.with(|t| *t.borrow_mut() = tol.max(0.0));
+}
+
+/// Clear the vertex-resolution tolerance.
+pub fn clear_vertex_resolution_tol() {
+    VERTEX_RESOLUTION_TOL.with(|t| *t.borrow_mut() = 0.0);
+}
+
+/// The current vertex-resolution tolerance (0.0 when unset).
+pub fn vertex_resolution_tol() -> f64 {
+    VERTEX_RESOLUTION_TOL.with(|t| *t.borrow())
+}
+
 // Thread-local face label for per-face log attribution (session-54).
 // The STEP converter sets this around each per-face triangulation call
 // with the same sequential face id that lands in `triangle_face_ids`
@@ -8103,6 +8134,48 @@ fn nurbs_lune_band_strip_impl(
     let uspan = umax - umin;
     if !(vspan > 1e-9) || !(uspan > 0.0) {
         lune_fail!("flat ring");
+    }
+    // ── 3.4 median 3D rim-edge chord (the weld-collapse signal) ───
+    // s94, mirroring the s78 sail §3.5 gate: faces whose rim is
+    // discretized FINER than the mesh's vertex resolution (merge/
+    // weld tolerance, ~eff_tol) collapse in the global merge — the
+    // ladder's column/level points weld onto ring/neighbor vertices
+    // and the triangles degenerate (measured SLEEVE f114 4x8 family:
+    // rim median chord 0.002445 vs max_dev 0.010 → ratio 0.244; the
+    // accepted 595-tri ladder lost 578/595 at merge as degenerate and
+    // the 17 surviving remnant slivers fold 180°; the legacy earcutr
+    // result is fold-clean for 8 of the 12 affected faces). The mesh
+    // layer has no access to the weld tolerance — the sag (max_dev)
+    // is the proxy, cutoff ratio 0.35 matrix-tuned in s78 (shared
+    // with the sail). Tunable: DRAPPER_LUNE_RIM_RATIO=<r>.
+    let rim_median_3d = {
+        let mut steps: Vec<f64> = (0..n)
+            .map(|i| {
+                let a = nurbs.point_at(us[i], vs[i]);
+                let b = nurbs.point_at(us[(i + 1) % n], vs[(i + 1) % n]);
+                ((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z))
+                    .sqrt()
+            })
+            .collect();
+        steps.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
+        steps[n / 2]
+    };
+    let rim_ratio: f64 = std::env::var("DRAPPER_LUNE_RIM_RATIO")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.35);
+    // s94 v2: the DIRECT resolution leg — the converter's merge_tol
+    // (thread-local, constant across BOTH converter passes, unlike the
+    // sag). A rim below half the vertex resolution is weld-collapse
+    // class regardless of the pass's sag budget.
+    let vres = vertex_resolution_tol();
+    let collapse = (max_dev > 0.0 && rim_median_3d < rim_ratio * max_dev)
+        || (vres > 0.0 && rim_median_3d < 0.5 * vres);
+    if collapse {
+        lune_fail!(format!(
+            "rim finer than sag (median chord {:.6} < {}*max_dev {:.6}) — weld-collapse class",
+            rim_median_3d, rim_ratio, max_dev
+        ));
     }
     // ── 3.5 session-72 C: SLIT-POCKET detection (retry path only) ─
     // A thin out-and-back "pocket" at a wall foot (SLEEVE f185
@@ -23319,6 +23392,61 @@ mod tests {
         let (tris, new_pts) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
         assert!(!tris.is_empty(), "SLEEVE boot must qualify for the lune strip");
         assert_lune_band_invariants(&nurbs, &ring, &tris, &new_pts);
+    }
+
+    /// s94: the vertex-resolution leg of the lune weld-collapse gate.
+    /// A rim below half the converter's merge_tol (thread-local vertex
+    /// resolution) must reject the band regardless of the sag budget —
+    /// the SLEEVE 4x8 micro-family ladder collapses in the global merge
+    /// (578/595 tris degenerate, measured) and the remnant slivers fold
+    /// 180°. Unset (tests, direct callers) keeps the s78 sag-proxy-only
+    /// behavior.
+    #[test]
+    fn nurbs_lune_band_vertex_resolution_gate() {
+        let nurbs = fillet_nurbs_fixture();
+        let (u_w, u_r, u_arc) = (0.14f64, 0.84f64, 0.0f64);
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for _ in 0..4 {
+            ring.push([0.0, 0.0]);
+        }
+        for k in 0..17 {
+            let t = k as f64 / 16.0;
+            ring.push([0.06 + (u_r - 0.06) * t, 0.001 + 0.003 * t]);
+        }
+        for k in 1..=30 {
+            ring.push([u_r - 0.002 * k as f64 / 30.0, 0.02 + 0.95 * k as f64 / 30.0]);
+        }
+        for k in 0..22 {
+            let t = k as f64 / 21.0;
+            ring.push([u_r - (u_r - u_w) * t, 0.99 + 0.01 * (std::f64::consts::PI * t).sin()]);
+        }
+        for k in 0..30 {
+            ring.push([u_w, 0.97 - 0.946 * k as f64 / 29.0]);
+        }
+        ring.push([u_arc, 0.02]);
+        for k in 1..=24 {
+            ring.push([u_arc, 0.02 - 0.019 * k as f64 / 24.0]);
+        }
+        // sanity: without the resolution reference the strip qualifies
+        let (tris_ok, _) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(
+            !tris_ok.is_empty(),
+            "fixture must qualify without the resolution reference"
+        );
+        // with a vertex resolution far above the rim scale: reject
+        set_vertex_resolution_tol(1e6);
+        let (tris_rej, new_rej) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        clear_vertex_resolution_tol();
+        assert!(
+            tris_rej.is_empty() && new_rej.is_empty(),
+            "sub-resolution rim must reject the lune band"
+        );
+        // the clear really restores the default behavior
+        let (tris_again, _) = nurbs_lune_band_strip(&nurbs, &ring, 0.01);
+        assert!(
+            !tris_again.is_empty(),
+            "clear_vertex_resolution_tol must restore acceptance"
+        );
     }
 
     /// Curved-wall lune (HOUSING f68-like): both walls drift in u
