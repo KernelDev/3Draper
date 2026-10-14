@@ -41,3 +41,6 @@ trace_*.log
 forensics/s93/objs/
 forensics/s94/objs/
 forensics/s94/objs2/
+forensics/s96/objs/
+forensics/s96/objs_nofix/
+forensics/s96/stages/

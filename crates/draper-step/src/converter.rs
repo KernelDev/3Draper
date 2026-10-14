@@ -424,6 +424,269 @@ fn apply_healing_to_face_data(
     result
 }
 
+// ============================================================
+// s96: cross-face validation of healing forward-flag flips
+// ============================================================
+
+/// Effective surface normal at a 3D point, signed by the face's
+/// forward flag (σ·n — the same convention the winding audits vote
+/// with). Analytic fast path via `surface_normal_at_point` (single
+/// source of truth with the postweld audit); parametric surfaces
+/// (Nurbs/...) project the point and use `normal_at(u,v)` = du×dv
+/// (the oracle convention, s92).
+fn eff_normal_at(surf: &Surface, forward: bool, m: &Point3d) -> Option<[f64; 3]> {
+    if let Some(n) = surface_normal_at_point(surf, m) {
+        let s = if forward { 1.0 } else { -1.0 };
+        return Some([s * n[0], s * n[1], s * n[2]]);
+    }
+    let (u, v) = surf.project_point(m);
+    let p = surf.point_at(u, v);
+    let dist = ((p.x - m.x) * (p.x - m.x)
+        + (p.y - m.y) * (p.y - m.y)
+        + (p.z - m.z) * (p.z - m.z))
+        .sqrt();
+    if dist > 5e-2 {
+        return None; // wrong-basin projection — no signal
+    }
+    let n = surf.normal_at(u, v);
+    let l = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
+    if l < 1e-12 {
+        return None;
+    }
+    let s = if forward { 1.0 } else { -1.0 };
+    Some([s * n.x / l, s * n.y / l, s * n.z / l])
+}
+
+/// s96: TOPOLOGICAL ORIENTATION SOLVE — cross-face parity propagation over
+/// the shared-edge graph, replacing blind trust in the healing pipeline's
+/// centroid heuristic for cross-face states.
+///
+/// Root cause (drill HM measured, session 96): `fix_normal_orientation`
+/// flips faces whose effective normal points "toward the shell centroid".
+/// For groove/pocket walls of non-star-shaped parts that heuristic
+/// misfires: face 13 (Cylinder, spiral groove rim, raw same_sense .F.)
+/// got flipped .F.→.T., inverting its whole emission — the UV ring's CCW
+/// normalization then corrupts the spiral band (642/2504 triangles bad)
+/// AND breaks the cross-face consistency at the LEGALLY SHARED edge #53125
+/// with face 214 (Nurbs 4x15, raw .T.): 55/55 shared edges emitted
+/// same-direction → 17 REAL WINDING-FLIP census pairs (topo-flipped +
+/// opposite-side apexes + ~173° dihedral at the seam). The later audits
+/// (winding BFS 55→23 same-dir, postweld component flip — both sides
+/// flipped = identity for the pair) cannot cleanly repair a mixed state.
+/// A LOCAL per-face rule is not enough either (measured: the flipped face
+/// sees 4 tangent edges FIXED by the flip vs 1 slit edge BROKEN by it —
+/// but that one slit edge carries 55 mesh segments and 17 census pairs;
+/// entity-count voting picks the wrong side). This is a GRAPH problem.
+///
+/// Discriminator (measured on the merge-stage dump): with CORRECT flags
+/// the two faces' effective normals at the shared edge are on the SAME
+/// side of the surface (near-parallel, ν·ν ≈ +0.99 — a tangent blend
+/// seam); with a wrong flip they are near-ANTIPARALLEL (ν·ν ≈ −0.99 —
+/// the "back-to-back slit" signature of a topo-flipped seam). Orthogonal
+/// relationships (ν·ν ≈ 0, e.g. cube corners) carry no signal (the flip
+/// leaves them invariant) — no constraint.
+///
+/// Solver: per shared STEP edge entity, for each face pair owning it,
+/// emit a parity constraint x_i ⊕ x_j = p (p=1 if the CURRENT state is a
+/// slit, p=0 if tangent-consistent), weighted by the edge's 3D length.
+/// Hill-climb from the current state (all x=0): toggle a face's flag iff
+/// it strictly decreases the violated-constraint weight. Accepted toggles
+/// strictly reduce violated weight — never worse than the input state by
+/// construction. Deterministic (faces in index order, strict-improvement
+/// only). Applies to ALL faces of the BREP — a face the healing did not
+/// touch can still be part of a broken parity chain (measured: face
+/// 13's flag sits between 4 tangent edges it satisfies and 1 slit edge
+/// it breaks — only the chain solve finds the global assignment).
+/// Faces with no signal keep the healing's call (centroid heuristic
+/// stands for isolated/orthogonal faces).
+///
+/// Kill-switch: DRAPPER_HEAL_FLIP_VALIDATE=0. Tunable:
+/// DRAPPER_HEAL_FLIP_TAN (cos threshold, default 0.985).
+/// Debug: DRAPPER_HEAL_FLIP_DEBUG=1.
+fn validate_healing_flips(_raw: &[FaceData], healed: &mut [FaceData]) -> usize {
+    let enabled = std::env::var("DRAPPER_HEAL_FLIP_VALIDATE")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    if !enabled || healed.len() < 2 {
+        return 0;
+    }
+    let tan_cos: f64 = std::env::var("DRAPPER_HEAL_FLIP_TAN")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.985);
+    let dbg = std::env::var("DRAPPER_HEAL_FLIP_DEBUG").is_ok();
+
+    // Shared-edge map: STEP edge entity id → (healed face idx, edge idx).
+    let mut shared: std::collections::HashMap<i64, Vec<(usize, usize)>> =
+        std::collections::HashMap::new();
+    for (hi, fd) in healed.iter().enumerate() {
+        for (ei, sid) in fd.edge_step_ids.iter().enumerate() {
+            if *sid != 0 && ei < fd.edges.len() {
+                shared.entry(*sid).or_default().push((hi, ei));
+            }
+        }
+    }
+    // Constraints: (face_a, face_b, parity, weight, sid). Parity 1 means
+    // the CURRENT state must be negated to become consistent.
+    let mut constraints: Vec<(usize, usize, bool, f64, i64)> = Vec::new();
+    let mut sids: Vec<i64> = shared.keys().copied().collect();
+    sids.sort_unstable(); // determinism
+    for sid in sids {
+        let owners = &shared[&sid];
+        if owners.len() < 2 {
+            continue;
+        }
+        // Distinct owning faces (a face may reference the same entity from
+        // several of its loops — one node in the graph).
+        let mut faces: Vec<usize> = owners.iter().map(|&(f, _)| f).collect();
+        faces.sort_unstable();
+        faces.dedup();
+        if faces.len() < 2 {
+            continue;
+        }
+        // Representative edge geometry (same STEP entity — identical curve).
+        let edge = &healed[faces[0]].edges[owners.iter().find(|&&(f, _)| f == faces[0]).unwrap().1];
+        let Some(curve) = &edge.curve else { continue };
+        let (t0, t1) = edge.param_range;
+        // Edge 3D length as the constraint weight (16-sample polyline).
+        let mut plen = 0.0;
+        let mut prev: Option<Point3d> = None;
+        for k in 0..16 {
+            let t = t0 + (t1 - t0) * k as f64 / 15.0;
+            let p = curve.point_at(t);
+            if let Some(q) = prev {
+                plen += q.distance_to(&p);
+            }
+            prev = Some(p);
+        }
+        if plen <= 1e-12 {
+            continue; // degenerate edge — no signal
+        }
+        // Multi-sample: 3 points along the curve — a relationship that
+        // varies along the edge (tangent mid, folded ends) emits mixed
+        // constraints that the weight resolves; each point carries plen/3.
+        // Effective normals per face per point (cache per face per point).
+        for frac in [0.2f64, 0.5, 0.8] {
+            let tm = t0 + (t1 - t0) * frac;
+            let m = curve.point_at(tm);
+            let mut nus: std::collections::HashMap<usize, [f64; 3]> =
+                std::collections::HashMap::new();
+            for &f in &faces {
+                if let Some(nu) = eff_normal_at(&healed[f].surface, healed[f].forward, &m) {
+                    nus.insert(f, nu);
+                }
+            }
+            if nus.len() < 2 {
+                continue;
+            }
+            let mut pair: Vec<usize> = nus.keys().copied().collect();
+            pair.sort_unstable();
+            for w in 0..pair.len() {
+                for q in (w + 1)..pair.len() {
+                    let (a, b) = (pair[w], pair[q]);
+                    let d = nus[&a][0] * nus[&b][0]
+                        + nus[&a][1] * nus[&b][1]
+                        + nus[&a][2] * nus[&b][2];
+                    if d < -tan_cos {
+                        constraints.push((a, b, true, plen / 3.0, sid));
+                    } else if d > tan_cos {
+                        constraints.push((a, b, false, plen / 3.0, sid));
+                    }
+                }
+            }
+        }
+    }
+    if constraints.is_empty() {
+        return 0;
+    }
+    if dbg {
+        for (a, b, p, w, sid) in &constraints {
+            eprintln!(
+                "HEALFLIP constraint sid={} faces#{}#{} parity={} w={:.4}",
+                sid, a, b, *p as u8, w
+            );
+        }
+    }
+    // Hill-climb from the current state (flip[]=false). Violated weight
+    // of the input state = sum of parity-1 constraints. A toggle is
+    // accepted only on STRICT decrease — never worse than the input.
+    let n = healed.len();
+    let mut flip = vec![false; n];
+    let violated = |flip: &Vec<bool>| -> f64 {
+        let mut v = 0.0;
+        for (a, b, p, w, _) in &constraints {
+            if (flip[*a] ^ flip[*b]) != *p {
+                v += w;
+            }
+        }
+        v
+    };
+    let mut cur = violated(&flip);
+    loop {
+        let mut improved = false;
+        for i in 0..n {
+            flip[i] = !flip[i];
+            let v2 = violated(&flip);
+            if v2 < cur - 1e-12 {
+                cur = v2;
+                improved = true;
+                if dbg {
+                    eprintln!(
+                        "HEALFLIP toggle face#{}(step#{}) → violated={:.4}",
+                        i, healed[i].step_face_id, cur
+                    );
+                }
+            } else {
+                flip[i] = !flip[i];
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    // Pruning: prefer the INPUT state on ties — gratuitous chain flips that
+    // don't strictly pay for themselves in violated weight are reverted
+    // (never-worsen toward the healing's own assignment).
+    for i in 0..n {
+        if flip[i] {
+            flip[i] = false;
+            let v2 = violated(&flip);
+            if v2 <= cur + 1e-12 {
+                cur = v2; // un-flip (tie or better)
+            } else {
+                flip[i] = true;
+            }
+        }
+    }
+    // Apply.
+    let mut n_flipped = 0usize;
+    for i in 0..n {
+        if flip[i] {
+            healed[i].forward = !healed[i].forward;
+            n_flipped += 1;
+        }
+    }
+    if dbg {
+        eprintln!(
+            "HEALFLIP final: {} faces flipped, violated weight {:.4} → {:.4}, constraints {}",
+            n_flipped,
+            constraints.iter().filter(|c| c.2).map(|c| c.3).sum::<f64>(),
+            cur,
+            constraints.len()
+        );
+    }
+    if n_flipped > 0 {
+        log::info!(
+            "HEALFLIP: topological orientation solve flipped {} faces ({} constraints, violated weight now {:.4})",
+            n_flipped,
+            constraints.len(),
+            cur
+        );
+    }
+    n_flipped
+}
+
+
 /// Log a summary of the healing report.
 fn log_healing_report(brep_id: i64, report: &HealingReport) {
     if report.total_fixes() == 0 {
@@ -5128,7 +5391,12 @@ impl<'a> StepConverter<'a> {
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
-            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+            {
+                let mut healed_list =
+                    apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+                let _n_reverts = validate_healing_flips(&face_data_list, &mut healed_list);
+                healed_list
+            }
         } else {
             face_data_list
         };
@@ -5757,7 +6025,8 @@ impl<'a> StepConverter<'a> {
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
-            let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            let mut healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            let _n_reverts = validate_healing_flips(&face_data_list, &mut healed_list);
 
             // DIAG: Compute post-healing geometry signature
             let post_heal_sig = compute_face_data_signature(&healed_list);
@@ -6764,7 +7033,8 @@ impl<'a> StepConverter<'a> {
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(brep_id, &report);
-            let healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            let mut healed_list = apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+            let _n_reverts = validate_healing_flips(&face_data_list, &mut healed_list);
             if healed_list.len() != pre_heal_count {
                 log::warn!(
                     "BREP #{} healing changed face count: {} → {}",
@@ -6949,7 +7219,12 @@ impl<'a> StepConverter<'a> {
             let healing_params = HealingParams::aggressive_with_context(&tol_ctx);
             let (healed, report) = heal_solid(&solid, &healing_params);
             log_healing_report(shell_id, &report);
-            apply_healing_to_face_data(&face_data_list, &healed, &face_id_map)
+            {
+                let mut healed_list =
+                    apply_healing_to_face_data(&face_data_list, &healed, &face_id_map);
+                let _n_reverts = validate_healing_flips(&face_data_list, &mut healed_list);
+                healed_list
+            }
         } else {
             face_data_list
         };

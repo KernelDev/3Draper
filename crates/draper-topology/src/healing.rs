@@ -2435,6 +2435,15 @@ fn fix_normal_orientation(staged: &mut StagedShell, _params: &HealingParams, rep
     if staged.shell.faces.is_empty() {
         return;
     }
+    // s96 experiment: kill-switch for the centroid heuristic — measured
+    // to flip the CROSS-FACE orientation of topologically-consistent
+    // groove/pocket walls (drill HM (13,214): 17 REAL WINDING-FLIP pairs).
+    if std::env::var("DRAPPER_HEAL_NORMALFIX")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
+        return;
+    }
 
     // Compute centroid as average of edge midpoints (C5 Stage 7.4b:
     // edge midpoints from the working lists)
