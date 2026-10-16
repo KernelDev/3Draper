@@ -17823,16 +17823,193 @@ fn castellation_row_lattice(
     surface: &Surface,
     boundary_2d: &[[f64; 2]],
 ) -> (Vec<usize>, Vec<[f64; 2]>) {
+    // session-98: ORIENTATION × TOLERANCE CASCADE. The s86 single
+    // pass (identity, tol 0.08×vspan, min run 3) runs FIRST —
+    // bit-identical for every previously-accepted face. Only on
+    // rejection do the groove-class extensions run: the SLEEVE
+    // spiral-groove walls (f45/f93/f147/f152) are the same 3-level
+    // castellation shape but (a) their tooth tops are 2-POINT
+    // plateaus (the decimated rounded corners — s86 required ≥3),
+    // (b) the teeth can hang from the DOMINANT rim side (f93/f152:
+    // dominant run at the domain top → v-flip + ring reversal
+    // canonicalizes), (c) short teeth on a tall band merge under
+    // the 0.08×vspan cluster tolerance (f152: teeth 0.08 vs vspan
+    // 1.13 → 0.005 cascade step), (d) the tall band A (up to 0.117
+    // 3D) is outside the s86 H-window — relaxed here because the
+    // chains are post-decimation weld-stable (spacing > merge_tol;
+    // the s85 full-height-fan pathology cannot recur) and a 3D
+    // same-face fold guard (measured: max normal angle 5-7.5° on
+    // all four faces) rejects any residual fold. Deterministic
+    // fixed order; first success wins. Kill-switches:
+    // DRAPPER_CAST_ROW_LATTICE=0 (all), DRAPPER_CAST_EXTEND=0
+    // (extensions only). Debug: DRAPPER_CAST_DEBUG traces each
+    // attempt.
+    let n = boundary_2d.len();
+    let ext_on = std::env::var("DRAPPER_CAST_EXTEND").as_deref() != Ok("0");
+    // (flip_v, rev_ring, tol_scale, min_run, relax_band_a)
+    let cascade: [(bool, bool, f64, usize, bool); 3] = [
+        (false, false, 0.08, 3, false), // s86 original — bit-identity
+        (false, false, 0.02, 2, true),  // s98: 2-pt plateaus, fine tol
+        (true, true, 0.005, 2, true),   // s98: + flip+rev canonicalization
+    ];
+    for (ci, &(flip, rev, tol, min_run, relax)) in cascade.iter().enumerate() {
+        if ci > 0 && !ext_on {
+            break;
+        }
+        let ring: Vec<[f64; 2]> = if flip {
+            let vmin = boundary_2d.iter().fold(f64::INFINITY, |a, p| a.min(p[1]));
+            let vmax = boundary_2d.iter().fold(f64::NEG_INFINITY, |a, p| a.max(p[1]));
+            boundary_2d
+                .iter()
+                .map(|p| [p[0], vmin + vmax - p[1]])
+                .collect()
+        } else {
+            boundary_2d.to_vec()
+        };
+        let ring: Vec<[f64; 2]> = if rev {
+            ring.into_iter().rev().collect()
+        } else {
+            ring
+        };
+        let attempt = castellation_try(surface, &ring, tol, min_run, relax, ci == 0);
+        let Some((tris, new_pts)) = attempt else {
+            continue;
+        };
+        // map reversed indices back to the original ring (flip keeps
+        // indices; rev maps i -> n-1-i)
+        let mapped: Vec<usize> = if rev {
+            tris.iter().map(|&i| if i < n { n - 1 - i } else { i }).collect()
+        } else {
+            tris
+        };
+        // winding re-normalization on the ORIGINAL ring (flip/rev
+        // reverse the orientation sign; the core normalized to the
+        // transformed ring)
+        let poly_s: f64 = (0..n)
+            .map(|i| {
+                let a = boundary_2d[i];
+                let b = boundary_2d[(i + 1) % n];
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum();
+        let mut out: Vec<usize> = Vec::with_capacity(mapped.len());
+        let all_pts = |ix: usize| -> [f64; 2] {
+            if ix < n {
+                boundary_2d[ix]
+            } else {
+                new_pts[ix - n]
+            }
+        };
+        for c in mapped.chunks_exact(3) {
+            let a = all_pts(c[0]);
+            let b = all_pts(c[1]);
+            let d = all_pts(c[2]);
+            let s = (b[0] - a[0]) * (d[1] - a[1]) - (b[1] - a[1]) * (d[0] - a[0]);
+            if s * poly_s < 0.0 {
+                out.extend_from_slice(&[c[0], c[2], c[1]]);
+            } else {
+                out.extend_from_slice(c);
+            }
+        }
+        // extension paths: 3D same-face FOLD GUARD on the original
+        // coordinates (the level the census measures; the s86 H-window
+        // is relaxed, so folds must be rejected directly — measured
+        // margin on the groove class: max normal angle 5-7.5°)
+        if ci > 0 {
+            let mut folds = 0usize;
+            {
+                use std::collections::HashMap;
+                let p3 = |ix: usize| -> draper_geometry::Point3d {
+                    let uv = all_pts(ix);
+                    surface.point_at(uv[0], uv[1])
+                };
+                let mut edge_tris: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+                for (ti, c) in out.chunks_exact(3).enumerate() {
+                    for k in 0..3 {
+                        let a = c[k];
+                        let b = c[(k + 1) % 3];
+                        if a != b {
+                            edge_tris.entry((a.min(b), a.max(b))).or_default().push(ti);
+                        }
+                    }
+                }
+                let normal = |t: &[usize]| -> Option<[f64; 3]> {
+                    let a = p3(t[0]);
+                    let b = p3(t[1]);
+                    let d = p3(t[2]);
+                    let e1 = [b.x - a.x, b.y - a.y, b.z - a.z];
+                    let e2 = [d.x - a.x, d.y - a.y, d.z - a.z];
+                    let nn = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let l = (nn[0] * nn[0] + nn[1] * nn[1] + nn[2] * nn[2]).sqrt();
+                    if l > 1e-18 {
+                        Some([nn[0] / l, nn[1] / l, nn[2] / l])
+                    } else {
+                        None
+                    }
+                };
+                for ts in edge_tris.values() {
+                    if ts.len() != 2 {
+                        continue;
+                    }
+                    let t0 = &out[ts[0] * 3..ts[0] * 3 + 3];
+                    let t1 = &out[ts[1] * 3..ts[1] * 3 + 3];
+                    if let (Some(n1), Some(n2)) = (normal(t0), normal(t1)) {
+                        let dot = (n1[0] * n2[0] + n1[1] * n2[1] + n1[2] * n2[2])
+                            .clamp(-1.0, 1.0);
+                        if dot.acos().to_degrees() > 170.0 {
+                            folds += 1;
+                        }
+                    }
+                }
+            }
+            if folds > 0 {
+                if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+                    eprintln!(
+                        "[CAST ext reject {}] fold guard: {} pairs",
+                        current_face_label(),
+                        folds
+                    );
+                }
+                continue;
+            }
+        }
+        if ci > 0 && std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
+            eprintln!(
+                "[CAST ext accept {}] flip={} rev={} tol={} min_run={}",
+                current_face_label(),
+                flip,
+                rev,
+                tol,
+                min_run
+            );
+        }
+        return (out, new_pts);
+    }
+    (Vec::new(), Vec::new())
+}
+
+fn castellation_try(
+    surface: &Surface,
+    boundary_2d: &[[f64; 2]],
+    tol_scale: f64,
+    min_run: usize,
+    relax_band_a: bool,
+    allow_rows: bool,
+) -> Option<(Vec<usize>, Vec<[f64; 2]>)> {
     macro_rules! cast_fail {
         ($reason:expr) => {{
             if std::env::var("DRAPPER_CAST_DEBUG").is_ok() {
                 eprintln!("[CAST reject {}] {}", current_face_label(), $reason);
             }
-            return (Vec::new(), Vec::new());
+            return None;
         }};
     }
     if std::env::var("DRAPPER_CAST_ROW_LATTICE").as_deref() == Ok("0") {
-        return (Vec::new(), Vec::new());
+        return None;
     }
     let n = boundary_2d.len();
     if n < 64 {
@@ -17908,8 +18085,8 @@ fn castellation_row_lattice(
     }
     for &(s, e) in &runs {
         let len = (e + n - s) % n + 1;
-        if len < 3 {
-            cast_fail!(format!("short run {} pts", len));
+        if len < min_run {
+            cast_fail!(format!("short run {} pts (min {})", len, min_run));
         }
     }
     // ── 2. v-level clustering ───────────────────────────────────
@@ -17922,7 +18099,7 @@ fn castellation_row_lattice(
         }
         sum / len as f64
     };
-    let lvl_tol = 0.08 * vspan;
+    let lvl_tol = tol_scale * vspan;
     let mut sorted: Vec<(usize, usize)> = runs.clone();
     sorted.sort_by(|a, b| run_v(a).partial_cmp(&run_v(b)).unwrap_or(std::cmp::Ordering::Equal));
     let mut levels: Vec<(f64, Vec<(usize, usize)>)> = Vec::new();
@@ -18151,7 +18328,8 @@ fn castellation_row_lattice(
     // edges), teeth = the per-tooth zipper chord-edge↔walls+plateau.
     // Env DRAPPER_CAST_ROWS=1 opts back into the row lattice
     // (experimental).
-    let rows_mode = std::env::var("DRAPPER_CAST_ROWS").as_deref() == Ok("1");
+    let rows_mode =
+        allow_rows && std::env::var("DRAPPER_CAST_ROWS").as_deref() == Ok("1");
     let mut new_uv: Vec<[f64; 2]> = Vec::new();
     let push_pt = |uv: [f64; 2], new_uv: &mut Vec<[f64; 2]>| -> usize {
         new_uv.push(uv);
@@ -18173,9 +18351,13 @@ fn castellation_row_lattice(
     let gap_a_3d = (v_mid - v_bot) * ax_s;
     let k_a_geom = ((gap_a_3d / H_TARGET).ceil() as usize).clamp(1, 8);
     let h_sub_a = gap_a_3d / k_a_geom as f64;
-    if h_sub_a < H_MIN || h_sub_a > H_MAX {
+    if !relax_band_a && (h_sub_a < H_MIN || h_sub_a > H_MAX) {
         cast_fail!(format!("band A sub-band height {:.4} outside class", h_sub_a));
     }
+    // s98 extension: the tall-band class (groove walls, band A up to
+    // 0.117 3D) skips the H-window — weld-stability is guaranteed by
+    // the s95 decimation (ring spacing > merge_tol) and the wrapper's
+    // 3D fold guard rejects any residual fold directly.
     let w_row_a = 3.0 * h_sub_a;
     // rim-only default: single sub-band per region (no rows/chords)
     let k_a = if rows_mode { k_a_geom } else { 1usize };
@@ -18639,6 +18821,56 @@ fn castellation_row_lattice(
                 if lower.len() < 2 || t.plateau.len() < 2 {
                     cast_fail!("tooth U/plateau degenerate");
                 }
+                // s98: TILTED-WALL teeth (the groove class — rounded
+                // corners decimated to inward diagonals make the
+                // plateau ends x-INSIDE the wall tops). The U chain
+                // dips below base_l's x and the u-criterion zipper
+                // fans across the base; worse, the tilted path is
+                // angularly NON-monotone around base_l (a farther
+                // wall-top point at a shallower polar angle than a
+                // nearer plateau end) — the fan blades overlap
+                // (measured: +1.3-2.6% ABS area on f45/f147). The
+                // tooth outline (base_l → walls → plateau → walls →
+                // base_r, closed by the chord) is a SIMPLE polygon:
+                // earcut it directly — a partition by construction
+                // (no overlap possible, every rim edge exactly 1x,
+                // the chord edge included).
+                let u_of = |ix: usize| -> f64 { boundary_2d[ix][0] };
+                let u_mono = |ch: &[usize]| -> bool {
+                    ch.windows(2)
+                        .all(|w| u_of(w[0]) <= u_of(w[1]) + 1e-12)
+                };
+                if !u_mono(&lower) {
+                    let mut poly: Vec<usize> = Vec::with_capacity(
+                        t.wl_asc.len() + t.plateau.len() + t.wr_asc.len() + 2,
+                    );
+                    poly.push(base_l);
+                    poly.extend(t.wl_asc.iter().copied());
+                    poly.extend(t.plateau.iter().copied());
+                    poly.extend(t.wr_asc.iter().rev().copied());
+                    poly.push(base_r);
+                    // dedup consecutive (plateau/wall ends can coincide
+                    // with base corners after decimation)
+                    poly.dedup_by(|a, b| *a == *b);
+                    if poly.len() < 4 {
+                        cast_fail!("tilted tooth polygon degenerate");
+                    }
+                    let mut coords: Vec<f64> = Vec::with_capacity(poly.len() * 2);
+                    for &ix in poly.iter() {
+                        coords.push(boundary_2d[ix][0]);
+                        coords.push(boundary_2d[ix][1]);
+                    }
+                    let idx = crate::earcut_adapter::triangulate_polygon_with_holes(
+                        &coords, &[],
+                    );
+                    if idx.len() < 6 {
+                        cast_fail!("tilted tooth earcut empty");
+                    }
+                    for c in idx.chunks_exact(3) {
+                        tris.extend_from_slice(&[poly[c[0]], poly[c[1]], poly[c[2]]]);
+                    }
+                    continue;
+                }
                 if !zipper(&lower, &t.plateau, &t.wl_set, &t.wr_set, &mut tris) {
                     cast_fail!("tooth U zipper stuck");
                 }
@@ -18955,7 +19187,7 @@ fn castellation_row_lattice(
         }
         let _ = std::fs::write(&path, out);
     }
-    (tris, new_uv)
+    Some((tris, new_uv))
 }
 
 #[cfg(test)]

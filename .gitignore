@@ -44,3 +44,7 @@ forensics/s94/objs2/
 forensics/s96/objs/
 forensics/s96/objs_nofix/
 forensics/s96/stages/
+forensics/s98/stages/
+forensics/s98/final_objs/
+forensics/s98/final_new/
+forensics/s98/debug_tri.log
