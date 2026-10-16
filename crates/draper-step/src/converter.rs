@@ -9820,6 +9820,19 @@ impl<'a> StepConverter<'a> {
         Some(fwd.min(rev))
     }
 
+    /// session-97: the parent-circle geometry (center, radius) of an
+    /// EDGE_CURVE's 3D curve, when that curve is a circle (or a trimmed
+    /// arc of one). None for every other curve kind (the concentric-
+    /// circle guard only ever compares circle-vs-circle pairs).
+    fn edge_circle_params(&self, edge_curve_id: i64) -> Option<(Point3d, f64)> {
+        let edge = self.resolve_edge_curve(edge_curve_id)?;
+        match edge.curve.as_ref()? {
+            Curve3d::Circle(c) => Some((c.center, c.radius)),
+            Curve3d::Arc(a) => Some((a.circle.center, a.circle.radius)),
+            _ => None,
+        }
+    }
+
     fn compute_edge_curve_sample_points(&self, edge_curve_id: i64) -> Option<Vec<Point3d>> {
         // Primary path: use resolve_edge_curve to get a proper TopoEdge.
         if let Some(edge) = self.resolve_edge_curve(edge_curve_id) {
@@ -10603,6 +10616,54 @@ impl<'a> StepConverter<'a> {
                                         sid_i, sid_j, d, glue_dev_tol,
                                         self.edge_curve_type_name(*sid_i),
                                         self.edge_curve_type_name(*sid_j)
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        // session-97 CONCENTRIC-CIRCLE GUARD (the GEAR
+                        // root-band fillet cascade). The fillet stack of a
+                        // gear tooth space puts THREE same-axis arc families
+                        // within one vertex-pair tolerance of each other:
+                        // root-cylinder arc (r=.1525, y=.01), cone-flank
+                        // arc (r=.15957, y=.00293) and end-plane arc
+                        // (r=.16664, y=0) — consecutive vertex pairs are
+                        // 0.0076–0.01 apart (< seam_tol 0.0153) while the
+                        // arcs are diameter-long (chord .3 >> 3×offset), so
+                        // BOTH the s95 relative-offset guard and the s80
+                        // deviation guard (dev .0076–.017 < 2×tol .0306)
+                        // pass them. The alias chain then substituted the
+                        // end-plane polyline (r=.16664, y=0) for the root
+                        // arcs (#15817/#15794/#15876/#15779), poisoning the
+                        // half-cylinder band faces' boundary rings (v-range
+                        // [0,.23] instead of [.01,.22], radius .1666) —
+                        // the (421,426)×2 FOLD-OVER flap family. A genuine
+                        // seam twin or slit-lip pair is the SAME circle
+                        // (same center, same radius — only the angular
+                        // extent/offset differs: measured slit lips and
+                        // twins deviate by ~0 here); the fillet cascade is
+                        // CO-AXIAL circles of DIFFERENT radii. Rule: for
+                        // circle-vs-circle candidates require same center
+                        // AND same radius within 5% of the sewing
+                        // tolerance; everything else keeps the legacy
+                        // guards. Kill-switch: DRAPPER_SEAM_CIRCLE_GUARD=0.
+                        let circle_guard_on = std::env::var("DRAPPER_SEAM_CIRCLE_GUARD")
+                            .as_deref()
+                            != Ok("0");
+                        if circle_guard_on {
+                            if let (Some(ci), Some(cj)) = (
+                                self.edge_circle_params(*sid_i),
+                                self.edge_circle_params(*sid_j),
+                            ) {
+                                let tol_c = seam_tol.max(merge_tol) * 0.05;
+                                let dc = ci.0.distance_to(&cj.0);
+                                let dr = (ci.1 - cj.1).abs();
+                                if dc > tol_c || dr > tol_c {
+                                    log::info!(
+                                        "BREP: seam alias REJECTED by concentric-circle guard: #{} vs #{} (centers ({:.4},{:.4},{:.4})/({:.4},{:.4},{:.4}) dc={:.5}, radii {:.5}/{:.5} dr={:.5} > tol {:.5} — co-axial arcs of the fillet cascade, not one boundary)",
+                                        sid_i, sid_j,
+                                        ci.0.x, ci.0.y, ci.0.z, cj.0.x, cj.0.y, cj.0.z,
+                                        dc, ci.1, cj.1, dr, tol_c
                                     );
                                     continue;
                                 }
