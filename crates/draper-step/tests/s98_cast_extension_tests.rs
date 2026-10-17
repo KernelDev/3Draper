@@ -138,8 +138,15 @@ fn s98_cast_extension_kills_sleeve_groove_folds() {
 fn s98_cast_extension_killswitch_reproduces_groove_folds() {
     let _guard = S98_ENV_LOCK.lock().unwrap();
     std::env::set_var("DRAPPER_CAST_EXTEND", "0");
+    // s100 layer isolation (the s91 "enumerate LAYERS" discipline): the
+    // seam born-fold split also unwelds the (45,46)x2 CROSS-face groove
+    // pairs when the s98 cascade is off (measured: 6 -> 4 — defense in
+    // depth, a feature not a bug). This leg pins the s98 cascade alone,
+    // so the s100 pass must be off here too.
+    std::env::set_var("DRAPPER_SEAM_FOLD_SPLIT", "0");
     let inst = sleeve_instance();
     std::env::remove_var("DRAPPER_CAST_EXTEND");
+    std::env::remove_var("DRAPPER_SEAM_FOLD_SPLIT");
     let inst = inst.expect("SLEEVE BREP#32629 triangulation failed (kill-switch leg)");
     let folds = groove_fold_pairs(&inst);
     assert!(

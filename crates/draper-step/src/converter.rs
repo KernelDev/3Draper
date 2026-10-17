@@ -6556,6 +6556,19 @@ impl<'a> StepConverter<'a> {
             draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-gapfill");
         }
 
+        // ─── Session-100 PHASE 1: record born-fold seam pairs ───────────
+        // Cross-face seam pairs BORN folded at emission (analytic dihedral
+        // >170°, dmax≈0 from merge on — the s99 EMISSION-FOLD class). The
+        // pre-winding mesh ALSO contains transient anti-wound seams that
+        // fix_inconsistent_winding harmonizes by itself (measured: the
+        // f6×f265 rim zipper), so phase 1 only RECORDS fingerprints here;
+        // phase 2 (post-flapclean) splits only the survivors. Kill-switch:
+        // DRAPPER_SEAM_FOLD_SPLIT=0 (gates both phases).
+        let bornfold_record: Vec<[u32; 4]> = {
+            let res_tol = self.last_brep_eff_tol.get();
+            draper_mesh::seam_bornfold_record(&mesh, res_tol)
+        };
+
         // ─── Fix inconsistent winding (face orientation repair) ──────────
         draper_mesh::fix_inconsistent_winding(&mut mesh);
         draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-winding");
@@ -6789,6 +6802,31 @@ impl<'a> StepConverter<'a> {
                         brep_id,
                     );
                 }
+            }
+        }
+
+        // ─── Session-100 PHASE 2: split the SURVIVING born-fold seams ────
+        // Assembly-level cross-face fold census, gated on the phase-1
+        // record, running AFTER the v5 postweld audit (the LAST stage that
+        // touches winding): only pairs folded since merge that survived
+        // the winding BFS AND the v5 flip fixpoint unchanged are split.
+        // (Measured: pre-v5 placement fired on pairs the v5 audit resolves
+        // by flipping one side — the splits then rippled the v5's component
+        // graph, manufacturing new sub-tol pairs.) The split clones one
+        // edge vertex on one face side, minimal collateral — no vertex
+        // moves, no winding change, no triangle added/removed; the flap
+        // stays geometrically sealed as a zero-gap double ply but the
+        // census pair disappears. BFS-manufactured pairs are not in the
+        // phase-1 record and stay untouched.
+        {
+            let res_tol = self.last_brep_eff_tol.get();
+            let n_bfs = draper_mesh::seam_bornfold_split(&mut mesh, res_tol, &bornfold_record);
+            if n_bfs > 0 {
+                log::info!(
+                    "BREP #{} detailed: seam born-fold split unwelded {} cross-face seam fold edge(s)",
+                    brep_id, n_bfs,
+                );
+                draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-bornfold-split");
             }
         }
 

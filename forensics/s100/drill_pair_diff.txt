@@ -1,0 +1,6 @@
+3,4c3,4
+< --- brep_idx=3 HOUSING (BREP#47598) BREP#47598: 348 pairs >170° (0 tangent-exempt, 345 sub-tol weld-noise, 0 knife-fin pinch, 3 real) eff_tol=0.0305
+< --- brep_idx=4 HOUSING_MIRROR (BREP#62542) BREP#62542: 457 pairs >170° (0 tangent-exempt, 452 sub-tol weld-noise, 0 knife-fin pinch, 5 real) eff_tol=0.0302
+---
+> --- brep_idx=3 HOUSING (BREP#47598) BREP#47598: 346 pairs >170° (0 tangent-exempt, 345 sub-tol weld-noise, 0 knife-fin pinch, 1 real) eff_tol=0.0305
+> --- brep_idx=4 HOUSING_MIRROR (BREP#62542) BREP#62542: 456 pairs >170° (0 tangent-exempt, 452 sub-tol weld-noise, 0 knife-fin pinch, 4 real) eff_tol=0.0302

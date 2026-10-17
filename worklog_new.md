@@ -15867,3 +15867,118 @@ gapfill→winding→flapclean→postweldwind; финал = pass6 (HOUSING)/pass8
 - tools/: s99_band_fold_dump.rs (эмиссионная атрибуция пар).
 - scripts/: s99_track_real_pairs.py (winding-трекинг диэдрала по
   стадиям; BREP_PASSES map для drill).
+
+## Сессия 100 (2026-10-17): SEAM BORN-FOLD SPLIT (2-фазный) — тройка
+## EMISSION-FOLD ликвидирована: drill REAL 8→5, sub-tol бит-стабилен,
+## corpus A/B: 7/8 файлов IDENTICAL, transmission 0=0 с сохранённым
+## knife-fin; сьюты 0 fail
+
+# Контекст: git pull принёс s93–s99 (14 коммитов) — план резюме сессии
+# устарел, актуален план s100 из root_cause_map. Item 1 = тройка
+# EMISSION-FOLD. Окружение после sandbox-сброса восстановлено
+# (/tmp/my-project/.cargo, rust_env.sh пересоздан, сборка foreground
+# циклами ≤600с — урок s99 №2).
+
+### 1. Механизм (форензика s100_edge_census + s99_band_fold_dump)
+
+Два класса рождённых сложенными пар (dmax≈0, аналитический диэдрал
+>170° с merge): A. TANGENT-STRIP — boundary row филет-банда в
+тангенсной плоскости y=6.00 складывается поверх иглы plane-fan через
+seam-ребро (opp-traversal, same-side апексы, area ratio 0.67 — МЕЖДУ
+классами s89-flapclean); B. SAME-TRAVERSAL — вырожденный rim-sliver
+(h=0.0001) приварен к FAT-игле (h=0.567) ОДИНАКОВЫМ обходом ребра
+(гейт s89 требует противоположного; апекс sliver'а НА линии ребра —
+apex-side тест численно бессмыслен).
+
+### 2. Фикс: seam_bornfold_split — 2 фазы, чистая топология
+
+Фаза 1 (pre-winding): ЗАПИСЬ отпечатков [ea,eb,ap0,ap1] (индексы
+вершин стабильны merge→конец — вершины только добавляются). Фаза 2
+(ПОСЛЕ v5-аудита): ре-детекция, сплит ТОЛЬКО выживших — клон ОДНОЙ
+вершины ребра на ОДНОЙ стороне грани (все треугольники грани с этой
+вершиной перемаплены; внутренняя связность грани цела), выбор
+(вершина, сторона) по минимальному коллатералю (сумма длин
+cross-face сварок на этой вершине, fold-ребро исключено). Ни одна
+вершина не двигается, ни одна намотка не меняется, треугольники не
+добавляются/удаляются: флейп остаётся геометрически запечатанным
+(двойной слой нулевого зазора), но пары цензуса больше нет.
+Never-worsen по построению: разварка не может создать shared edge.
+
+Гейты: manifold-2 cross-face; нормали >170°; fat anchor
+max(апекс-высота над ребром) ≥ res_tol — ВЫРОВНЕН по мере цензуса
+(НЕ 2·area/shortest); fold proof = same-side апексы (оба солидны,
+дист > 2% длины ребра) OR (same-traversal AND sub-resolution ear);
+deferrals: s89 ear/dup (только opp-traversal), s94 knife-fin pinch
+(реплицирован в продакшн: apex-offset ≤ 0.1·hinge, оба
+перпендикулярных gap ≥ res_tol, wall-normal offset ≤ 3·gap).
+Kill-switch DRAPPER_SEAM_FOLD_SPLIT=0 (обе фазы); DRAPPER_BORNFOLD_DEBUG.
+
+### 3. Три опровергнутых размещения (итерации дизайна, измерено)
+
+1. Пре-winding однофазно: стрелял по ТРАНЗИЕНТНЫМ анти-намотанным
+   швам, которые winding-BFS гармонизирует сам (f6×f265 zipper — 6+
+   каскадных сплитов; DRILL_SHAFT пары) → 2 фазы.
+2. Фаза 2 до v5: стрелял по парам, которые v5-аудит чинит флипом
+   (4 лишних сплита HOUSING; сплиты ripple-нули компонентный граф v5,
+   +1 суб-tol пара) → фаза 2 ПОСЛЕ v5 (последняя winding-стадия).
+3. Fat anchor по thickness: 4+ сплита на парах класса суб-tol цензуса
+   (короткое НЕ-shared ребро раздувает 2·area/shortest) → мера
+   цензуса (апекс-высота).
+
+### 4. Измерения
+
+- drill REAL 8→5 (HOUSING 3→1, HM 5→4); сработали ровно 3 сплита
+  ((543,544)=T370/T41259, (1074,1075)=T1215/T49022, (575,576)=
+  T398/T43000); sub-tol бит-стабилен 345=345 / 452=452 (ripple v5
+  нет). Остаток 5: merge-deform 2, BFS 2, fixpoint 1 (items 2-3).
+- Corpus A/B 8 файлов: отличается ТОЛЬКО drill; transmission
+  IDENTICAL включая 4 knife-fin SPRING пары (первый прогон без
+  knife-fin гейта дал их разварку + 2 BUG-строки 54→56 — гейт
+  добавлен); BUG-строки drill 10=10, bnd-дельта: HOUSING +6, HM +2,
+  SLEEVE 322/322=.
+- Kill-switch OFF: sorted bit-exact против s99-репро; детерминизм
+  двойной прогон sorted-md5 =; angle_check: drill FAIL 2= (BREP
+  level), trans PASS=, compressor 1= chronic, brick_round 1=.
+- Сьюты: mesh/geom/topo/core 28×ok 0 fail; step lib 169/0; step
+  integration 23 сьюта 0 fail. +7 самодоказательных тестов
+  (s100_bornfold_split_tests: 2 позитивных класса, thin-wall/same-
+  face/knife-fin/sub-tol негативы, kill-switch).
+- DEFENSE IN DEPTH: при DRAPPER_CAST_EXTEND=0 сплит-пасс всё равно
+  убирает (45,46)×2 cross-face groove пары (6→4); s98 killswitch leg
+  изолирован (DRAPPER_SEAM_FOLD_SPLIT=0 добавлен — дисциплина s91
+  «enumerate LAYERS»), PoisonError-каскад мьютекса починен самой
+  изоляцией.
+
+### 5. Уроки
+
+1. Stage-aware размещение: пасс, действующий рядом с winding-стадиями,
+   обязан стоять ПОСЛЕ всех, кто может разрешить/создать целевой класс
+   — иначе крадёт транзиенты или получает ripple от последующих флипов.
+2. Выравнивание мер обязательно: суб-tol цензуса = апекс-высота над
+   ребром; ear s89 = 2·area/shortest. Гейт с чужой мерой стреляет по
+   чужой территории (4 ложных сплита + ripple v5, измерено).
+3. Чисто-топологический сплит (клон вершины, face-scoped) —
+   минимальное never-worsen действие для born-folded швов: флипы
+   заблокированы ripple-трейдами (s99), removal открывает суб-рез
+   щели, clipping — тяжёлая механика.
+4. Каждый exempt-класс диагностического цензуса, до которого
+   продакшн теперь дотягивается, обязан быть реплицирован в
+   продакшн-гейте (knife-fin: без него 4 exempt SPRING пары
+   разварены + 2 BUG-строки).
+5. Отравление мьютекса (PoisonError) маскирует вторую реальную ошибку
+   в тесте: первая паника в leg-е под локом валит соседний тест —
+   при разборе FAILED-каскада смотри ПЕРВУЮ панику, не последнюю.
+
+### 6. Артефакты
+
+- forensics/s100/: summary.txt (механизм+гейты+измерения+итерации),
+  drill_pair_diff.txt, corpus_on_real_lines.txt.
+- tools/src/bin/s100_edge_census.rs: вершинно-рёберная цензуса
+  окрестностей (обоснование scope клонов).
+- scripts/s100_corpus_measure.sh: A/B корпус 8 файлов OFF/ON.
+- crates/draper-mesh/tests/s100_bornfold_split_tests.rs (+7).
+- Остаток для s101: merge-deform пары ((62,62),(206,206)) — pre-merge
+  аудит близких вершин на тонких лопастях ИЛИ ретриангуляция; BFS/
+  fixpoint тройка — parity-расширение s96-солвера ИЛИ хроника;
+  переносы s98-плана (bnd-сверка GEAR/HOUSING/HM эмиссии, WARN-гейт,
+  ABS-площадь, стаггер-решётка, BUG-строки drill).

@@ -1,0 +1,4 @@
+/home/z/my-project/scripts/s100_corpus/brick_thin_round.ON.pairs:--- brep_idx=0 BREP#1498 BREP#1498: 3 pairs >170° (0 tangent-exempt, 1 sub-tol weld-noise, 0 knife-fin pinch, 2 real) eff_tol=0.0000
+/home/z/my-project/scripts/s100_corpus/compressor-13920_top.ON.pairs:--- brep_idx=1 COLLECTOR-13920 (BREP#2860) BREP#2860: 156 pairs >170° (0 tangent-exempt, 141 sub-tol weld-noise, 0 knife-fin pinch, 15 real) eff_tol=0.0671
+/home/z/my-project/scripts/s100_corpus/drill_top.ON.pairs:--- brep_idx=3 HOUSING (BREP#47598) BREP#47598: 346 pairs >170° (0 tangent-exempt, 345 sub-tol weld-noise, 0 knife-fin pinch, 1 real) eff_tol=0.0305
+/home/z/my-project/scripts/s100_corpus/drill_top.ON.pairs:--- brep_idx=4 HOUSING_MIRROR (BREP#62542) BREP#62542: 456 pairs >170° (0 tangent-exempt, 452 sub-tol weld-noise, 0 knife-fin pinch, 4 real) eff_tol=0.0302

@@ -1,0 +1,110 @@
+s100: seam born-fold split (2-phase) — the EMISSION-FOLD triple killed
+=====================================================================
+Baseline: s99 (bit-identical reproduction, kill-switch OFF sorted-exact).
+Target: s99 root_cause_map item 1 — the 3 EMISSION-FOLD REAL pairs
+((6,265)+(3,235)/(3,248) mirror twins: HOUSING 3 + HOUSING_MIRROR).
+
+Mechanism (s99 map): cross-face seam pairs BORN folded at emission
+(analytic dihedral >170 deg, dmax ~ 0 from merge on). Two classes:
+  A. TANGENT-STRIP FOLD ((3,235)/(3,248)): a NURBS_FILLET_BAND boundary
+     row lying in the tangent plane (y=6.00) folds over the plane fan's
+     needle across the seam edge. Opposite traversal, same-side apexes,
+     area ratio ~0.67 — BETWEEN the s89 flapclean's ear/dup classes.
+  B. SAME-TRAVERSAL FOLD ((6,265)): a degenerate rim sliver (h=0.0001,
+     area 7e-7) welded to a fat corner-fan needle (h=0.567) with the
+     SAME directed traversal (s89 requires opposite; the sliver's apex
+     lies ON the edge line so the apex-side test is numerically void).
+
+FIX: draper_mesh::seam_bornfold_split — 2-phase assembly-level census.
+  Phase 1 (pre-winding, post-gapfill): RECORD fingerprints
+    [min(ea,eb), max(ea,eb), min(ap0,ap1), max(ap0,ap1)] — vertex
+    indices are stable merge->end (vertices are only appended).
+  Phase 2 (post-v5-audit): re-detect; split ONLY recorded survivors —
+    clone ONE edge vertex on ONE face side (all that face's tris using
+    the vertex remapped; face-internal connectivity intact), choosing
+    the (vertex, side) with minimal collateral (total length of
+    cross-face welds at that vertex the clone breaks, fold edge
+    excluded). No vertex moves, no winding change, no triangle
+    added/removed. The flap stays geometrically sealed (zero-gap double
+    ply) but the census pair disappears. Never-worsen by construction:
+    unwelding cannot create a shared edge.
+
+Gates: manifold-2 cross-face edge; as-wound normals >170 deg; fat
+anchor max(apex height over the shared edge) >= res_tol (CENSUS-ALIGNED
+— the probe's sub-tol rule, NOT 2*area/shortest); fold proof = same-side
+apexes (both solidly off the edge line, dist > 2% edge_len) OR
+(same-traversal AND sub-resolution ear); deferrals: s89 ear/dup classes
+(opposite-traversal only), s94 knife-fin pinch (offset copies: apex-
+offset <= 0.1*hinge, both perpendicular gaps >= res_tol, wall-normal
+offset <= 3*gap) — replicated in production.
+Kill-switch DRAPPER_SEAM_FOLD_SPLIT=0 (both phases). Debug:
+DRAPPER_BORNFOLD_DEBUG=1. Diag tool: s100_edge_census (vertex/edge
+neighborhoods — the clone-scope collateral analysis).
+
+MEASURED RESULTS
+----------------
+Splits fired (exactly 3):
+  HOUSING edge (543,544) T370/T41259 = (3,235)  [clone v544, face 3, collateral 0]
+  HOUSING edge (1074,1075) T1215/T49022 = (6,265) [clone v1075, face 265, collateral 1 short weld]
+  HM      edge (575,576) T398/T43000 = (3,248)  [clone v576, face 3, collateral 0]
+
+drill REAL 8 -> 5 (HOUSING 3->1, HM 5->4). Sub-tol census bit-stable
+(345=345, 452=452 — no v5 ripple). Remaining 5: (62,62)+(206,206)
+merge-deform, (3,243)+(30,30) BFS, (3,3) fixpoint — s100 items 2-3.
+
+Corpus A/B (8 files, OFF vs ON): ONLY drill differs (the lines above);
+Zentralstaender / compressor (15=15) / as1 / transmission / brick_thin
+/ brick_thin_round (2=2) / brick_thin_hole: pairs IDENTICAL.
+BUG lines: drill 10=10, transmission 54=54 (the SPRING knife-fin 4
+exempt pairs preserved). Bnd-edge delta (first pass): HOUSING
+4017->4023 (+6), HM 4382->4384 (+2), SLEEVE 322/322 =.
+angle_check: drill FAIL 2= (BREP-level), trans PASS=, compressor 1=
+chronic, brick_thin_round 1= chronic.
+Kill-switch OFF: sorted bit-exact vs the s99 repro. Determinism:
+double-run sorted-md5 equal.
+Suites: mesh/geom/topo/core 28x ok 0 fail; step lib 169/0; step
+integration 23 suites 0 fail (s98 killswitch leg updated for s100 layer
+isolation). +7 self-proving unit tests
+(crates/draper-mesh/tests/s100_bornfold_split_tests.rs).
+
+DEFENSE IN DEPTH (measured): with DRAPPER_CAST_EXTEND=0 (s98 cascade
+off), the s100 pass still unwelds the (45,46)x2 CROSS-face groove
+pairs: SLEEVE groove folds 6 -> 4. The s98 killswitch leg now pins the
+s98 cascade alone (DRAPPER_SEAM_FOLD_SPLIT=0 added there — the s91
+"enumerate LAYERS" discipline).
+
+THE 3 REFUTED PLACEMENTS (design iterations, kept for the record)
+------------------------------------------------------------------
+1. Single-phase PRE-WINDING: fired on TRANSIENT anti-wound seams that
+   fix_inconsistent_winding harmonizes by itself (the drill f6 x f265
+   rim zipper: 6+ cascade splits, one per zipper edge; DRILL_SHAFT
+   pairs) => 2-phase design (record pre-winding, split only survivors).
+2. Phase 2 PRE-v5 (post-flapclean): fired on pairs the v5 audit
+   RESOLVES by flipping one side (4 extra HOUSING splits on
+   census-invisible pairs; the splits rippled the v5 component graph,
+   +1 manufactured sub-tol pair) => phase 2 moved AFTER the v5 audit
+   (the last winding-touching stage).
+3. Fat anchor via thickness (2*area/shortest, the s89 measure): fired
+   on 4+ HOUSING pairs the census classifies sub-tol (thin lips whose
+   shortest NON-shared edge is tiny inflates the measure) => aligned to
+   the probe's apex-height-over-shared-edge rule.
+
+LESSONS
+-------
+1. Stage-aware placement: a pass that acts on winding-adjacent state
+   must run AFTER every stage that could resolve or manufacture the
+   target class (winding BFS harmonizes transients; the v5 fixpoint
+   flips resolvable pairs) — else it either steals transients or gets
+   rippled by downstream flips.
+2. Measure alignment is not optional: the census's sub-tol rule is
+   apex-height-over-shared-edge; the s89 flapclean's ear rule is
+   2*area/shortest. A gate using the wrong measure fires on the other
+   pass's territory (measured: 4 spurious splits + v5 ripple).
+3. A pure-topology split (vertex clone, face-scoped) is the minimal
+   never-worsen action for born-folded seams: flips are blocked by
+   ripple trades (s99), removals open sub-resolution gaps, clipping is
+   heavy machinery. The flap remains as a sealed zero-gap double ply —
+   sim-irrelevant at 2e-5 lens scale.
+4. Every exempt class of the diagnostic census that production now
+   touches must be replicated in the production gate (the s94 knife-fin
+   pinch: without it, 4 exempt SPRING pairs unwelded + 2 new BUG lines).

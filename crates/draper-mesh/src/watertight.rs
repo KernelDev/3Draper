@@ -1666,6 +1666,468 @@ pub fn remove_cross_face_fold_flaps(mesh: &mut TriangleMesh, res_tol: f64) -> us
     n_removed
 }
 
+/// A detected cross-face born-fold pair (all gates passed).
+/// Vertex indices only — vertex indices are stable from merge to the end
+/// of the pipeline (vertices are only ever appended, never compacted), so
+/// the 4-tuple fingerprint `[min(ea,eb), max(ea,eb), min(ap0,ap1),
+/// max(ap0,ap1)]` identifies the same geometric pair across stages.
+pub struct BornFoldPair {
+    pub ea: u32,
+    pub eb: u32,
+    pub ap0: u32,
+    pub ap1: u32,
+    pub t0: usize,
+    pub t1: usize,
+}
+
+impl BornFoldPair {
+    pub fn fingerprint(&self) -> [u32; 4] {
+        [
+            self.ea.min(self.eb),
+            self.ea.max(self.eb),
+            self.ap0.min(self.ap1),
+            self.ap0.max(self.ap1),
+        ]
+    }
+}
+
+/// Shared guards for the s100 seam born-fold pass pair.
+/// Returns false when the pass is disabled / not applicable.
+fn bornfold_guards_ok(mesh: &TriangleMesh, res_tol: f64) -> bool {
+    if std::env::var("DRAPPER_SEAM_FOLD_SPLIT")
+        .map(|v| v == "0")
+        .unwrap_or(false)
+    {
+        return false;
+    }
+    if res_tol <= 0.0 || mesh.triangles.is_empty() {
+        return false;
+    }
+    let Some(ref fids) = mesh.triangle_face_ids else {
+        return false;
+    };
+    fids.len() == mesh.triangles.len()
+}
+
+/// Session-100 detection core: scan every manifold-2 cross-face edge and
+/// return ALL born-fold pairs (deterministic edge order), together with
+/// the edge map (reused by the split phase for collateral analysis).
+///
+/// Gates (see seam_bornfold_split for the full rationale):
+///   - manifold-2 edge, cross-face (fids differ), both normals valid,
+///     as-wound normal angle > 170°
+///   - fat anchor: max(thickness) >= res_tol (both-thin pairs are the
+///     sub-tolerance weld-noise class — not ours)
+///   - fold proof: same-side apexes (s0·s1 > 0 with both apexes solidly
+///     off the edge line), OR the same-traversal degenerate-ear
+///     signature (same directed traversal + one side a sub-resolution
+///     ear: thickness < res_tol AND area < 0.5·partner). A legit
+///     two-sided thin wall also has same traversal but clearly
+///     OPPOSITE-side apexes and no sub-resolution ear — excluded by both
+///     branches.
+///   - s89 deferral: opposite-traversal pairs that the s89 flapclean
+///     would remove (sub-resolution ear, or coincident duplicate) are
+///     skipped so the s89 stage stays bit-exact.
+fn bornfold_scan(
+    mesh: &TriangleMesh,
+    res_tol: f64,
+) -> Option<(
+    Vec<BornFoldPair>,
+    std::collections::HashMap<(u32, u32), Vec<(usize, u32, u32)>>,
+)> {
+    let Some(ref fids) = mesh.triangle_face_ids else {
+        return None;
+    };
+    use std::collections::HashMap;
+    let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            edge_map.entry(key).or_default().push((ti, v0, v1));
+        }
+    }
+    // Deterministic visitation order (s87 lesson 1).
+    let mut edges: Vec<(&(u32, u32), &Vec<(usize, u32, u32)>)> = edge_map.iter().collect();
+    edges.sort_unstable_by_key(|(e, _)| **e);
+
+    let p = |vi: u32| &mesh.vertices[vi as usize];
+    let mut out: Vec<BornFoldPair> = Vec::new();
+    for (edge, owners) in &edges {
+        if owners.len() != 2 {
+            continue;
+        }
+        let (t0, da0, db0) = owners[0];
+        let (t1, da1, db1) = owners[1];
+        let (fid0, fid1) = (fids[t0], fids[t1]);
+        if fid0 == fid1 {
+            continue; // same-face: fix_inconsistent_winding territory
+        }
+        let same_trav = da0 == da1 && db0 == db1;
+        let opp_trav = da0 == db1 && db0 == da1;
+        if !same_trav && !opp_trav {
+            continue;
+        }
+        let (tri0, tri1) = (mesh.triangles[t0], mesh.triangles[t1]);
+        let (Some(n0), Some(n1)) = (
+            compute_tri_normal(&mesh.vertices, &tri0),
+            compute_tri_normal(&mesh.vertices, &tri1),
+        ) else {
+            continue;
+        };
+        let dot = n0.0 * n1.0 + n0.1 * n1.1 + n0.2 * n1.2;
+        let (l0, l1) = (
+            (n0.0 * n0.0 + n0.1 * n0.1 + n0.2 * n0.2).sqrt(),
+            (n1.0 * n1.0 + n1.1 * n1.1 + n1.2 * n1.2).sqrt(),
+        );
+        let cos_angle = (dot / (l0 * l1)).max(-1.0).min(1.0);
+        if cos_angle.acos().to_degrees() <= 170.0 {
+            continue;
+        }
+        let (area0, area1) = (
+            tri_area(&mesh.vertices, &tri0),
+            tri_area(&mesh.vertices, &tri1),
+        );
+        if area0 <= 0.0 || area1 <= 0.0 {
+            continue;
+        }
+        let thickness_of = |t: &[u32; 3], area: f64| -> f64 {
+            let l01 = p(t[0]).distance_to(p(t[1]));
+            let l12 = p(t[1]).distance_to(p(t[2]));
+            let l20 = p(t[2]).distance_to(p(t[0]));
+            let shortest = l01.min(l12).min(l20);
+            if shortest > 1e-15 {
+                2.0 * area / shortest
+            } else {
+                0.0
+            }
+        };
+        let (th0, th1) = (thickness_of(&tri0, area0), thickness_of(&tri1, area1));
+        // Apex-side test (needed for the fat anchor below).
+        let (ea, eb) = **edge;
+        let apex_of = |t: &[u32; 3], x: u32, y: u32| -> u32 {
+            for &v in t {
+                if v != x && v != y {
+                    return v;
+                }
+            }
+            u32::MAX
+        };
+        let (ap0, ap1) = (apex_of(&tri0, ea, eb), apex_of(&tri1, ea, eb));
+        if ap0 == u32::MAX || ap1 == u32::MAX {
+            continue;
+        }
+        let (pa, pb, q0, q1) = (p(ea), p(eb), p(ap0), p(ap1));
+        let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+        let side = |q: &Point3d| {
+            let d = (q.x - pa.x, q.y - pa.y, q.z - pa.z);
+            (
+                e.1 * d.2 - e.2 * d.1,
+                e.2 * d.0 - e.0 * d.2,
+                e.0 * d.1 - e.1 * d.0,
+            )
+        };
+        let (s0, s1) = (side(&q0), side(&q1));
+        let dot_ss = s0.0 * s1.0 + s0.1 * s1.1 + s0.2 * s1.2;
+        let edge_len = (e.0 * e.0 + e.1 * e.1 + e.2 * e.2).sqrt();
+        if edge_len <= 1e-15 {
+            continue;
+        }
+        let (mag0, mag1) = (
+            (s0.0 * s0.0 + s0.1 * s0.1 + s0.2 * s0.2).sqrt(),
+            (s1.0 * s1.0 + s1.1 * s1.1 + s1.2 * s1.2).sqrt(),
+        );
+        // |s| = |e| · dist(apex, edge line).
+        let (h0, h1) = (mag0 / edge_len, mag1 / edge_len);
+        // Fat anchor — CENSUS-ALIGNED (s100 measurement): the probe's
+        // sub-tol rule is `h0 < tol && h1 < tol` with h = the apex height
+        // over the shared edge line, NOT 2·area/shortest. The first s100
+        // draft used the thickness measure and fired on 4+ HOUSING pairs
+        // that the census classifies sub-tol (thin lips whose shortest
+        // NON-shared edge is tiny, inflating 2·area/shortest) — splitting
+        // them rippled the v5 audit (+new sub-tol pairs). Only pairs the
+        // census could count REAL are ours.
+        if h0.max(h1) < res_tol {
+            continue;
+        }
+        let ear_like =
+            th0.min(th1) < res_tol && area0.min(area1) < 0.5 * area0.max(area1);
+        // s89 deferral: leave the flapclean's ear/dup classes to it.
+        if opp_trav && ear_like {
+            continue;
+        }
+        if opp_trav && (area0 - area1).abs() <= 0.02 * area0.max(area1) {
+            let c = |t: &[u32; 3]| {
+                let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+                (
+                    (a.x + b.x + c.x) / 3.0,
+                    (a.y + b.y + c.y) / 3.0,
+                    (a.z + b.z + c.z) / 3.0,
+                )
+            };
+            let (c0, c1) = (c(&tri0), c(&tri1));
+            let cd = ((c0.0 - c1.0).powi(2)
+                + (c0.1 - c1.1).powi(2)
+                + (c0.2 - c1.2).powi(2))
+            .sqrt();
+            if cd < res_tol {
+                continue; // coincident duplicate: s89's class
+            }
+        }
+        // |s| = |e| · dist(apex, edge line): an apex is "solid" when its
+        // distance to the line exceeds 2% of the edge length.
+        let solid_floor = 0.02 * edge_len * edge_len;
+        let fold_proof = if mag0 > solid_floor && mag1 > solid_floor {
+            dot_ss > 0.0 // same-side apexes: genuine overlap flap
+        } else {
+            // Degenerate apex (on the edge line): the same-traversal
+            // sub-resolution ear signature is the only reliable proof.
+            same_trav && ear_like
+        };
+        if !fold_proof {
+            continue;
+        }
+        // s94 knife-fin pinch deferral (measured s100: without this the
+        // pass split the transmission SPRING f2/f3 pinch — 4 exempt pairs
+        // unwelded, +2 watertight BUG lines). Two offset copies stacked
+        // across a resolvable wall gap (the flattened-tube pinch): same-
+        // side apexes that nearly coincide (apex-offset ≤ 0.1·hinge
+        // reach), both perpendicular gaps ≥ res_tol (the copies are
+        // disjoint — resolvable), and the offset wall-normal (≤ 3·gap).
+        // The s94 census exemption, replicated for the production path.
+        {
+            let seg_dist = |q: &Point3d| -> f64 {
+                let ap = [q.x - pa.x, q.y - pa.y, q.z - pa.z];
+                let t = ((ap[0] * e.0 + ap[1] * e.1 + ap[2] * e.2)
+                    / (edge_len * edge_len))
+                    .clamp(0.0, 1.0);
+                let cx = pa.x + t * e.0 - q.x;
+                let cy = pa.y + t * e.1 - q.y;
+                let cz = pa.z + t * e.2 - q.z;
+                (cx * cx + cy * cy + cz * cz).sqrt()
+            };
+            let (d_h0, d_h1) = (seg_dist(&q0), seg_dist(&q1));
+            let d_min = d_h0.min(d_h1).max(1e-30);
+            let c01 = ((q0.x - q1.x).powi(2)
+                + (q0.y - q1.y).powi(2)
+                + (q0.z - q1.z).powi(2))
+            .sqrt();
+            if c01 <= 0.1 * d_min {
+                // Resolvable perpendicular gaps (also proves disjointness).
+                let plane_dist = |q: &Point3d, t: &[u32; 3]| -> f64 {
+                    let (ta, tb, tc) = (p(t[0]), p(t[1]), p(t[2]));
+                    let e1 = [tb.x - ta.x, tb.y - ta.y, tb.z - ta.z];
+                    let e2 = [tc.x - ta.x, tc.y - ta.y, tc.z - ta.z];
+                    let n = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if l <= 1e-30 {
+                        return f64::INFINITY;
+                    }
+                    let dq = [q.x - ta.x, q.y - ta.y, q.z - ta.z];
+                    (n[0] * dq[0] + n[1] * dq[1] + n[2] * dq[2]) / l
+                };
+                let g0 = plane_dist(&q0, &tri1).abs();
+                let g1 = plane_dist(&q1, &tri0).abs();
+                let gap_floor = res_tol.max(1e-9);
+                if g0 >= gap_floor && g1 >= gap_floor && c01 <= 3.0 * g0.max(g1) {
+                    continue; // knife-fin pinch: s94's exempt class
+                }
+            }
+        }
+        out.push(BornFoldPair {
+            ea,
+            eb,
+            ap0,
+            ap1,
+            t0,
+            t1,
+        });
+    }
+    Some((out, edge_map))
+}
+
+/// Session-100 PHASE 1 (pre-winding): record the born-fold seam pairs.
+///
+/// The pre-winding mesh also contains TRANSIENT anti-wound seams that
+/// fix_inconsistent_winding will harmonize by itself (measured: the drill
+/// f6×f265 rim zipper — six same-traversal ear pairs pre-winding, only one
+/// degenerate sliver pair surviving to the final census). Splitting the
+/// transients would be pure collateral damage, so phase 1 only RECORDS the
+/// fingerprints here; phase 2 (seam_bornfold_split, post-flapclean) splits
+/// only the pairs that SURVIVED every winding stage unchanged.
+pub fn seam_bornfold_record(mesh: &TriangleMesh, res_tol: f64) -> Vec<[u32; 4]> {
+    if !bornfold_guards_ok(mesh, res_tol) {
+        return Vec::new();
+    }
+    match bornfold_scan(mesh, res_tol) {
+        Some((pairs, _)) => pairs.iter().map(|p| p.fingerprint()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Session-100 PHASE 2 (post-flapclean): split the SURVIVING born-fold
+/// seams — the assembly-level cross-face fold census for seam pairs that
+/// are BORN folded at emission (analytic dihedral >170° with dmax≈0 from
+/// merge onward; s99 root_cause_map: the 3 drill REAL emission-fold pairs
+/// (6,265)/(3,235)/(3,248)).
+///
+/// The per-face strip builders cannot see the neighbour face's emission
+/// (s98 lesson-3 pattern), so the anti-wound double coverage at a seam is
+/// invisible to every per-face accept gate. Two signature classes survive
+/// every existing pass:
+///   A. TANGENT-STRIP FOLD — a fillet band's boundary row lies in the
+///      tangent plane and folds over the plane fan's needle across the
+///      seam edge: opposite traversal, same-side apexes, but BETWEEN the
+///      s89 flapclean's removal classes (area ratio ~0.67, centroids far
+///      apart) so nothing takes it.
+///   B. SAME-TRAVERSAL FOLD — a degenerate rim sliver welded to a fat
+///      corner-fan needle with the SAME directed traversal (the s89 gate
+///      requires opposite traversal, so it is rejected there); the
+///      sliver's apex lies on the edge line, making the apex-side test
+///      numerically meaningless.
+///
+/// Action: SPLIT the seam — clone ONE edge vertex on ONE face side (all of
+/// that face's triangles using the vertex are remapped, so face-internal
+/// connectivity is untouched), choosing the (vertex, side) with the least
+/// collateral: the smallest total length of cross-face welds at that
+/// vertex that the clone breaks (the fold edge itself excluded). No vertex
+/// moves, no winding changes, no triangle is added or removed — the flap
+/// stays geometrically sealed (double-ply, zero gap) but the census pair
+/// disappears because the edge is no longer shared. Never-worsen by
+/// construction: unwelding cannot create a shared edge, hence no new pair.
+///
+/// Only pairs whose fingerprint was recorded by PHASE 1 (pre-winding) are
+/// split: pairs manufactured BY the winding stage (the s99 BFS class) and
+/// pairs resolved by it (the transients) are not ours to touch.
+///
+/// Kill-switch: DRAPPER_SEAM_FOLD_SPLIT=0 (gates both phases).
+/// Diagnostics: DRAPPER_BORNFOLD_DEBUG=1.
+pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32; 4]]) -> usize {
+    if !bornfold_guards_ok(mesh, res_tol) || record.is_empty() {
+        return 0;
+    }
+    let debug = std::env::var("DRAPPER_BORNFOLD_DEBUG").is_ok();
+    use std::collections::HashSet;
+    let record: HashSet<[u32; 4]> = record.iter().copied().collect();
+
+    let mut n_total = 0usize;
+    // One action per iteration on the LIVE mesh: each split kills its
+    // triggering pair and cannot create a new shared edge, so the loop is
+    // guaranteed to terminate (bounded by the initial pair count).
+    loop {
+        // ── Detection phase (immutable borrows) ──────────────────────
+        let plan = {
+            let Some((pairs, edge_map)) = bornfold_scan(mesh, res_tol) else {
+                break;
+            };
+            let Some(pair) = pairs.iter().find(|p| record.contains(&p.fingerprint())) else {
+                break;
+            };
+            let (ea, eb, t0, t1) = (pair.ea, pair.eb, pair.t0, pair.t1);
+
+            // ── Choose the (vertex, face-side) clone with least collateral ──
+            // candidate (v, F): collateral = Σ |v−w| over edges (v,w) ≠ the
+            // fold edge that have ≥1 owner with fid==F and ≥1 owner with
+            // fid!=F (exactly the welds the clone would break); remap_count
+            // = #tris with fid==F containing v.
+            let fold_key = if ea < eb { (ea, eb) } else { (eb, ea) };
+            let Some(ref fids) = mesh.triangle_face_ids else {
+                break;
+            };
+            let (fid0, fid1) = (fids[t0], fids[t1]);
+            let p = |vi: u32| &mesh.vertices[vi as usize];
+            let mut best: Option<(f64, usize, u32, u64)> = None; // (collateral, remap, v, F)
+            for (v, f) in [(ea, fid0), (eb, fid0), (ea, fid1), (eb, fid1)] {
+                let mut collateral = 0.0f64;
+                for ((u, w), owners) in edge_map.iter() {
+                    if (*u, *w) == fold_key {
+                        continue;
+                    }
+                    if *u != v && *w != v {
+                        continue;
+                    }
+                    let mut has_f = false;
+                    let mut has_other = false;
+                    for &(ti, _, _) in owners {
+                        if fids[ti] == f {
+                            has_f = true;
+                        } else {
+                            has_other = true;
+                        }
+                    }
+                    if has_f && has_other {
+                        let other = if *u == v { *w } else { *u };
+                        let d = p(v).distance_to(p(other));
+                        collateral += d;
+                    }
+                }
+                let remap = mesh
+                    .triangles
+                    .iter()
+                    .enumerate()
+                    .filter(|(ti, tri)| fids[*ti] == f && tri.contains(&v))
+                    .count();
+                if remap == 0 {
+                    continue;
+                }
+                let cand = (collateral, remap, v, f);
+                if best.is_none() || (collateral, remap) < (best.unwrap().0, best.unwrap().1) {
+                    best = Some(cand);
+                }
+            }
+            let Some((_, _, v, f)) = best else {
+                break;
+            };
+            Some((v, f, (ea, eb), t0, t1))
+        };
+
+        // ── Mutation phase (no outstanding borrows) ───────────────────
+        let Some((v, f, edge, t0, t1)) = plan else {
+            break;
+        };
+        let new_idx = mesh.vertices.len() as u32;
+        let src = mesh.vertices[v as usize];
+        mesh.vertices.push(src);
+        // Keep the per-vertex normals array aligned when present.
+        if let Some(ref mut norms) = mesh.normals {
+            if norms.len() == new_idx as usize && (v as usize) < norms.len() {
+                let n = norms[v as usize];
+                norms.push(n);
+            }
+        }
+        // Remap v → new_idx in every triangle of face f that uses v.
+        if let Some(ref fids) = mesh.triangle_face_ids {
+            for ti in 0..mesh.triangles.len() {
+                if fids[ti] != f {
+                    continue;
+                }
+                let tri = &mut mesh.triangles[ti];
+                for k in 0..3 {
+                    if tri[k] == v {
+                        tri[k] = new_idx;
+                    }
+                }
+            }
+        }
+        n_total += 1;
+        if debug {
+            eprintln!(
+                "BORNFOLD_SPLIT: seam edge ({},{}) pair T{}/T{} \
+                 → cloned v{}→v{} for face {} (collateral-min choice)",
+                edge.0, edge.1, t0, t1, v, new_idx, f
+            );
+        }
+        if n_total > 100_000 {
+            break; // safety net (should be unreachable)
+        }
+    }
+    n_total
+}
+
 /// Get the directed edge (a, b) for edge (ev0, ev1) in triangle [v0, v1, v2].
 /// Returns Some((a, b)) where the edge goes a→b in the triangle's winding.
 /// Returns None if the edge is not part of the triangle.
