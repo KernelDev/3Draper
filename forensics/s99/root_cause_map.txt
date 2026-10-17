@@ -1,0 +1,91 @@
+s99 ROOT-CAUSE MAP: the 8 REAL drill pairs (HOUSING 3 + HOUSING_MIRROR 5)
+=========================================================================
+Baseline: s98 castext (bit-identical reproduction, sorted-md5 equal).
+Method: s99_band_fold_dump (emission UV attribution via FaceInfo.uv_triangles
++ Surface::point_at) + winding-aware stage dihedral tracking
+(scripts/s99_track_real_pairs.py over DRAPPER_DUMP_STAGE_OBJS p6-p9).
+
+CRITICAL PROBE LESSON: in fold_face_probe output the "VERTS T{t0}/T{t1}"
+line is printed BEFORE its pair line (source line 387 < 577) — a VERTS line
+belongs to the NEXT pair line, not the previous one. s99 lost an hour to
+this off-by-one association (t591/t39449 = the SUBTOL (3,228) pair, not the
+REAL (6,265)).
+
+Stage order (execution, NOT the s98 list order): merge -> weld -> tj ->
+gapfill -> winding(fix_inconsistent_winding) -> [finaltj] -> flapclean(s89)
+-> postweldwind(v5 audit). Pass->brep for drill: p0/p1=DRILL_SHAFT,
+p2/p3=GEAR, p4/p5=SHAFT_SLEEVE, p6/p7=HOUSING, p8/p9=HM. Final mesh =
+pass6 (HOUSING) / pass8 (HM) — the gated-retry pass output is discarded.
+
+Pair table (census faces = emission faces; world mid; T = final tri idx):
+---------------------------------------------------------------------------
+(6,265)  H  f6 Nurbs(6x15) x f265 Plane    mid=(0.11,5.29,3.50) T1215,T49022
+         EMISSION-FOLD: analytic dihedral 179.94 deg at emission (dmax 0).
+         f265 side = domain-spanning corner fan (UV u: 0.56->0.00), the
+         h=0.5672 needle; f6 side = micro-triangle. 180 deg from MERGE on.
+(62,62)  H  f62+f62 Sphere                  mid=(0.48,-1.01,1.36) T13183,T13188
+         MERGE-DEFORM: analytic 103.45 deg (clean), 1 shared UV pt; the
+         merge snaps two near-coincident ring verts (d 0.0028/0.0056) and
+         the deformed thin blades fold. 180 deg from MERGE on.
+(3,235)  H  f3 Plane x f235 Nurbs(4x9)      mid=(1.33,6.00,1.42) T370,T41259
+         EMISSION-FOLD: analytic 179.99 deg. The NURBS_FILLET_BAND f235
+         boundary row (v=0.79) vs the f3 plane corner fan (domain corner
+         -0.89,1.33) cover the same y=6.00 seam strip, anti-wound.
+         MIRROR TWIN of HM (3,248). 180 deg from MERGE on.
+(3,243)  HM f3 Plane x f243 Nurbs(7x9)      mid=(-0.34,6.00,3.60) T560,T41561
+         BFS RIPPLE: clean 0.00 deg through gapfill; fix_inconsistent_
+         winding's single-pass BFS flips T41561 for an edge with a THIRD
+         triangle; the flip manufactures the pair at d-after-winding.
+         Local parity conflict (non-orientable seam cluster).
+(30,30)  HM f30+f30 Nurbs(4x10)             mid=(-1.11,-0.03,3.90) T7443,T7449
+         BFS RELABEL: clean 0.18 deg; SAME-SIDE apex pair (duplicate
+         coverage, both apexes below the shared edge); BFS sees
+         same-direction traversal -> "inconsistent" -> flips one ->
+         opposite-traversal + 180 deg = manufactured FOLD-OVER.
+(3,248)  HM f3 Plane x f248 Nurbs(4x9)      mid=(-1.33,6.00,1.42) T398,T43000
+         EMISSION-FOLD: analytic 179.99 deg. Mirror twin of (3,235).
+(206,206) HM f206+f206 Torus                mid=(-0.48,-0.14,4.60) T33981,T33982
+         MERGE-DEFORM: analytic 19.81 deg (clean, shared UV edge); merge
+         snaps two ring verts 0.0158 apart (near_uv_dists 3.59e-2), the
+         deformed blades fold. 180 deg from MERGE on.
+(3,3)    HM f3+f3 Plane (COINCIDENT)        mid=(-1.39,6.00,2.82) T522,T662
+         POSTWELD FIXPOINT BOUNDARY: clean 0.00 deg through flapclean;
+         both tris vote-bad+solid, both in the v5 flip set; the fixpoint
+         BLOCKs one via a third edge, the pair edge re-examined as
+         exactly-one-flipped hits the FREE-SKIP (h_over_shared 0.0027/
+         0.0302 both < res_tol 0.0302) -> the other stays flipped ->
+         REAL pair (census thickness h=0.0303 >= 0.0302). Measure
+         mismatch h_over_shared vs thickness at ~2e-5 from the tolerance.
+
+Mechanism totals: MERGE/EMISSION folds 5, BFS winding-stage 2, postweld
+fixpoint 1.
+
+REFUTED FIXES (both measured, both NET REGRESSION — do not retry as-is):
+---------------------------------------------------------------------------
+1. BFS never-manufacture guards (same-side skip + ripple guard,
+   DRAPPER_WIND_BFS_GUARD): drill REAL 8 -> 256. The single-pass BFS is a
+   load-bearing flood-fill; local guards fragment the global orientation.
+2. Fixpoint free-skip thickness alignment (require BOTH h_over_shared and
+   thickness under tol, DRAPPER_FIXPOINT_THICK_SKIP): drill REAL 8 -> 12.
+   Kills (3,3) but 60 disagreement free-skips (strip geometry: long shared
+   base, h_over_shared small, thickness ~ base large) become BLOCKs ->
+   poison cascade manufactures (243,243)x2 + (169,186) HOUSING and
+   (239,239)x2 HM. The s91 prediction ("gating on the stricter measure
+   blocked whole clusters") reproduces exactly.
+
+S100 DESIGN CONSTRAINTS (from this session):
+- The 3 EMISSION-FOLD pairs ((6,265)+(3,235)/(3,248) mirror twins) need
+  seam-zone emission work: the band boundary row and the plane corner fan
+  double-cover the y=6.00 seam strip anti-wound. Candidate: cross-face
+  fold census INSIDE the band-rescue accept gate (the s98 lesson-3
+  pattern: rescues gated by topological debt are blind to geometric debt)
+  — but the census needs the NEIGHBOUR face's emission, which the
+  per-face strip builder does not see => assembly-level check.
+- The 2 MERGE-DEFORM pairs ((62,62),(206,206)): dedup snaps near-coincident
+  ring verts (0.016-0.036 apart) deforming thin blades. Candidate: a
+  pre-merge near-coincident vertex audit on thin blades, or a post-merge
+  census-driven local retriangulation (quad-flip class, opposite-side).
+- The 2 BFS pairs + 1 fixpoint pair are winding-parity/boundary flicker at
+  non-orientable seam clusters; local un-flip is blocked by ripple trades
+  (measured). Candidate: s96 graph-parity solver extension to these
+  clusters, or accept as chronic boundary noise.
