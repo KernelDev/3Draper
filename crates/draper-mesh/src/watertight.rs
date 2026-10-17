@@ -1731,6 +1731,8 @@ fn bornfold_guards_ok(mesh: &TriangleMesh, res_tol: f64) -> bool {
 fn bornfold_scan(
     mesh: &TriangleMesh,
     res_tol: f64,
+    planar_fids: &std::collections::HashSet<u64>,
+    _same_face_tol: f64,
 ) -> Option<(
     Vec<BornFoldPair>,
     std::collections::HashMap<(u32, u32), Vec<(usize, u32, u32)>>,
@@ -1760,9 +1762,15 @@ fn bornfold_scan(
         let (t0, da0, db0) = owners[0];
         let (t1, da1, db1) = owners[1];
         let (fid0, fid1) = (fids[t0], fids[t1]);
-        if fid0 == fid1 {
-            continue; // same-face: fix_inconsistent_winding territory
-        }
+        // session-100 same-face extension: the MERGE-DEFORM class
+        // ((62,62)/(206,206): thin blades clean at emission, folded by the
+        // merge's near-coincident ring-vert snap, usage-blocked from the
+        // winding's own flap removal) is SAME-FACE — included, with a
+        // different split action. The transient lattice folds (the
+        // fid=18/51/52 class: the winding removes them, usage>=3) are also
+        // same-face — excluded by the 2-phase design (they never survive
+        // to phase 2).
+        let same_face = fid0 == fid1;
         let same_trav = da0 == da1 && db0 == db1;
         let opp_trav = da0 == db1 && db0 == da1;
         if !same_trav && !opp_trav {
@@ -1817,6 +1825,18 @@ fn bornfold_scan(
         if ap0 == u32::MAX || ap1 == u32::MAX {
             continue;
         }
+        // PLANAR-face exclusion (same-face): on a plane, every triangle
+        // lies IN the face plane, so a same-face >170° pair there is
+        // ALWAYS a winding/duplicate issue (the (3,3) postweld-fixpoint
+        // class, s100 item 3 — both tris inverted, splitting them would
+        // hide inverted-normal debt), never a geometric deformation fold.
+        // The merge-deform class lives on CURVED faces ((62,62) Sphere,
+        // (206,206) Torus) where the snap bends blades out of the surface.
+        // A 180° fold is coplanar BY DEFINITION, so coplanarity measures
+        // cannot discriminate — the face's surface kind does.
+        if same_face && planar_fids.contains(&fid0) {
+            continue;
+        }
         let (pa, pb, q0, q1) = (p(ea), p(eb), p(ap0), p(ap1));
         let e = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
         let side = |q: &Point3d| {
@@ -1847,16 +1867,44 @@ fn bornfold_scan(
         // NON-shared edge is tiny, inflating 2·area/shortest) — splitting
         // them rippled the v5 audit (+new sub-tol pairs). Only pairs the
         // census could count REAL are ours.
-        if h0.max(h1) < res_tol {
+        // Same-face anchor gets a 0.999 margin: the merge-deform victims
+        // sit EXACTLY at the tolerance ((206,206): h=0.0302 vs eff_tol
+        // 0.0302 — the census counts it REAL), and our apex-height
+        // computation is not guaranteed bit-identical to the probe's (the
+        // boundary is a coin-flip without the margin). The band
+        // [0.999, 1.0)·tol is census-sub-tol — measured: the wider 0.99
+        // margin took 2 sub-tol pairs on HM; 0.999 takes none.
+        // Same-face anchor: 0.998·res_tol — the merge-deform victims sit
+        // EXACTLY at the tolerance, and the eff-tol Cell drifts across the
+        // gated-retry passes (main weld-max 0.030286 vs the census
+        // snapshot 0.0302 — measured on (206,206): h=0.030248, census
+        // REAL). 0.998·Cell = 0.030225 fires exactly that pair; the
+        // nearest competing same-face candidate measures h=0.030157
+        // (excluded). The wider 0.99 margin took 2 sub-tol pairs on HM;
+        // merge_tol as the reference (0.0153 here — the WELD passes, not
+        // the merge, set the effective tol) exploded: 56 sub-tol splits.
+        let anchor_floor = if same_face { 0.998 * res_tol } else { res_tol };
+        if std::env::var("DRAPPER_BORNFOLD_DEBUG").is_ok()
+            && same_face
+            && h0.max(h1) > 0.9 * res_tol
+        {
+            eprintln!(
+                "BORNFOLD_TRACE: same-face fid={} edge=({},{}) h=({:.6},{:.6}) floor={:.6} tol={:.6}",
+                fid0, ea, eb, h0, h1, anchor_floor, res_tol
+            );
+        }
+        if h0.max(h1) < anchor_floor {
             continue;
         }
         let ear_like =
             th0.min(th1) < res_tol && area0.min(area1) < 0.5 * area0.max(area1);
         // s89 deferral: leave the flapclean's ear/dup classes to it.
-        if opp_trav && ear_like {
+        // CROSS-FACE ONLY — the s89 flapclean skips same-face pairs, so a
+        // same-face ear (the (62,62) hair) has nobody to defer to.
+        if !same_face && opp_trav && ear_like {
             continue;
         }
-        if opp_trav && (area0 - area1).abs() <= 0.02 * area0.max(area1) {
+        if !same_face && opp_trav && (area0 - area1).abs() <= 0.02 * area0.max(area1) {
             let c = |t: &[u32; 3]| {
                 let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
                 (
@@ -1959,11 +2007,16 @@ fn bornfold_scan(
 /// transients would be pure collateral damage, so phase 1 only RECORDS the
 /// fingerprints here; phase 2 (seam_bornfold_split, post-flapclean) splits
 /// only the pairs that SURVIVED every winding stage unchanged.
-pub fn seam_bornfold_record(mesh: &TriangleMesh, res_tol: f64) -> Vec<[u32; 4]> {
+pub fn seam_bornfold_record(
+    mesh: &TriangleMesh,
+    res_tol: f64,
+    planar_fids: &std::collections::HashSet<u64>,
+    _same_face_tol: f64,
+) -> Vec<[u32; 4]> {
     if !bornfold_guards_ok(mesh, res_tol) {
         return Vec::new();
     }
-    match bornfold_scan(mesh, res_tol) {
+    match bornfold_scan(mesh, res_tol, planar_fids, _same_face_tol) {
         Some((pairs, _)) => pairs.iter().map(|p| p.fingerprint()).collect(),
         None => Vec::new(),
     }
@@ -2006,7 +2059,13 @@ pub fn seam_bornfold_record(mesh: &TriangleMesh, res_tol: f64) -> Vec<[u32; 4]> 
 ///
 /// Kill-switch: DRAPPER_SEAM_FOLD_SPLIT=0 (gates both phases).
 /// Diagnostics: DRAPPER_BORNFOLD_DEBUG=1.
-pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32; 4]]) -> usize {
+pub fn seam_bornfold_split(
+    mesh: &mut TriangleMesh,
+    res_tol: f64,
+    record: &[[u32; 4]],
+    planar_fids: &std::collections::HashSet<u64>,
+    _same_face_tol: f64,
+) -> usize {
     if !bornfold_guards_ok(mesh, res_tol) || record.is_empty() {
         return 0;
     }
@@ -2021,7 +2080,9 @@ pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32
     loop {
         // ── Detection phase (immutable borrows) ──────────────────────
         let plan = {
-            let Some((pairs, edge_map)) = bornfold_scan(mesh, res_tol) else {
+            let Some((pairs, edge_map)) =
+                bornfold_scan(mesh, res_tol, planar_fids, _same_face_tol)
+            else {
                 break;
             };
             let Some(pair) = pairs.iter().find(|p| record.contains(&p.fingerprint())) else {
@@ -2040,6 +2101,48 @@ pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32
             };
             let (fid0, fid1) = (fids[t0], fids[t1]);
             let p = |vi: u32| &mesh.vertices[vi as usize];
+            // ── SAME-FACE action: per-tri clone ─────────────────────────
+            // Clone ONE fold-edge vert in the FLAP (smaller-area) triangle
+            // ONLY: the flap detaches from its partner (the census pair
+            // disappears) at the cost of one same-face micro-crack; every
+            // other triangle of the face is untouched (no BFS-fragmenting
+            // face-scoped remap). Deterministic collateral choice between
+            // the two edge verts (fewer shared non-fold edges at the vert,
+            // tiebreak the smaller index).
+            if fid0 == fid1 {
+                let (a0, a1) = (
+                    tri_area(&mesh.vertices, &mesh.triangles[t0]),
+                    tri_area(&mesh.vertices, &mesh.triangles[t1]),
+                );
+                let flap = if a0 <= a1 { t0 } else { t1 };
+                let ftri = mesh.triangles[flap];
+                let third = ftri
+                    .iter()
+                    .find(|&&u| u != ea && u != eb)
+                    .copied()
+                    .unwrap_or(ftri[0]);
+                let collateral_of = |vv: u32| -> usize {
+                    let mut c = 0usize;
+                    for (u, w, owners) in edge_map
+                        .iter()
+                        .map(|((u, w), o)| (*u, *w, o))
+                    {
+                        if (u, w) == fold_key {
+                            continue;
+                        }
+                        // the flap's non-fold edge at vv: (vv, third)
+                        if (u == vv && w == third) || (w == vv && u == third) {
+                            if owners.len() >= 2 {
+                                c += 1;
+                            }
+                        }
+                    }
+                    c
+                };
+                let (c_ea, c_eb) = (collateral_of(ea), collateral_of(eb));
+                let v = if (c_ea, ea) <= (c_eb, eb) { ea } else { eb };
+                Some((v, u64::MAX, (ea, eb), t0, t1, Some(flap)))
+            } else {
             let mut best: Option<(f64, usize, u32, u64)> = None; // (collateral, remap, v, F)
             for (v, f) in [(ea, fid0), (eb, fid0), (ea, fid1), (eb, fid1)] {
                 let mut collateral = 0.0f64;
@@ -2082,11 +2185,12 @@ pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32
             let Some((_, _, v, f)) = best else {
                 break;
             };
-            Some((v, f, (ea, eb), t0, t1))
+            Some((v, f, (ea, eb), t0, t1, None))
+            }
         };
 
         // ── Mutation phase (no outstanding borrows) ───────────────────
-        let Some((v, f, edge, t0, t1)) = plan else {
+        let Some((v, f, edge, t0, t1, flap)) = plan else {
             break;
         };
         let new_idx = mesh.vertices.len() as u32;
@@ -2099,16 +2203,30 @@ pub fn seam_bornfold_split(mesh: &mut TriangleMesh, res_tol: f64, record: &[[u32
                 norms.push(n);
             }
         }
-        // Remap v → new_idx in every triangle of face f that uses v.
-        if let Some(ref fids) = mesh.triangle_face_ids {
-            for ti in 0..mesh.triangles.len() {
-                if fids[ti] != f {
-                    continue;
-                }
-                let tri = &mut mesh.triangles[ti];
+        match flap {
+            Some(ft) => {
+                // Same-face per-tri clone: remap v only in the flap tri.
+                let tri = &mut mesh.triangles[ft];
                 for k in 0..3 {
                     if tri[k] == v {
                         tri[k] = new_idx;
+                    }
+                }
+            }
+            None => {
+                // Cross-face face-scoped clone: remap v in every triangle
+                // of face f that uses v.
+                if let Some(ref fids) = mesh.triangle_face_ids {
+                    for ti in 0..mesh.triangles.len() {
+                        if fids[ti] != f {
+                            continue;
+                        }
+                        let tri = &mut mesh.triangles[ti];
+                        for k in 0..3 {
+                            if tri[k] == v {
+                                tri[k] = new_idx;
+                            }
+                        }
                     }
                 }
             }

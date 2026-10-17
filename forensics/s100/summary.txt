@@ -108,3 +108,66 @@ LESSONS
 4. Every exempt class of the diagnostic census that production now
    touches must be replicated in the production gate (the s94 knife-fin
    pinch: without it, 4 exempt SPRING pairs unwelded + 2 new BUG lines).
+
+=====================================================================
+ADDENDUM — ITEM 2: the SAME-FACE MERGE-DEFORM extension (same session)
+=====================================================================
+Target: the 2 same-face MERGE-DEFORM REAL pairs — (62,62) HOUSING Sphere
+(hair h=0.0014 folded over a fat blade h=0.0349, analytic 103.45 clean)
++ (206,206) HM Torus (h=0.0302/0.0225, analytic 19.81 clean) — thin
+blades deformed by the merge's near-coincident ring-vert snaps
+(d<=0.007), usage-blocked from the winding's own same-face flap removal.
+
+EXTENSION: bornfold_scan admits same-face pairs (per-tri clone action:
+ONE fold-edge vert cloned in the SMALLER-area flap triangle only — the
+flap detaches at the cost of one same-face micro-crack; no face-scoped
+remap, no BFS fragmentation). Gates for same-face: >170 deg, fat anchor
+0.998*res_tol, same-side apexes / same-traversal ear, knife-fin deferral;
+EXCLUDED: same-face pairs on PLANAR faces (on a plane every same-face
+170 deg pair is winding/duplicate debt — the (3,3) fixpoint class, item
+3 — never a deformation fold; a 180 deg fold is coplanar BY DEFINITION,
+so coplanarity measures cannot discriminate, the surface kind does).
+
+MEASURED: drill REAL 8 -> 3 (HOUSING 3->0 incl. (62,62); HM 5->3 incl.
+(206,206)); the remaining 3 = exactly the item-3 triple ((3,243),(30,30)
+BFS + (3,3) fixpoint). Sub-tol census bit-stable (345=345, 452=452).
+Corpus: compressor 15 -> 12 REAL (3 same-class debt pairs, sub-tol
+141=141 bit-stable, BUG lines 4=4); the other 6 files IDENTICAL.
+BUG lines drill 10=10; bnd delta: HOUSING +8, HM +5 (first pass).
+angle_check: drill FAIL 2 -> 1 (improved), compressor FAIL 1=, trans
+PASS=. Kill-switch OFF: sorted bit-exact vs the s99 repro (verified by
+md5). Determinism: double-run sorted-md5 equal. Suites: draper-mesh 12x
+ok, step lib 169/0, step integration 23 suites 0 fail, geom/topo/core
+green. Unit tests: 8 (2 cross-face positives, same-face curved positive,
+planar negative, thin-wall negative, knife-fin negative, sub-tol
+negative, kill-switch).
+
+THE 3 REFUTED APPROACHES for item 2 (measured, kept for the record):
+1. MERGE FOLD GUARD at the weld site (mesh.rs, default-ON weld refusal):
+   the fold-preview CANNOT work at the merge — (a) a half-resolution
+   preview sees false folds on cascading lattice welds (fid=51 d=0.0118
+   lattice: dozens of spurious refusals); (b) a full-resolution preview
+   cannot see SELF-weld chains at all (the chain targets do not exist at
+   preview time); (c) a local inversion+fat-neighbour test still fires
+   on lattice folds that fix_inconsistent_winding removes later (usage
+   >= 3 there). The discrimination knowledge (transient vs surviving)
+   lives ONLY at the end of the pipeline — the 2-phase design already
+   has it. REVERTED (mesh.rs back to HEAD).
+2. Coincident-apex exclusion (apex distance < res_tol): WRONG
+   discriminator — the (3,3) dup apexes are 0.14 APART (the census's
+   COINCIDENT flag is d01/d10 < 1e-6 coplanarity, not apex distance),
+   and it caught the merge-deform (206,206) itself (apexes 0.0081).
+3. Coplanarity (d01/d10 < 1e-6) exclusion: also wrong — a 180-deg fold
+   IS coplanar by definition; it caught (62,62) (180.00 exact).
+   The planar-face exclusion is the correct discriminator.
+
+TOLERANCE BOUNDARY FORENSICS ((206,206), for the record): its h=0.030248
+sits between the main-pass eff-tol Cell (weld-max 0.030286) and the
+census snapshot (0.0302 — the Cell drifts across the gated-retry
+passes). merge_tol as the anchor reference EXPLODED (merge_tol=0.0153
+here — the WELD passes, not the merge, set the effective tol: 56 sub-tol
+splits, HM 5->7 REAL). The 0.998*Cell margin fires exactly (206,206)
+(nearest competing same-face candidate h=0.030157, excluded); the wider
+0.99 margin took 2 sub-tol pairs. Lesson: the effective tolerance is a
+PER-PASS moving target — s101 should expose a pass-stable resolution
+reference instead of margin-chasing.

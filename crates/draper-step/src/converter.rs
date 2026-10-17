@@ -6564,9 +6564,14 @@ impl<'a> StepConverter<'a> {
         // f6×f265 rim zipper), so phase 1 only RECORDS fingerprints here;
         // phase 2 (post-flapclean) splits only the survivors. Kill-switch:
         // DRAPPER_SEAM_FOLD_SPLIT=0 (gates both phases).
+        let bornfold_planar_fids: std::collections::HashSet<u64> = face_infos
+            .iter()
+            .filter(|fi| fi.surface_type == "Plane")
+            .map(|fi| fi.face_id)
+            .collect();
         let bornfold_record: Vec<[u32; 4]> = {
             let res_tol = self.last_brep_eff_tol.get();
-            draper_mesh::seam_bornfold_record(&mesh, res_tol)
+            draper_mesh::seam_bornfold_record(&mesh, res_tol, &bornfold_planar_fids, merge_tol)
         };
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
@@ -6820,7 +6825,13 @@ impl<'a> StepConverter<'a> {
         // phase-1 record and stay untouched.
         {
             let res_tol = self.last_brep_eff_tol.get();
-            let n_bfs = draper_mesh::seam_bornfold_split(&mut mesh, res_tol, &bornfold_record);
+            let n_bfs = draper_mesh::seam_bornfold_split(
+                &mut mesh,
+                res_tol,
+                &bornfold_record,
+                &bornfold_planar_fids,
+                merge_tol,
+            );
             if n_bfs > 0 {
                 log::info!(
                     "BREP #{} detailed: seam born-fold split unwelded {} cross-face seam fold edge(s)",
