@@ -118,3 +118,22 @@ ARTIFACTS
 - scripts/s101_who_flipped.py       (flip-side identification)
 - /tmp/s101/stages/ (p0-p3 stage OBJs+fmaps), /tmp/s101_scan.err
   (STAGEFOLD per-stage totals), /tmp/s101_band.log (emission dump log)
+
+ADDENDUM (s102 seed): chord-triangle UV signature
+--------------------------------------------------
+All 5 sampled chord triangles share ONE uv signature:
+  (3.1416, v_a)(3.1416, v_b)(0.0000, 0.0449)
+= 2 verts on the u=PI cut edge (consecutive v: 0.31/0.40, 0.49/0.58,
+1.21/1.30 ...) + 1 vert at the u=0 rim corner (0, 0.0449). The chord
+fan is a family of DOMAIN-EDGE BRIDGES between the two cut ends of the
+face-8 band domain — same family as drill f265 "domain-spanning corner
+fan" (UV u 0.56->0.00, s99 map) and the f3 corner fan of the
+EMISSION-FOLD class. Caveat: precise domain topology (how the u=0/u=PI
+cuts relate to the rim arc; the corner point's 3D identity) needs
+tools/uv_polygon_audit on face 8 (#2442) — the 4-decimal uv dump cannot
+resolve the vert-to-uv association inside a triangle. s102 entry point.
+
+Face-7 needle fan: cylinder tris uv=(1.97,9.33)(1.89,9.33)(0.20,9.00)
+— v up to 9.33 (arc length along the tube); the needle apex sits at
+u~0.20 = the far end of the cylinder band domain. Same bridge family
+on the cylinder side: needles connect the band's two u-ends.
