@@ -1,0 +1,120 @@
+s101 FORENSICS: compressor-13920 12 REAL pairs — full attribution
+==================================================================
+Baseline (bit-consistent with s100 p2): drill REAL 3 (HM 452 sub-tol +
+3 real), compressor REAL 12 (COLLECTOR-13920 141 sub-tol + 12 real),
+transmission 0 REAL (SPRING 4 knife-fin exempt). Environment: sandbox
+reset again (uptime 0 min, /tmp logs dead, detached builds dead —
+lesson s97-5/s99-2 THIRD confirmation: foreground cycles only, 2 cycles
+10m+50s). git pull 377910b -> c38676b (s100 p2).
+
+METHOD (s99 toolkit, zero production changes)
+---------------------------------------------
+1. fold_face_probe + DRAPPER_DUMP_PAIR_VERTS: T-indices of the 12 pairs
+   (VERTS PRECEDES its pair line — s99 probe lesson, STILL true).
+2. s99_band_fold_dump <file> 2860 <triA,triB>: emission UV attribution.
+3. DRAPPER_DUMP_STAGE_OBJS stage OBJs (p2/p3 = COLLECTOR) + custom
+   wound-dihedral tracker (scripts/s101_track_comp_pairs.py).
+   CHRONOLOGY LESSON (s99 repeat): stage list order != execution order;
+   sort by mtime. True order: merge -> weld -> tj -> gapfill -> winding
+   -> flapclean -> postweldwind -> bornfold-split (last).
+4. Edge multiplicity + apex neighbourhood (s101_edge_multiplicity.py),
+   flip-side identification (s101_who_flipped.py).
+5. DRAPPER_SCAN_STAGES per-stage fold totals.
+
+THE 12 PAIRS — ONE DEFECT
+-------------------------
+All 12: faces=(7,8) Cylinder(#2429) x Sphere(#2442), FOLD-OVERFAT,
+ang 171.2-174.9, along the rim circle (local y=-3.00, r=2.0; world
+y=4.60), azimuth arc ~103-165 deg. Both fan apexes IDENTICAL for all
+12 pairs:
+  - cylinder side: v559 (1.96157,-2.66667,0.39018) — on the tube wall
+    OPPOSITE side of the rim; edge-degree 50, 96 tris, ALL face 7.
+    Triangles are giant NEEDLES slicing across the tube opening
+    (h=2.17-3.76 over the shared rim edge).
+  - sphere side: v660 (0.08973,-3.00000,1.99799) — ON the rim circle;
+    21 face-8 tris around it + 2 face-7 tris (mixed-ownership rim
+    vertex). All its face-8 fan tris have ALL 3 verts on the rim
+    circle: flat CHORD triangles covering the rim disk sector
+    (h=0.09-1.47).
+=> A ZIPPER of two degenerate filler fans along the rim: face-7 needles
+(+y normals) x face-8 chords, interleaved on consecutive rim edges.
+
+ATTRIBUTION CHAIN (measured)
+----------------------------
+- Emission (s99_band_fold_dump): ALL 12 = VERDICT MERGE-ADJACENCY;
+  analytic dihedral 5.1-8.8 deg (clean thin wedge), final 171.2-174.9
+  (anti-parallel = one side inverted); dmax=0.00000 (no vertex moved).
+- Stage tracking (wound dihedral, p2): merge 5-9 -> weld 5-9 -> tj 5-9
+  -> gapfill 5-9 -> **winding 172-175** -> flapclean 172-175 ->
+  postweldwind 172-175 -> bornfold-split 172-175 (final). The fold is
+  MANUFACTURED at fix_inconsistent_winding and survives everything.
+- Flip side: the face-8 CHORD fan flips (+y -> -y, whole fan unit,
+  21/21 tris wound CCW-around-apex = uniformly -y after); the face-7
+  needle fan is untouched.
+- Why BFS flips it: pre-winding the chord fan (+y) is consistent with
+  the needles but INCONSISTENT with its own dome band (face-8 bulk,
+  -y-ish normals: sphere cap bulges -y away from the tube). BFS
+  flood-fill arrives from the dome and unifies the chord fan to -y.
+- NET-ZERO trade (s96-lesson-1 phenomenon, now measured on compressor):
+  STAGEFOLD totals p2: gapfill 5092 -> winding 5092 (equal). The BFS
+  trades the chord-dome spoke folds for the rim-needle folds, 1:1
+  count. Winding stage is the MESSENGER; the mixed state is born at
+  emission.
+- Edge multiplicity: all 12 rim edges manifold-2 (exactly [7,8]) — NOT
+  the drill (3,243) third-triangle ripple class.
+
+ROOT (emission level — s96 lesson 1 applies verbatim)
+-----------------------------------------------------
+Face 8 (Sphere #2442) UV-domain triangulation emits a flat chord fan
+as its rim strip coverage (3-verts-on-rim triangles, zero sphere-
+surface coverage) instead of following the sphere surface down to the
+rim. Face 7 (Cylinder #2429) band triangulation emits giant needles
+across the tube opening from a single wall vertex. The two fans zip
+along the rim circle. The earcutr MISSING-edge WARNs (Discriminant(1)/(3)
+faces, dist 2.32 jumps) belong to faces 2/3, NOT 7/8 — face 8's
+triangulation reports no gap; the chord fan is the LEGITIMATE output
+of its (degenerate near-rim) UV domain. 82/690 tris of face 8 already
+die at merge-degen; the chord fan survives.
+
+WHY EXISTING PASSES CANNOT FIX (measured / by design)
+-----------------------------------------------------
+- bornfold-split (s100): phase-1 records pre-winding fingerprints —
+  these pairs are CLEAN (5-9 deg) at phase 1, folded only after
+  winding; phase 2 splits phase-1 survivors only. By design: splitting
+  winding-manufactured folds would SEAL IN inverted normals (s101 plan
+  note: "split скрывает инвертированные нормали — не наш класс").
+- v5 postweld audit / flapclean: both sides solid (fat needle + fat
+  fan), no ear/dup/knife gates apply; manifold-2 edges.
+- s96 graph-parity solver (validate_healing_flips): NO SIGNAL at this
+  rim — true junction is a ~56 deg kink (dome normal (-0.22,-0.83,0.51)
+  vs wall radial), nu*nu ~ 0.55 = orthogonal class, invariant to flips.
+- BFS guards: refuted s99 (drill 8 -> 256, fragmentation).
+
+STRATEGIC PICTURE AFTER THIS ATTRIBUTION (corpus)
+-------------------------------------------------
+- drill 3 REAL  = 2 winding-manufacture (BFS ripple/relabel, s99 map)
+                  + 1 fixpoint free-skip boundary (3,3).
+- compressor 12 = 12 winding-manufacture (rim zipper, this session).
+- transmission  = 0.
+=> winding-manufacture family = 14/15 of remaining REAL debt. But the
+winding BFS is load-bearing and net-zero — the ROOTS are emission-level
+degenerate clusters (non-orientable seam strips / duplicate coverage /
+rim zippers). "Parity-расширение s96-солвера" as a MESH-level weighted
+solver would only re-arbitrate the trade (and risks the s99 8->256
+fragmentation); the s96 EDGE-level solver has no signal here.
+=> s102 candidate (highest value): EMISSION-level — face-8 sphere band
+rim-strip flattening (why the near-rim UV region triangulates into
+chord fans) + face-7 needle fan; the root_cause_map's own candidate
+(cross-face fold census INSIDE band-rescue/emission accept gates,
+s98-lesson-3 pattern) extended to sphere band domains.
+=> chronic alternative: accept 15 REAL as boundary noise (drill 3 +
+compressor 12); all are thin-wedge/filler-geometry artefacts, no
+inverted-normal leak into real surface area except the zipper itself.
+
+ARTIFACTS
+---------
+- scripts/s101_track_comp_pairs.py  (stage wound-dihedral tracker)
+- scripts/s101_edge_multiplicity.py (rim edge mult + apex hoods)
+- scripts/s101_who_flipped.py       (flip-side identification)
+- /tmp/s101/stages/ (p0-p3 stage OBJs+fmaps), /tmp/s101_scan.err
+  (STAGEFOLD per-stage totals), /tmp/s101_band.log (emission dump log)
