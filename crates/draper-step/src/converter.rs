@@ -18009,8 +18009,53 @@ fn dedup_consecutive_junctions_bit_exact(
 /// dimension: u[i] += round((u[i−1]_unrolled − u[i]) / P) · P. Every
 /// consecutive pair ends within ±P/2 of its predecessor, so the loop
 /// becomes the continuous unrolled image of the face's true boundary.
-/// Loops that are already branch-consistent (all steps ≪ P/2 — the
-/// legitimate full-wrap seam faces) are a strict no-op.
+/// s103 experiment knob: which periodic surface types get the greedy
+/// seam unroll. Default "sphere" (the s102 behavior, bit-identical).
+/// DRAPPER_UV_SEAM_UNWRAP_TYPES="sphere,cylinder,cone,torus" or "all"
+/// extends the set — used ONLY to measure the reject-class regressions
+/// (torus #34272 / cyl #34618) while designing the s103 discriminator.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PeriodicType {
+    Sphere,
+    Cylinder,
+    Cone,
+    Torus,
+}
+
+fn periodic_unroll_type_enabled(t: PeriodicType) -> bool {
+    use std::sync::OnceLock;
+    // bit 0 = sphere (default), 1 = cylinder, 2 = cone, 3 = torus
+    static MASK: OnceLock<u32> = OnceLock::new();
+    let mask = *MASK.get_or_init(|| {
+        let raw = std::env::var("DRAPPER_UV_SEAM_UNWRAP_TYPES")
+            .unwrap_or_else(|_| "sphere".to_string())
+            .to_ascii_lowercase();
+        let mut m = 0u32;
+        for word in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match word {
+                "all" | "any" => return 0xF,
+                "sphere" => m |= 1,
+                "cylinder" | "cyl" => m |= 2,
+                "cone" => m |= 4,
+                "torus" => m |= 8,
+                _ => {}
+            }
+        }
+        m
+    });
+    let bit = match t {
+        PeriodicType::Sphere => 1,
+        PeriodicType::Cylinder => 2,
+        PeriodicType::Cone => 4,
+        PeriodicType::Torus => 8,
+    };
+    mask & bit != 0
+}
+
+/// Greedy periodic-seam UV unroll (s102): re-branch consecutive samples
+/// across a ~±2π u-jump so a branch-split loop becomes the canonical
+/// domain. Loops that are already branch-consistent (all steps ≪ P/2 —
+/// the legitimate full-wrap seam faces) are a strict no-op.
 ///
 /// Returns the number of adjusted samples (both dimensions).
 fn unwrap_periodic_uv_junctions(uvs: &mut [Point2d], surface: &Surface) -> usize {
@@ -18025,7 +18070,21 @@ fn unwrap_periodic_uv_junctions(uvs: &mut [Point2d], surface: &Surface) -> usize
         // Plane×Cylinder h=7.0). Extending to those types needs the
         // doubled-edge/slit discriminator (s103): fire ONLY when the
         // junction's UV segment overlaps a later boundary run.
-        Surface::Sphere(_) => (Some(two_pi), None),
+        // s103: DRAPPER_UV_SEAM_UNWRAP_TYPES selects the periodic-type set
+        // (experiment/A-B knob, comma list: sphere,cylinder,cone,torus /
+        // "all"); default "sphere" = the s102 behavior, bit-identical.
+        Surface::Sphere(_) if periodic_unroll_type_enabled(PeriodicType::Sphere) => {
+            (Some(two_pi), None)
+        }
+        Surface::Cylinder(_) if periodic_unroll_type_enabled(PeriodicType::Cylinder) => {
+            (Some(two_pi), None)
+        }
+        Surface::Cone(_) if periodic_unroll_type_enabled(PeriodicType::Cone) => {
+            (Some(two_pi), None)
+        }
+        Surface::Torus(_) if periodic_unroll_type_enabled(PeriodicType::Torus) => {
+            (Some(two_pi), Some(two_pi))
+        }
         _ => (None, None),
     };
     if u_p.is_none() && v_p.is_none() {
