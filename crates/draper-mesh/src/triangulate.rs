@@ -1865,7 +1865,7 @@ fn triangulate_staged_with_cache(
 /// is indexed, so compacted (mirror-free) solids stage identically to
 /// mirror-bearing ones. `face.id` is preserved, so edge-discretization
 /// cache keys `(edge_id, face_id)` match the legacy path exactly.
-fn stage_solid_face(solid: &Solid, face: &Face) -> StagedFace {
+pub fn stage_solid_face(solid: &Solid, face: &Face) -> StagedFace {
     let owned = collect_instance_edges(solid, face);
     stage_instance_view(face, &owned)
 }
@@ -2231,7 +2231,7 @@ fn collect_face_boundary_from_cache(
 ///
 /// This replaces `collect_face_boundary_points_with_uv` in the main pipeline.
 /// UV coordinates are retrieved from the cache's per-face UV map.
-fn collect_face_boundary_with_uv_from_cache(
+pub fn collect_face_boundary_with_uv_from_cache(
     face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     surface: &Surface,
@@ -2383,7 +2383,7 @@ fn collect_face_holes_from_cache(
 /// Collect hole boundary points AND UV coordinates from a face's inner wires using the cache.
 ///
 /// This replaces `collect_face_hole_points_with_uv` in the main pipeline.
-fn collect_face_holes_with_uv_from_cache(
+pub fn collect_face_holes_with_uv_from_cache(
     face: &StagedFace,
     cache: &EdgeDiscretizationCache,
     surface: &Surface,

@@ -6210,6 +6210,189 @@ impl<'a> StepConverter<'a> {
             ));
             let face_mesh = self.surface_to_mesh_cached(face_data, &params, bbox, &mut edge_cache);
             draper_mesh::parametric_domain::clear_current_face_label();
+
+            // ── s102 emission audit hook ────────────────────────────────
+            // DRAPPER_UV_AUDIT_FACE="2442,2429" selects STEP faces;
+            // DRAPPER_UV_AUDIT_OUT (default /tmp/s102) receives
+            // uvaudit_step<id>.txt: the EXACT production polygon
+            // (collect_face_boundary_loops_cached on the already-filled
+            // cache), domain-edge structure (u=0/u=PI/u=2PI cuts), holes,
+            // and the emitted per-face mesh classified by
+            // 3-on-boundary / domain-edge-bridge signature.
+            if let Ok(sel) = std::env::var("DRAPPER_UV_AUDIT_FACE") {
+                if sel
+                    .split(',')
+                    .filter_map(|x| x.trim().parse::<i64>().ok())
+                    .any(|v| v == step_face_id)
+                {
+                    let loops = self.collect_face_boundary_loops_cached(
+                        face_data,
+                        &params,
+                        &mut edge_cache,
+                    );
+                    let out_dir = std::env::var("DRAPPER_UV_AUDIT_OUT")
+                        .unwrap_or_else(|_| "/tmp/s102".to_string());
+                    let _ = std::fs::create_dir_all(&out_dir);
+                    let path = format!("{}/uvaudit_step{}.txt", out_dir, step_face_id);
+                    let mut s = String::with_capacity(16384);
+                    let b = &loops.boundary_3d;
+                    let uv = &loops.boundary_uvs;
+                    s.push_str(&format!(
+                        "# UVAUDIT brep#{} face#{} step#{} {} bnd={} holes={} tris={} verts={} fwd={}\n",
+                        brep_id, face_id, step_face_id, surface_type,
+                        b.len(), loops.holes_3d.len(),
+                        face_mesh.triangles.len(), face_mesh.vertices.len(),
+                        face_data.forward
+                    ));
+                    for (i, (p, q)) in b.iter().zip(uv.iter()).enumerate() {
+                        s.push_str(&format!(
+                            "POLY {:4} u={:9.4} v={:9.4} xyz=({:10.5},{:10.5},{:10.5})\n",
+                            i, q.u, q.v, p.x, p.y, p.z
+                        ));
+                    }
+                    for (hi, (hp, hq)) in loops.holes_3d.iter().zip(loops.holes_uvs.iter()).enumerate() {
+                        s.push_str(&format!("HOLE {} n={}\n", hi, hp.len()));
+                        for (i, (p, q)) in hp.iter().zip(hq.iter()).enumerate() {
+                            s.push_str(&format!(
+                                "  HP{:4} u={:9.4} v={:9.4} xyz=({:10.5},{:10.5},{:10.5})\n",
+                                i, q.u, q.v, p.x, p.y, p.z
+                            ));
+                        }
+                    }
+                    let pi = std::f64::consts::PI;
+                    let tau = 2.0 * std::f64::consts::PI;
+                    let on = |u: f64, x: f64| (u - x).abs() < 0.03;
+                    let mut e0: Vec<usize> = Vec::new();
+                    let mut epi: Vec<usize> = Vec::new();
+                    let mut etau: Vec<usize> = Vec::new();
+                    for (i, q) in uv.iter().enumerate() {
+                        if on(q.u, 0.0) {
+                            e0.push(i);
+                        }
+                        if on(q.u, pi) {
+                            epi.push(i);
+                        }
+                        if on(q.u, tau) {
+                            etau.push(i);
+                        }
+                    }
+                    let vrange = |idx: &[usize]| -> (f64, f64) {
+                        idx.iter()
+                            .map(|&i| uv[i].v)
+                            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, bb), v| (a.min(v), bb.max(v)))
+                    };
+                    if !e0.is_empty() {
+                        let (a, bb) = vrange(&e0);
+                        s.push_str(&format!(
+                            "CUT u=0   : n={} v-range=[{:.4},{:.4}] idx={:?}\n",
+                            e0.len(), a, bb, e0
+                        ));
+                    }
+                    if !epi.is_empty() {
+                        let (a, bb) = vrange(&epi);
+                        s.push_str(&format!(
+                            "CUT u=PI  : n={} v-range=[{:.4},{:.4}] idx={:?}\n",
+                            epi.len(), a, bb, epi
+                        ));
+                    }
+                    if !etau.is_empty() {
+                        let (a, bb) = vrange(&etau);
+                        s.push_str(&format!(
+                            "CUT u=2PI : n={} v-range=[{:.4},{:.4}] idx={:?}\n",
+                            etau.len(), a, bb, etau
+                        ));
+                    }
+                    let scale = face_mesh
+                        .vertices
+                        .iter()
+                        .map(|v| v.x.abs().max(v.y.abs()).max(v.z.abs()))
+                        .fold(1.0_f64, f64::max)
+                        .max(1.0);
+                    let eps2 = (1e-6 * scale) * (1e-6 * scale);
+                    let poly3: Vec<[f64; 3]> = b.iter().map(|p| [p.x, p.y, p.z]).collect();
+                    let mut n3 = 0usize;
+                    let mut nbr = 0usize;
+                    let mut matched_verts = 0usize;
+                    for (vi, v) in face_mesh.vertices.iter().enumerate() {
+                        let mv = [v.x, v.y, v.z];
+                        if poly3.iter().any(|px| {
+                            let d0 = px[0] - mv[0];
+                            let d1 = px[1] - mv[1];
+                            let d2 = px[2] - mv[2];
+                            d0 * d0 + d1 * d1 + d2 * d2 < eps2
+                        }) {
+                            matched_verts += 1;
+                        }
+                        let _ = vi;
+                    }
+                    for (ti, tr) in face_mesh.triangles.iter().enumerate() {
+                        let hits: Vec<Option<usize>> = tr
+                            .iter()
+                            .map(|&vi| {
+                                let mv = [
+                                    face_mesh.vertices[vi as usize].x,
+                                    face_mesh.vertices[vi as usize].y,
+                                    face_mesh.vertices[vi as usize].z,
+                                ];
+                                poly3.iter().position(|px| {
+                                    let d0 = px[0] - mv[0];
+                                    let d1 = px[1] - mv[1];
+                                    let d2 = px[2] - mv[2];
+                                    d0 * d0 + d1 * d1 + d2 * d2 < eps2
+                                })
+                            })
+                            .collect();
+                        if hits.iter().filter(|h| h.is_some()).count() < 3 {
+                            continue;
+                        }
+                        n3 += 1;
+                        let cut_of = |q: &Point2d| -> &'static str {
+                            if on(q.u, 0.0) {
+                                "u0"
+                            } else if on(q.u, pi) {
+                                "uPI"
+                            } else if on(q.u, tau) {
+                                "u2PI"
+                            } else {
+                                "bnd"
+                            }
+                        };
+                        let cuts: Vec<&'static str> =
+                            hits.iter().map(|h| cut_of(&uv[h.unwrap()])).collect();
+                        let uniq: std::collections::HashSet<&'static str> =
+                            cuts.iter().copied().collect();
+                        if uniq.len() >= 2 {
+                            nbr += 1;
+                        }
+                        s.push_str(&format!(
+                            "CHORD tri#{} verts=({},{},{}) poly=({},{},{}) uv=({:.4},{:.4})({:.4},{:.4})({:.4},{:.4}) cuts={:?}\n",
+                            ti,
+                            tr[0],
+                            tr[1],
+                            tr[2],
+                            hits[0].unwrap(),
+                            hits[1].unwrap(),
+                            hits[2].unwrap(),
+                            uv[hits[0].unwrap()].u,
+                            uv[hits[0].unwrap()].v,
+                            uv[hits[1].unwrap()].u,
+                            uv[hits[1].unwrap()].v,
+                            uv[hits[2].unwrap()].u,
+                            uv[hits[2].unwrap()].v,
+                            cuts
+                        ));
+                    }
+                    s.push_str(&format!(
+                        "SUMMARY: 3-on-bnd={} bridges={} matched-bnd-verts={}/{}\n",
+                        n3,
+                        nbr,
+                        matched_verts,
+                        b.len()
+                    ));
+                    let _ = std::fs::write(&path, s);
+                    log::info!("UVAUDIT: wrote {}", path);
+                }
+            }
             
             // Set face ID for all triangles in this face mesh
             let face_tri_count = face_mesh.triangle_count();
@@ -13757,6 +13940,27 @@ impl<'a> StepConverter<'a> {
             *hole_uvs = deduped_uvs;
         }
 
+        // ── s102: periodic-seam UV unwrap ─────────────────────────────
+        // (see unwrap_periodic_uv_junctions for the root-cause argument).
+        // Kill-switch: DRAPPER_UV_SEAM_UNWRAP=0 disables (A/B measure).
+        if std::env::var("DRAPPER_UV_SEAM_UNWRAP")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+        {
+            let mut n_adj = unwrap_periodic_uv_junctions(&mut boundary_uvs, &face_data.surface);
+            for hole_uvs in inner_boundary_uvs.iter_mut() {
+                n_adj += unwrap_periodic_uv_junctions(hole_uvs, &face_data.surface);
+            }
+            if n_adj > 0 {
+                log::info!(
+                    "UV_SEAM_UNWRAP: face #{} surface={:?}: {} samples re-branched",
+                    face_data.step_face_id,
+                    std::mem::discriminant(&face_data.surface),
+                    n_adj
+                );
+            }
+        }
+
         FaceBoundaryLoops {
             boundary_3d: boundary_points,
             boundary_uvs,
@@ -17786,6 +17990,75 @@ fn dedup_consecutive_junctions_bit_exact(
     }
 
     (unique_pts, unique_uvs)
+}
+
+/// s102: unwrap periodic-seam branch mismatches in an assembled UV loop.
+///
+/// Root cause (measured on compressor COLLECTOR face #2442 — the 12 REAL
+/// rim-zipper pairs): a face whose wire crosses a periodic seam can have
+/// consecutive edges on mismatched parametric branches — the +x meridian
+/// ends at (0, π/2) while the rim arc starts at (2π−δ, π/2), the SAME 3D
+/// vertex. The assembled UV polygon then contains a full-period junction
+/// segment lying exactly ON TOP of the true boundary edge; the doubled
+/// out-and-back edge cancels in the winding sense, the effective domain
+/// flips to the wrong half (face-8 emitted the NEIGHBOUR lune's [0,π]
+/// instead of its own [π,2π]), and the earcutr ears along the degenerate
+/// slit became the 68 domain-edge-bridge chords — the rim-zipper seeds.
+///
+/// Fix: single forward pass, greedy nearest-branch unroll per periodic
+/// dimension: u[i] += round((u[i−1]_unrolled − u[i]) / P) · P. Every
+/// consecutive pair ends within ±P/2 of its predecessor, so the loop
+/// becomes the continuous unrolled image of the face's true boundary.
+/// Loops that are already branch-consistent (all steps ≪ P/2 — the
+/// legitimate full-wrap seam faces) are a strict no-op.
+///
+/// Returns the number of adjusted samples (both dimensions).
+fn unwrap_periodic_uv_junctions(uvs: &mut [Point2d], surface: &Surface) -> usize {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let (u_p, v_p): (Option<f64>, Option<f64>) = match surface {
+        // s102 follow-up #2: Sphere-only. The greedy u-unroll is proven for
+        // the sphere-lune seam flip (COLLECTOR #2442: the true domain
+        // restored, assembly boundary 2071→1923). Cylinder/Torus carry
+        // LEGITIMATE near-2π u-jumps (transmission #34618: a 0.1-gap
+        // near-full-wrap band; #34272: two seam crossings) which the
+        // cascade re-branches wholesale (+118 same-face sub-tol, +1 REAL
+        // Plane×Cylinder h=7.0). Extending to those types needs the
+        // doubled-edge/slit discriminator (s103): fire ONLY when the
+        // junction's UV segment overlaps a later boundary run.
+        Surface::Sphere(_) => (Some(two_pi), None),
+        _ => (None, None),
+    };
+    if u_p.is_none() && v_p.is_none() {
+        return 0;
+    }
+    let n = uvs.len();
+    if n < 3 {
+        return 0;
+    }
+    let mut adjusted = 0usize;
+    for &(period, is_u) in &[(u_p, true), (v_p, false)] {
+        let period = match period {
+            Some(p) => p,
+            None => continue,
+        };
+        let get = |uv: &Point2d| -> f64 {
+            if is_u { uv.u } else { uv.v }
+        };
+        let mut set = |uv: &mut Point2d, val: f64| {
+            if is_u { uv.u = val } else { uv.v = val }
+        };
+        let mut prev = get(&uvs[0]);
+        for i in 1..n {
+            let raw = get(&uvs[i]);
+            let k = ((prev - raw) / period).round();
+            if k != 0.0 {
+                set(&mut uvs[i], raw + k * period);
+                adjusted += 1;
+            }
+            prev = get(&uvs[i]);
+        }
+    }
+    adjusted
 }
 
 /// Check whether a 3D point lies on a circle (on the circle's plane AND at

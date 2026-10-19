@@ -1,0 +1,91 @@
+s102 FORENSICS: compressor emission slice — the periodic-seam DOMAIN FLIP
+==========================================================================
+Baseline (bit-consistent with s101): drill REAL 3 (HM 452 sub-tol + 3),
+compressor REAL 12 (COLLECTOR 141 sub-tol + 12), trans 0 REAL.
+Sandbox: 4th reset era; git pull 377910b-era -> ab69bf1 (s101 addendum);
+resumed from the s101 plan (my s93-epoch summary was stale — the repo
+is the source of truth, git pull FIRST, always).
+
+1. THE EMISSION SLICE (uv_polygon_audit v2 + the s102 audit hook)
+-------------------------------------------------------------------
+New instrumentation (DRAPPER_UV_AUDIT_FACE="id,id" env, hook in
+triangulate_brep_detailed right after surface_to_mesh_cached — the only
+point where face_data + the filled edge_cache + the emitted face_mesh
+coexist; collect_face_boundary_loops_cached re-called on the same cache
+= the EXACT production polygon). Findings on face #2442 (Sphere, the
+12 REAL pairs' sphere side):
+
+  - Domain: lune u∈[pi,2pi] x v∈[0.0334,pi/2]; wire = rim arc (−y half
+    of the tangency circle, sphere R=2 center (0,−3,0) local, TANGENT
+    to the cylinder wall along the rim) + the two meridians u=0/u=pi
+    up to the pole chord.
+  - THE DEGENERATION: the seam vertex (2,−3,0) sits ON the rim at the
+    u=0≡2pi cut. The +x meridian's pcurve ends at (0, pi/2) while the
+    rim arc's pcurve starts at (2pi−δ, pi/2) — the SAME 3D vertex on
+    mismatched branches. The assembled polygon contains the full-width
+    junction segment (0,pi/2)->(2pi−δ,pi/2) lying EXACTLY ON TOP of the
+    true rim edge (u 2pi->pi along v=pi/2). The doubled out-and-back
+    edge cancels in the winding sense; shoelace of the effective loop
+    = 4.83 = the [0,pi]x[0.0334,pi/2] rectangle: THE DOMAIN FLIPPED TO
+    THE NEIGHBOUR LUNE'S TERRITORY (face-8 emitted the +y half; #2442
+    is the ONLY face on sphere #2434 — the −y half got no coverage).
+  - The earcutr ears along the degenerate slit = the domain-edge-bridge
+    chords: 68/68 3-on-boundary tris were bridges (3 families: A at
+    (pi,pi/2) apex (pi,1.504); B the pole fan apex (0,0.0334); C at
+    (2pi−δ,pi/2) — C+B seed the final zipper; the s101 addendum's
+    sampled signature (bases u=pi at v 0.31..1.30 + apex (0,0.0449))
+    = family B).
+  - Face #2429 (Cylinder, the needle side): domain CLEAN
+    ([0,pi]x[7.3327,9.3327], the rim at v=9.3327, local y=−3 r=2 —
+    the SAME tangency circle; holes=1 tiny port at u≈2.04). The
+    needles (12 CHORD tris) = the partial-wrap tube path's corner fans
+    at u=0/u=pi: apex = the generator's far end (2,−1,0), bases =
+    consecutive rim pairs — h up to 3.76, the worst tris in the corpus.
+
+2. THE FIX (converter, collect_face_boundary_loops_cached)
+-------------------------------------------------------------------
+unwrap_periodic_uv_junctions(): single greedy forward pass per periodic
+dim, u[i] += round((u[i−1]_unrolled − u[i])/P)*P. On #2442: the +x
+meridian re-branched 0→2pi (18 samples) — the polygon became the TRUE
+lune [pi,2pi] (CUT u=2PI n=24 replaces CUT u=0; emission 1520→1153
+tris). VERIFIED by the audit dump.
+
+3. THE MEASURE (A/B, DRAPPER_UV_SEAM_UNWRAP=0 kill-switch)
+-------------------------------------------------------------------
+  - compressor: COLLECTOR census UNCHANGED (12 REAL) — the pair ids/
+    h/areas CHANGED (the fix propagated; the zipper REBUILT via
+    MERGE-ADJACENCY: band tool attribution — analytic 5-8° (clean!),
+    final 171-175°, dmax=0, same apexes v559 (cyl, (1.96,−2.67,0.39))
+    and v660 (sph, (0.09,−3,2.0)=the u=2pi meridian at v=0.0449).
+    The manufacture layer (merge/winding) survives the emission fix —
+    s103's target.
+  - ASSEMBLY watertightness (the real win): BREP#2860 aggregated
+    2071→1923 boundary (−148), 561→504 non-manifold (−57), χ −342→−303.
+  - drill: bit-identical. as1-oc-214: watertight, 0 REAL.
+  - transmission REGRESSION with all-types unwrap (the intermediate
+    state): TRANS_HOUSING 3→119 pairs (torus #34272: 194-sample
+    cascade — two LEGITIMATE seam crossings at (2pi−δ,pi/2)->(0+δ) and
+    (0,pi)->(2pi−δ); cyl #34618: a 0.1-gap near-full-wrap band with
+    legitimate 6.18-rad jumps) — +118 same-face sub-tol + 1 REAL
+    Plane×Cylinder h=7.0. => RESTRICTED to Sphere-only: the full
+    assembly benefit persists (it came entirely from the two sphere
+    faces #2442/#2453), all regressions gone.
+
+4. REMAINS (s103+)
+-------------------------------------------------------------------
+  a. The doubled-edge/slit discriminator: fire the unroll ONLY when
+     the junction's UV segment overlaps a later boundary run (the
+     face-8 signature); #34272/#34618-style legitimate near-2pi bands
+     must not fire. Then extend to Cylinder/Torus.
+  b. The MERGE-ADJACENCY manufacture (the 12 REAL zipper): analytic
+     5-8° → final 171-175° at merge/winding. The s101 refutations
+     stand; new lever = the emission corner fans (the earcutr
+     collinear-run degeneracy: 69 3-on-bnd chords persist even on the
+     TRUE-lune polygon — thin corner wedges survive refinement).
+     Candidate: sphere band-grid (latitude rows) like the cylinder
+     tube grid, or the 3-on-boundary censor in the emission accept
+     gate (the s102 plan's original option).
+  c. Face #2429's corner needles (the partial-wrap tube path ends).
+  d. COLLECTOR pre-existing: 1104 boundary edges (16.89%) χ=−144 —
+     NOT a regression (baseline state); the lune hole partially
+     addressed by the fix (the −y half now covered by emission).
