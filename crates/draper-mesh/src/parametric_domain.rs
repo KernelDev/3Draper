@@ -4150,6 +4150,68 @@ pub(crate) fn generate_sphere_steiner_grid(
         }
     }
 
+    // ── s105: boundary band rows (sphere band-grid) ──────────────────
+    //
+    // WHY: the regular grid's first/last rows sit a FULL cell away from
+    // the UV bbox edges (exclusive indexing i∈[1,n_u), j∈[1,n_v)). On
+    // faces whose boundary hugs the bbox (e.g. the collector lune
+    // #2442: rectangle [π,2π]×[0.0334,π/2], n_u=23/n_v=11 → the top
+    // row is 0.14 rad below the rim), the un-supported boundary strip
+    // is filled by earcutr with 3-on-bnd CHORD FANS — flat slivers
+    // whose long edges (up to 1.34 rad on the lune) cut across the
+    // dome instead of following it. These fans are the rim-zipper
+    // seed (s101 attribution: face-8 chord fans × face-7 needles; the
+    // winding BFS then flips the fan unit as a whole, manufacturing
+    // the 12 REAL MERGE-ADJACENCY folds). s104 recon localized them
+    // to the THREE lune corner fans; half-step rows/columns give the
+    // boundary strip a support line at HALF a cell from the bbox
+    // edge, so earcutr tiles it with surface-hugging triangles.
+    //
+    // Geometry: two latitudinal rows at v = v_min + h_v / v_max - h_v
+    // (h_v = v_span/(2·n_v)), u at the regular column positions PLUS
+    // the two half-step column ends; two meridional columns at
+    // u = u_min + h_u / u_max - h_u, v at the regular row positions
+    // (the half-step rows already cover the v-ends). The same
+    // POLE_EPS rule applies: rows/columns in the pole-degenerate band
+    // are skipped (pole coverage is legitimate there — s104 warning:
+    // the fix must not break pole coverage; it must not create rows
+    // where all u collapse to one 3D point).
+    //
+    // Blast radius: only sphere faces that reach this generator AND
+    // whose domain extends to the bbox edge keep the band points (the
+    // domain filter below clips the rest). Kill-switch:
+    // DRAPPER_SPHERE_BAND_GRID=0 restores the pristine grid.
+    if n_u >= 2
+        && n_v >= 2
+        && std::env::var("DRAPPER_SPHERE_BAND_GRID").as_deref() != Ok("0")
+    {
+        let h_u = u_span / (2.0 * n_u as f64);
+        let h_v = v_span / (2.0 * n_v as f64);
+        // Two latitudinal rows (bottom v_min+h_v, top v_max−h_v).
+        // Each row: half-step end + regular columns + half-step end.
+        for &v in &[v_min + h_v, v_max - h_v] {
+            if v < POLE_EPS || v > std::f64::consts::PI - POLE_EPS {
+                continue;
+            }
+            grid.push(Point2d::new(u_min + h_u, v));
+            for i in 1..n_u {
+                grid.push(Point2d::new(u_min + u_span * i as f64 / n_u as f64, v));
+            }
+            grid.push(Point2d::new(u_max - h_u, v));
+        }
+        // Two meridional columns (left u_min+h_u, right u_max−h_u) at
+        // the regular row v-positions (rows above cover the v-ends).
+        for &u in &[u_min + h_u, u_max - h_u] {
+            for j in 1..n_v {
+                let v = v_min + v_span * j as f64 / n_v as f64;
+                if v < POLE_EPS || v > std::f64::consts::PI - POLE_EPS {
+                    continue;
+                }
+                grid.push(Point2d::new(u, v));
+            }
+        }
+    }
+
     // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
     let span_max = u_span.max(v_span);
     let boundary_tol = (span_max * 1e-6).max(1e-9);
