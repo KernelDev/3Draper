@@ -3930,6 +3930,86 @@ pub(crate) fn generate_cylinder_or_cone_steiner_grid(
         }
     }
 
+    // ── s106: boundary band rows (cylinder band-grid) ──────────────────
+    //
+    // WHY: mirrors the s105 sphere band-grid (generate_sphere_steiner_grid)
+    // — the regular grid's first/last rows sit a FULL cell away from the
+    // UV bbox edges (exclusive indexing i∈[1,n_u), j∈[1,n_v)). On
+    // partial-wrap cylinder faces whose boundary hugs the bbox (e.g. the
+    // collector half-pipe #2429: rectangle [0,π]×[7.33,9.33], n_u=23/n_v=8
+    // → the last interior column is a FULL cell (π/23 ≈ 0.137) left of the
+    // u=π cut edge), the un-supported boundary strip is filled by the
+    // legacy earcutr spike-chain pass with 3-on-bnd CHORD FANS —
+    // height-spanning needles (up to 2.07 rad on #2429: 9 tris around the
+    // top-rim apex poly#94, pairs on the bottom rim) that the winding BFS
+    // flips as a unit at merge, manufacturing the same-face (7,7) REAL
+    // fold (the s105 net-zero re-arbitration residue, item-3 class).
+    // Half-step rows/columns give the boundary strip a support line at
+    // HALF a cell from the bbox edge, so the spike chain (or the rescue
+    // CDT) tiles it with surface-hugging triangles instead.
+    //
+    // Geometry: two axial rows at v = v_min + h_v / v_max − h_v
+    // (h_v = v_span/(2·n_v)), u at the regular column positions PLUS the
+    // two half-step column ends; two angular columns at u = u_min + h_u /
+    // u_max − h_u (h_u = u_span/(2·n_u)), v at the regular row positions
+    // (the half-step rows already cover the v-ends). No pole rule is
+    // needed (cylinders have no pole degeneracy; cone apexes are handled
+    // by the per-point is_degenerate_uv filter below, which the band
+    // points pass through exactly like regular points).
+    //
+    // SEAM RESTRICTION (s106 A/B lesson): the cylinder seam neighborhood
+    // is the s104 toxic zone (greedy-unroll near-duplicate rim samples,
+    // u 6.2832 vs 6.2973). TWO victim classes measured:
+    //   (a) FULL-WRAP faces (u_span > 0.98·2π): the u bbox edges ARE the
+    //       periodic seam — no boundary strip exists to support there.
+    //   (b) SEAM-CROSSING faces (the unrolled u_range strictly contains a
+    //       multiple of the period 2π — e.g. the cross-seam band #33417
+    //       (TRANS_HOUSING f31): generator u_range ≈ [5.9, 7.1], span
+    //       1.2165): band points of ANY flavor re-route the Hamiltonian
+    //       spike chain through the near-duplicate zone, the primary
+    //       earcutr pass drops 45 ring verts, the region-drop rescue
+    //       re-routes through the per-face CDT whose sliver guard then
+    //       skips 252/273 interior points (the s82 long-chord deadlock)
+    //       — collapsing the emission 1326→216 tris and manufacturing
+    //       the cross-face (13,114) h=7.0 REAL fold via the weld chain.
+    // Rule: band points are emitted ONLY on seam-safe faces (partial
+    // wrap, seam outside the range) — the fix targets #2429/#39570 (both
+    // u_span = π, clean cuts) and the s104 victims keep their exact
+    // baseline interior set.
+    let tau = 2.0 * std::f64::consts::PI;
+    let full_wrap = u_span > 0.98 * tau;
+    let seam_crossing = {
+        let eps = 1e-9;
+        let k_first = (u_min / tau).floor() as i64 + 1;
+        (k_first as f64) * tau < u_max - eps
+    };
+    let seam_safe = !full_wrap && !seam_crossing;
+    if n_u >= 2
+        && n_v >= 2
+        && seam_safe
+        && std::env::var("DRAPPER_CYL_BAND_GRID").as_deref() != Ok("0")
+    {
+        let h_u = u_span / (2.0 * n_u as f64);
+        let h_v = v_span / (2.0 * n_v as f64);
+        // Two axial rows (bottom v_min+h_v, top v_max−h_v).
+        // Each row: half-step end + regular columns + half-step end.
+        for &v in &[v_min + h_v, v_max - h_v] {
+            grid.push(Point2d::new(u_min + h_u, v));
+            for i in 1..n_u {
+                grid.push(Point2d::new(u_min + u_span * i as f64 / n_u as f64, v));
+            }
+            grid.push(Point2d::new(u_max - h_u, v));
+        }
+        // Two angular columns (left u_min+h_u, right u_max−h_u) at the
+        // regular row v-positions (the rows above cover the v-ends).
+        for &u in &[u_min + h_u, u_max - h_u] {
+            for j in 1..n_v {
+                let v = v_min + v_span * j as f64 / n_v as f64;
+                grid.push(Point2d::new(u, v));
+            }
+        }
+    }
+
     // Filter to points strictly inside the face domain (outside holes, inside outer boundary).
     let span_max = u_span.max(v_span);
     let boundary_tol = (span_max * 1e-6).max(1e-9);

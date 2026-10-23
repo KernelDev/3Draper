@@ -144,8 +144,16 @@ fn s105_band_grid_kills_collector_rim_zipper() {
 fn s105_band_grid_killswitch_reproduces_rim_zipper() {
     let _guard = S105_ENV_LOCK.lock().unwrap();
     std::env::set_var("DRAPPER_SPHERE_BAND_GRID", "0");
+    // s106: the cylinder band grid (DRAPPER_CYL_BAND_GRID, default ON)
+    // independently kills the SAME rim-zipper family (face-7's emission
+    // needles were the BFS flip material) — with only the sphere switch
+    // off, the (7,8) count stays 0 and this leg can no longer observe
+    // the pre-s105 state. Set BOTH kill-switches so the OFF leg isolates
+    // exactly the sphere band's contribution (pre-s105 baseline: 12).
+    std::env::set_var("DRAPPER_CYL_BAND_GRID", "0");
     let inst = collector_instance();
     std::env::remove_var("DRAPPER_SPHERE_BAND_GRID");
+    std::env::remove_var("DRAPPER_CYL_BAND_GRID");
     let inst = inst.expect("COLLECTOR BREP#2860 triangulation failed (kill-switch leg)");
     let folds = rim_zipper_pairs(&inst);
     assert!(
