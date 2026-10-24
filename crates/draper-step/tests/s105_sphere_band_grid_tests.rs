@@ -151,9 +151,17 @@ fn s105_band_grid_killswitch_reproduces_rim_zipper() {
     // the pre-s105 state. Set BOTH kill-switches so the OFF leg isolates
     // exactly the sphere band's contribution (pre-s105 baseline: 12).
     std::env::set_var("DRAPPER_CYL_BAND_GRID", "0");
+    // s107: the bornfold WINDING RECORD layer (DRAPPER_BORNFOLD_
+    // WINDING_RECORD, default ON) ALSO gates the same zipper family —
+    // the (7,8) rim-zipper pairs are BFS-manufactured (the s101
+    // net-zero exchange: the winding BFS flips the chord fan against
+    // the dome), so the post-winding record now catches them and
+    // phase-2 splits the survivors. Third switch joined the family.
+    std::env::set_var("DRAPPER_BORNFOLD_WINDING_RECORD", "0");
     let inst = collector_instance();
     std::env::remove_var("DRAPPER_SPHERE_BAND_GRID");
     std::env::remove_var("DRAPPER_CYL_BAND_GRID");
+    std::env::remove_var("DRAPPER_BORNFOLD_WINDING_RECORD");
     let inst = inst.expect("COLLECTOR BREP#2860 triangulation failed (kill-switch leg)");
     let folds = rim_zipper_pairs(&inst);
     assert!(

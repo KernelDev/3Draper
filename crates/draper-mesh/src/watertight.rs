@@ -1754,9 +1754,33 @@ fn bornfold_scan(
     edges.sort_unstable_by_key(|(e, _)| **e);
 
     let p = |vi: u32| &mesh.vertices[vi as usize];
+    // session-107 forensics: DRAPPER_BORNFOLD_TRACE_EDGE=v0,v1 prints
+    // every gate decision for that undirected edge (vertex ids).
+    let trace_edge: Option<(u32, u32)> = std::env::var("DRAPPER_BORNFOLD_TRACE_EDGE")
+        .ok()
+        .and_then(|v| {
+            let ab: Vec<u32> = v
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+            if ab.len() == 2 {
+                Some((ab[0].min(ab[1]), ab[0].max(ab[1])))
+            } else {
+                None
+            }
+        });
     let mut out: Vec<BornFoldPair> = Vec::new();
     for (edge, owners) in &edges {
+        let tmatch = trace_edge == Some(**edge);
         if owners.len() != 2 {
+            if tmatch {
+                eprintln!(
+                    "BFTE edge=({},{}) SKIP owners={} (not 2)",
+                    edge.0,
+                    edge.1,
+                    owners.len()
+                );
+            }
             continue;
         }
         let (t0, da0, db0) = owners[0];
@@ -1773,7 +1797,24 @@ fn bornfold_scan(
         let same_face = fid0 == fid1;
         let same_trav = da0 == da1 && db0 == db1;
         let opp_trav = da0 == db1 && db0 == da1;
+        if tmatch {
+            eprintln!(
+                "BFTE edge=({},{}) t{}/t{} fids=({},{}) same_face={} same_trav={} opp_trav={}",
+                edge.0,
+                edge.1,
+                t0,
+                t1,
+                fid0,
+                fid1,
+                same_face,
+                same_trav,
+                opp_trav
+            );
+        }
         if !same_trav && !opp_trav {
+            if tmatch {
+                eprintln!("BFTE   SKIP: neither traversal");
+            }
             continue;
         }
         let (tri0, tri1) = (mesh.triangles[t0], mesh.triangles[t1]);
@@ -1790,6 +1831,12 @@ fn bornfold_scan(
         );
         let cos_angle = (dot / (l0 * l1)).max(-1.0).min(1.0);
         if cos_angle.acos().to_degrees() <= 170.0 {
+            if tmatch {
+                eprintln!(
+                    "BFTE   SKIP: ang={:.2} <= 170",
+                    cos_angle.acos().to_degrees()
+                );
+            }
             continue;
         }
         let (area0, area1) = (

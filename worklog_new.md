@@ -16749,3 +16749,150 @@ corpus = 3 HM chronic (pre-existing) — последний drill-долг.
    дрожит ±20 между прогонами одного бинаря — только census-строки
    (пары/summary) детерминированы; сверять их, диагностику —
    игнорировать.
+
+## Сессия 107 (2026-10-24): ДВА ИЗ ТРЁХ HM CHRONIC УБИТЫ — (3,3)
+## через eff_tol RULER-DRIFT фикс (gated-retry утечка линейки),
+## (30,30) через bornfold WINDING-RECORD слой; drill REAL 3→1,
+## остаток (3,243) = anti-wound шов поверх degenerate band wall-fan
+## (полная атрибуция для s108); открытие: brick_thin_round real=2
+## pre-existing вне s106-учёта (корпус s106 фактически 5, не 3)
+
+Старт: 9-я sandbox-эпоха (uptime 1 мин; релизных бинарей нет,
+build_diag.log/pid мертвы; тулчейн /tmp/my-project уцелел, rustup
+default сброшен восстановлением — переустановлен stable 1.98.1).
+git pull: already up to date, HEAD 7e3b3ad = s106-финал. Резюме
+эпохи s93 устарело на 14 сессий; план = s106-запись «Осталось
+(сессия 107)» п.1: HM 3 REAL chronic. Сборка: foreground-циклы
+≤580 с (урок s103/s106), 2 цикла (deps частично уцелели, 268M).
+
+### 0. Baseline — бит-идентичен s106
+
+census: comp 140 subtol/0 REAL; drill REAL 3 (HM 465 subtol+3:
+(3,3) h=(0.0027,0.0303) Plane COINCIDENT, (3,243) h=(0.0384,
+0.0018) Plane×Nurbs, (30,30) h=(0.0451,0.0227) Nurbs FOLD-OVER;
+SLEEVE 6, HOUSING 348); trans TH 5/0. all_files: comp 1230, drill
+5458, trans 63396, 22 ok/4 leaky/1 BAD. #2860 first 754/184,
+retry 567/380. Fresh-атрибуция s99_band_fold_dump (текущие
+T-индексы): (3,3) T522/T662 WELD-CREATED needle+fat (апекс иглы
+0.0027 от хорды, аналитика 0.00°); (3,243) T560/T41784 MERGE-
+ADJACENCY, T41784 = UV-ВЫРОЖДЕННЫЙ слайвер (все 3 UV-точки на
+линии u=1.0048, band-ряд); (30,30) T7465/T7471 MERGE-ADJACENCY
+(высокие ячейки f30 v-span 0.09–0.125, merge-снап 0.006–0.007).
+
+### 1. (3,3) — КОРЕНЬ: eff_tol ruler drift между gated-retry проходами
+
+Новая инструментировка DRAPPER_FIXPOINT_TRACE=<t[,t]..> (конвертер,
+все решения fixpoint для перечисленных треугольников) дала smoking
+gun: edge (290,307) p=t662 q=t522 hp=0.030262 hq=0.002705
+tol=0.030286 → FREE-SKIP (запас 2.4e-5). Цензус же судил с
+eff_tol≈0.0302xx → REAL. Линейка ОДНА (brep_eff_tol), формула h
+одинаковая, позиции не двигаются (bornfold-split «no vertex moves»)
+— РАЗЛИЧАЕТСЯ ЗНАЧЕНИЕ: audit pass8 читал живой Cell (0.030286 =
+weld-max ПОБЕДИВШЕГО прохода), а снапшот brep_eff_tol_cache брался
+ПОСЛЕ gated — где Cell оставался от ОТБРОШЕННОГО retry (halved
+deviation → другие weld-потребности → 0.0302xx). Предсказание s101
+(«pass-stable reference вместо margin-охоты») подтверждено с
+механизмом. Фикс: захват first_eff_tol до retry + restore на ВСЕХ
+first-wins путях (rejected / no-mesh; accepted-путь оставляет Cell
+retry). Kill-switch DRAPPER_EFF_TOL_RESTORE=0. Меш бит-идентичен —
+меняется только снапшот линейки: (3,3) 0.030262 < 0.030286 → SUBTOL.
+drill REAL 3→2; HM subtol 465→466; eff_tol дисплеи 0.0302→0.0303
+(HM), 0.0305→0.0304 (HOUSING) — линейки победителей.
+
+### 2. (30,30) — bornfold WINDING RECORD слой
+
+fix_inconsistent_winding производит 180°-пары как побочный эффект
+принуждения manifold-обхода (RELABEL: same-side апексы =
+дублирующее покрытие → same-direction traversal → флип → фолд).
+Phase-1 запись s100 снимается ДО winding — эти пары вне записи.
+Фикс: union ПОСТ-winding скана в bornfold_record (seam_bornfold_
+record теми же гейтами); phase-2 по-прежнему режет только
+выживших (live rescan post-v5) — та же 2-фазная безопасность.
+seam_bornfold_split УЖЕ умеет same-face (per-tri clone клапана,
+s100). Kill-switch DRAPPER_BORNFOLD_WINDING_RECORD=0 (слой),
+DRAPPER_SEAM_FOLD_SPLIT=0 гейтит обе фазы. drill REAL 2→1; HM
+468→467 пар; drill bnd 5458 НЕ ИЗМЕНИЛСЯ (микро-трещина сплита
+поглощается). Изоляция слоёв: RESTORE=0 → real=2, WINDING_RECORD=0
+→ real=2, default → real=1 — каждый фикс −1.
+
+### 3. (3,243) — атрибуция для s108 (не закрыт)
+
+Полная цепочка измерена (DRAPPER_BORNFOLD_TRACE_EDGE=707,708 —
+новый трейс гейтов bornfold_scan по ребру): pre-winding состояние =
+ANTI-WOUND шов (opp_trav + ang=0.00°, класс-A s100 — f3 corner-fan
+× f243 band покрывают одну полосу шва y=6.00 встречно); BFS
+«гармонизирует» обход флипом одной стороны → same_trav + 180°;
+v5 бессилен (голос слайвера None — вырожденный UV); bornfold split
+отказывает ПО ДИЗАЙНУ (fold_proof: апексы на противоположных
+сторонах = inverted-пара, s100 «не прятать inverted-normal долг»).
+Эмиссионный корень: NURBS_FILLET_BAND rescue f243 (1297 level pts,
+314→2874 tris) строит wall-fan [anchor_r, rw[k-1], rw[k]] от анкера
+НА ПРЯМОЙ стене u=1.004795 (граница v 0.079→1.0, 56 точек, джиттер
+9-го знака) → 68 UV-вырожденных слайверов (s107_uv_sliver_audit:
+ratio <1e-4, все drop_unsafe — прямые ring-рёбра покрыты ТОЛЬКО
+ими). План s108: перетриангуляция вырожденного клина (bridging
+[anchor_r, rw[first], cbtm_tail] + цепочка [cbtm_tail, rw[k],
+rw[k+1]] — edge-accounting 1×/2× проверен аналитически, риск
+3D-оверлапов) ИЛИ хроническая граница (все дешёвые фиксы измеренно
+опробованы: BFS-гарды 8→256 s99, thickness-skip 8→12 s99, split
+fold_proof-fail by design).
+
+### 4. A/B-батарея (полная)
+
+- census 8 файлов: drill 3→1; comp 0=0; trans 0=0; brick_thin,
+  brick_thin_hole, Zentral, as1 0=0; brick_thin_round 2=2.
+  ОТКРЫТИЕ: brick_thin_round real=2 ((12,12) Plane COINCIDENT +
+  (32,32) Cylinder, h=0.0001 оба, eff_tol=0.0000 — микротолерансы
+  BREP#1498 ~2.49e-8) — PRE-EXISTING на s106 HEAD (проверено git
+  stash + pristine rebuild): s106-вердикт «corpus REAL 15→5→3»
+  считал только 3 главных файла; фактический корпус s106 = 5.
+- all_files: comp 1230=, drill 5458=, trans 63396=, статусы
+  22 ok/4 leaky/1 BAD=; #2860 first 754/184=, retry 569/380 (+2 bnd
+  на ОТБРОШЕННОМ retry-проходе — запись+сплит winding-пар retry-меша;
+  финал = first-pass, не затронут).
+- angle_check: drill FAIL 1= ((3,243) chronic), comp PASS=,
+  trans PASS=, brick chronic=.
+- Детерминизм: double-run sorted-md5 EQUAL (drill).
+- Сьюты: mesh 446/0, geom 440/0, topo 305/0, core 77/0, step lib
+  169/0, industrial 2/0.
+- Самодоказывающие: +3 s107-теста (default (3,3)=(30,30)=0 /
+  RESTORE=0 → (3,3)≥1 / WINDING_RECORD=0 → (30,30)≥1) — green.
+  ОБСЛУЖИВАНИЕ OFF-ног (урок s106-1, третий виток): s105/s106
+  OFF-ноги обязаны дополнительно выключать DRAPPER_BORNFOLD_
+  WINDING_RECORD ((7,8)-зиппер и (7,7)/(37,37)-иглы = BFS-
+  manufactured = теперь гейтится новым слоем — без этого «got 0»
+  и отравленный mutex валит соседний тест, воспроизведено и
+  починено: s105 2/2, s106 2/2 green).
+- Новая инструментировка: DRAPPER_FIXPOINT_TRACE (fixpoint-решения
+  по треугольникам), DRAPPER_BORNFOLD_TRACE_EDGE (гейты bornfold_
+  scan по ребру), tools/s107_uv_sliver_audit (UV-вырожденные
+  слайверы лица + drop-safety рёбер).
+
+### Осталось (сессия 108)
+
+1. HM (3,243): эмиссионный фикс degenerate wall-fan клина f243
+   (план в §3) ИЛИ документирование хронической границей.
+2. brick_thin_round real=2 (pre-existing, eff_tol=0.0000,
+   микротолерансы): классифицировать (sub-res класс при tol~2.5e-8
+   — h=1e-4 legitimately REAL) или фиксить микротолерансы BREP#1498.
+3. Item-4: COLLECTOR #2860 χ-документация (перенос s98+).
+4. Мониторинг мягких минусов s106: SLEEVE +4, TH +2 subtol.
+
+### Уроки
+
+1. «Ruler стабильнее маргина»: зазор 2.4e-5 у free-skip был НЕ
+   дрейфом позиций и не разницей формул — системной утечкой линейки
+   отброшенного retry-прохода в глобальном Cell. Прежде чем искать
+   дрейф мер — проверить, КАКОЙ проход оставил значение в Cell.
+2. «Снапшот = часть контракта gated-retry»: функция возвращает меш
+   победителя, но глобальный Cell держит состояние ПОСЛЕДНЕГО
+   прохода. Любой Cell при retry-архитектуре требует restore на
+   каждом first-wins пути (3 пути: rejected, no-mesh, accepted).
+3. Урок s106-1, третий виток: слой, гейтящий то же семейство
+   дефектов, требует обслуживания OFF-ног ВСЕХ предыдущих
+   самодоказывающих тестов. При новом гейте — прогон тест-файлов
+   прошлых сессий ОБЯЗАТЕЛЕН (s105 отравился первым).
+4. «Цифры вердикта без файлового состава мертвы»: «corpus REAL
+   15→5→3» s106 считал 3 файла; brick_thin_round real=2 жил вне
+   учёта два+ вердикта подряд. Вердикты обязаны перечислять состав
+   корпуса (8 файлов, не 3).

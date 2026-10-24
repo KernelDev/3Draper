@@ -5811,6 +5811,26 @@ impl<'a> StepConverter<'a> {
         bbox: &Option<(Point3d, Point3d)>,
     ) -> Option<(TriangleMesh, Vec<FaceInfo>)> {
         let first = self.triangulate_brep_detailed(brep_id, params, bbox)?;
+        // session-107: capture the FIRST pass's effective resolution
+        // BEFORE the retry overwrites the converter Cell. The gated
+        // caller snapshots `last_brep_eff_tol()` right after this
+        // function returns — without the restore below, a rejected
+        // retry (halved deviation params → different weld needs)
+        // leaked ITS smaller/larger eff_tol into the per-BREP cache,
+        // and every downstream gate (census sub-tol classifier,
+        // bornfold-split res_tol) judged the RETURNED mesh against a
+        // ruler of a mesh that was thrown away. Measured on drill HM
+        // #62542: main-pass weld max 0.030286 vs retry snapshot
+        // 0.0302xx — the (3,3) chronic pair (h=0.030262) sat in the
+        // 6e-5 gap: free-skipped by the v5 audit (correct for its
+        // own mesh) yet REAL by the census (wrong ruler).
+        // s107 kill-switch: DRAPPER_EFF_TOL_RESTORE=0 disables the
+        // restore (reproduces the pre-s107 leak — kept for A/B and the
+        // self-proving test's OFF-leg).
+        let eff_tol_restore_on = std::env::var("DRAPPER_EFF_TOL_RESTORE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+        let first_eff_tol = self.last_brep_eff_tol.get();
         // On wasm32 the gate is check-only: a retry would double the worker's
         // load time for defect-heavy files (drill_top retries ~12s per broken
         // BREP natively). The web keeps the first result, matching the
@@ -5854,6 +5874,11 @@ impl<'a> StepConverter<'a> {
                     "BREP #{}: §1.2 retry produced no mesh — keeping first result",
                     brep_id
                 );
+                // s107: the failed retry already reset the Cell to its
+                // own merge_tol — restore the first pass's value.
+                if eff_tol_restore_on {
+                    self.last_brep_eff_tol.set(first_eff_tol);
+                }
                 return Some(first);
             }
         };
@@ -5881,6 +5906,8 @@ impl<'a> StepConverter<'a> {
                 first.0.triangle_count(),
                 defects_first
             );
+            // s107: the retry's mesh is returned — its Cell value
+            // (already current) is the correct ruler.
             Some(retry)
         } else {
             log::info!(
@@ -5891,6 +5918,11 @@ impl<'a> StepConverter<'a> {
                 first.0.triangle_count(),
                 defects_first
             );
+            // s107: restore the FIRST pass's resolution — the retry's
+            // Cell value must not leak past its rejected mesh.
+            if eff_tol_restore_on {
+                self.last_brep_eff_tol.set(first_eff_tol);
+            }
             Some(first)
         }
     }
@@ -6752,7 +6784,7 @@ impl<'a> StepConverter<'a> {
             .filter(|fi| fi.surface_type == "Plane")
             .map(|fi| fi.face_id)
             .collect();
-        let bornfold_record: Vec<[u32; 4]> = {
+        let mut bornfold_record: Vec<[u32; 4]> = {
             let res_tol = self.last_brep_eff_tol.get();
             draper_mesh::seam_bornfold_record(&mesh, res_tol, &bornfold_planar_fids, merge_tol)
         };
@@ -6760,6 +6792,50 @@ impl<'a> StepConverter<'a> {
         // ─── Fix inconsistent winding (face orientation repair) ──────────
         draper_mesh::fix_inconsistent_winding(&mut mesh);
         draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-winding");
+
+        // ─── session-107: record the BFS-manufactured pairs too ────────
+        // fix_inconsistent_winding's greedy flood-fill manufactures 180°
+        // pairs as a side effect of enforcing manifold edge traversal:
+        //   · RIPPLE — a flip forced by an edge with a THIRD triangle
+        //     folds a different, previously clean neighbour (HM (3,243)
+        //     Plane×Nurbs over the f243 degenerate band wall-fan sliver);
+        //   · RELABEL — same-side apex overlap (duplicate coverage) reads
+        //     as same-direction traversal, the flip makes it a fold (HM
+        //     (30,30) f30 thin-strip dome).
+        // Phase-1's pre-winding record cannot see them (they were clean
+        // 0.18–0.00° before the BFS). Union the POST-winding census into
+        // the record: phase-2 still rescans the LIVE mesh post-v5 and
+        // splits only survivors, so pairs that finaltj/flapclean/v5
+        // resolve stay untouched — the same 2-phase safety the s100
+        // design gives emission-folds. Guards unchanged (census-aligned
+        // fat anchor excludes sub-tol; knife-fin/ear deferrals intact).
+        // Kill-switches: DRAPPER_SEAM_FOLD_SPLIT=0 gates both phases;
+        // DRAPPER_BORNFOLD_WINDING_RECORD=0 gates ONLY this layer (the
+        // s91 lesson-5 discipline: switches enumerate layers — the
+        // emission-fold record above stays on independently).
+        if std::env::var("DRAPPER_BORNFOLD_WINDING_RECORD")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+        {
+            let res_tol = self.last_brep_eff_tol.get();
+            let bfs_made =
+                draper_mesh::seam_bornfold_record(&mesh, res_tol, &bornfold_planar_fids, merge_tol);
+            if !bfs_made.is_empty() {
+                log::debug!(
+                    "BREP #{} detailed: bornfold record +{} post-winding (BFS-manufactured) fingerprints",
+                    brep_id,
+                    bfs_made.len()
+                );
+            }
+            // dedup (phase-1 overlap) — phase-2 membership is a set test
+            let mut seen: std::collections::HashSet<[u32; 4]> =
+                bornfold_record.iter().copied().collect();
+            for fp in bfs_made {
+                if seen.insert(fp) {
+                    bornfold_record.push(fp);
+                }
+            }
+        }
 
         // Remove duplicate triangles (same 3 vertex indices). These arise when
         // two STEP faces overlap geometrically and share the same edges — common
@@ -16825,6 +16901,17 @@ pub fn postweld_component_winding_audit(
     }
     // boundary fixpoint
     let cos10: f64 = 0.9848077530122080; // cos(10°)
+    // session-107 forensics: DRAPPER_FIXPOINT_TRACE=<t0[,t1,...]> dumps
+    // every fixpoint edge decision (BLOCK/ABSORB/free-skip gates) that
+    // involves any of the listed triangle indices — attributing the
+    // exactly-one-flipped outcome of chronic pairs like HM (3,3).
+    let fpt_trace: Option<Vec<usize>> = std::env::var("DRAPPER_FIXPOINT_TRACE")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|s| s.parse::<usize>().ok())
+                .collect::<Vec<usize>>()
+        });
     // session-92 forensics: DRAPPER_POSTWELD_TRACE=<fid> dumps the
     // per-triangle vote/thickness/flip decision for ONE face.
     let trace_fid: Option<u64> = std::env::var("DRAPPER_POSTWELD_TRACE")
@@ -16961,7 +17048,33 @@ pub fn postweld_component_winding_audit(
             };
             let hp = h_over_shared(&mesh.triangles[p]);
             let hq = h_over_shared(&mesh.triangles[q]);
+            if let Some(tt) = &fpt_trace {
+                if tt.contains(&p) || tt.contains(&q) {
+                    eprintln!(
+                        "FPT brep#{} edge=({},{}) p=t{} q=t{} hp={:.6} hq={:.6} tol={:.6} vote_p={:?} vote_q={:?} nrm_dot={:.4}",
+                        brep_id,
+                        edge.0,
+                        edge.1,
+                        p,
+                        q,
+                        hp,
+                        hq,
+                        res_tol_audit,
+                        vote[p],
+                        vote[q],
+                        nrm_of(&mesh.triangles[p])
+                            .zip(nrm_of(&mesh.triangles[q]))
+                            .map(|(a, b)| a.0 * b.0 + a.1 * b.1 + a.2 * b.2)
+                            .unwrap_or(f64::NAN)
+                    );
+                }
+            }
             if hp < res_tol_audit && hq < res_tol_audit {
+                if let Some(tt) = &fpt_trace {
+                    if tt.contains(&p) || tt.contains(&q) {
+                        eprintln!("FPT   -> FREE-SKIP (both h < tol)");
+                    }
+                }
                 continue;
             }
             if vote[q] == Some(false) || vote[q] == Some(true) {
@@ -16969,12 +17082,22 @@ pub fn postweld_component_winding_audit(
                 // genuine fold as a FOLD-OVER pair), or a
                 // bad-but-unflipped neighbor (defensive):
                 // BLOCK the flipped side — refuse the flip.
+                if let Some(tt) = &fpt_trace {
+                    if tt.contains(&p) || tt.contains(&q) {
+                        eprintln!("FPT   -> BLOCK p (vote_q decided)");
+                    }
+                }
                 flip_set.remove(&p);
                 poisoned.insert(p);
                 n_blocked += 1;
                 grew = true;
             } else if poisoned.contains(&q) {
                 // vote-None but poisoned earlier: refuse too.
+                if let Some(tt) = &fpt_trace {
+                    if tt.contains(&p) || tt.contains(&q) {
+                        eprintln!("FPT   -> BLOCK p (q poisoned)");
+                    }
+                }
                 flip_set.remove(&p);
                 poisoned.insert(p);
                 n_blocked += 1;
@@ -16983,6 +17106,11 @@ pub fn postweld_component_winding_audit(
                 // vote-None (degenerate sliver / surface without
                 // a closed-form normal — unreliable winding):
                 // absorb into the flip set.
+                if let Some(tt) = &fpt_trace {
+                    if tt.contains(&p) || tt.contains(&q) {
+                        eprintln!("FPT   -> ABSORB q");
+                    }
+                }
                 flip_set.insert(q);
                 n_absorbed += 1;
                 grew = true;

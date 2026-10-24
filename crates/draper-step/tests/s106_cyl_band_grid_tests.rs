@@ -155,9 +155,15 @@ fn s106_cyl_band_killswitch_reproduces_needles() {
     std::env::set_var("DRAPPER_CYL_BAND_GRID", "0");
     // NOTE: the sphere band (s105) stays ON — the OFF leg reproduces the
     // s105-final state, where both needle folds were the census residue.
+    // s107: the bornfold WINDING RECORD layer (default ON) also gates
+    // the needle family (the (7,7)/(37,37) folds are BFS net-zero
+    // manufactured — the post-winding record catches them and phase-2
+    // splits the survivors), so the OFF leg disables it too.
+    std::env::set_var("DRAPPER_BORNFOLD_WINDING_RECORD", "0");
     let comp = brep_instance("compressor-13920_top.stp", 2860);
     let drill = brep_instance("drill_top.stp", 47598);
     std::env::remove_var("DRAPPER_CYL_BAND_GRID");
+    std::env::remove_var("DRAPPER_BORNFOLD_WINDING_RECORD");
     let comp = comp.expect("COLLECTOR BREP#2860 triangulation failed (kill-switch leg)");
     let drill = drill.expect("HOUSING BREP#47598 triangulation failed (kill-switch leg)");
     let folds7 = same_face_needle_pairs(&comp, 7);
