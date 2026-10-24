@@ -158,10 +158,18 @@ fn s105_band_grid_killswitch_reproduces_rim_zipper() {
     // the dome), so the post-winding record now catches them and
     // phase-2 splits the survivors. Third switch joined the family.
     std::env::set_var("DRAPPER_BORNFOLD_WINDING_RECORD", "0");
+    // s108: the DEGENERATE WALL-FAN SUBDIVISION (DRAPPER_DEGEN_FAN_SPLIT,
+    // default ON) ALSO gates the same zipper family — the chord-fan
+    // corner pockets near the lune rim ride on zero-area wall fans
+    // (straight u=const trim sections), and the subdivided emission
+    // removes the BFS flip material at the source. Fourth switch
+    // joined the family.
+    std::env::set_var("DRAPPER_DEGEN_FAN_SPLIT", "0");
     let inst = collector_instance();
     std::env::remove_var("DRAPPER_SPHERE_BAND_GRID");
     std::env::remove_var("DRAPPER_CYL_BAND_GRID");
     std::env::remove_var("DRAPPER_BORNFOLD_WINDING_RECORD");
+    std::env::remove_var("DRAPPER_DEGEN_FAN_SPLIT");
     let inst = inst.expect("COLLECTOR BREP#2860 triangulation failed (kill-switch leg)");
     let folds = rim_zipper_pairs(&inst);
     assert!(

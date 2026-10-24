@@ -7440,6 +7440,9 @@ pub fn nurbs_fillet_band_strip(
         Vec<[f64; 2]>,
         Vec<usize>,
     )> = None;
+    // s108: DEGENERATE WALL-FAN SUBDIVISION kill-switch (default ON);
+    // =0 reproduces the phantom-fan baseline bit-exactly.
+    let dfs_on = std::env::var("DRAPPER_DEGEN_FAN_SPLIT").as_deref() != Ok("0");
     'levels: for kk in start_k..=8 {
         let (mut anchors_l, mut anchors_r) = match pick_anchors(kk) {
             Some(x) => x,
@@ -7650,6 +7653,7 @@ pub fn nurbs_fillet_band_strip(
                 // left fan: anchor = the bottom connector's left end; CCW
                 // winding = DESCENDING wall order (s69 form).
                 let anchor_l = cbtm[0];
+                let left_fan_start = tris.len();
                 if anchors_l[j] < anchors_l[j + 1] {
                     let lw = &w_l[(anchors_l[j] + 1)..=anchors_l[j + 1]];
                     for k in 1..lw.len() {
@@ -7663,6 +7667,7 @@ pub fn nurbs_fillet_band_strip(
                 // right fan: anchor = the bottom connector's right end; CCW
                 // winding = ASCENDING wall order (s69 form).
                 let anchor_r = cbtm[cbtm.len() - 1];
+                let right_fan_start = tris.len();
                 if anchors_r[j] < anchors_r[j + 1] {
                     let rw = &w_r[(anchors_r[j] + 1)..=anchors_r[j + 1]];
                     for k in 1..rw.len() {
@@ -7699,6 +7704,47 @@ pub fn nurbs_fillet_band_strip(
                     if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
                         tris.extend_from_slice(&tri);
                         tri_band.push(j);
+                    }
+                }
+                // ── s108: DEGENERATE WALL-FAN SUBDIVISION (per band) ────
+                // A straight trim wall section (u=const up to ~1e-8
+                // jitter — the f243 class) leaves every wall fan
+                // zero-area in UV; subdivide the chord-carrying zipper
+                // triangle through the wall points instead (the
+                // edge-accounting proof is on the helper's doc).
+                if dfs_on {
+                    let uvpos = |i: usize| -> [f64; 2] {
+                        if i < n {
+                            [us[i], vs[i]]
+                        } else {
+                            new_pts[i - n]
+                        }
+                    };
+                    if anchors_r[j] + 2 <= anchors_r[j + 1] {
+                        let rws = &w_r[(anchors_r[j] + 1)..=anchors_r[j + 1]];
+                        repair_degenerate_wall_fan(
+                            &mut tris,
+                            &mut tri_band,
+                            anchor_r,
+                            rws,
+                            right_fan_start,
+                            false,
+                            &uvpos,
+                            j,
+                        );
+                    }
+                    if anchors_l[j] + 2 <= anchors_l[j + 1] {
+                        let lws = &w_l[(anchors_l[j] + 1)..=anchors_l[j + 1]];
+                        repair_degenerate_wall_fan(
+                            &mut tris,
+                            &mut tri_band,
+                            anchor_l,
+                            lws,
+                            left_fan_start,
+                            true,
+                            &uvpos,
+                            j,
+                        );
                     }
                 }
             }
@@ -8108,6 +8154,215 @@ pub fn nurbs_fillet_band_strip(
         }
     }
     (tris, new_pts)
+}
+
+// ─────────────────────────────────────────────────────────────────
+// s108: DEGENERATE WALL-FAN SUBDIVISION (the (3,243) class)
+// ─────────────────────────────────────────────────────────────────
+// A straight trim wall section (every wall point on one UV line —
+// u=const up to ~1e-8 jitter, e.g. the f243 fillet trim u=1.0048)
+// makes EVERY wall fan of the band zero-area in UV: the fan's apex
+// (the connector's end) sits ON the wall, so [anchor, w[k-1], w[k]]
+// covers the section's ring edges on phantom slivers whose UV
+// normals are garbage — the postweld winding vote reads them as
+// None (the anti-wound seam state survives) and the BFS ripple
+// manufactures the 180° cross-face pair. Cure, per degenerate fan:
+// the ONE zipper triangle that carries the wall CHORD
+// (anchor → the section's ceiling point — both ends ON the wall) is
+// subdivided along that chord through the section's interior wall
+// points, fanning from the chord tri's OFF-wall vertex X:
+//   [X, anchor, w[0]], [X, w[0], w[1]], …, [X, w[M-2], w[M-1]]
+// (the p-sequence anchor, w[0..M-1] — the first tri inherits the
+// chord tri's (X, anchor) edge and carries the rim (anchor, w[0]),
+// the last inherits (X, ceiling)).
+// Edge accounting is conserved EXACTLY (analytically):
+//   • the wall's ring segments move from the old fan's bases onto
+//     the new fan's bases (still rim, 1×);
+//   • the chord edge (non-rim, was 2×: the old fan's last tri + the
+//     chord tri) ceases to exist — both carriers are dropped;
+//   • the chord tri's two other edges are inherited 1:1 by the new
+//     fan's first/last triangles (their second carriers — the
+//     neighbouring zipper tris — are untouched);
+//   • the old fan's spokes simply cease to exist.
+// The tiled area is conserved (a subdivision of one triangle), and
+// the new triangles have REAL UV area (apex off the wall) — the
+// vote is no longer None. Kill-switch: DRAPPER_DEGEN_FAN_SPLIT=0
+// (skip the repair calls entirely — bit-identical baseline).
+fn repair_degenerate_wall_fan(
+    tris: &mut Vec<usize>,
+    tri_band: &mut Vec<usize>,
+    anchor: usize,
+    wall: &[usize],
+    fan_start: usize,
+    fan_desc: bool,
+    uv_of: &dyn Fn(usize) -> [f64; 2],
+    band: usize,
+) {
+    let m = wall.len();
+    if m < 2 || tris.len() < fan_start + 3 * (m - 1) {
+        return; // no fan block where expected — leave untouched
+    }
+    let fan_tris = m - 1;
+    // 1. degeneracy: EVERY fan triangle 2·|area|/longest² < eps
+    //    (the s107_uv_sliver_audit criterion, default 1e-4; healthy
+    //    curved-wall fans sit five-plus orders above it). The eps is
+    //    knob-tunable for bisection (DRAPPER_DEGEN_FAN_EPS).
+    let eps: f64 = std::env::var("DRAPPER_DEGEN_FAN_EPS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1e-4);
+    let trace = std::env::var("DRAPPER_DEGEN_FAN_TRACE").is_ok();
+    let sliver_ratio = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| -> f64 {
+        let area2 = ((b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])).abs();
+        let lab = (b[0] - a[0]).hypot(b[1] - a[1]).max(1e-300);
+        let lbc = (c[0] - b[0]).hypot(c[1] - b[1]).max(1e-300);
+        let lca = (a[0] - c[0]).hypot(a[1] - c[1]).max(1e-300);
+        let longest = lab.max(lbc).max(lca);
+        area2 / (longest * longest)
+    };
+    let mut worst_ratio = 0.0f64;
+    for k in 1..m {
+        let base = fan_start + 3 * (k - 1);
+        if tris[base] != anchor {
+            return;
+        }
+        let (wa, wb) = if fan_desc {
+            (wall[k], wall[k - 1])
+        } else {
+            (wall[k - 1], wall[k])
+        };
+        if tris[base + 1] != wa || tris[base + 2] != wb {
+            return; // not the expected fan layout — leave untouched
+        }
+        let r = sliver_ratio(uv_of(tris[base]), uv_of(tris[base + 1]), uv_of(tris[base + 2]));
+        if r > worst_ratio {
+            worst_ratio = r;
+        }
+        if r >= eps {
+            return; // a healthy (curved-wall) fan — keep it
+        }
+    }
+    if trace {
+        eprintln!(
+            "[DEGEN_FAN] band={} wall_pts={} worst_ratio={:.3e} anchor_uv=({:.6},{:.6})",
+            band,
+            m,
+            worst_ratio,
+            uv_of(anchor)[0],
+            uv_of(anchor)[1]
+        );
+    }
+    // 2. locate the chord carrier: exactly TWO triangles contain the
+    //    pair {anchor, wall[m-1]} — the fan's last one + ONE zipper
+    //    tri; the zipper one is the subdivision subject.
+    let ceiling = wall[m - 1];
+    let mut carriers = 0usize;
+    let mut chord_flat: Option<usize> = None;
+    let ti_from = fan_start / 3;
+    let ti_to = tris.len() / 3;
+    for ti in ti_from..ti_to {
+        let t = [tris[3 * ti], tris[3 * ti + 1], tris[3 * ti + 2]];
+        if t.contains(&anchor) && t.contains(&ceiling) {
+            carriers += 1;
+            let flat = 3 * ti;
+            let in_fan = flat >= fan_start && flat < fan_start + 3 * fan_tris;
+            if !in_fan {
+                chord_flat = Some(flat);
+            }
+        }
+    }
+    if carriers != 2 {
+        return; // expected exactly fan-last + zipper — bail out untouched
+    }
+    let Some(cf) = chord_flat else { return };
+    let xt = [tris[cf], tris[cf + 1], tris[cf + 2]];
+    let Some(&x) = xt.iter().find(|&&v| v != anchor && v != ceiling) else {
+        return;
+    };
+    if wall.contains(&x) {
+        return; // the apex candidate sits ON the wall — no cure, bail out
+    }
+    // 3. orientation: follow the chord tri's cyclic direction along
+    //    the wall (anchor → ceiling, or the reverse).
+    let pa = xt.iter().position(|&v| v == anchor).unwrap();
+    let pc = xt.iter().position(|&v| v == ceiling).unwrap();
+    let ascending = (pc + 3 - pa) % 3 == 1;
+    if trace {
+        eprintln!(
+            "[DEGEN_FAN SPLICE] band={} m={} fan_start={} cf={} x={} asc={} wall={:?}",
+            band, m, fan_start, cf, x, ascending, &wall[..m.min(6)]
+        );
+    }
+    // 4. splice: the chord tri sits AFTER the fan block — drop it
+    //    first (later flat index), then the fan block, then append.
+    let census_before: std::collections::HashMap<(usize, usize), usize> = if trace {
+        let mut m2 = std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a2 = c[k];
+                let b2 = c[(k + 1) % 3];
+                if a2 != b2 {
+                    *m2.entry((a2.min(b2), b2.max(a2))).or_default() += 1;
+                }
+            }
+        }
+        m2
+    } else {
+        std::collections::HashMap::new()
+    };
+    tris.drain(cf..cf + 3);
+    tri_band.drain(cf / 3..cf / 3 + 1);
+    tris.drain(fan_start..fan_start + 3 * fan_tris);
+    tri_band.drain(fan_start / 3..fan_start / 3 + fan_tris);
+    for k in 0..m {
+        // the p-sequence: p_0 = anchor (the section's foot), then
+        // wall[0..m-1] — the first tri [x, anchor, wall[0]] inherits
+        // the chord tri's (x, anchor) edge AND carries the rim
+        // (anchor, wall[0]); the last [x, wall[m-2], ceiling]
+        // inherits (x, ceiling). Net triangle count: m replaces
+        // (m-1 fan + 1 chord tri) — unchanged.
+        let p_k = if k == 0 { anchor } else { wall[k - 1] };
+        let p_k1 = wall[k];
+        let tri = if ascending {
+            [x, p_k, p_k1]
+        } else {
+            [x, p_k1, p_k]
+        };
+        if tri[0] != tri[1] && tri[1] != tri[2] && tri[0] != tri[2] {
+            tris.extend_from_slice(&tri);
+            tri_band.push(band);
+        }
+    }
+    if trace {
+        let mut after = std::collections::HashMap::new();
+        for c in tris.chunks_exact(3) {
+            for k in 0..3 {
+                let a2 = c[k];
+                let b2 = c[(k + 1) % 3];
+                if a2 != b2 {
+                    *after.entry((a2.min(b2), b2.max(a2))).or_default() += 1;
+                }
+            }
+        }
+        let mut changed = 0usize;
+        for (e, &cnt_b) in census_before.iter() {
+            let cnt_a = after.get(e).copied().unwrap_or(0);
+            if cnt_a != cnt_b {
+                eprintln!(
+                    "[DEGEN_FAN DELTA] edge {:?} {} -> {}",
+                    e, cnt_b, cnt_a
+                );
+                changed += 1;
+            }
+        }
+        for (&e, &cnt_a) in after.iter() {
+            if !census_before.contains_key(&e) && cnt_a != 0 {
+                eprintln!("[DEGEN_FAN DELTA] edge {:?} NEW -> {}", e, cnt_a);
+                changed += 1;
+            }
+        }
+        eprintln!("[DEGEN_FAN SPLICED] band={} changed_edges={}", band, changed);
+    }
 }
 
 /// session-71: LUNE_FILLET_BAND — the Nurbs lune class (the post-s70
