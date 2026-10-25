@@ -4182,14 +4182,36 @@ pub(crate) fn generate_sphere_steiner_grid(
         n_v -= 1;
     }
 
+    // s110: seam-safety classification of the sphere u-range, same rule
+    // as the s106 cylinder band-grid gate (generate_cylinder_or_cone_
+    // steiner_grid) — the sphere band-grid (s105) has NO such gate, so
+    // for forensics we log whether the meridional columns at
+    // u_min+h_u / u_max−h_u would sit next to a periodic seam
+    // (full-wrap face or an unrolled range strictly containing a
+    // multiple of the u-period 2π). Measured on the corpus (s110): all
+    // 126 generator calls are partial, seam-safe lunes/bands — the
+    // "columns half-step from the seam on a full sphere" scenario has
+    // no substrate in the corpus (max u_span = 4.4752 < 0.98·2π).
+    let tau = 2.0 * std::f64::consts::PI;
+    let full_wrap = u_span > 0.98 * tau;
+    let seam_crossing = {
+        let eps = 1e-9;
+        let k_first = (u_min / tau).floor() as i64 + 1;
+        (k_first as f64) * tau < u_max - eps
+    };
+
     log::debug!(
-        "sphere steiner grid: n_u={}, n_v={}, radius={:.4}, u_span={:.4}, v_span={:.4}, budget={}",
+        "sphere steiner grid: n_u={}, n_v={}, radius={:.4}, u_span={:.4}, v_span={:.4}, budget={}, u_range=[{:.4},{:.4}], full_wrap={}, seam_crossing={}",
         n_u,
         n_v,
         radius,
         u_span,
         v_span,
-        max_budget
+        max_budget,
+        u_min,
+        u_max,
+        full_wrap,
+        seam_crossing
     );
 
     // Pole threshold: matches `at_north_pole` / `at_south_pole` in

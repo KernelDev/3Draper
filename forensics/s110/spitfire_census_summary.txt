@@ -1,0 +1,9 @@
+--- brep_idx=0 NAUO_3874 (BREP#31356) BREP#31356: 24 pairs >170° (0 tangent-exempt, 21 sub-tol weld-noise, 0 knife-fin pinch, 3 real) eff_tol=0.0194
+--- brep_idx=2 NAUO_15973 (BREP#31359) BREP#31359: 62 pairs >170° (0 tangent-exempt, 56 sub-tol weld-noise, 0 knife-fin pinch, 6 real) eff_tol=0.0156
+--- brep_idx=4 NAUO_15981 (BREP#31359) BREP#31359: 62 pairs >170° (0 tangent-exempt, 56 sub-tol weld-noise, 0 knife-fin pinch, 6 real) eff_tol=0.0156
+--- brep_idx=5 NAUO_15987 (BREP#31356) BREP#31356: 24 pairs >170° (0 tangent-exempt, 21 sub-tol weld-noise, 0 knife-fin pinch, 3 real) eff_tol=0.0194
+--- brep_idx=7 NAUO_28747 (BREP#27977) BREP#27977: 107 pairs >170° (0 tangent-exempt, 82 sub-tol weld-noise, 0 knife-fin pinch, 25 real) eff_tol=0.0167
+--- brep_idx=8 NAUO_15998 (BREP#31357) BREP#31357: 47 pairs >170° (0 tangent-exempt, 47 sub-tol weld-noise, 0 knife-fin pinch, 0 real) eff_tol=0.0192
+--- brep_idx=9 NAUO_28750 (BREP#31360) BREP#31360: 71 pairs >170° (0 tangent-exempt, 64 sub-tol weld-noise, 0 knife-fin pinch, 7 real) eff_tol=0.0179
+--- brep_idx=10 NAUO_16007 (BREP#31357) BREP#31357: 47 pairs >170° (0 tangent-exempt, 47 sub-tol weld-noise, 0 knife-fin pinch, 0 real) eff_tol=0.0192
+--- brep_idx=12 NAUO_28744 (BREP#31360) BREP#31360: 71 pairs >170° (0 tangent-exempt, 64 sub-tol weld-noise, 0 knife-fin pinch, 7 real) eff_tol=0.0179

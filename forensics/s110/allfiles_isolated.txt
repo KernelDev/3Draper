@@ -1,0 +1,31 @@
+File                                           BREPs     Tris       BndEdges     Status
+-----------------------------------------------------------------------------------------------
+test/3.05.078.stp                                  1     2884     0/4326      0.0%  WATERTIGHT
+test/8394-121_Spit-Fire.STEP                      13    70437 10843/110276    9.8%  leaky
+test/8500-02_Vulcan.STEP                          23   177974 20465/275463    7.4%  leaky
+test/SampleCube.step                               1       12     0/18        0.0%  WATERTIGHT
+test/Zentralstaender.stp                          34    49738     0/74607     0.0%  WATERTIGHT
+test/as1-oc-214.stp                               18    23168     0/34752     0.0%  WATERTIGHT
+test/as1-oc-214_bolt.stp                           1     1196     0/1794      0.0%  WATERTIGHT
+test/as1-oc-214_nut.stp                            1      560     0/840       0.0%  WATERTIGHT
+test/as1-oc-214_plate.stp                          1     3972     0/5958      0.0%  WATERTIGHT
+test/as1-oc-214_rod.stp                            1      652     0/978       0.0%  WATERTIGHT
+test/brick_thin.stp                                1    19372     0/29058     0.0%  WATERTIGHT
+test/brick_thin_hole.stp                           1     5496     0/8244      0.0%  WATERTIGHT
+test/brick_thin_round.stp                          1     2913  1086/4911     22.1%  BAD
+test/compressor-13920_top.stp                      2     9111  1136/14126     8.0%  leaky
+test/cube_with_void.stp                            2        4     0/6         0.0%  WATERTIGHT
+test/drill_top.stp                                 5    96806  5155/146647    3.5%  ok
+test/gdt_test.stp                                  1        0     0/0         0.0%  WATERTIGHT
+test/nested_assembly.stp                           1       12     0/18        0.0%  WATERTIGHT
+test/nist_assembly.stp                             2       24     0/36        0.0%  WATERTIGHT
+test/nist_block_with_hole.stp                      1      172     0/258       0.0%  WATERTIGHT
+test/nist_chamfer_block.stp                        1       16     0/24        0.0%  WATERTIGHT
+test/nist_complex_surface.stp                      1       12     0/18        0.0%  WATERTIGHT
+test/nist_cone.stp                                 1      200     0/300       0.0%  WATERTIGHT
+test/nist_cube.stp                                 1       12     0/18        0.0%  WATERTIGHT
+test/nist_cylinder.stp                             1      200     0/300       0.0%  WATERTIGHT
+test/nist_sphere.stp                               1      960     0/1440      0.0%  WATERTIGHT
+test/transmission_top.stp                        152   323932 63349/515307   12.3%  leaky
+-----------------------------------------------------------------------------------------------
+Summary: 22 ok, 4 leaky, 1 BAD, 0 errors (27 total) [per-file isolated]
