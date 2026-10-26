@@ -591,6 +591,150 @@ fn cdt_defect_count(
     defects
 }
 
+/// session-114: split a BAND ring — two v-monotone walls with opposite
+/// traversal signs, possibly TILTED (D-edges: the u-extent drifts with
+/// v) and possibly wiggled by sub-tol neutral (dv≈0) bumps, joined at
+/// a v-min turn and a v-max turn. A neutral bridge AT a turn is a flat
+/// cap chain; a sharp turn has no bridge and the cap is the single
+/// turn point. Returns (bottom, top, left, right) under the s83 arc
+/// contract: bottom spans br→bl (cap at v-min), top spans tl→tr (cap
+/// at v-max), left = left wall [bl..tl] v-ASCENDING, right = right
+/// wall [br..tr] v-ASCENDING. None when the ring is not this class
+/// (more than two monotone runs / same-sign runs / degenerate spans).
+fn band_ring_split(
+    all_2d: &[[f64; 2]],
+    n_boundary: usize,
+) -> Option<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> {
+    let n = n_boundary;
+    if n < 8 {
+        return None;
+    }
+    let (mut vmin, mut vmax) = (f64::INFINITY, f64::NEG_INFINITY);
+    for i in 0..n {
+        let v = all_2d[i][1];
+        if !v.is_finite() {
+            return None;
+        }
+        vmin = vmin.min(v);
+        vmax = vmax.max(v);
+    }
+    let vspan = vmax - vmin;
+    if vspan <= 0.0 {
+        return None;
+    }
+    let veps = 1e-9 * vspan;
+    let sgn = |i: usize| -> i8 {
+        let dv = all_2d[(i + 1) % n][1] - all_2d[i][1];
+        if dv > veps {
+            1
+        } else if dv < -veps {
+            -1
+        } else {
+            0
+        }
+    };
+    // cyclic sequence of non-neutral edges, starting at a block head
+    let first = (0..n).find(|&i| sgn(i) != 0)?;
+    let mut seq: Vec<(usize, i8)> = Vec::new();
+    for k in 0..n {
+        let i = (first + k) % n;
+        let s = sgn(i);
+        if s != 0 {
+            seq.push((i, s));
+        }
+    }
+    if seq.len() < 4 {
+        return None;
+    }
+    // rotate so that seq position 0 starts a sign block (cyclic boundary
+    // not inside a block)
+    let mut rot_at = 0usize;
+    if seq[seq.len() - 1].1 == seq[0].1 {
+        let mut last_transition = 0usize;
+        for k in 1..seq.len() {
+            if seq[k].1 != seq[k - 1].1 {
+                last_transition = k;
+            }
+        }
+        rot_at = last_transition;
+    }
+    let rot: Vec<(usize, i8)> = seq[rot_at..]
+        .iter()
+        .chain(seq[..rot_at].iter())
+        .copied()
+        .collect();
+    // sign blocks in ring order: [(start pos, end pos incl, sign)]
+    let mut blocks: Vec<(usize, usize, i8)> = Vec::new();
+    {
+        let m = rot.len();
+        let mut s = 0usize;
+        for k in 1..m {
+            if rot[k].1 != rot[k - 1].1 {
+                blocks.push((s, k - 1, rot[k - 1].1));
+                s = k;
+            }
+        }
+        blocks.push((s, m - 1, rot[m - 1].1));
+    }
+    if blocks.len() != 2 || blocks[0].2 != -blocks[1].2 {
+        return None;
+    }
+    // wall chains (points, ring order, inclusive ends; interior
+    // neutral bumps stay inside the wall chain)
+    let chain = |from_pt: usize, to_pt: usize| -> Vec<usize> {
+        let mut c = Vec::new();
+        let mut i = from_pt;
+        c.push(i);
+        while i != to_pt {
+            i = (i + 1) % n;
+            c.push(i);
+        }
+        c
+    };
+    let wall_pts = |b: &(usize, usize, i8)| -> (usize, usize) {
+        // (start point, end point) of the wall in ring order
+        let e0 = rot[b.0].0;
+        let e1 = rot[b.1].0;
+        (e0, (e1 + 1) % n)
+    };
+    let (b0, b1) = (&blocks[0], &blocks[1]);
+    let (a0_pt, a1_pt) = wall_pts(b0);
+    let (c0_pt, c1_pt) = wall_pts(b1);
+    // bridge 1: from the end of wall-0 to the start of wall-1 (ring
+    // order); bridge 2: from the end of wall-1 to the start of wall-0
+    let bridge1 = chain(a1_pt, c0_pt);
+    let bridge2 = chain(c1_pt, a0_pt);
+    // assign walls by sign: the "+" wall ascends v (right), the "-" wall
+    // descends v in ring order (left, reversed to ascend)
+    let (right, left_desc, cap_low, cap_high) = if b0.2 == 1 {
+        // wall-0 ascends: bridge1 sits at v-max (top), bridge2 at v-min
+        (
+            chain(a0_pt, a1_pt),
+            chain(c0_pt, c1_pt),
+            bridge2,
+            bridge1,
+        )
+    } else {
+        // wall-0 descends: bridge1 at v-min (bottom), bridge2 at v-max
+        (
+            chain(c0_pt, c1_pt),
+            chain(a0_pt, a1_pt),
+            bridge1,
+            bridge2,
+        )
+    };
+    let mut left = left_desc;
+    left.reverse();
+    // sanity: cap chains must be flat (they consist of neutral edges by
+    // construction — the turn points may repeat at both ends) and walls
+    // non-degenerate
+    if right.len() < 2 || left.len() < 2 || cap_low.is_empty() || cap_high.is_empty() {
+        return None;
+    }
+    // (bottom, top, left, right) under the s83 arc contract
+    Some((cap_low, cap_high, left, right))
+}
+
 /// session-83: STRUCTURAL LATTICE row triangulation — the s78 SAIL_BAND
 /// construction generalized to a GIVEN interior lattice (the adaptive
 /// subdivision's own Steiner points) on a 4-corner monotone ring.
@@ -742,92 +886,136 @@ fn structured_lattice_triangulation(
         }
         cls.push(c);
     }
+    // s114 BAND LATTICE: D-edges mean TILTED WALLS — a band (serpentine
+    // strip) whose walls are v-monotone but whose u-extent drifts with
+    // v (Spit-Fire #27977 f44/f7 Torus class: a straight u=const wall
+    // with sub-tol rim bumps + a sloping arc wall, sharp v-turns, NO
+    // rim cap edges at all — the s83 H/V corner split cannot express
+    // it and rejected the whole class, leaving the face on the
+    // sliver-guard-deadlocked CDT that drops 65% of the interior
+    // lattice and emits the chord families that fold over the torus
+    // extremum lines). The v-monotonicity split CAN: exactly two
+    // opposite-sign monotone runs around the ring joined at a v-min
+    // and a v-max turn (a neutral flat bridge at a turn is a cap; a
+    // neutral bump INSIDE a run is a wall wiggle and stays in the
+    // wall). Caps may degenerate to a single point (sharp turn) — the
+    // zipper fans from a point (dead_a/dead_b paths already handle
+    // 1-length chains).
+    // Kill-switch: DRAPPER_BAND_LATTICE=0 (in addition to the shared
+    // DRAPPER_LATTICE_BAND=0).
+    let band_caps;
+    let (mut bottom, mut top, mut left, mut right): (
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+        Vec<usize>,
+    );
     if has_d {
-        // rounded/organic corners: outside the s83 rectangle class
-        lattice_reject!("diagonal rim edges (rounded corners)");
+        if std::env::var("DRAPPER_BAND_LATTICE").as_deref() == Ok("0") {
+            lattice_reject!("diagonal rim edges (rounded corners)");
+        }
+        match band_ring_split(all_2d, n_boundary) {
+            Some((b, t, l, r)) => {
+                bottom = b;
+                top = t;
+                left = l;
+                right = r;
+                band_caps = true;
+            }
+            None => {
+                // rounded/organic corners outside both classes
+                lattice_reject!("diagonal rim edges (rounded corners)");
+            }
+        }
+    } else {
+        band_caps = false;
+        let corners: Vec<usize> = (0..n)
+            .filter(|&i| cls[(i + n - 1) % n] != cls[i])
+            .collect();
+        if corners.len() != 4 {
+            lattice_reject!(format!("corner count {}", corners.len()));
+        }
+        let cu_min = corners.iter().map(|&i| all_2d[i][0]).fold(f64::INFINITY, f64::min);
+        let cu_max = corners.iter().map(|&i| all_2d[i][0]).fold(f64::NEG_INFINITY, f64::max);
+        let cv_min = corners.iter().map(|&i| all_2d[i][1]).fold(f64::INFINITY, f64::min);
+        let cv_max = corners.iter().map(|&i| all_2d[i][1]).fold(f64::NEG_INFINITY, f64::max);
+        let nearest_corner = |tu: f64, tv: f64| -> usize {
+            let mut best = corners[0];
+            let mut bd = f64::INFINITY;
+            for &c in corners.iter() {
+                let p = all_2d[c];
+                let d = (p[0] - tu) * (p[0] - tu) + (p[1] - tv) * (p[1] - tv);
+                if d < bd {
+                    bd = d;
+                    best = c;
+                }
+            }
+            best
+        };
+        let bl = nearest_corner(cu_min, cv_min);
+        let br = nearest_corner(cu_max, cv_min);
+        let tr = nearest_corner(cu_max, cv_max);
+        let tl = nearest_corner(cu_min, cv_max);
+        if bl == br || bl == tr || bl == tl || br == tr || br == tl || tr == tl {
+            lattice_reject!("corner identity collapse");
+        }
+        let arc = |from: usize, to: usize, avoid: &[usize; 2]| -> Option<Vec<usize>> {
+            let mut fwd = vec![from];
+            let mut i = from;
+            let mut ok = true;
+            while i != to {
+                i = (i + 1) % n;
+                if i == to {
+                    break;
+                }
+                if i == avoid[0] || i == avoid[1] {
+                    ok = false;
+                    break;
+                }
+                fwd.push(i);
+            }
+            if ok {
+                fwd.push(to);
+            } else {
+                fwd.clear();
+            }
+            let mut bwd = vec![from];
+            let mut i = from;
+            let mut ok = true;
+            while i != to {
+                i = (i + n - 1) % n;
+                if i == to {
+                    break;
+                }
+                if i == avoid[0] || i == avoid[1] {
+                    ok = false;
+                    break;
+                }
+                bwd.push(i);
+            }
+            if ok {
+                bwd.push(to);
+            } else {
+                bwd.clear();
+            }
+            match (fwd.is_empty(), bwd.is_empty()) {
+                (false, false) => Some(if fwd.len() <= bwd.len() { fwd } else { bwd }),
+                (false, true) => Some(fwd),
+                (true, false) => Some(bwd),
+                (true, true) => None,
+            }
+        };
+        bottom = arc(bl, br, &[tl, tr])?;
+        top = arc(tl, tr, &[bl, br])?;
+        left = arc(bl, tl, &[br, tr])?;
+        right = arc(br, tr, &[bl, tl])?;
     }
-    let corners: Vec<usize> = (0..n)
-        .filter(|&i| cls[(i + n - 1) % n] != cls[i])
-        .collect();
-    if corners.len() != 4 {
-        lattice_reject!(format!("corner count {}", corners.len()));
+    // s114: a band cap may degenerate to a single point (sharp v-turn);
+    // the walls themselves must stay non-degenerate.
+    if left.len() < 2 || right.len() < 2 {
+        lattice_reject!("degenerate arc");
     }
-    let cu_min = corners.iter().map(|&i| all_2d[i][0]).fold(f64::INFINITY, f64::min);
-    let cu_max = corners.iter().map(|&i| all_2d[i][0]).fold(f64::NEG_INFINITY, f64::max);
-    let cv_min = corners.iter().map(|&i| all_2d[i][1]).fold(f64::INFINITY, f64::min);
-    let cv_max = corners.iter().map(|&i| all_2d[i][1]).fold(f64::NEG_INFINITY, f64::max);
-    let nearest_corner = |tu: f64, tv: f64| -> usize {
-        let mut best = corners[0];
-        let mut bd = f64::INFINITY;
-        for &c in corners.iter() {
-            let p = all_2d[c];
-            let d = (p[0] - tu) * (p[0] - tu) + (p[1] - tv) * (p[1] - tv);
-            if d < bd {
-                bd = d;
-                best = c;
-            }
-        }
-        best
-    };
-    let bl = nearest_corner(cu_min, cv_min);
-    let br = nearest_corner(cu_max, cv_min);
-    let tr = nearest_corner(cu_max, cv_max);
-    let tl = nearest_corner(cu_min, cv_max);
-    if bl == br || bl == tr || bl == tl || br == tr || br == tl || tr == tl {
-        lattice_reject!("corner identity collapse");
-    }
-    // ── 3. four arcs between corners ───────────────────────────────
-    let arc = |from: usize, to: usize, avoid: &[usize; 2]| -> Option<Vec<usize>> {
-        let mut fwd = vec![from];
-        let mut i = from;
-        let mut ok = true;
-        while i != to {
-            i = (i + 1) % n;
-            if i == to {
-                break;
-            }
-            if i == avoid[0] || i == avoid[1] {
-                ok = false;
-                break;
-            }
-            fwd.push(i);
-        }
-        if ok {
-            fwd.push(to);
-        } else {
-            fwd.clear();
-        }
-        let mut bwd = vec![from];
-        let mut i = from;
-        let mut ok = true;
-        while i != to {
-            i = (i + n - 1) % n;
-            if i == to {
-                break;
-            }
-            if i == avoid[0] || i == avoid[1] {
-                ok = false;
-                break;
-            }
-            bwd.push(i);
-        }
-        if ok {
-            bwd.push(to);
-        } else {
-            bwd.clear();
-        }
-        match (fwd.is_empty(), bwd.is_empty()) {
-            (false, false) => Some(if fwd.len() <= bwd.len() { fwd } else { bwd }),
-            (false, true) => Some(fwd),
-            (true, false) => Some(bwd),
-            (true, true) => None,
-        }
-    };
-    let mut bottom = arc(bl, br, &[tl, tr])?;
-    let mut top = arc(tl, tr, &[bl, br])?;
-    let mut left = arc(bl, tl, &[br, tr])?;
-    let mut right = arc(br, tr, &[bl, tl])?;
-    if bottom.len() < 2 || top.len() < 2 || left.len() < 2 || right.len() < 2 {
+    if (bottom.len() < 2 || top.len() < 2) && !band_caps {
         lattice_reject!("degenerate arc");
     }
     let (umin, umax) = {
@@ -918,6 +1106,21 @@ fn structured_lattice_triangulation(
         if j == m_rows + 1 {
             return top.iter().map(|&i| i as u32).collect();
         }
+        if j == 1 && band_caps {
+            // s114 BAND WEDGE: chain B of the first strip is the right
+            // wall band alone (v-ascending, from the turn point side
+            // up to the row-0 level) — the left band and row 0 moved
+            // to chain A (see lower_chain). When the right band below
+            // row 0 is EMPTY (f7: the right wall starts above the
+            // first row level), chain B degenerates to the first right
+            // wall point — the wedge zips A against that single
+            // anchor and the k=2 strip owns the rest of the wall.
+            let (s, e) = rb[0];
+            if s < e {
+                return right[s..e].iter().map(|&i| i as u32).collect();
+            }
+            return vec![right[1] as u32];
+        }
         let (s, e) = lb[j - 1];
         let mut row: Vec<u32> = left[s..e].iter().map(|&i| i as u32).collect();
         row.extend(rows[j - 1].iter().map(|&i| i as u32));
@@ -931,6 +1134,24 @@ fn structured_lattice_triangulation(
         // k = 1: bottom cap; k = m_rows+1: sub-corners + row M;
         // else anchors at L_{k-1} + row k-1
         if k == 1 {
+            if band_caps {
+                // s114 BAND WEDGE: the sharp-turn bottom cap cannot fan
+                // over the full row band — the wall bands CONTINUE both
+                // walls through the turn point, so fan triangles
+                // (turn, wall_i, wall_i+1) are 1D degenerate. Instead
+                // the wedge zips the LEFT band + row 0 (chain A, from
+                // the turn point up the left wall and across the row)
+                // against the RIGHT band (chain B, up the right wall):
+                // the first triangle (turn, left[1], right[1]) carries
+                // BOTH turn rim edges, the last (row0_end-1, row0_end,
+                // right_top) closes at the next strip's lower anchor
+                // (count-2 interior edge via the k=2 zipper).
+                let mut c: Vec<u32> = vec![bottom[0] as u32];
+                let (s, e) = lb[0];
+                c.extend(left[s..e].iter().map(|&i| i as u32));
+                c.extend(rows[0].iter().map(|&i| i as u32));
+                return Some(c);
+            }
             return Some(bottom.iter().map(|&i| i as u32).collect());
         }
         if k == m_rows + 1 {
@@ -973,11 +1194,15 @@ fn structured_lattice_triangulation(
     let mut tris: Vec<[u32; 3]> = Vec::new();
     for k in 1..=m_rows + 1 {
         let a = match lower_chain(k) {
-            Some(c) if c.len() >= 2 => c,
+            // s114: a band's bottom cap is a single turn point — the
+            // zipper fans from it (dead_a from the first step)
+            Some(c) if c.len() >= 2 || (band_caps && k == 1 && c.len() == 1) => c,
             _ => lattice_reject!(format!("lower chain degenerate k={}", k)),
         };
         let b = full_row(k);
-        if b.len() < 2 {
+        // s114: a band's top cap may likewise be a single turn point
+        // (dead_b from the first step — A walks, fanning to the point)
+        if b.len() < 2 && !(band_caps && k == m_rows + 1 && b.len() == 1) {
             lattice_reject!(format!("upper row degenerate k={}", k));
         }
         let (m, nb) = (a.len(), b.len());
@@ -986,6 +1211,13 @@ fn structured_lattice_triangulation(
         while ia < m - 1 || ib < nb - 1 {
             let dead_a = ia >= m - 1;
             let dead_b = ib >= nb - 1;
+            // s114: a single-point band cap anchors BOTH walls (the
+            // sharp turn point) — it must not count as "on a wall" for
+            // the all-on-one-wall degenerate tests below, or the very
+            // first fan triangle (cap, band[0], band[1]) is falsely
+            // degenerate on both sides and the zipper deadlocks
+            // (f44: stuck k=1 ia=0 ib=0).
+            let a_is_turn = band_caps && k == 1 && m == 1 && ia == 0;
             // all-on-one-wall triangles are 1D degenerates: on u-const
             // walls (sail) they are EXACTLY collinear and the eps guard
             // catches them; an ANGLED wall's curvature (f26 right wall:
@@ -993,19 +1225,23 @@ fn structured_lattice_triangulation(
             // inverted wall sliver — tripped explicitly instead.
             let deg_a = !dead_a && {
                 area2(a[ia], a[ia + 1], b[ib]).abs() <= eps_area
-                    || (left_set.contains(&a[ia])
+                    || (!a_is_turn
+                        && left_set.contains(&a[ia])
                         && left_set.contains(&a[ia + 1])
                         && left_set.contains(&b[ib]))
-                    || (right_set.contains(&a[ia])
+                    || (!a_is_turn
+                        && right_set.contains(&a[ia])
                         && right_set.contains(&a[ia + 1])
                         && right_set.contains(&b[ib]))
             };
             let deg_b = !dead_b && {
                 area2(a[ia], b[ib + 1], b[ib]).abs() <= eps_area
-                    || (left_set.contains(&a[ia])
+                    || (!a_is_turn
+                        && left_set.contains(&a[ia])
                         && left_set.contains(&b[ib + 1])
                         && left_set.contains(&b[ib]))
-                    || (right_set.contains(&a[ia])
+                    || (!a_is_turn
+                        && right_set.contains(&a[ia])
                         && right_set.contains(&b[ib + 1])
                         && right_set.contains(&b[ib]))
             };
@@ -1042,16 +1278,42 @@ fn structured_lattice_triangulation(
                 // u-criterion (both chains weakly u-monotone)
                 all_2d[a[ia + 1] as usize][0] <= all_2d[b[ib + 1] as usize][0]
             };
+            // s114 BAND WEDGE orientation + micro-fold repair: chain A of
+            // the band's first strip walks UP the left wall then across
+            // the row (a Z-shaped chain), so the wedge's fan around the
+            // turn point comes out CLOCKWISE where the rest of the face
+            // is CCW — emit the wedge's triangles vertex-swapped. Beyond
+            // the wedge, a curved wall whose lattice pokes marginally
+            // past it (f44 left arc: row-first points ~8e-3 outside)
+            // makes individual strip emits come out CW as thin slivers
+            // (areas 1e-6..1e-4, whole overlap well under the area
+            // guard); swapping JUST those keeps the strip winding
+            // uniform AND restores edge-direction consistency with
+            // their neighbors (the topological edge audit has already
+            // passed, so this is a pure orientation repair). The real
+            // 3D impact is adjudicated downstream by the torus
+            // windmill fold gate.
+            let inv = band_caps && k == 1;
+            let mut emit = |tt: [u32; 3]| {
+                let mut t = tt;
+                if inv {
+                    t.swap(1, 2);
+                }
+                if area2(t[0], t[1], t[2]) < 0.0 {
+                    t.swap(1, 2);
+                }
+                tris.push(t);
+            };
             if take_a {
-                tris.push([a[ia], a[ia + 1], b[ib]]);
+                emit([a[ia], a[ia + 1], b[ib]]);
                 ia += 1;
             } else if can_b {
-                tris.push([a[ia], b[ib + 1], b[ib]]);
+                emit([a[ia], b[ib + 1], b[ib]]);
                 ib += 1;
             } else if !dead_a && !deg_a {
                 // wall_block_a is the only blocker — B is exhausted or
                 // blocked; advance A to finish the band
-                tris.push([a[ia], a[ia + 1], b[ib]]);
+                emit([a[ia], a[ia + 1], b[ib]]);
                 ia += 1;
             } else {
                 lattice_reject!(format!(
@@ -1070,6 +1332,27 @@ fn structured_lattice_triangulation(
     }
     // ── 7. guards: coverage / edge audit / area / winding / needles ─
     {
+        // s114: full strip dump for offline analysis (any reject below)
+        if let Ok(path) = std::env::var("DRAPPER_BAND_DUMP") {
+            use std::io::Write;
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static DUMP_CT: AtomicUsize = AtomicUsize::new(0);
+            let ct = DUMP_CT.fetch_add(1, Ordering::SeqCst);
+            if let Ok(mut f) = std::fs::File::create(format!(
+                "{}_{}_{}.txt",
+                path,
+                ct,
+                crate::parametric_domain::current_face_label()
+            )) {
+                let _ = writeln!(f, "n_boundary {} tris {}", n_boundary, tris.len());
+                for p in all_2d.iter().take(interior_start + n_interior) {
+                    let _ = writeln!(f, "p {} {}", p[0], p[1]);
+                }
+                for t in tris.iter() {
+                    let _ = writeln!(f, "t {} {} {}", t[0], t[1], t[2]);
+                }
+            }
+        }
         let mut used = vec![false; interior_start + n_interior];
         for t in tris.iter() {
             for &v in t.iter() {
@@ -1125,9 +1408,40 @@ fn structured_lattice_triangulation(
             .map(|t| area2(t[0], t[1], t[2]) * 0.5)
             .sum();
         if (strip_s - poly_s).abs() > 0.005 * poly_s.abs().max(1e-12) {
+            // s114 diagnostics: a deficit with a FULL edge audit means
+            // local fold-overs (negatively oriented triangles whose
+            // areas subtract) — count them before rejecting, and dump
+            // the full strip for offline analysis when
+            // DRAPPER_BAND_DUMP is set.
+            let noise0 = 1e-9 * scale2;
+            let (mut pos0, mut neg0) = (0usize, 0usize);
+            for t in tris.iter() {
+                let s = area2(t[0], t[1], t[2]);
+                if s > noise0 {
+                    pos0 += 1;
+                } else if s < -noise0 {
+                    neg0 += 1;
+                }
+            }
+            if let Ok(path) = std::env::var("DRAPPER_BAND_DUMP") {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::File::create(format!(
+                    "{}_{}.txt",
+                    path,
+                    crate::parametric_domain::current_face_label()
+                )) {
+                    let _ = writeln!(f, "n_boundary {} tris {}", n_boundary, tris.len());
+                    for p in all_2d.iter().take(interior_start + n_interior) {
+                        let _ = writeln!(f, "p {} {}", p[0], p[1]);
+                    }
+                    for t in tris.iter() {
+                        let _ = writeln!(f, "t {} {} {}", t[0], t[1], t[2]);
+                    }
+                }
+            }
             lattice_reject!(format!(
-                "area mismatch strip {:.6} vs poly {:.6}",
-                strip_s, poly_s
+                "area mismatch strip {:.6} vs poly {:.6} ({} pos / {} neg)",
+                strip_s, poly_s, pos0, neg0
             ));
         }
         if strip_s * poly_s < 0.0 {

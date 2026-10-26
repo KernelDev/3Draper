@@ -2455,9 +2455,41 @@ impl BrepSession {
     /// smooth normals). Mirrors the post-face-loop code in `triangulate_brep_detailed`.
     fn finalize(mut self, _converter: &StepConverter) -> (TriangleMesh, Vec<FaceInfo>) {
         let brep_id = self.brep_id;
+        // s114 stage dump (env-gated, diagnostic only): the f71 Nurbs
+        // winding inversions (emission (435,454,453) -> merged
+        // (435,453,454)) need stage-level localization through the
+        // merge -> weld -> dedup -> T-junction -> fill ->
+        // fix_inconsistent_winding -> dedup2 chain. Baseline bit-identical
+        // when unset.
+        let dump_stages = std::env::var("DRAPPER_DUMP_STAGES").ok();
+        let dump_stage = |mesh: &TriangleMesh, stage: &str| {
+            if let Some(ref prefix) = dump_stages {
+                use std::io::Write;
+                let path = format!("{}_{}_{}.mesh", prefix, brep_id, stage);
+                if let Ok(mut f) = std::fs::File::create(&path) {
+                    let _ = writeln!(
+                        f,
+                        "# brep {} verts {} tris {}",
+                        brep_id,
+                        mesh.vertices.len(),
+                        mesh.triangle_count()
+                    );
+                    for v in mesh.vertices.iter() {
+                        let _ = writeln!(f, "v {} {} {}", v.x, v.y, v.z);
+                    }
+                    let fids = mesh.triangle_face_ids.as_ref();
+                    for (ti, t) in mesh.triangles.iter().enumerate() {
+                        let fid = fids.map(|x| x[ti]).unwrap_or(0);
+                        let _ = writeln!(f, "t {} {} {}\t{}", t[0], t[1], t[2], fid);
+                    }
+                }
+            }
+        };
+        dump_stage(&self.mesh, "pre");
 
         // Filter degenerate triangles
         filter_degenerate_triangles(&mut self.mesh, 1e-10);
+        dump_stage(&self.mesh, "after_filter");
 
         // ─── Recompute face_infos.triangle_range from triangle_face_ids ───
         // After filter_degenerate_triangles removes triangles, the original
@@ -2530,6 +2562,7 @@ impl BrepSession {
                     brep_id, dup_removed, pre_dedup, self.mesh.triangle_count(),
                 );
             }
+            dump_stage(&self.mesh, "after_dedup1");
 
             // CDT-style T-junction repair — when non-manifold OR boundary
             // edges remain after duplicate removal. Boundary-only T-junctions
@@ -2552,6 +2585,7 @@ impl BrepSession {
                     );
                 }
             }
+            dump_stage(&self.mesh, "after_tj");
 
             // Gap filling: fill missing triangles for boundary edge loops.
             // This catches small holes where a face's triangulation didn't
@@ -2575,13 +2609,17 @@ impl BrepSession {
                     );
                 }
             }
+            dump_stage(&self.mesh, "after_fill");
         }
+        dump_stage(&self.mesh, "after_weld");
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
         draper_mesh::fix_inconsistent_winding(&mut self.mesh);
+        dump_stage(&self.mesh, "after_fiw");
 
         // Remove duplicate triangles
         let dup_removed = self.mesh.remove_duplicate_triangles();
+        dump_stage(&self.mesh, "after_dedup2");
         if dup_removed > 0 {
             log::info!(
                 "BREP #{} detailed (chunked): removed {} duplicate/degenerate triangles ({} → {})",

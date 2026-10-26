@@ -14408,6 +14408,18 @@ pub fn triangulate_surface_consistent(
                                 && cdt_ring_edges >= legacy_ring_edges
                                 && cdt_extra_bnd < legacy_extra_bnd
                                 && cdt_interior_dropped == 0;
+                            // s114 MEASURED-AND-REVERTED: an UNCONDITIONAL
+                            // Torus fold gate (folds counted for every
+                            // candidate, cf<=lf gating every arm) REGRESSES
+                            // Spit-Fire 57 -> 91 REAL: the crescent-class
+                            // CDT (f44: 65% Steiners dropped, 57 emission
+                            // fold pairs) still beats the legacy spike
+                            // chain in the MERGED mesh (25 vs 59 REAL) —
+                            // emission folds are NOT merged folds (Step-5
+                            // weld absorbs the sub-tol ones). The windmill
+                            // placement (dropped==0) stays the only fold
+                            // gate; band-lattice results satisfy it by
+                            // construction (every Steiner used).
                             let (torus_fold_ok, legacy_emission_folds, cdt_emission_folds) =
                                 if torus_windmill {
                                     let count_folds = |flat: &[usize]| -> usize {
