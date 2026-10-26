@@ -1,0 +1,110 @@
+
+==============================================================================
+VULCAN 8500-02: 56 REAL pairs
+==============================================================================
+
+[1] mechanism x shape:
+    FOLD-OVER     x FAT    : 12
+    FOLD-OVER     x SLIVER : 25
+    WINDING-FLIP  x FAT    : 13
+    WINDING-FLIP  x SLIVER : 6
+
+[1b] shared-edge traversal x census class (mechanism verification):
+    opposite  x FOLD-OVER    : 37
+    same      x WINDING-FLIP : 19
+
+[2] same-face: 52 / cross-face: 4
+
+[3] per-BREP breakdown (h/eff_tol = max margin of pairs):
+    BREP#10203 NAUO_29530   n=27 same=24 h/eT=1.0-15.3x | FO/SLV:18 WF/FAT:3 WF/SLV:6
+        faces involved: [108, 185, 222, 1100, 1103, 1106, 1109, 1115, 1118, 1121, 1124, 1130, 1133, 1136, 1139, 1145, 1151, 1160, 1166, 1169, 1176, 1182]
+        types: PlanexPlane:24 PlanexTorus:3
+    BREP#10204 NAUO_29645   n= 4 same= 4 h/eT=2.2-2.2x | FO/FAT:2 WF/FAT:2
+        faces involved: [3, 21]
+        types: CylinderxCylinder:4
+    BREP#10212 NAUO_29592   n= 3 same= 3 h/eT=1.7-3.8x | WF/FAT:3
+        faces involved: [8, 12, 19]
+        types: PlanexPlane:2 CylinderxCylinder:1
+    BREP#10217 NAUO_29498   n= 1 same= 1 h/eT=1.1-1.1x | WF/FAT:1
+        faces involved: [6]
+        types: CylinderxCylinder:1
+    BREP#10220 NAUO_29477   n=21 same=20 h/eT=1.0-13.1x | FO/FAT:10 FO/SLV:7 WF/FAT:4
+        faces involved: [8, 25, 27, 28]
+        types: NurbsxNurbs:20 CylinderxNurbs:1
+
+[4] h/eff_tol margin histogram (max h of pair / full-precision eff_tol):
+      1-2  x :  35 ###################################
+      2-4  x :  12 ############
+      4-8  x :   5 #####
+      8-16 x :   4 ####
+     16-100x :   0 
+    >=100x   :   0
+
+[5] angle: >=179.99: 45 | 175-179.99: 8 | 170-175: 3
+
+[6] top-8 worst by h/eff_tol margin:
+      15.3x BREP#10203 NAUO_29530   ang=180.00 cross f=(222,1169) TorusxPlane h=0.2415 [WINDING-FLIPFAT]
+      13.1x BREP#10220 NAUO_29477   ang=179.34 cross f=(8,27) CylinderxNurbs h=0.2627 [FOLD-OVERFAT]
+      12.9x BREP#10220 NAUO_29477   ang=180.00 same f=(25,25) NurbsxNurbs h=0.2589 [FOLD-OVERSLIVER]
+       9.9x BREP#10220 NAUO_29477   ang=180.00 same f=(27,27) NurbsxNurbs h=0.1981 [FOLD-OVERFAT]
+       7.0x BREP#10220 NAUO_29477   ang=179.90 same f=(27,27) NurbsxNurbs h=0.1402 [FOLD-OVERFAT]
+       5.5x BREP#10220 NAUO_29477   ang=180.00 same f=(25,25) NurbsxNurbs h=0.1094 [WINDING-FLIPFAT]
+       5.2x BREP#10220 NAUO_29477   ang=173.91 same f=(25,25) NurbsxNurbs h=0.1046 [FOLD-OVERSLIVER]
+       5.2x BREP#10220 NAUO_29477   ang=180.00 same f=(25,25) NurbsxNurbs h=0.1041 [FOLD-OVERFAT]
+
+==============================================================================
+SPIT-FIRE 8394-121: 57 REAL pairs
+==============================================================================
+
+[1] mechanism x shape:
+    FOLD-OVER     x FAT    : 25
+    FOLD-OVER     x SLIVER : 9
+    WINDING-FLIP  x FAT    : 23
+
+[1b] shared-edge traversal x census class (mechanism verification):
+    opposite  x FOLD-OVER    : 34
+    same      x WINDING-FLIP : 23
+
+[2] same-face: 53 / cross-face: 4
+
+[3] per-BREP breakdown (h/eff_tol = max margin of pairs):
+    BREP#27977 NAUO_28747   n=25 same=25 h/eT=1.4-44.9x | FO/FAT:11 FO/SLV:1 WF/FAT:13
+        faces involved: [6, 7, 30, 44, 65, 71]
+        types: TorusxTorus:15 NurbsxNurbs:10
+    BREP#31356 NAUO_3874    n= 6 same= 6 h/eT=1.0-14.5x | FO/FAT:6
+        faces involved: [3, 5, 26]
+        types: CylinderxCylinder:4 NurbsxNurbs:2
+    BREP#31359 NAUO_15973   n=12 same= 8 h/eT=1.0-17.5x | FO/FAT:4 WF/FAT:8
+        faces involved: [7, 11, 12, 13]
+        types: NurbsxNurbs:10 ConexNurbs:2
+    BREP#31360 NAUO_28750   n=14 same=14 h/eT=1.2-1.6x | FO/FAT:4 FO/SLV:8 WF/FAT:2
+        faces involved: [24, 25, 26]
+        types: NurbsxNurbs:14
+
+[4] h/eff_tol margin histogram (max h of pair / full-precision eff_tol):
+      1-2  x :  17 #################
+      2-4  x :   0 
+      4-8  x :  10 ##########
+      8-16 x :   9 #########
+     16-100x :  19 ###################
+    >=100x   :   0
+
+[5] angle: >=179.99: 13 | 175-179.99: 31 | 170-175: 13
+
+[6] top-8 worst by h/eff_tol margin:
+      44.9x BREP#27977 NAUO_28747   ang=170.26 same f=(44,44) TorusxTorus h=0.7486 [FOLD-OVERFAT]
+      44.9x BREP#27977 NAUO_28747   ang=170.26 same f=(44,44) TorusxTorus h=0.7485 [FOLD-OVERFAT]
+      42.7x BREP#27977 NAUO_28747   ang=170.66 same f=(44,44) TorusxTorus h=0.7123 [FOLD-OVERFAT]
+      42.7x BREP#27977 NAUO_28747   ang=170.66 same f=(44,44) TorusxTorus h=0.7122 [FOLD-OVERFAT]
+      28.9x BREP#27977 NAUO_28747   ang=174.49 same f=(71,71) NurbsxNurbs h=0.4820 [WINDING-FLIPFAT]
+      28.4x BREP#27977 NAUO_28747   ang=175.31 same f=(71,71) NurbsxNurbs h=0.4746 [WINDING-FLIPFAT]
+      25.4x BREP#27977 NAUO_28747   ang=174.42 same f=(6,6) TorusxTorus h=0.4242 [WINDING-FLIPFAT]
+      22.9x BREP#27977 NAUO_28747   ang=170.31 same f=(71,71) NurbsxNurbs h=0.3825 [WINDING-FLIPFAT]
+
+==============================================================================
+GLOBAL: 113 REAL pairs total
+==============================================================================
+COINCIDENT-flagged: 26
+same-face: 105 / cross-face: 8
+pairs involving a Nurbs face: 59
+instance-deduplicated unique defects: 94 (Vulcan 54 + Spit-Fire 40; 19 duplicate-instance copies)
