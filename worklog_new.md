@@ -17450,3 +17450,115 @@ s105/s106 band-grid: каждый кластер = отдельный A/B-гей
 4. NAUO-инстансы одного BREP дают бит-идентичные пары (19 копий из
    113) — отчёт по уникальным дефектам (94), иначе двойной учёт
    завышает долг на 20%.
+
+## Сессия 112 (2026-10-26): TORUS BAND-GRID ГИПОТЕЗА ОПРОВЕРГНУТА за
+## один A/B (+20 REAL регрессия, откачен, baseline бит-идентичен);
+## главная находка: ВСЕ проблемные лица #27977 идут через RESCUE-ветки
+## с «interior Steiners dropped» — первичная эмиссия проваливается
+## (49-451 non-rim bnd edges), фолды manufacture-ит уже rescue-слой
+
+Старт: та же sandbox-эпоха (HEAD de9f16e s111, бинари целы). План =
+s111 «Осталось» item-1: анатомия Torus-гигантов #27977 f44/f71/f65.
+
+### 1. UV-анатомия f44 (uv_polygon_audit; нумерации цензуса и
+### uv_polygon_audit СОВПАДАЮТ — проверено по facemap step_ids: f44
+### Torus 14510, f65 Torus 14531, f71 Nurbs(deg=3/2, cps=6x7) 14551)
+
+f44: выкройка u∈[0,1.2021] v∈[2,3], bnd=190, tris=472, **3-on-bnd=45
+CHORD-вееров** (26 вдоль правого края u=1.2021 двумя веерами apex
+185/205 + 19 на ШВЕ u=0 веером apex 0 (u=0.0203!)); f6: 305 вееров +
+63 bridges; f65: 16 вееров. Выглядело как точный класс s105/s106
+(«un-supported boundary strips → chord fans»).
+
+### 2. Гипотеза «torus band-grid» — реализована и ОПРОВЕРГНУТА
+
+Реализация: зеркалo s105/s106 в generate_torus_steiner_grid — 2 строки
+v=v_min+h_v/v_max−h_v + 2 столбца u=u_min+h_u/u_max−h_u, half-cell,
+seam-safe гейт В ОБОИХ направлениях (тор периодичен и по u, и по v:
+full-wrap u/v > 0.98·2π и seam-crossing (2πk строго внутри unrolled
+range) → без band), kill-switch DRAPPER_TORUS_BAND_GRID=0. Сборка
+2m12s, A/B Spit-Fire (оба прогона детерминированы double-run):
+- **Цель НЕ достигнута**: f44 (9 пар), f71 (9), f65 (4) — бит-идентичны
+  ON/OFF; #27977 25→26 real (+1 на f7).
+- **РЕГРЕССИЯ**: новый BREP #31361 NAUO_15991 0→**19 REAL** (eff_tol
+  =0.0002! Torus (2,2)/(60,60), h до 0.41 = ~2000x линейки), #31357
+  sub-tol 47→54 (+7). Итого Spit-Fire 57→77 REAL.
+- ОТКАТ: git checkout, пересборка, baseline md5 бит-идентичен
+  (2604d3…=2604d3…). Код в истории не остался (по правилу: чистый
+  минус не вливается).
+
+Почему не достигла (RUST_LOG=draper_mesh::parametric_domain=debug,
+96 вызовов торус-грида на файл, band-точки проходят фильтр
+529→625): **целевые лица идут НЕ через грид**. Атрибуция по
+маркерам [fbrepXXX_fYY_Type] (каждое лицо = 2 инстанса):
+- f44/f65/f6 (Torus): «unused-ring-vertex/region-drop rescue: 3-49
+  ring verts unused, 308-634 non-rim bnd edges — re-routing through
+  per-face CDT (… 732→602 tris, emission folds 0→0)»;
+- f71 (Nurbs): «SAIL_BAND rescue: 4-sided patch lattice accepted
+  (non-rim 49→0, 245→653 tris, 228 analytic pts, **interior Steiners
+  dropped**)»;
+- прочие 58: few-level (TORUS_FILLET_BAND) rescue.
+Первичная эмиссия (spike-chain/earcutr) на этих лицах проваливается
+(49-451 non-rim bnd edges, unused ring verts), rescue перекраивает
+лицо — band-точки (как и все interior Steiners) при этом DROPPED.
+Токсичность band на «здоровых» торах #31361 — вероятно класс s106
+#33417: band-точки у границы конфликтуют с плотной граничной
+дискретизацией и ломают гамильтонову цепь (точную атрибуцию не
+копал — минус однозначен, фикс откачен).
+
+### 3. Vulc #10203 (P2): Plane-семейство — пары ПОСТ-MERGE, не эмиссия
+
+f1100 (типичный): 27 uv_tris, degenerate-кандидатов ratio<1e-4 = 0 (НЕ
+s108-класс), «final-mesh face-local >170° same-face pairs: 2» — пары
+рождает merge/weld/winding на тонких рёбрах (COINCIDENT 24/27 =
+дубли-покрытие). Контекст BREP-патологии: 8 self-intersection
+(report-only), Torus-лица f1/f2 теряют на merge 456/617 и 445/603
+tris (degenerate/duplicate), f3 Cylinder с 56 дырами и «earcutr
+missing 57/527 boundary edges», region-drop rescue повсюду. #10203 =
+хронически повреждённый BREP (bnd 2705 = 10.6%, nm 356) — как
+brick_thin_round #1498: чинить плоскостной дубли-класс ради 24 пар
+1-15x на патологическом исходнике = не приоритет против #27977.
+
+### 4. Итог приоритизации workstream (корректировка P1-механизма)
+
+P1 #27977 остаётся главной целью, но вход НЕ «band-grid», а
+**rescue-слой**: (a) почему первичная эмиссия оставляет 49-451
+non-rim bnd edges на этих лицах (spike-chain на тонких торах с
+полным u-wrap?); (b) почему rescue-эмиссия (CDT/SAIL_BAND/fillet-band
+без interior Steiners) создаёт фолд-пары (веера 3-on-bnd у CDT,
+lattice-структуры у SAIL_BAND); (c) f44 веера u0-seam (19 tris, apex
+на 0.02 от шва) — отдельный шовный подкласс. SAIL_BAND f71:
+«245→653 tris» — а пары остаются: lattice сам фолдит или merge.
+
+### Осталось (сессия 113)
+
+1. ГЛАВНОЕ: атрибуция rescue-эмиссии #27977 f44 — дамп per-face CDT
+   результата (602 tris: где 45 вееров 3-on-bnd из uv_polygon_audit —
+   до или после rescue?), сравнить с SAIL_BAND f71 (653 tris);
+   кандидат фикса — rescue с сохранением interior Steiners (сейчас
+   dropped) или гейт вееров в CDT.
+2. Почему primary emission проваливается на этих торах (49-451
+   non-rim bnd edges) — spike-chain/earcutr на wrap_u=true лицах.
+3. Vulc #10203: вердикт «хроник-документировать» (как brick #1498),
+   НЕ чинить — фиксировать в таблице мониторинга.
+4. item-2 s110 (ОТДЕЛЬНО): GLOBAL_STEPS per-conversion reset API.
+5. Мониторинг 10 файлов, soft-minuses без изменений.
+
+### Уроки
+
+1. «Проверь, что изменение вообще достигает цели» — сработало за 30
+   минут: 5 минут RUST_LOG с правильным фильтром показали 96 вызовов
+   грида и НИ ОДНОГО на целевых лицах. Атрибуция ДО фикса дешевле, но
+   A/B после прототипа тоже быстр (детерминизм = двойной прогон).
+2. RUST_LOG-фильтр по голому имени модуля (parametric_domain=debug) НЕ
+   матчит draper_mesh::parametric_domain — debug-строки молча
+   пропадают (в s110 та же ловушка дала «0 вызовов сфер-грида» в
+   fold_face_probe; правильный фильтр — полный путь
+   draper_mesh::parametric_domain=debug).
+3. Band-гриды у границ НЕ универсальны: сфера/цилиндр — выигрыш, тор —
+   токсичен (+20 REAL на здоровых торах #31361 с eff_tol 2e-4).
+   Перенос слоя фикса на новый тип поверхности обязан начинаться с
+   A/B на ВСЁМ файле, а не с предположения аналогии.
+4. Маркеры [fbrepXXX_fYY_Type] в rescue-логах — готовая карта путей
+   эмиссии per-face: grep одного прогона даёт полную атрибуцию
+   (region-drop CDT vs SAIL_BAND vs fillet-band) без нового кода.
