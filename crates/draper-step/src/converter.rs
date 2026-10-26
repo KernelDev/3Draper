@@ -6447,9 +6447,22 @@ impl<'a> StepConverter<'a> {
             // the exact face/path that emits them.
             if let Ok(dir) = std::env::var("DRAPPER_DUMP_FACE_OBJS") {
                 let _ = std::fs::create_dir_all(&dir);
+                // s113: sanitize the type string — Nurbs(deg=3/2, cps=6x7)
+                // contains '/' which silently turns the path into a
+                // non-existent subdirectory (fs::write fails, swallowed).
+                let type_tag: String = surface_type
+                    .chars()
+                    .map(|c| {
+                        if c.is_alphanumeric() || c == '_' || c == '.' || c == '-' {
+                            c
+                        } else {
+                            '_'
+                        }
+                    })
+                    .collect();
                 let path = format!(
                     "{}/brep{}_f{}_s{}_{}.obj",
-                    dir, brep_id, face_id, step_face_id, surface_type
+                    dir, brep_id, face_id, step_face_id, type_tag
                 );
                 let mut obj = String::with_capacity(4096);
                 for v in &face_mesh_with_ids.vertices {

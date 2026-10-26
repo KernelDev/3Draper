@@ -15083,24 +15083,78 @@ pub fn triangulate_surface_consistent(
                 triangle_indices.len() / 3,
                 current_face_label(),
             ));
+            // s113: 3D columns (same sources as Step-5 uses) so offline
+            // analysis can simulate the position-dedup adjacency — the
+            // emission-fold gate counts adjacency by UV INDEX and misses
+            // fold pairs that only appear once position-duplicate
+            // vertices (seam/wrap points) collapse onto each other.
             out.push_str("boundary\n");
-            for p in &outer_uv {
-                out.push_str(&format!("b {:.9} {:.9}\n", p.u, p.v));
+            for (bi, p) in outer_uv.iter().enumerate() {
+                let q = boundary_points_3d.get(bi);
+                out.push_str(&format!(
+                    "b {:.9} {:.9} {} {} {}\n",
+                    p.u,
+                    p.v,
+                    q.map(|v| format!("{:.9}", v.x)).unwrap_or_else(|| "nan".into()),
+                    q.map(|v| format!("{:.9}", v.y)).unwrap_or_else(|| "nan".into()),
+                    q.map(|v| format!("{:.9}", v.z)).unwrap_or_else(|| "nan".into()),
+                ));
             }
             for &hi in &valid_hole_indices {
                 out.push_str(&format!("hole {}\n", hi));
-                for p in &normalized_holes_uv_capped[hi] {
-                    out.push_str(&format!("h {:.9} {:.9}\n", p.u, p.v));
+                let h3 = hole_polylines_3d_capped.get(hi);
+                for (hj, p) in normalized_holes_uv_capped[hi].iter().enumerate() {
+                    let q = h3.and_then(|v| v.get(hj));
+                    out.push_str(&format!(
+                        "h {:.9} {:.9} {} {} {}\n",
+                        p.u,
+                        p.v,
+                        q.map(|v| format!("{:.9}", v.x)).unwrap_or_else(|| "nan".into()),
+                        q.map(|v| format!("{:.9}", v.y)).unwrap_or_else(|| "nan".into()),
+                        q.map(|v| format!("{:.9}", v.z)).unwrap_or_else(|| "nan".into()),
+                    ));
                 }
             }
             out.push_str("interior\n");
             for p in &interior_uv_points {
-                out.push_str(&format!("i {:.9} {:.9}\n", p.u, p.v));
+                let q = if let Surface::Nurbs(ref nurbs) = surface {
+                    deterministic_round_point(nurbs.derivatives_at(p.u, p.v).point)
+                } else {
+                    deterministic_round_point(surface.point_at(p.u, p.v))
+                };
+                out.push_str(&format!(
+                    "i {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                    p.u, p.v, q.x, q.y, q.z
+                ));
             }
             out.push_str("tris\n");
             for chunk in triangle_indices.chunks(3) {
                 if chunk.len() == 3 {
                     out.push_str(&format!("t {} {} {}\n", chunk[0], chunk[1], chunk[2]));
+                }
+            }
+            // s113: tail of all_uv beyond the listed b/h/i points —
+            // SAIL_BAND appends its analytic lattice points AFTER the
+            // interior list; without them the t-indices are dangling.
+            let n_listed = outer_uv.len()
+                + valid_hole_indices
+                    .iter()
+                    .map(|&hi| normalized_holes_uv_capped[hi].len())
+                    .sum::<usize>()
+                + interior_uv_points.len();
+            if all_uv.len() > n_listed {
+                out.push_str("appended\n");
+                for i in n_listed..all_uv.len() {
+                    let uv = all_uv[i];
+                    let q = if let Surface::Nurbs(ref nurbs) = surface {
+                        deterministic_round_point(nurbs.derivatives_at(uv.u, uv.v).point)
+                    } else {
+                        deterministic_round_point(surface.point_at(uv.u, uv.v))
+                    };
+                    out.push_str(&format!(
+                        "a {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                        uv.u, uv.v, q.x, q.y, q.z
+                    ));
                 }
             }
             let _ = std::fs::write(&path, out);
