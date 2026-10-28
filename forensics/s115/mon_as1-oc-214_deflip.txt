@@ -1,0 +1,69 @@
+Loading STEP file: test/as1-oc-214.stp
+[2026-10-28T09:43:05Z WARN  draper_step::converter] BREP #63: skipped 2 step_ids at vertex_pair (189, 191) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:05Z WARN  draper_step::converter] BREP #63: skipped 2 step_ids at vertex_pair (629, 631) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:05Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=1 (110 total hole pts), total_tris=114, degenerate=0, forward=true
+[2026-10-28T09:43:05Z WARN  draper_step::converter]   outer uv bbox: [-10.0000,10.0000] x [-7.5000,7.5000]
+[2026-10-28T09:43:05Z WARN  draper_step::converter]   hole 0 uv bbox: [-5.0000,5.0000] x [-4.9976,4.9976] (110 pts)
+[2026-10-28T09:43:05Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=1 (110 total hole pts), total_tris=114, degenerate=0, forward=true
+[2026-10-28T09:43:05Z WARN  draper_step::converter]   outer uv bbox: [-10.0000,10.0000] x [-7.5000,7.5000]
+[2026-10-28T09:43:05Z WARN  draper_step::converter]   hole 0 uv bbox: [-5.0000,5.0000] x [-4.9967,4.9967] (110 pts)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #759: skipped 2 step_ids at vertex_pair (766, 768) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #759: skipped 2 step_ids at vertex_pair (1011, 1033) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #1190: skipped 2 step_ids at vertex_pair (1197, 1199) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #1190: skipped 2 step_ids at vertex_pair (1440, 1442) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #1190: skipped 2 step_ids at vertex_pair (1680, 1702) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:06Z WARN  draper_step::converter] BREP #1190: skipped 2 step_ids at vertex_pair (1785, 1807) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (2060, 2062) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (2374, 2376) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (2612, 2614) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (2850, 2852) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (3316, 3318) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (3443, 3445) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (3543, 3545) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] BREP #1934: skipped 2 step_ids at vertex_pair (3643, 3645) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=1 (110 total hole pts), total_tris=114, degenerate=0, forward=true
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   outer uv bbox: [-100.0000,0.0000] x [-60.0000,0.0000]
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 0 uv bbox: [-55.0000,-45.0000] x [-24.9976,-15.0024] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=3 (330 total hole pts), total_tris=338, degenerate=0, forward=true
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   outer uv bbox: [0.0000,100.0000] x [0.0000,50.0000]
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 0 uv bbox: [57.9904,67.9904] x [37.5024,47.4976] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 1 uv bbox: [32.0096,42.0096] x [37.5024,47.4976] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 2 uv bbox: [45.0000,55.0000] x [15.0024,24.9976] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=3 (330 total hole pts), total_tris=338, degenerate=0, forward=false
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   outer uv bbox: [-100.0000,0.0000] x [-40.0000,0.0000]
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 0 uv bbox: [-67.9904,-57.9904] x [-12.4967,-2.5033] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 1 uv bbox: [-42.0096,-32.0096] x [-12.4967,-2.5033] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 2 uv bbox: [-55.0000,-45.0000] x [-34.9967,-25.0033] (110 pts)
+[2026-10-28T09:43:07Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=1 (110 total hole pts), total_tris=114, degenerate=0, forward=false
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   outer uv bbox: [0.0000,100.0000] x [0.0000,50.0000]
+[2026-10-28T09:43:07Z WARN  draper_step::converter]   hole 0 uv bbox: [45.0000,55.0000] x [25.0033,34.9967] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (3939, 3941) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (4177, 4179) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (4415, 4417) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (4653, 4655) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (4891, 4893) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5129, 5131) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5569, 5571) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5669, 5671) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5769, 5771) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5869, 5871) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (5969, 5971) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] BREP #3813: skipped 2 step_ids at vertex_pair (6069, 6071) — 2 shape groups (shape_tol=0.0001)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=6 (660 total hole pts), total_tris=674, degenerate=0, forward=true
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   outer uv bbox: [-90.0000,90.0000] x [-75.0000,75.0000]
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 0 uv bbox: [-47.5000,-37.5000] x [7.9928,17.9880] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 1 uv bbox: [-47.5000,-37.5000] x [-17.9880,-7.9928] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 2 uv bbox: [37.5000,47.5000] x [-17.9880,-7.9928] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 3 uv bbox: [37.5000,47.5000] x [7.9928,17.9880] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 4 uv bbox: [-70.0000,-60.0000] x [-4.9976,4.9976] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 5 uv bbox: [60.0000,70.0000] x [-4.9976,4.9976] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter] EARCUTR_DIAG: outer=4pts, holes=6 (660 total hole pts), total_tris=674, degenerate=0, forward=true
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   outer uv bbox: [-90.0000,90.0000] x [-75.0000,75.0000]
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 0 uv bbox: [37.5000,47.5000] x [7.9937,17.9871] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 1 uv bbox: [37.5000,47.5000] x [-17.9871,-7.9937] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 2 uv bbox: [-47.5000,-37.5000] x [-17.9871,-7.9937] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 3 uv bbox: [-47.5000,-37.5000] x [7.9937,17.9871] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 4 uv bbox: [60.0000,70.0000] x [-4.9967,4.9967] (110 pts)
+[2026-10-28T09:43:09Z WARN  draper_step::converter]   hole 5 uv bbox: [-70.0000,-60.0000] x [-4.9967,4.9967] (110 pts)
+
+===== GRAND HISTOGRAM (class | surfA | surfB) =====

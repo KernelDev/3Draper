@@ -1443,6 +1443,190 @@ pub fn fix_inconsistent_winding(mesh: &mut TriangleMesh) -> usize {
     flipped_count
 }
 
+/// Session-115: post-winding isolated-victim deflip (kill-switch
+/// `DRAPPER_WINDING_DEFLIP=0`, default ON after the full 10-file
+/// monitor — bit-exact legacy with the switch).
+///
+/// Root cause this repairs (s113/s114): the merge tolerance-weld V→E on a
+/// THIN triangle (height < weld distance) lands the apex on the far side
+/// of the opposite edge — the triangle's normal flips GEOMETRICALLY while
+/// its vertex order (and hence every directed edge) stays intact. The
+/// `fix_inconsistent_winding` BFS then sees "consistent edges +
+/// anti-parallel normals (>170°)" on that pair and swaps the neighbour's
+/// winding (the `needs_flip` branch under consistent traversal) — the
+/// weld-flip itself is repaired, but the swap breaks the swapped
+/// triangle's directed edges with ITS other neighbours, the BFS cascades
+/// the inversion forward through visited order, and the census defect
+/// re-materialises on the cascade boundary as a same-traversal >170°
+/// pair (the s111 WINDING-FLIP class; s114 f71 tri#513/561 were cascade
+/// VICTIMS, not the welded triangles; the s107 "RIPPLE" is the same
+/// mechanism). The v5 surface-normal audit
+/// (`postweld_component_winding_audit`) skips those cascade victims: they
+/// are thin (all-thin clusters are skipped by the s90 lesson) and often
+/// Nurbs-vote-None.
+///
+/// This pass is purely topological and measures ACTUAL dihedrals on the
+/// final mesh, weighted by the census REAL gate (s115 measurement: the
+/// unweighted variant repaired 26 sub-tol pairs in Vulcan #10211 while
+/// MANUFACTURING 3 REAL pairs per instance — the cascade victims there
+/// are sub-tolerance weld noise, while their healthy sub-10° edges had
+/// REAL-sized apex heights). Flip triangle T (swap indices 1,2 — no
+/// coverage, area or topology change, boundary edges untouched) iff:
+///   (a) NO edge of T forms an opposite-traversal >170° REAL pair with
+///       its usage==2 neighbour (never hide a physical FOLD-OVER above
+///       the resolution tolerance), and
+///   (b) the flip strictly reduces the REAL census-pair count on T's
+///       edges: every same-traversal >170° REAL pair maps to 180°−dih
+///       < 10° (repaired), while every currently-sub-10° REAL-sized
+///       edge maps to >170° (a new REAL pair). Sub-tol pairs (BOTH apex
+///       heights < res_tol, the probe's SUBTOL gate) carry ZERO weight —
+///       repairing them is not worth creating any REAL pair.
+///
+/// Greedy passes in index order until a fixpoint (deterministic). Every
+/// flip strictly decreases the global REAL census-pair counter
+/// (integer ≥ 0), so the loop terminates; an isolated victim (3
+/// same-traversal >170° REAL edges, 0 sub-10° REAL-sized edges) is the
+/// canonical −3 case, a 2-triangle victim cluster resolves over two
+/// passes.
+pub fn winding_deflip(mesh: &mut TriangleMesh, res_tol: f64) -> usize {
+    use std::collections::HashMap;
+    let n = mesh.triangles.len();
+    if n == 0 {
+        return 0;
+    }
+
+    // Undirected edge → (tri_idx, directed v0→v1). Usage >2 (non-manifold)
+    // edges are recorded but skipped by the pair logic below.
+    let mut edge_map: HashMap<(u32, u32), Vec<(usize, u32, u32)>> = HashMap::new();
+    for (ti, tri) in mesh.triangles.iter().enumerate() {
+        let (a, b, c) = (tri[0], tri[1], tri[2]);
+        for (v0, v1) in [(a, b), (b, c), (c, a)] {
+            let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+            edge_map.entry(key).or_default().push((ti, v0, v1));
+        }
+    }
+
+    // Cached per-triangle normals; a flip exactly negates the normal.
+    let mut normals: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+    for ti in 0..n {
+        let nt = compute_tri_normal(&mesh.vertices, &mesh.triangles[ti])
+            .unwrap_or((0.0, 0.0, 0.0));
+        normals.push(nt);
+    }
+
+    // Apex-of-triangle-over-shared-edge height (the probe's
+    // point_line_dist measure — the SUBTOL gate reference).
+    let apex_height = |tri: &[u32; 3], e0: u32, e1: u32| -> Option<f64> {
+        let (pa, pb) = (
+            mesh.vertices[e0 as usize],
+            mesh.vertices[e1 as usize],
+        );
+        let mut apex = None;
+        for &v in tri {
+            if v != e0 && v != e1 {
+                apex = Some(mesh.vertices[v as usize]);
+                break;
+            }
+        }
+        let pc = apex?;
+        let ab = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+        let ap = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+        let cr = [
+            ap[1] * ab[2] - ap[2] * ab[1],
+            ap[2] * ab[0] - ap[0] * ab[2],
+            ap[0] * ab[1] - ap[1] * ab[0],
+        ];
+        let l = (cr[0] * cr[0] + cr[1] * cr[1] + cr[2] * cr[2]).sqrt();
+        Some(l / (ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]).sqrt().max(1e-30))
+    };
+
+    let mut total_flips = 0usize;
+    loop {
+        let mut flipped_any = false;
+        for ti in 0..n {
+            let tri = mesh.triangles[ti];
+            let mut ban = false; // REAL physical fold on one of T's edges
+            let mut fix_gain = 0usize; // REAL same-traversal >170° pairs repaired
+            let mut break_cost = 0usize; // REAL-sized sub-10° edges broken
+            for (v0, v1) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                let users = match edge_map.get(&key) {
+                    Some(u) => u,
+                    None => continue,
+                };
+                if users.len() != 2 {
+                    continue; // boundary or non-manifold: not a census pair
+                }
+                let nti = if users[0].0 == ti { users[1].0 } else { users[0].0 };
+                if nti == ti {
+                    continue; // self-duplicate via degenerate index reuse
+                }
+                // Neighbour's directed traversal of the shared edge.
+                let ntri = mesh.triangles[nti];
+                let mut n_dir: Option<(u32, u32)> = None;
+                for (w0, w1) in [
+                    (ntri[0], ntri[1]),
+                    (ntri[1], ntri[2]),
+                    (ntri[2], ntri[0]),
+                ] {
+                    if (w0 == key.0 && w1 == key.1) || (w0 == key.1 && w1 == key.0) {
+                        n_dir = Some((w0, w1));
+                        break;
+                    }
+                }
+                let (nv0, nv1) = match n_dir {
+                    Some(d) => d,
+                    None => continue,
+                };
+                let same_traversal = (v0, v1) == (nv0, nv1);
+                // Dihedral between the two triangle normals.
+                let (nt, nn) = (normals[ti], normals[nti]);
+                let l = (nt.0 * nt.0 + nt.1 * nt.1 + nt.2 * nt.2).sqrt()
+                    * (nn.0 * nn.0 + nn.1 * nn.1 + nn.2 * nn.2).sqrt();
+                if l < 1e-30 {
+                    continue; // degenerate normal — skip conservatively
+                }
+                let cos = ((nt.0 * nn.0 + nt.1 * nn.1 + nt.2 * nn.2) / l)
+                    .max(-1.0)
+                    .min(1.0);
+                let dih = cos.acos().to_degrees();
+                // REAL gate (probe's SUBTOL criterion inverted): a pair is
+                // REAL iff ANY apex height over the shared edge is ≥ res_tol.
+                let real_pair = match (
+                    apex_height(&tri, key.0, key.1),
+                    apex_height(&ntri, key.0, key.1),
+                ) {
+                    (Some(h_t), Some(h_s)) => h_t >= res_tol || h_s >= res_tol,
+                    _ => true, // unmeasurable — treat as REAL (conservative)
+                };
+                if dih > 170.0 {
+                    if same_traversal {
+                        if real_pair {
+                            fix_gain += 1; // REAL WINDING-FLIP pair — repaired
+                        }
+                    } else if real_pair {
+                        ban = true; // REAL physical FOLD-OVER — never hide it
+                    }
+                } else if dih < 10.0 && real_pair {
+                    break_cost += 1; // healthy REAL-sized edge — flip breaks it
+                }
+            }
+            if !ban && fix_gain > break_cost {
+                // Flip: swap winding, negate cached normal.
+                let t = &mut mesh.triangles[ti];
+                t.swap(1, 2);
+                normals[ti] = (-normals[ti].0, -normals[ti].1, -normals[ti].2);
+                total_flips += 1;
+                flipped_any = true;
+            }
+        }
+        if !flipped_any {
+            break;
+        }
+    }
+    total_flips
+}
+
 /// Session-89: cross-face FOLD-OVER flap cleanup (post-weld, post-winding).
 ///
 /// `fix_inconsistent_winding` Step 1 only removes SAME-face 180° overlap

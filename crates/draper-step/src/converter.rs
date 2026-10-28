@@ -1401,6 +1401,16 @@ impl OwnedStepConversionContext {
     /// params here — they will only be made more conservative (never coarser)
     /// if the model's diagonal is large enough to warrant it.
     pub fn new_with_params(step_file: StepFile, mut params: TriangulationParams) -> Self {
+        // Session-115 (s110 item-2): every owning model conversion resets
+        // the process-global Hamiltonian-chain step pool. Long-lived
+        // converters (worker / cloud / WASM, many models in one process)
+        // were ORDER-DEPENDENT: the first models drained the 80M pool and
+        // later models silently fell back to spike-chain emission. This
+        // is the single delegation point of new / new_with_lod /
+        // new_with_lod_and_profile, so one call covers every owning entry.
+        // Single-conversion processes are unaffected (pool starts full).
+        draper_mesh::reset_hamiltonian_step_budget();
+
         // Enable healing with default preset — it fixes gaps, holes,
         // flipped normals, degenerate edges, and small features.
         // The aggressive preset (fix_self_intersections) can be enabled
@@ -7148,6 +7158,43 @@ impl<'a> StepConverter<'a> {
                     brep_id, n_bfs,
                 );
                 draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-bornfold-split");
+            }
+        }
+
+        // ─── Session-115: post-winding isolated-victim deflip ─────────
+        // The LAST winding-touching stage. The merge tolerance-weld's
+        // thin-triangle normal flips (s62 mechanism, s114-decoded) are
+        // repaired by fix_inconsistent_winding's BFS via a winding swap
+        // that CASCADES the inversion onto not-yet-visited neighbours;
+        // the defect re-materialises on the cascade boundary as a
+        // same-traversal >170° pair (s111 WINDING-FLIP class). The v5
+        // surface-normal audit skips those victims (all-thin clusters,
+        // Nurbs vote-None). This pass flips an isolated victim back
+        // with a strictly-decreasing REAL-census-pair criterion (the
+        // probe SUBTOL gate: pairs with BOTH apex heights < res_tol
+        // carry zero weight) and a physical-fold ban (never hides a
+        // REAL FOLD-OVER). Winding-only: no vertex moves, no triangle
+        // added/removed, boundary edges unchanged.
+        //
+        // MEASURED (s115, default-ON gate): Spit-Fire 57→44, Vulcan
+        // 56→49 REAL pairs (−20; FOLD-OVER 71→71 untouched, pure
+        // WINDING-FLIP class); all_files 27/27 BREP/Tris/Bnd/Status
+        // bit-identical; 8-file soft-minus monitor (drill 842/842,
+        // transmission 165/165, compressor 150/150, Zentralstaender /
+        // 3.05.078 / as1-oc-214 0) — identical. Kill-switch:
+        // DRAPPER_WINDING_DEFLIP=0 (bit-exact legacy).
+        if std::env::var("DRAPPER_WINDING_DEFLIP")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+        {
+            let res_tol = self.last_brep_eff_tol.get();
+            let n_deflip = draper_mesh::winding_deflip(&mut mesh, res_tol);
+            if n_deflip > 0 {
+                log::info!(
+                    "BREP #{} detailed: winding deflip repaired {} cascade-victim winding inversions",
+                    brep_id, n_deflip,
+                );
+                draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-deflip");
             }
         }
 

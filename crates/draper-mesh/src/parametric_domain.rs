@@ -3333,6 +3333,41 @@ fn serpentine_chain(interior: &[Point2d], attach: &Point2d) -> Vec<Point2d> {
     out
 }
 
+/// Process-global step budget shared by every `hamiltonian_chain` call
+/// (session-51): reads the remaining allowance once per face, spends
+/// actual steps locally, writes the remainder back. Races are benign
+/// (worst case some face gets a shorter allowance).
+///
+/// Session-115 (s110 item-2): the original per-PROCESS pool of 80M
+/// steps made long-lived converters (worker / cloud / WASM converting
+/// many models in one process) ORDER-DEPENDENT — the first models
+/// drained the pool and later models got allowance 0, silently
+/// falling back to spike-chain emission. The pool is now reset per
+/// CONVERSION at the owning converter entry
+/// (`StepConverter::new_with_params`, the single delegation point of
+/// `new` / `new_with_lod` / `new_with_lod_and_profile`) via
+/// [`reset_hamiltonian_step_budget`]. Single-conversion processes are
+/// unaffected (the pool starts full).
+static GLOBAL_STEPS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(HAMILTONIAN_STEP_BUDGET);
+
+/// The per-conversion Hamiltonian search budget (80M steps). See
+/// [`GLOBAL_STEPS`].
+const HAMILTONIAN_STEP_BUDGET: u64 = 80_000_000;
+
+/// Reset the process-global Hamiltonian-chain step pool to its full
+/// per-conversion budget (s110 item-2, implemented s115).
+///
+/// Called at the start of every owning model conversion
+/// (`StepConverter::new_with_params` and its delegating constructors)
+/// so that a long-lived process converting many models gives EVERY
+/// model the full search budget instead of draining the pool on the
+/// first few. Safe to call at any time (a plain store; concurrent
+/// `hamiltonian_chain` callers may simply observe a larger allowance).
+pub fn reset_hamiltonian_step_budget() {
+    GLOBAL_STEPS.store(HAMILTONIAN_STEP_BUDGET, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Hamiltonian path over the Steiner grid graph (adjacency = nearest
 /// lattice neighbors), endpoints near `attach` and within 2 hops of
 /// each other. Deterministic LCG; bounded work; None on failure.
@@ -3518,8 +3553,7 @@ fn hamiltonian_chain(
     // allowance once per face, spends actual steps locally, writes the
     // remainder back (single-threaded probe; races are benign — worst
     // case some face gets a shorter allowance).
-    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-    static GLOBAL_STEPS: AtomicU64 = AtomicU64::new(80_000_000);
+    use std::sync::atomic::Ordering as AtomicOrdering;
     let mut allowance = GLOBAL_STEPS.swap(0, AtomicOrdering::Relaxed);
     if allowance == 0 {
         return None;

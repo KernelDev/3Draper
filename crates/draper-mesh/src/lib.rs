@@ -50,6 +50,7 @@ pub use pmi_display::*;
 pub use wasm_api::*;
 pub use gdt_check::*;
 pub use parametric_domain::reproject_nurbs_point;
+pub use parametric_domain::reset_hamiltonian_step_budget;
 pub use decimate::decimate_mesh;
 
 // ============================================================
