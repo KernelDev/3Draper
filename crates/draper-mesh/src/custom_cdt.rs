@@ -1074,13 +1074,19 @@ fn structured_lattice_triangulation(
     // at the top (carries everything above L_{M-1} up to the top
     // corner, the sub-corner included): the sub-corner is the final
     // zipper's lower-chain anchor, and its band's rim edges close
-    // against it (s78 "open at the top" contract).
+    // against it (s78 "open at the top" contract) — for the H/V
+    // lattice class. For BAND caps (s115) the last band CLOSES at
+    // L_{M-1} like every other band: the open variant put the whole
+    // upper wall into full_row(m_rows)'s B as a Z-chain (arc up to
+    // the top → back to the row → down the wall) that broke the
+    // zipper's u-monotonicity — the top-cap fan chain
+    // (lower_chain(m_rows+1)) owns everything above L_{M-1} instead.
     let seg_bounds = |wall: &[usize]| -> Vec<(usize, usize)> {
         let len = wall.len();
         let mut bounds = Vec::with_capacity(m_rows);
         let mut s = 1usize;
         for j in 0..m_rows {
-            let e = if j == m_rows - 1 {
+            let e = if j == m_rows - 1 && !band_caps {
                 len - 1
             } else {
                 let mut e = s;
@@ -1098,13 +1104,23 @@ fn structured_lattice_triangulation(
     let rb = seg_bounds(&right);
     // ── 5. chains ──────────────────────────────────────────────────
     let full_row = |j: usize| -> Vec<u32> {
-        // j = 0: bottom cap; j = m_rows+1: top cap; else band-j walls
-        // + row j (1-based) between them
+        // j = 0: bottom cap; j = m_rows+1: top cap; j = m_rows+2
+        // (band_caps only): the fan-2 B-chain [row M last] + top cap;
+        // else band-j walls + row j (1-based) between them
         if j == 0 {
             return bottom.iter().map(|&i| i as u32).collect();
         }
         if j == m_rows + 1 {
             return top.iter().map(|&i| i as u32).collect();
+        }
+        if j == m_rows + 2 && band_caps {
+            // s115 fan-2 B: the row's last point, then the top cap.
+            let mut c: Vec<u32> = Vec::new();
+            if let Some(&last) = rows[m_rows - 1].last() {
+                c.push(last as u32);
+            }
+            c.extend(top.iter().map(|&i| i as u32));
+            return c;
         }
         if j == 1 && band_caps {
             // s114 BAND WEDGE: chain B of the first strip is the right
@@ -1158,9 +1174,60 @@ fn structured_lattice_triangulation(
             if left.len() < 2 || right.len() < 2 {
                 return None;
             }
+            if band_caps {
+                // s115 TOP fan-1: with the last wall band CLOSED at the
+                // last row level (seg_bounds band_caps branch), the
+                // wall points ABOVE the last row level moved out of
+                // full_row(m_rows) — the old open band's Z-chain (arc
+                // up to the top → back to the row → down the wall)
+                // broke the zipper's u-monotonicity and fanned monster
+                // triangles from the previous row's tail (the s114
+                // +0.65%/+1.8% top-zone area overlap). Fan-1 chain =
+                // the arc leftover (from the near-turn point DOWN to
+                // the band's closing point) + the last row, zipped
+                // against the top cap (the turn). The junction edge
+                // (arc band-last → row[0]) and the row chords are
+                // exactly the B-chain steps of strip m_rows — the
+                // glue that keeps every interior edge at count 2; the
+                // arc leftover chords are rim edges emitted once.
+                let (_sl, el) = lb[m_rows - 1];
+                let lo_l = el.max(1) - 1;
+                let mut c: Vec<u32> = Vec::new();
+                for p in (lo_l..left.len() - 1).rev() {
+                    c.push(left[p] as u32);
+                }
+                c.extend(rows[m_rows - 1].iter().map(|&i| i as u32));
+                if c.len() < 2 {
+                    return None;
+                }
+                return Some(c);
+            }
             let mut c: Vec<u32> = vec![left[left.len() - 2] as u32];
             c.extend(rows[m_rows - 1].iter().map(|&i| i as u32));
             c.push(right[right.len() - 2] as u32);
+            return Some(c);
+        }
+        if k == m_rows + 2 && band_caps {
+            // s115 TOP fan-2: the wall-side mini-fan — A = the wall
+            // band's closing point + the wall leftover (v-ascending,
+            // up to the near-turn point), zipped against B = [last
+            // row's last point] + the top cap (full_row side). A
+            // straight wall's chords through the turn are exactly
+            // collinear, so this side CANNOT hang off fan-1 — it fans
+            // from the ROW END instead; the closing spoke (row last ↔
+            // turn) is shared with fan-1's last triangle (count 2).
+            if right.len() < 2 {
+                return None;
+            }
+            let (_sr, er) = rb[m_rows - 1];
+            let lo_r = er.max(1) - 1;
+            let mut c: Vec<u32> = Vec::new();
+            for p in lo_r..right.len() - 1 {
+                c.push(right[p] as u32);
+            }
+            if c.len() < 2 {
+                return None;
+            }
             return Some(c);
         }
         let lvl = row_v[k - 2];
@@ -1180,8 +1247,22 @@ fn structured_lattice_triangulation(
         c.push(anchor_at(&right) as u32);
         Some(c)
     };
-    let left_set: HashSet<u32> = left.iter().map(|&i| i as u32).collect();
-    let right_set: HashSet<u32> = right.iter().map(|&i| i as u32).collect();
+    // s115: wall sets EXCLUDE the corner positions (0 and len-1 —
+    // the turn points). The corners anchor BOTH walls, so counting
+    // them as wall points false-trips the all-on-one-wall degenerate
+    // tests (the top fan's arc/wall chords through the turn) and the
+    // wall_block_a right-suffix detection (b[nb-1] == the turn is
+    // NOT a wall suffix). Interior wall positions only.
+    let left_set: HashSet<u32> = if left.len() >= 2 {
+        left[1..left.len() - 1].iter().map(|&i| i as u32).collect()
+    } else {
+        HashSet::new()
+    };
+    let right_set: HashSet<u32> = if right.len() >= 2 {
+        right[1..right.len() - 1].iter().map(|&i| i as u32).collect()
+    } else {
+        HashSet::new()
+    };
     // ── 6. two-pointer zipper (s78 mechanics, angled-wall hardened) ─
     let scale2 = uspan * uspan + vspan * vspan;
     let eps_area = 1e-12 * scale2;
@@ -1192,7 +1273,23 @@ fn structured_lattice_triangulation(
         (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])
     };
     let mut tris: Vec<[u32; 3]> = Vec::new();
-    for k in 1..=m_rows + 1 {
+    // s115: strip index per emitted triangle (the UV needle guard
+    // exempts the band cap strips — see the guard).
+    let mut tri_k: Vec<usize> = Vec::new();
+    // s115: band caps add a SECOND top strip — the wall-side mini-fan
+    // (k = m_rows+2) — because a single fan from the turn cannot
+    // cover a STRAIGHT wall's top segment (its chords through the
+    // turn are exactly collinear). The top region decomposes as:
+    //   fan-1 (k = m_rows+1): A = [arc leftover desc + arc band-last]
+    //       + row M, B = the top cap (the turn) — fans the curved
+    //       side; the junction edge (arc band-last → row[0]) and the
+    //       row chords glue against strip m_rows' B steps.
+    //   fan-2 (k = m_rows+2): A = [wall band-last + wall leftover
+    //       asc], B = [row M last] + top — zips the straight wall's
+    //       top against the row end and the turn; the closing spoke
+    //       (row M last ↔ turn) glues the two fans (count 2).
+    let k_top = if band_caps { m_rows + 2 } else { m_rows + 1 };
+    for k in 1..=k_top {
         let a = match lower_chain(k) {
             // s114: a band's bottom cap is a single turn point — the
             // zipper fans from it (dead_a from the first step)
@@ -1200,6 +1297,34 @@ fn structured_lattice_triangulation(
             _ => lattice_reject!(format!("lower chain degenerate k={}", k)),
         };
         let b = full_row(k);
+        // s115 diagnostic: per-strip chain decomposition (env-gated)
+        if std::env::var("DRAPPER_BAND_CHAINS").is_ok() {
+            let fmt_chain = |c: &[u32]| -> String {
+                c.iter()
+                    .map(|&i| {
+                        format!(
+                            "{}({:.4},{:.4})",
+                            i, all_2d[i as usize][0], all_2d[i as usize][1]
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            eprintln!(
+                "BANDCHAINS m_rows={} k={}: A[{}] = {}",
+                m_rows,
+                k,
+                a.len(),
+                fmt_chain(&a)
+            );
+            eprintln!(
+                "BANDCHAINS m_rows={} k={}: B[{}] = {}",
+                m_rows,
+                k,
+                b.len(),
+                fmt_chain(&b)
+            );
+        }
         // s114: a band's top cap may likewise be a single turn point
         // (dead_b from the first step — A walks, fanning to the point)
         if b.len() < 2 && !(band_caps && k == m_rows + 1 && b.len() == 1) {
@@ -1218,6 +1343,12 @@ fn structured_lattice_triangulation(
             // degenerate on both sides and the zipper deadlocks
             // (f44: stuck k=1 ia=0 ib=0).
             let a_is_turn = band_caps && k == 1 && m == 1 && ia == 0;
+            // s115 mirror: the TOP fan's single-point cap (the sharp
+            // turn in B) anchors both walls the same way — the arc
+            // chords (110, 111, turn) and wall chords (106, 107, turn)
+            // of the restructured top chain are falsely all-on-one-wall
+            // without this exemption (f44: stuck k=m+1 ia=0 ib=0).
+            let b_is_turn = band_caps && k == m_rows + 1 && nb == 1 && ib == 0;
             // all-on-one-wall triangles are 1D degenerates: on u-const
             // walls (sail) they are EXACTLY collinear and the eps guard
             // catches them; an ANGLED wall's curvature (f26 right wall:
@@ -1226,10 +1357,12 @@ fn structured_lattice_triangulation(
             let deg_a = !dead_a && {
                 area2(a[ia], a[ia + 1], b[ib]).abs() <= eps_area
                     || (!a_is_turn
+                        && !b_is_turn
                         && left_set.contains(&a[ia])
                         && left_set.contains(&a[ia + 1])
                         && left_set.contains(&b[ib]))
                     || (!a_is_turn
+                        && !b_is_turn
                         && right_set.contains(&a[ia])
                         && right_set.contains(&a[ia + 1])
                         && right_set.contains(&b[ib]))
@@ -1237,10 +1370,12 @@ fn structured_lattice_triangulation(
             let deg_b = !dead_b && {
                 area2(a[ia], b[ib + 1], b[ib]).abs() <= eps_area
                     || (!a_is_turn
+                        && !b_is_turn
                         && left_set.contains(&a[ia])
                         && left_set.contains(&b[ib + 1])
                         && left_set.contains(&b[ib]))
                     || (!a_is_turn
+                        && !b_is_turn
                         && right_set.contains(&a[ia])
                         && right_set.contains(&b[ib + 1])
                         && right_set.contains(&b[ib]))
@@ -1266,6 +1401,16 @@ fn structured_lattice_triangulation(
             let take_a = if !can_a {
                 false
             } else if !can_b {
+                true
+            } else if band_caps && k == m_rows + 2 {
+                // s115 fan-2 (the wall mini-fan from the row end): the
+                // wall is u-constant and the turn sits at the SAME u
+                // (5th-decimal differences flip the u-criterion into
+                // stepping B first, which wedges the walk on the
+                // collinear wall chords). A consumes the wall chain
+                // first, then B takes the single closing step to the
+                // turn — exactly the mini-fan (row_end, wall_i,
+                // wall_i+1) … (wall_top, turn, row_end).
                 true
             } else if ia == 0
                 && ib == 0
@@ -1303,6 +1448,7 @@ fn structured_lattice_triangulation(
                     t.swap(1, 2);
                 }
                 tris.push(t);
+                tri_k.push(k);
             };
             if take_a {
                 emit([a[ia], a[ia + 1], b[ib]]);
@@ -1472,7 +1618,22 @@ fn structured_lattice_triangulation(
         // mismatched (f26-168 class: row ends 0.08 short of the wall,
         // 55-pt wall band fanning from a distant row point) — such a
         // face keeps the standard CDT result.
-        for t in tris.iter() {
+        // s115 BAND-CAP EXEMPTION: the band cap strips (the k=1 wedge,
+        // the k=m+1 top fan-1, the k=m+2 wall mini-fan) cover rim
+        // HAIRPINS — a sharp turn where the arc arrives tangentially
+        // to the straight wall makes the first fan chord legitimately
+        // thin (f44: (110,111,turn) aspect 7.7e-4, area 1.8e-6 — a
+        // real piece of surface between three consecutive RIM points;
+        // no triangulation of that rim is fat). Unlike the s82
+        // row-grid class (INTERIOR mismatch needles that fold in 3D),
+        // the cap slivers are rim-local and sub-resolution — the 3D
+        // impact is adjudicated downstream by the torus windmill fold
+        // gate and the final census. Scoped to band_caps ONLY: the
+        // H/V lattice keeps the strict guard (bit-exact never-worsen).
+        for (ti, t) in tris.iter().enumerate() {
+            if band_caps && (tri_k[ti] == 1 || tri_k[ti] >= m_rows + 1) {
+                continue; // cap strip — rim hairpin, exempt
+            }
             let p = all_2d[t[0] as usize];
             let q = all_2d[t[1] as usize];
             let r = all_2d[t[2] as usize];
@@ -1482,6 +1643,33 @@ fn structured_lattice_triangulation(
             let max_e = e1.max(e2).max(e3);
             let a = area2(t[0], t[1], t[2]).abs() * 0.5;
             if max_e > 0.0 && a < 1e-3 * max_e {
+                // s115 SAGITTA EXEMPTION (band row strips only): when
+                // the arc wall's own rim discretization is denser than
+                // the row grid, the left-band tail fans from the row's
+                // first point (itself ~8e-3 off the arc — sub-tol poke)
+                // over the band chords, and those triangles are the
+                // micro-sagitta between the arc and its chords —
+                // heights 1e-3..4e-3, i.e. under 3% of the local row
+                // spacing. The lattice cannot resolve a wedge thinner
+                // than its own row step; the f26 class (row ends 0.01+
+                // from the wall at a 0.05 row spacing = 20%+) stays
+                // rejected. Height ruler = 2·area/shortest-edge (the
+                // apex's distance to the chord line), compared to 10%
+                // of the strip's local row spacing.
+                if band_caps {
+                    let min_e = e1.min(e2).min(e3);
+                    if min_e > 0.0 {
+                        let h_over_chord = 2.0 * a / min_e.sqrt();
+                        let k_strip = tri_k[ti];
+                        if k_strip >= 2 && k_strip <= m_rows {
+                            let spacing =
+                                row_v[k_strip - 1] - row_v[k_strip - 2];
+                            if spacing > 0.0 && h_over_chord < 0.1 * spacing {
+                                continue; // sub-row-resolution sagitta
+                            }
+                        }
+                    }
+                }
                 lattice_reject!("UV needle in row grid");
             }
         }
