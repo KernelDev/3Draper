@@ -2246,17 +2246,65 @@ pub struct CircleInconsistency {
 /// are degenerate — 84% merge loss (f28), while the legacy ear-clip
 /// path only lost 50/301. Default OFF until (a)+(b) are fixed; the
 /// criterion stays here so the follow-up session can flip it.
+///
+/// s118: (a) is fixed in is_degenerate_at (span-scaled numerical step)
+/// and (b) in the NURBS_FILLET_BAND accept gate (merge-sliver share).
+/// ONE ribbon sub-class stays excluded here forever: ribbons whose
+/// RULING WIDTH is below the published merge tolerance
+/// (parametric_domain::vertex_resolution_tol — the exact
+/// vertex_merge_tolerance().max(sewing_tol) the converter welds with).
+/// A sub-weld ribbon is merge-doomed by geometry: EVERY width-spanning
+/// triangle has two vertices closer than the weld tolerance and dies in
+/// the merge (s117 f28: width 8.9e-3 < merge_tol 2e-2 → 1866/2233 =
+/// 84% loss; the surviving structure is whatever runs along the coil
+/// loop). For those the legacy path (garbage UV → self-intersect → 3D
+/// ear-clip along the loop) is the least-bad emission, so the chain
+/// projection must NOT "fix" their UV. Measured widths (s118
+/// ribbon_degen_probe, forensics/s118/): f25/f27 (u_span 551) width
+/// 6.11e-2 > 2e-2 → chain-eligible; f28 (u_span 3570) width 8.9e-3 →
+/// excluded.
 pub fn nurbs_ribbon_chain_projection(
-    u_degree: usize,
-    v_degree: usize,
-    u_range: f64,
-    v_range: f64,
+    nurbs: &draper_geometry::NurbsSurface,
 ) -> bool {
     if std::env::var("DRAPPER_RIBBON_CHAIN").as_deref() != Ok("1") {
         return false;
     }
-    (u_degree == 1 && u_range < 10.0 && v_range >= 10.0)
-        || (v_degree == 1 && v_range < 10.0 && u_range >= 10.0)
+    let (u0, u1) = nurbs.u_range();
+    let (v0, v1) = nurbs.v_range();
+    let u_range = u1 - u0;
+    let v_range = v1 - v0;
+    // Which direction is the (degree-1) ruling? The ribbon is LONG in the
+    // other direction (range >= 10).
+    let ruled_along_u =
+        nurbs.u_degree == 1 && u_range < 10.0 && v_range >= 10.0;
+    let ruled_along_v =
+        !ruled_along_u && nurbs.v_degree == 1 && v_range < 10.0 && u_range >= 10.0;
+    if !ruled_along_u && !ruled_along_v {
+        return false;
+    }
+    // Minimum ruling width over 9 samples of the long direction.
+    let n_probe = 9;
+    let mut min_width = f64::INFINITY;
+    for i in 0..n_probe {
+        let t = (i as f64) / ((n_probe - 1) as f64);
+        let (a, b) = if ruled_along_u {
+            let v = v0 + (v1 - v0) * t;
+            (nurbs.point_at(u0, v), nurbs.point_at(u1, v))
+        } else {
+            let u = u0 + (u1 - u0) * t;
+            (nurbs.point_at(u, v0), nurbs.point_at(u, v1))
+        };
+        let d = ((a.x - b.x) * (a.x - b.x)
+            + (a.y - b.y) * (a.y - b.y)
+            + (a.z - b.z) * (a.z - b.z))
+            .sqrt();
+        if d < min_width {
+            min_width = d;
+        }
+    }
+    // Sub-weld ribbons stay on the legacy path (see doc comment).
+    let merge_tol = crate::parametric_domain::vertex_resolution_tol();
+    min_width > merge_tol
 }
 
 /// Compute adaptive grid size for brute-force NURBS point projection.

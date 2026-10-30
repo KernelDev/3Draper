@@ -5589,12 +5589,7 @@ pub fn triangulate_surface_uv_cdt(
         // s117: coiled thin ruled ribbons need CHAIN projection —
         // see nurbs_ribbon_chain_projection (edge_cache.rs).
         let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
-            || crate::nurbs_ribbon_chain_projection(
-                nurbs.u_degree,
-                nurbs.v_degree,
-                u_range,
-                v_range,
-            );
+            || crate::nurbs_ribbon_chain_projection(nurbs);
         let mut uvs = Vec::with_capacity(boundary_points.len());
         for (i, p) in boundary_points.iter().enumerate() {
             let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
@@ -5671,12 +5666,7 @@ pub fn triangulate_surface_uv_cdt(
                 // s117: coiled thin ruled ribbons need CHAIN projection —
                 // see nurbs_ribbon_chain_projection (edge_cache.rs).
                 let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
-                    || crate::nurbs_ribbon_chain_projection(
-                        nurbs.u_degree,
-                        nurbs.v_degree,
-                        u_range,
-                        v_range,
-                    );
+                    || crate::nurbs_ribbon_chain_projection(nurbs);
                 let mut uvs = Vec::with_capacity(hole.len());
                 for (i, p) in hole.iter().enumerate() {
                     let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
@@ -13952,9 +13942,139 @@ pub fn triangulate_surface_consistent(
                                 cnt
                             };
                             let strip_extra = extra_boundary_edges(&strip);
+                            // s118 (satellite b of the s117 ribbon chain):
+                            // MERGE-SLIVER share of the strip emission. The
+                            // never-worsen gate above counts only rim/non-rim
+                            // boundary EDGES — it is blind to an emission that
+                            // is mostly zero-area AFTER the tolerance weld
+                            // (s117 f28: the band won "non-rim 5 → 0" but
+                            // lost 1866/2233 = 84% of its triangles in merge,
+                            // vs the legacy ear-clip's 50/301). A triangle
+                            // dies in merge exactly when two of its vertices
+                            // weld to the same global vertex — first-order
+                            // proxy: a pair closer than the PUBLISHED merge
+                            // tolerance (vertex_resolution_tol — the converter
+                            // sets it to vertex_merge_tolerance().max(
+                            // sewing_tol) per BREP; 0.0 in tools that bypass
+                            // the converter → the gate is a no-op there).
+                            // Positions: ring verts via surface.point_at of
+                            // the boundary UV (the cached ring 3D differs by
+                            // the projection error only), new level points
+                            // via point_at — exactly how Step 5 resolves
+                            // them downstream.
+                            let strip_sliver_share = {
+                                // Kill-switch: DRAPPER_NFB_SLIVER_GATE=0
+                                // restores the s70 rim/extra-only gate.
+                                static SLIVER_GATE_ON: std::sync::OnceLock<bool> =
+                                    std::sync::OnceLock::new();
+                                let gate_on = *SLIVER_GATE_ON.get_or_init(|| {
+                                    std::env::var("DRAPPER_NFB_SLIVER_GATE").as_deref() != Ok("0")
+                                });
+                                let merge_tol = vertex_resolution_tol();
+                                if !gate_on || merge_tol <= 0.0 || strip.len() < 3 {
+                                    0.0
+                                } else {
+                                    let mut p3: Vec<draper_geometry::Point3d> =
+                                        Vec::with_capacity(n_boundary + strip_new.len());
+                                    for uv in boundary_2d.iter().take(n_boundary) {
+                                        p3.push(surface.point_at(uv[0], uv[1]));
+                                    }
+                                    for uv in strip_new.iter() {
+                                        p3.push(surface.point_at(uv[0], uv[1]));
+                                    }
+                                    // Merge-death model (calibrated s118 on the
+                                    // Vulcan A/B): a triangle dies iff two of
+                                    // its vertices map to the SAME global
+                                    // vertex. Ring vertices are REUSED (they
+                                    // are already in the global table); a NEW
+                                    // level point only maps to an existing
+                                    // vertex when it lies within merge_tol of
+                                    // a ring position — otherwise two new
+                                    // points within tol of each other are
+                                    // BOTH added fresh and the triangle
+                                    // SURVIVES (merge_meshes only matches
+                                    // against the existing table). So a
+                                    // within-tol pair counts as a death only
+                                    // when at least one endpoint is
+                                    // ring-clustered. This is what separates
+                                    // the s70-validated fillet bands
+                                    // (#10211: predicted 0.48-0.69, ACTUAL
+                                    // merge loss 0.27-0.42 — the plain
+                                    // any-pair proxy over-predicted by
+                                    // ~0.2-0.3 there and would have rejected
+                                    // them) from the true garbage emissions
+                                    // (#10217 f17: 0.84 predicted, 0.80
+                                    // actual; #10211 f112/f116/f123/f127:
+                                    // 0.59-0.61 actual — width clusters
+                                    // hugging the reused rims).
+                                    let mt2 = merge_tol * merge_tol;
+                                    let d2 = |a: &draper_geometry::Point3d,
+                                              b: &draper_geometry::Point3d|
+                                     -> f64 {
+                                        (a.x - b.x) * (a.x - b.x)
+                                            + (a.y - b.y) * (a.y - b.y)
+                                            + (a.z - b.z) * (a.z - b.z)
+                                    };
+                                    // near_ring[i] for NEW points: within
+                                    // merge_tol of any ring position.
+                                    // (Ring points themselves are trivially
+                                    // ring-clustered.)
+                                    let mut near_ring =
+                                        vec![false; p3.len()];
+                                    for (ni, np) in p3.iter().enumerate().skip(n_boundary) {
+                                        for rp in p3.iter().take(n_boundary) {
+                                            if d2(np, rp) < mt2 {
+                                                near_ring[ni] = true;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    let clustered =
+                                        |i: usize| -> bool { i < n_boundary || near_ring[i] };
+                                    // Strip indices are exactly [0..n_boundary)
+                                    // ring | [n_boundary..) new — same layout
+                                    // as p3.
+                                    let pos = |i: usize| -> &draper_geometry::Point3d { &p3[i] };
+                                    let mut n_sliver = 0usize;
+                                    let mut n_tri = 0usize;
+                                    for c in strip.chunks_exact(3) {
+                                        n_tri += 1;
+                                        let ia = c[0];
+                                        let ib = c[1];
+                                        let ic = c[2];
+                                        let dead_pair = |i: usize, j: usize| -> bool {
+                                            d2(pos(i), pos(j)) < mt2
+                                                && (clustered(i) || clustered(j))
+                                        };
+                                        if dead_pair(ia, ib)
+                                            || dead_pair(ib, ic)
+                                            || dead_pair(ia, ic)
+                                        {
+                                            n_sliver += 1;
+                                        }
+                                    }
+                                    if std::env::var("DRAPPER_NFB_DEBUG").is_ok() {
+                                        eprintln!(
+                                            "[NFB sliver-gate] {}: {} tris, {} predicted merge-slivers (share {:.2}, merge_tol {:.2e})",
+                                            current_face_label(),
+                                            n_tri,
+                                            n_sliver,
+                                            n_sliver as f64 / n_tri.max(1) as f64,
+                                            merge_tol
+                                        );
+                                    }
+                                    n_sliver as f64 / n_tri.max(1) as f64
+                                }
+                            };
                             let never_worse = strip_rim >= legacy_rim_count
                                 && strip_extra <= legacy_extra_bnd
-                                && (strip_rim > legacy_rim_count || strip_extra < legacy_extra_bnd);
+                                && (strip_rim > legacy_rim_count
+                                    || strip_extra < legacy_extra_bnd)
+                                // s118: an emission that is >50% merge-dead
+                                // is garbage regardless of rim counts — the
+                                // face is better served by the legacy CDT
+                                // result standing behind this gate.
+                                && strip_sliver_share <= 0.5;
                             if never_worse {
                                 // remap [ring 0..n | new n..n+m] →
                                 // [ring | …all_uv tail… | appended]
@@ -13983,12 +14103,13 @@ pub fn triangulate_surface_consistent(
                                 strip_accepted = true;
                             } else {
                                 log::debug!(
-                                    "[f{}] NURBS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {})",
+                                    "[f{}] NURBS_FILLET_BAND candidate rejected by never-worsen gate (rim {} vs {}, extra {} vs {}, sliver share {:.2})",
                                     current_face_label(),
                                     strip_rim,
                                     legacy_rim_count,
                                     strip_extra,
-                                    legacy_extra_bnd
+                                    legacy_extra_bnd,
+                                    strip_sliver_share
                                 );
                             }
                         }

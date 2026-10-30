@@ -2108,9 +2108,47 @@ impl Surface {
         // 1e-3 is better for estimating the Jacobian.
         // We only flag degeneracy if the partial is zero to within `tolerance`,
         // which means the surface collapses at this parametric point.
-        let eps = 1e-4;
-        let pu = self.point_at(u + eps, v);
-        let pv = self.point_at(u, v + eps);
+        //
+        // s118 (satellite a of the s117 ribbon chain): the step must SCALE
+        // with the parametric span for EXTREME-range NURBS domains (span >
+        // 100; every other surface type has a bounded span — 2π for the
+        // quadrics/revolution, O(1) for planes/extrusions/ruled). The fixed
+        // 1e-4 step does not scale to a 551:1 / 3570:1 range aspect (the
+        // Vulcan #10220 coil-ribbon class): a perfectly healthy direction
+        // with |dS/du| = 8.8e-3 (a ~1-unit coil bundle swept over 3570
+        // param units) moves only 8.8e-7 in 3D at eps=1e-4 — below the
+        // 1e-6 tolerance — so BOTH partials false-positive as zero and
+        // is_degenerate_uv reports the whole boundary "singular" (s117:
+        // "100% boundary points degenerate 459/459 — fan impossible →
+        // CDT"). eps = span * 1e-4 restores the same RELATIVE resolution
+        // the fixed step gives a unit-span surface. A larger step can only
+        // LIFT a false zero: a truly collapsed control row is exactly zero
+        // at any step, and the analytic Nurbs collapsed-row check below is
+        // step-independent — so no genuine degeneracy detection is lost.
+        // Kill-switch: DRAPPER_DEGEN_SPAN_EPS=0 restores the fixed step.
+        static SPAN_EPS_ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let span_eps_on = *SPAN_EPS_ON
+            .get_or_init(|| std::env::var("DRAPPER_DEGEN_SPAN_EPS").as_deref() != Ok("0"));
+        let (u_span, v_span) = match self {
+            Surface::Nurbs(n) => {
+                let (a, b) = n.u_range();
+                let (c, d) = n.v_range();
+                (b - a, d - c)
+            }
+            _ => (0.0, 0.0),
+        };
+        let eps_u = if span_eps_on && u_span > 100.0 {
+            1e-4 * u_span
+        } else {
+            1e-4
+        };
+        let eps_v = if span_eps_on && v_span > 100.0 {
+            1e-4 * v_span
+        } else {
+            1e-4
+        };
+        let pu = self.point_at(u + eps_u, v);
+        let pv = self.point_at(u, v + eps_v);
         let du = Vec3d::new(pu.x - p.x, pu.y - p.y, pu.z - p.z);
         let dv = Vec3d::new(pv.x - p.x, pv.y - p.y, pv.z - p.z);
         let du_len = (du.x * du.x + du.y * du.y + du.z * du.z).sqrt();
@@ -3563,6 +3601,55 @@ mod tests {
         let flags = surface.is_degenerate_at(0.0, PI, 1e-6);
         assert!(flags.contains(DegeneracyFlags::DU_ZERO),
             "Sphere south pole should have DU_ZERO flag, got {:?}", flags);
+    }
+
+    /// s118 (satellite a): a thin ruled ribbon over an EXTREME u-span
+    /// (the Vulcan #10220 coil-ribbon class: u_span 551/3570, v_span 1,
+    /// |dS/du| = |dS/dv| ≈ 8.8e-3 — a ~1-unit coil bundle swept over
+    /// thousands of param units). At the legacy fixed step eps=1e-4 BOTH
+    /// numerical partials land below the 1e-6 tolerance (8.8e-7-scale),
+    /// false-positive-flagging the whole surface singular — which made
+    /// is_degenerate_uv report "100% boundary points degenerate …
+    /// fan impossible" (s117). The span-scaled step must clear the
+    /// false positive while a normal-span surface with the same slow
+    /// parameterization keeps the legacy (singular) verdict.
+    #[test]
+    fn test_is_degenerate_at_extreme_span_ribbon_not_singular() {
+        // Bilinear patch, u in [0, 2000] mapping to 3D x in [0, 2]
+        // (|dS/du| = 1e-3), v in [0, 1] mapping to 3D y in [0, 1e-3]
+        // (|dS/dv| = 1e-3). Both partials are far from zero, but at the
+        // fixed eps=1e-4 each numerical displacement is 1e-7 < 1e-6.
+        let mk = |u_max: f64, u_extent: f64| {
+            let nurbs = NurbsSurface::from_v_rows(
+                1, 1,
+                vec![
+                    vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(u_extent, 0.0, 0.0)],
+                    vec![Point3d::new(0.0, 1e-3, 0.0), Point3d::new(u_extent, 1e-3, 0.0)],
+                ],
+                vec![vec![1.0, 1.0], vec![1.0, 1.0]],
+                vec![0.0, 0.0, u_max, u_max],
+                vec![0.0, 0.0, 1.0, 1.0],
+                false,
+                false,
+            );
+            Surface::Nurbs(nurbs)
+        };
+        // Extreme span: the scaled step (eps_u = 2000e-4 = 0.2 → du = 2e-4)
+        // rescues the u-partial; v keeps the small fixed step (span 1 ≤ 100)
+        // so DV_ZERO alone remains — NOT singular.
+        let extreme = mk(2000.0, 2.0);
+        let flags = extreme.is_degenerate_at(1000.0, 0.5, 1e-6);
+        assert!(!flags.is_singular(),
+            "extreme-span healthy ribbon must not be singular (s118 span-scaled step), got {:?}",
+            flags);
+        // Same slow parameterization on a NORMAL span (u in [0, 2], 3D
+        // extent 2e-3 → |dS/du| = 1e-3): the span gate does not fire and
+        // the legacy singular verdict is preserved bit-for-bit.
+        let normal = mk(2.0, 2e-3);
+        let flags = normal.is_degenerate_at(1.0, 0.5, 1e-6);
+        assert!(flags.is_singular(),
+            "normal-span slow ribbon keeps the legacy singular verdict, got {:?}",
+            flags);
     }
 
     #[test]

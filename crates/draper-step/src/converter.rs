@@ -15349,12 +15349,7 @@ impl<'a> StepConverter<'a> {
                 // s117: coiled thin ruled ribbons need CHAIN projection —
                 // see nurbs_ribbon_chain_projection (edge_cache.rs).
                 let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
-                    || draper_mesh::nurbs_ribbon_chain_projection(
-                        nurbs.u_degree,
-                        nurbs.v_degree,
-                        u_range,
-                        v_range,
-                    );
+                    || draper_mesh::nurbs_ribbon_chain_projection(nurbs);
                 let mut prev_u = (u_min + u_max) * 0.5;
                 let mut prev_v = (v_min + v_max) * 0.5;
                 for i in 0..n_samples {
@@ -15513,12 +15508,7 @@ impl<'a> StepConverter<'a> {
                 // s117: coiled thin ruled ribbons need CHAIN projection —
                 // see nurbs_ribbon_chain_projection (edge_cache.rs).
                 let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
-                    || draper_mesh::nurbs_ribbon_chain_projection(
-                        nurbs.u_degree,
-                        nurbs.v_degree,
-                        u_range,
-                        v_range,
-                    );
+                    || draper_mesh::nurbs_ribbon_chain_projection(nurbs);
 
                 let mut uvs = Vec::with_capacity(points_3d.len());
                 // Use the previous edge's last UV as the initial guess for the

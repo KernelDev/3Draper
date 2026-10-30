@@ -1,0 +1,33 @@
+# BREP#10220: 32 faces (of 13 solids)
+
+FACE #24: Nurbs(deg=3/1, cps=220x2) u=[0.0000,550.9949] span=551.0 v=[0.0000,1.0000] span=1.0000
+  ANALYTIC |dS/du|: min=5.715e-2 med=6.036e-2 max=6.356e-2 | |dS/dv|: min=6.107e-2 med=6.107e-2 max=6.108e-2
+  NUMERICAL eps=1e-4: DU_ZERO 5/205 DV_ZERO 41/205 SINGULAR 1/205
+  RIBBON WIDTH (v_min→v_max 3D): min=6.107e-2 max=6.108e-2
+  EPS-SWEEP (u=275.50, v=0.500): eps=1.00e-4:du=6.04e-6,dv=6.11e-6 | eps=1.00e-3:du=6.04e-5,dv=6.11e-5 | eps=1.00e-2:du=6.04e-4,dv=6.11e-4 | eps=1.00e-1:du=6.04e-3,dv=6.11e-3 | eps=1.00e0:du=6.03e-2,dv=3.05e-2 | eps=1.00e1:du=5.67e-1,dv=3.05e-2 | eps=1.00e2:du=2.58e-1,dv=3.05e-2 |
+  EPS-SWEEP (u=5.51, v=0.000): eps=1.00e-4:du=6.36e-6,dv=6.11e-6 | eps=1.00e-3:du=6.36e-5,dv=6.11e-5 | eps=1.00e-2:du=6.36e-4,dv=6.11e-4 | eps=1.00e-1:du=6.36e-3,dv=6.11e-3 | eps=1.00e0:du=6.35e-2,dv=6.11e-2 | eps=1.00e1:du=5.97e-1,dv=6.11e-2 | eps=1.00e2:du=2.68e-1,dv=6.11e-2 |
+  EPS-SWEEP (u=545.48, v=1.000): eps=1.00e-4:du=5.72e-6,dv=0.00e0 | eps=1.00e-3:du=5.72e-5,dv=0.00e0 | eps=1.00e-2:du=5.72e-4,dv=0.00e0 | eps=1.00e-1:du=5.71e-3,dv=0.00e0 | eps=1.00e0:du=5.71e-2,dv=0.00e0 | eps=1.00e1:du=3.09e-1,dv=0.00e0 | eps=1.00e2:du=3.09e-1,dv=0.00e0 |
+  EPS-SWEEP (u=275.50, v=0.000): eps=1.00e-4:du=6.36e-6,dv=6.11e-6 | eps=1.00e-3:du=6.36e-5,dv=6.11e-5 | eps=1.00e-2:du=6.36e-4,dv=6.11e-4 | eps=1.00e-1:du=6.36e-3,dv=6.11e-3 | eps=1.00e0:du=6.35e-2,dv=6.11e-2 | eps=1.00e1:du=5.97e-1,dv=6.11e-2 | eps=1.00e2:du=2.68e-1,dv=6.11e-2 |
+  EPS-SWEEP (u=275.50, v=1.000): eps=1.00e-4:du=5.72e-6,dv=0.00e0 | eps=1.00e-3:du=5.72e-5,dv=0.00e0 | eps=1.00e-2:du=5.72e-4,dv=0.00e0 | eps=1.00e-1:du=5.72e-3,dv=0.00e0 | eps=1.00e0:du=5.71e-2,dv=0.00e0 | eps=1.00e1:du=5.37e-1,dv=0.00e0 | eps=1.00e2:du=2.48e-1,dv=0.00e0 |
+
+FACE #26: Nurbs(deg=3/1, cps=220x2) u=[0.0000,550.9949] span=551.0 v=[0.0000,1.0000] span=1.0000
+  ANALYTIC |dS/du|: min=5.715e-2 med=6.036e-2 max=6.356e-2 | |dS/dv|: min=6.107e-2 med=6.107e-2 max=6.108e-2
+  NUMERICAL eps=1e-4: DU_ZERO 5/205 DV_ZERO 41/205 SINGULAR 1/205
+  RIBBON WIDTH (v_min→v_max 3D): min=6.107e-2 max=6.108e-2
+  EPS-SWEEP (u=275.50, v=0.500): eps=1.00e-4:du=6.04e-6,dv=6.11e-6 | eps=1.00e-3:du=6.04e-5,dv=6.11e-5 | eps=1.00e-2:du=6.04e-4,dv=6.11e-4 | eps=1.00e-1:du=6.04e-3,dv=6.11e-3 | eps=1.00e0:du=6.03e-2,dv=3.05e-2 | eps=1.00e1:du=5.67e-1,dv=3.05e-2 | eps=1.00e2:du=2.58e-1,dv=3.05e-2 |
+  EPS-SWEEP (u=5.51, v=0.000): eps=1.00e-4:du=5.72e-6,dv=6.11e-6 | eps=1.00e-3:du=5.72e-5,dv=6.11e-5 | eps=1.00e-2:du=5.72e-4,dv=6.11e-4 | eps=1.00e-1:du=5.72e-3,dv=6.11e-3 | eps=1.00e0:du=5.71e-2,dv=6.11e-2 | eps=1.00e1:du=5.37e-1,dv=6.11e-2 | eps=1.00e2:du=2.48e-1,dv=6.11e-2 |
+  EPS-SWEEP (u=545.48, v=1.000): eps=1.00e-4:du=6.36e-6,dv=0.00e0 | eps=1.00e-3:du=6.36e-5,dv=0.00e0 | eps=1.00e-2:du=6.36e-4,dv=0.00e0 | eps=1.00e-1:du=6.36e-3,dv=0.00e0 | eps=1.00e0:du=6.35e-2,dv=0.00e0 | eps=1.00e1:du=3.44e-1,dv=0.00e0 | eps=1.00e2:du=3.44e-1,dv=0.00e0 |
+  EPS-SWEEP (u=275.50, v=0.000): eps=1.00e-4:du=5.72e-6,dv=6.11e-6 | eps=1.00e-3:du=5.72e-5,dv=6.11e-5 | eps=1.00e-2:du=5.72e-4,dv=6.11e-4 | eps=1.00e-1:du=5.72e-3,dv=6.11e-3 | eps=1.00e0:du=5.71e-2,dv=6.11e-2 | eps=1.00e1:du=5.37e-1,dv=6.11e-2 | eps=1.00e2:du=2.48e-1,dv=6.11e-2 |
+  EPS-SWEEP (u=275.50, v=1.000): eps=1.00e-4:du=6.36e-6,dv=0.00e0 | eps=1.00e-3:du=6.36e-5,dv=0.00e0 | eps=1.00e-2:du=6.36e-4,dv=0.00e0 | eps=1.00e-1:du=6.36e-3,dv=0.00e0 | eps=1.00e0:du=6.35e-2,dv=0.00e0 | eps=1.00e1:du=5.97e-1,dv=0.00e0 | eps=1.00e2:du=2.68e-1,dv=0.00e0 |
+
+FACE #27: Nurbs(deg=3/1, cps=220x2) u=[0.0000,3570.1486] span=3570.1 v=[0.0000,1.0000] span=1.0000
+  ANALYTIC |dS/du|: min=8.820e-3 med=8.820e-3 max=8.821e-3 | |dS/dv|: min=8.925e-3 med=8.925e-3 max=8.925e-3
+  NUMERICAL eps=1e-4: DU_ZERO 205/205 DV_ZERO 205/205 SINGULAR 205/205
+  RIBBON WIDTH (v_min→v_max 3D): min=8.925e-3 max=8.925e-3
+  EPS-SWEEP (u=1785.07, v=0.500): eps=1.00e-4:du=8.82e-7,dv=8.93e-7 | eps=1.00e-3:du=8.82e-6,dv=8.93e-6 | eps=1.00e-2:du=8.82e-5,dv=8.93e-5 | eps=1.00e-1:du=8.82e-4,dv=8.93e-4 | eps=1.00e0:du=8.82e-3,dv=4.46e-3 | eps=1.00e1:du=8.81e-2,dv=4.46e-3 | eps=1.00e2:du=7.59e-1,dv=4.46e-3 |
+  EPS-SWEEP (u=35.70, v=0.000): eps=1.00e-4:du=8.82e-7,dv=8.93e-7 | eps=1.00e-3:du=8.82e-6,dv=8.93e-6 | eps=1.00e-2:du=8.82e-5,dv=8.93e-5 | eps=1.00e-1:du=8.82e-4,dv=8.93e-4 | eps=1.00e0:du=8.82e-3,dv=8.93e-3 | eps=1.00e1:du=8.81e-2,dv=8.93e-3 | eps=1.00e2:du=7.59e-1,dv=8.93e-3 |
+  EPS-SWEEP (u=3534.45, v=1.000): eps=1.00e-4:du=8.82e-7,dv=0.00e0 | eps=1.00e-3:du=8.82e-6,dv=0.00e0 | eps=1.00e-2:du=8.82e-5,dv=0.00e0 | eps=1.00e-1:du=8.82e-4,dv=0.00e0 | eps=1.00e0:du=8.82e-3,dv=0.00e0 | eps=1.00e1:du=8.81e-2,dv=0.00e0 | eps=1.00e2:du=3.09e-1,dv=0.00e0 |
+  EPS-SWEEP (u=1785.07, v=0.000): eps=1.00e-4:du=8.82e-7,dv=8.93e-7 | eps=1.00e-3:du=8.82e-6,dv=8.93e-6 | eps=1.00e-2:du=8.82e-5,dv=8.93e-5 | eps=1.00e-1:du=8.82e-4,dv=8.93e-4 | eps=1.00e0:du=8.82e-3,dv=8.93e-3 | eps=1.00e1:du=8.81e-2,dv=8.93e-3 | eps=1.00e2:du=7.59e-1,dv=8.93e-3 |
+  EPS-SWEEP (u=1785.07, v=1.000): eps=1.00e-4:du=8.82e-7,dv=0.00e0 | eps=1.00e-3:du=8.82e-6,dv=0.00e0 | eps=1.00e-2:du=8.82e-5,dv=0.00e0 | eps=1.00e-1:du=8.82e-4,dv=0.00e0 | eps=1.00e0:du=8.82e-3,dv=0.00e0 | eps=1.00e1:du=8.81e-2,dv=0.00e0 | eps=1.00e2:du=7.59e-1,dv=0.00e0 |
+
+# done
