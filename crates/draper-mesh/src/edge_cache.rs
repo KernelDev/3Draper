@@ -2212,6 +2212,53 @@ pub struct CircleInconsistency {
     pub point_counts: Vec<usize>,
 }
 
+/// s117: THIN RULED RIBBON — chain-projection criterion.
+///
+/// A ruled NURBS (degree 1 in one direction) whose ruled-direction
+/// range is SMALL (< 10) while the OTHER direction's range is LARGE
+/// (>= 10) is a COILED RIBBON (Vulcan #10220 f25/f27/f28: Nurbs
+/// deg=3/1 cps=220x2, u 551/3570 x v 1 — the ribbon self-overlaps in
+/// 3D). Independent per-point projection lands on distant coils
+/// (err 6.18e-2), and the brute-force fallback fails too: the 35x35
+/// grid steps 15.7 in u — COARSER than the ~10-unit coil pitch, so it
+/// cannot resolve the correct coil (bf err 7.14e-2). The UV polygon
+/// becomes a u-jumping zigzag, self-intersects, and the face falls to
+/// the 3D ear-clip best-fit-plane fallback — the s111 P3 fold debt
+/// (18 REAL pairs) plus 19-29% merge loss. Chain Newton from the
+/// previous point's UV (initial_uv already threads across edges in
+/// compute_edge_uvs_with_points) tracks the correct coil: the first
+/// point of each edge starts at the SAME 3D vertex as the previous
+/// edge's last point, so its projection is a continuation, not a
+/// fresh multi-valued solve.
+///
+/// Kill-switch semantics: OPT-IN via DRAPPER_RIBBON_CHAIN=1. Measured
+/// (s117 A/B, forensics/s117/): the UV layer IMPROVES dramatically (f28
+/// rims land exactly on v=0/v=1, projection err 6.18e-2 → 1.04e-2,
+/// u-jumps 200-500 → 13-26) but the OVERALL Vulcan census REGRESSED
+/// 50 → 54 REAL: with correct UV the ribbons no longer fall to the 3D
+/// ear-clip — instead they hit TWO downstream layers that are not ready
+/// for them: (a) is_degenerate_uv's numerical step (1e-4 parametric ×
+/// 1e-6 3D tolerance) false-positives "100% boundary degenerate" on
+/// coiled ribbons (|dS/du| ≈ 5e-8 for a ~1-unit-wide coil bundle with
+/// u_range 3570) → "fan impossible, falling through to CDT"; (b) the
+/// NURBS_FILLET_BAND rescue then accepts the sub-patch ribbon
+/// (non-rim 5 → 0 looks like a win) but emits 2233 tris of which 1866
+/// are degenerate — 84% merge loss (f28), while the legacy ear-clip
+/// path only lost 50/301. Default OFF until (a)+(b) are fixed; the
+/// criterion stays here so the follow-up session can flip it.
+pub fn nurbs_ribbon_chain_projection(
+    u_degree: usize,
+    v_degree: usize,
+    u_range: f64,
+    v_range: f64,
+) -> bool {
+    if std::env::var("DRAPPER_RIBBON_CHAIN").as_deref() != Ok("1") {
+        return false;
+    }
+    (u_degree == 1 && u_range < 10.0 && v_range >= 10.0)
+        || (v_degree == 1 && v_range < 10.0 && u_range >= 10.0)
+}
+
 /// Compute adaptive grid size for brute-force NURBS point projection.
 ///
 /// Larger UV ranges need finer grids to ensure the closest UV is found.

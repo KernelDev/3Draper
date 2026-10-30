@@ -996,7 +996,15 @@ fn project_points_nurbs_fast(surface: &Surface, points: &[Point3d]) -> Vec<Point
         let (v_min, v_max) = nurbs.v_range();
         let u_range = u_max - u_min;
         let v_range = v_max - v_min;
-        let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+        // s117: coiled thin ruled ribbons need CHAIN projection —
+        // see nurbs_ribbon_chain_projection (edge_cache.rs).
+        let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
+            || crate::nurbs_ribbon_chain_projection(
+                nurbs.u_degree,
+                nurbs.v_degree,
+                u_range,
+                v_range,
+            );
 
         let mut uvs = Vec::with_capacity(points.len());
         let mut prev_u = (u_min + u_max) * 0.5;

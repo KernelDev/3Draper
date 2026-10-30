@@ -5586,7 +5586,15 @@ pub fn triangulate_surface_uv_cdt(
         let (nv_min, nv_max) = nurbs.v_range();
         let u_range = nu_max - nu_min;
         let v_range = nv_max - nv_min;
-        let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+        // s117: coiled thin ruled ribbons need CHAIN projection —
+        // see nurbs_ribbon_chain_projection (edge_cache.rs).
+        let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
+            || crate::nurbs_ribbon_chain_projection(
+                nurbs.u_degree,
+                nurbs.v_degree,
+                u_range,
+                v_range,
+            );
         let mut uvs = Vec::with_capacity(boundary_points.len());
         for (i, p) in boundary_points.iter().enumerate() {
             let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
@@ -5660,7 +5668,15 @@ pub fn triangulate_surface_uv_cdt(
                 let (nv_min, nv_max) = nurbs.v_range();
                 let u_range = nu_max - nu_min;
                 let v_range = nv_max - nv_min;
-                let use_chain_newton = u_range < 10.0 && v_range < 10.0;
+                // s117: coiled thin ruled ribbons need CHAIN projection —
+                // see nurbs_ribbon_chain_projection (edge_cache.rs).
+                let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
+                    || crate::nurbs_ribbon_chain_projection(
+                        nurbs.u_degree,
+                        nurbs.v_degree,
+                        u_range,
+                        v_range,
+                    );
                 let mut uvs = Vec::with_capacity(hole.len());
                 for (i, p) in hole.iter().enumerate() {
                     let (u, v) = if use_chain_newton && i > 0 && !uvs.is_empty() {
