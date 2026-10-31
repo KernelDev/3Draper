@@ -6842,6 +6842,600 @@ fn try_strip_triangulation_ruled_nurbs(
     Some(mesh)
 }
 
+/// s119: MONOTONE-BAND ZIPPER for coiled thin ruled ribbons (helical bands).
+///
+/// MEASURED STRUCTURE (s119, forensics/s119/): the ribbon faces that
+/// `nurbs_ribbon_chain_projection` accepts are NOT axis-aligned UV
+/// sub-rectangles — they are HELICAL BANDS whose UV domain is a
+/// PARALLELOGRAM: two long rails at (nearly) constant v (e.g. Spit
+/// #31360 f25: top u∈[41,515] at v=1.0, bottom u∈[61,534] at v≈0.129)
+/// closed by two SLANTED runout sides (the helix lead displaces u by
+/// ~19.3 across the band width). The legacy
+/// `try_strip_triangulation_ruled_nurbs` corner check (nearest point
+/// to the 4 rectangle corners, 2% tolerance) rejects these BY
+/// CONSTRUCTION — the slanted corners sit far outside the 2% corner
+/// zones — and even a face-bbox retry cannot fix it (Vulcan #10220
+/// f25's UV bbox v_min is polluted to 0.074 by drifted notch points
+/// while the real band bottom is v≈0.1725).
+///
+/// The correct correspondence for a v-ruled band is PARAMETRIC, not
+/// arc-length: the ruling S(u, ·) connects rail points with the SAME
+/// u. This function therefore performs a classic MONOTONE-POLYGON
+/// TRIANGULATION in the (u, v) domain:
+///   1. split the boundary loop at the global u-min/u-max runs into
+///      two u-monotone chains (upper and lower boundary of the band),
+///   2. sweep both chains in ascending u, emitting a quad (2 tris)
+///      where both advance and a triangle where one does — every
+///      crossbar connects points at (nearly) the same u, i.e. lies
+///      along a ruling ON the surface, never cutting across the coil
+///      bundle (the failure mode of the arc-length zipper, the CDT
+///      lattice and the 3D ear-clip alike),
+///   3. thread the extreme-run points (vertical closing sides, e.g.
+///      Vulcan f27's u=0 ruling) as fans into the first/last column,
+///      exactly like the legacy strip's side chains.
+///
+/// Never-worsen guards (each returns None → the caller falls through
+/// to the legacy strip/CDT/ear-clip path):
+///   - the s117 opt-in criterion `nurbs_ribbon_chain_projection`
+///     (env DRAPPER_RIBBON_CHAIN=1; default OFF → this function is a
+///     no-op in default builds, keeping default censuses bit-identical),
+///     plus its own kill-switch DRAPPER_RIBBON_ZIPPER=0;
+///   - strict u-monotonicity of both chains (Vulcan f25's notch with
+///     drifted UVs doubles back in u → rejected);
+///   - reprojection consistency: p90 of |P − S(uv)| must be within
+///     3× of the median (Vulcan f27: 21% of points carry coil-jumped
+///     UVs with ~6× the clean error → rejected; Spit #31360/#31359's
+///     563/225-span ribbons measure clean);
+///   - per-triangle UV orientation must match the polygon's signed
+///     area (detects chain crossings / self-intersection);
+///   - per-triangle 3D diameter must be within 3× of the local
+///     derivative-scale of its UV cell (catches cross-bundle chords
+///     on narrow bands where a drifted UV slipped past the p90 gate);
+///   - full boundary-edge coverage after the sweep (watertightness).
+pub fn try_ribbon_monotone_zipper(
+    nurbs: &NurbsSurface,
+    boundary_points: &[Point3d],
+    boundary_uvs: &[Point2d],
+    forward: bool,
+) -> Option<TriangleMesh> {
+    // Kill-switch for this emitter alone (evaluated inside chain mode).
+    if std::env::var("DRAPPER_RIBBON_ZIPPER").as_deref() == Ok("0") {
+        return None;
+    }
+    // The s117 chain-projection criterion: env-gated (OPT-IN), thin
+    // ruled ribbon, ruling width above the merge tolerance. In default
+    // builds this returns false immediately → bit-identical behavior.
+    if !crate::nurbs_ribbon_chain_projection(nurbs) {
+        return None;
+    }
+
+    let n = boundary_points.len();
+    if n < 4 || boundary_uvs.len() != n {
+        return None;
+    }
+
+    // Ruled direction (mirrors the criterion's classification).
+    let (u0, u1) = nurbs.u_range();
+    let (v0, v1) = nurbs.v_range();
+    let u_span = u1 - u0;
+    let v_span = v1 - v0;
+    let v_ruled = nurbs.v_degree == 1 && v_span < 10.0 && u_span >= 10.0;
+    let u_ruled = !v_ruled && nurbs.u_degree == 1 && u_span < 10.0 && v_span >= 10.0;
+    if !v_ruled && !u_ruled {
+        return None;
+    }
+    // L = the long coordinate (the sweep direction), S = the ruled one.
+    let l_of = |uv: &Point2d| if v_ruled { uv.u } else { uv.v };
+    let s_of = |uv: &Point2d| if v_ruled { uv.v } else { uv.u };
+
+    // ── Reprojection consistency gate (drift detector) ────────────────
+    let mut errs: Vec<f64> = Vec::with_capacity(n);
+    for (p, uv) in boundary_points.iter().zip(boundary_uvs.iter()) {
+        let sp = nurbs.point_at(uv.u, uv.v);
+        errs.push(p.distance_to(&sp));
+    }
+    let mut sorted_errs = errs.clone();
+    sorted_errs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let e_med = sorted_errs[n / 2];
+    let e_p90 = sorted_errs[((n as f64 * 0.9) as usize).min(n - 1)];
+    if e_p90 > 3.0 * e_med.max(1e-6) {
+        log::debug!(
+            "RIBBON_ZIPPER: reprojection drift (median {:.2e}, p90 {:.2e}) — bail",
+            e_med, e_p90
+        );
+        return None;
+    }
+
+    // ── Global L extremes and their tie runs ──────────────────────────
+    let mut l_min = f64::MAX;
+    let mut l_max = f64::MIN;
+    for uv in boundary_uvs.iter() {
+        let l = l_of(uv);
+        if l < l_min { l_min = l; }
+        if l > l_max { l_max = l; }
+    }
+    let l_span = l_max - l_min;
+    if l_span <= 0.0 {
+        return None;
+    }
+    let tie_tol = l_span * 1e-9;
+    let is_min_tie: Vec<bool> = boundary_uvs.iter()
+        .map(|uv| (l_of(uv) - l_min).abs() <= tie_tol)
+        .collect();
+    let is_max_tie: Vec<bool> = boundary_uvs.iter()
+        .map(|uv| (l_max - l_of(uv)).abs() <= tie_tol)
+        .collect();
+
+    // Rotate the loop so index 0 is a non-tie for BOTH extremes (the
+    // runs must not wrap the array). If no such index exists, the loop
+    // is degenerate (only extreme points) — bail.
+    let origin = (0..n).find(|&i| !is_min_tie[i] && !is_max_tie[i])?;
+    let rot: Vec<usize> = (0..n).map(|k| (origin + k) % n).collect();
+    let is_min_tie: Vec<bool> = rot.iter().map(|&i| is_min_tie[i]).collect();
+    let is_max_tie: Vec<bool> = rot.iter().map(|&i| is_max_tie[i]).collect();
+
+    // Each tie set must be ONE contiguous cyclic run (now a contiguous
+    // interval not touching index 0).
+    let run_bounds = |flags: &[bool]| -> Option<(usize, usize)> {
+        let first = flags.iter().position(|&f| f)?;
+        let last = flags.iter().rposition(|&f| f)?;
+        if flags.iter().skip(first).take(last - first + 1).all(|&f| f) {
+            Some((first, last))
+        } else {
+            None
+        }
+    };
+    let (min_s, min_e) = run_bounds(&is_min_tie)?;
+    let (max_s, max_e) = run_bounds(&is_max_tie)?;
+
+    // Run endpoints in loop order: the min run [min_s..=min_e] connects
+    // the START of one chain to the START of the other; the max run
+    // [max_s..=max_e] connects the two chain ENDs.
+    //   chain_lower (ascending L) = forward walk min_e → max_s,
+    //   chain_upper (ascending L) = reverse of forward walk max_e → min_s.
+    let q0 = min_s; // upper chain start (min run's first point)
+    let qm = min_e; // lower chain start (min run's last point)
+    let r0 = max_s; // lower chain end (max run's first point)
+    let rk = max_e; // upper chain end (max run's last point)
+    if q0 == qm && r0 == rk && n <= 2 {
+        return None;
+    }
+    let walk_fwd = |from: usize, to: usize| -> Vec<usize> {
+        let mut v = Vec::new();
+        let mut i = from;
+        v.push(i);
+        while i != to {
+            i = (i + 1) % n;
+            v.push(i);
+        }
+        v
+    };
+    let lower_raw = walk_fwd(qm, r0); // ascending L (min → max)
+    let upper_raw = walk_fwd(rk, q0); // DESCENDING L (max → min)
+    let mut upper = upper_raw;
+    upper.reverse(); // ascending L
+    let lower = lower_raw;
+
+    if upper.len() < 2 || lower.len() < 2 {
+        return None;
+    }
+
+    // ── Strict monotonicity of both chains ────────────────────────────
+    let mono_ok = |chain: &[usize]| -> bool {
+        for w in 1..chain.len() {
+            let lp = l_of(&boundary_uvs[rot[chain[w - 1]]]);
+            let lc = l_of(&boundary_uvs[rot[chain[w]]]);
+            if lc < lp - tie_tol {
+                return false;
+            }
+        }
+        true
+    };
+    if !mono_ok(&upper) || !mono_ok(&lower) {
+        log::debug!("RIBBON_ZIPPER: non-monotone chain (notch or UV drift) — bail");
+        return None;
+    }
+
+    // UV polygon orientation (shoelace over the loop in the given
+    // order, in (L, S) coordinates).
+    let mut sigma = 0.0f64;
+    for k in 0..n {
+        let a = &boundary_uvs[rot[k]];
+        let b = &boundary_uvs[rot[(k + 1) % n]];
+        sigma += l_of(a) * s_of(b) - l_of(b) * s_of(a);
+    }
+    if sigma.abs() < 1e-12 {
+        return None; // degenerate polygon
+    }
+
+    // ── Reflex-side extraction ────────────────────────────────────────
+    //
+    // The head-based sweep below is only correct for chains that are
+    // CONVEX toward the interior. The rails are (helices at nearly
+    // constant S — no reflex vertices), but the RUNOUT side curves can
+    // bulge INTO the band (reflex): a plain sweep triangle then wraps
+    // the bulge and overlaps the neighbour (s119 lesson, caught by the
+    // unit test: zipped area 79.955 > polygon 79.595). Reflex vertices
+    // are therefore split off into SIDE chains at the two ends and
+    // threaded as fans into the first/last column — exactly like the
+    // constant-L extreme runs below.
+    let s_mid = |chain: &[usize]| s_of(&boundary_uvs[rot[chain[chain.len() / 2]]]);
+    let upper_is_higher = s_mid(&upper) > s_mid(&lower);
+    let mut s_lo = f64::MAX;
+    let mut s_hi = f64::MIN;
+    for uv in boundary_uvs.iter() {
+        let s = s_of(uv);
+        if s < s_lo { s_lo = s; }
+        if s > s_hi { s_hi = s; }
+    }
+    let s_band = (s_hi - s_lo).max(1e-12);
+    let reflex_tol = 0.01 * s_band;
+    // reflex[k]: vertex k bulges toward the polygon interior (above the
+    // chord (k-1, k+1) for the lower-S chain, below it for the higher).
+    let reflex_flags = |chain: &[usize], interior_above: bool| -> Vec<bool> {
+        (0..chain.len())
+            .map(|k| {
+                if k == 0 || k + 1 >= chain.len() {
+                    return false;
+                }
+                let a = &boundary_uvs[rot[chain[k - 1]]];
+                let b = &boundary_uvs[rot[chain[k]]];
+                let c = &boundary_uvs[rot[chain[k + 1]]];
+                let (la, lb, lc) = (l_of(a), l_of(b), l_of(c));
+                let t = if lc > la {
+                    ((lb - la) / (lc - la)).clamp(0.0, 1.0)
+                } else {
+                    0.5
+                };
+                let s_seg = s_of(a) + t * (s_of(c) - s_of(a));
+                let dev = s_of(b) - s_seg;
+                if interior_above {
+                    dev > reflex_tol
+                } else {
+                    dev < -reflex_tol
+                }
+            })
+            .collect()
+    };
+    let up_reflex = reflex_flags(&upper, !upper_is_higher);
+    let lo_reflex = reflex_flags(&lower, upper_is_higher);
+    // Split each chain into [leading side | core | trailing side].
+    // Returns None on middle reflex vertices (notched rail) — those
+    // need a stack-based sweep, out of scope (conservative reject).
+    let side_split = |flags: &[bool]| -> Option<(usize, usize, usize, usize)> {
+        let len = flags.len();
+        if len < 3 {
+            return Some((0, 0, len - 1, 0)); // too short to be reflex
+        }
+        // Leading run: interior vertices flags[1..=lead] are reflex.
+        let mut lead = 0usize;
+        while lead + 1 < len - 1 && flags[lead + 1] {
+            lead += 1;
+        }
+        // Trailing run: interior vertices flags[len-2-trail..=len-2].
+        let mut trail = 0usize;
+        while trail + 1 < len - 1 && flags[len - 2 - trail] {
+            trail += 1;
+        }
+        for k in (lead + 1)..=(len - 2 - trail) {
+            if flags[k] {
+                log::debug!("RIBBON_ZIPPER: middle reflex vertex at chain pos {} — bail", k);
+                return None;
+            }
+        }
+        // Leading side = chain[0..=lead+1] (lead+2 pts); trailing side =
+        // chain[len-2-trail..=len-1] (trail+2 pts); core between.
+        Some((
+            lead,
+            if lead > 0 { lead + 1 } else { 0 },
+            if trail > 0 { len - 2 - trail } else { len - 1 },
+            trail,
+        ))
+    };
+    let (up_lead, up_core_s, up_core_e, up_trail) = side_split(&up_reflex)?;
+    let (lo_lead, lo_core_s, lo_core_e, lo_trail) = side_split(&lo_reflex)?;
+    // One side per column edge only: two-sided columns (both chains
+    // reflex at the same end, or a reflex side next to a multi-point
+    // extreme run) form lens regions the single fan cannot express.
+    let min_run: Vec<usize> = (min_s..=min_e).collect();
+    let max_run: Vec<usize> = (max_s..=max_e).collect();
+    if (up_lead > 0 && lo_lead > 0)
+        || (up_trail > 0 && lo_trail > 0)
+        || (min_run.len() > 2 && (up_lead > 0 || lo_lead > 0))
+        || (max_run.len() > 2 && (up_trail > 0 || lo_trail > 0))
+    {
+        log::debug!("RIBBON_ZIPPER: two-sided or run+side column — bail");
+        return None;
+    }
+
+    // ── Monotone sweep over the convex cores ──────────────────────────
+    let upper_core = &upper[up_core_s..=up_core_e];
+    let lower_core = &lower[lo_core_s..=lo_core_e];
+    let na = upper_core.len();
+    let nb = lower_core.len();
+    if na < 2 || nb < 2 {
+        return None;
+    }
+    let mut tris: Vec<(usize, usize, usize)> = Vec::with_capacity(na + nb);
+    let mut i = 1usize;
+    let mut j = 1usize;
+    while i < na || j < nb {
+        let la = if i < na { l_of(&boundary_uvs[rot[upper_core[i]]]) } else { f64::INFINITY };
+        let lb = if j < nb { l_of(&boundary_uvs[rot[lower_core[j]]]) } else { f64::INFINITY };
+        let adv_a = i < na && la <= lb;
+        let adv_b = j < nb && lb <= la;
+        let ha = i - 1; // current upper head
+        let hb = j - 1; // current lower head
+        if adv_a && adv_b {
+            tris.push((upper_core[ha], upper_core[i], lower_core[j]));
+            tris.push((upper_core[ha], lower_core[j], lower_core[hb]));
+            i += 1;
+            j += 1;
+        } else if adv_a {
+            tris.push((upper_core[ha], upper_core[i], lower_core[hb]));
+            i += 1;
+        } else {
+            tris.push((upper_core[ha], lower_core[j], lower_core[hb]));
+            j += 1;
+        }
+    }
+
+    // ── Side fans (extreme runs + reflex runout sides) ────────────────
+    // Each column crossbar (first: upper_core[0] ↔ lower_core[0], last:
+    // the two core ends) may carry ONE side chain: either the constant-L
+    // extreme run or a reflex runout side. The runout sides are curves,
+    // so NO collinearity requirement — unlike the legacy strip's
+    // straight-ruling side chains.
+    let fan_into = |tris: &mut Vec<(usize, usize, usize)>,
+                    edge: (usize, usize),
+                    run: &Vec<usize>| {
+        if run.len() <= 2 {
+            return; // single point or a plain edge — nothing to thread
+        }
+        // Find the triangle carrying the (a, b) edge.
+        let (a, b) = edge;
+        let pos = tris.iter().position(|&(x, y, z)| {
+            (x == a && (y == b || z == b)) || (y == a && (x == b || z == b))
+                || (z == a && (x == b || y == b))
+        });
+        if let Some(idx) = pos {
+            let (tx, ty, tz) = tris[idx];
+            let apex = if tx != a && tx != b {
+                tx
+            } else if ty != a && ty != b {
+                ty
+            } else {
+                tz
+            };
+            tris.remove(idx);
+            for w in 0..run.len() - 1 {
+                tris.push((run[w], apex, run[w + 1]));
+            }
+        }
+    };
+    // First column: extreme run, or the (single) reflex leading side.
+    if min_run.len() > 2 {
+        fan_into(&mut tris, (upper_core[0], lower_core[0]), &min_run);
+    } else if up_lead > 0 {
+        let side: Vec<usize> = upper[..up_core_s + 1].to_vec();
+        fan_into(&mut tris, (upper_core[0], lower_core[0]), &side);
+    } else if lo_lead > 0 {
+        let side: Vec<usize> = lower[..lo_core_s + 1].to_vec();
+        fan_into(&mut tris, (upper_core[0], lower_core[0]), &side);
+    }
+    // Last column: extreme run, or the (single) reflex trailing side.
+    if max_run.len() > 2 {
+        fan_into(&mut tris, (lower_core[nb - 1], upper_core[na - 1]), &max_run);
+    } else if up_trail > 0 {
+        let side: Vec<usize> = upper[up_core_e..].to_vec();
+        fan_into(&mut tris, (lower_core[nb - 1], upper_core[na - 1]), &side);
+    } else if lo_trail > 0 {
+        let side: Vec<usize> = lower[lo_core_e..].to_vec();
+        fan_into(&mut tris, (lower_core[nb - 1], upper_core[na - 1]), &side);
+    }
+
+    // ── Per-triangle checks: degeneracy, orientation, 3D diameter ────
+    let p3 = |ri: usize| boundary_points[rot[ri]];
+    let uv_of = |ri: usize| boundary_uvs[rot[ri]];
+    let dist3 = |a: Point3d, b: Point3d| a.distance_to(&b);
+    let mut checked: Vec<(usize, usize, usize)> = Vec::with_capacity(tris.len());
+    for &(ta, tb, tc) in tris.iter() {
+        if ta == tb || tb == tc || ta == tc {
+            continue; // collapsed column (shared extreme vertex) — its
+                      // chain edges are covered by the neighbouring tris
+        }
+        // UV orientation must match the polygon's.
+        let uva = uv_of(ta);
+        let uvb = uv_of(tb);
+        let uvc = uv_of(tc);
+        let area2 = (l_of(&uvb) - l_of(&uva)) * (s_of(&uvc) - s_of(&uva))
+            - (l_of(&uvc) - l_of(&uva)) * (s_of(&uvb) - s_of(&uva));
+        if area2.abs() < 1e-15 {
+            // Collinear in UV: only legitimate if also 3D-collinear
+            // (all on one ruling) — then it is degenerate and would die
+            // in the merge anyway; reject otherwise.
+            let pa = p3(ta);
+            let pb = p3(tb);
+            let pc = p3(tc);
+            let e1 = (pb.x - pa.x, pb.y - pa.y, pb.z - pa.z);
+            let e2 = (pc.x - pa.x, pc.y - pa.y, pc.z - pa.z);
+            let cr = (
+                e1.1 * e2.2 - e1.2 * e2.1,
+                e1.2 * e2.0 - e1.0 * e2.2,
+                e1.0 * e2.1 - e1.1 * e2.0,
+            );
+            let area3 = (cr.0 * cr.0 + cr.1 * cr.1 + cr.2 * cr.2).sqrt() * 0.5;
+            let scale = dist3(pa, pb).max(dist3(pb, pc)).max(dist3(pa, pc)).max(1e-12);
+            if area3 <= 1e-9 * scale * scale {
+                continue; // 3D-collinear → skip the degenerate triangle
+            }
+            log::debug!("RIBBON_ZIPPER: zero-UV-area non-collinear triangle — bail");
+            return None;
+        }
+        let (mut x, mut y, mut z) = (ta, tb, tc);
+        if (area2 > 0.0) != (sigma > 0.0) {
+            std::mem::swap(&mut y, &mut z);
+        }
+        // 3D diameter vs the local derivative scale of the UV cell
+        // (cross-bundle chord detector).
+        let lu = (l_of(&uva)).min(l_of(&uvb)).min(l_of(&uvc));
+        let hu = (l_of(&uva)).max(l_of(&uvb)).max(l_of(&uvc));
+        let ls = (s_of(&uva)).min(s_of(&uvb)).min(s_of(&uvc));
+        let hs = (s_of(&uva)).max(s_of(&uvb)).max(s_of(&uvc));
+        let (cu, cv) = if v_ruled {
+            ((lu + hu) * 0.5, (ls + hs) * 0.5)
+        } else {
+            ((ls + hs) * 0.5, (lu + hu) * 0.5)
+        };
+        let d = nurbs.derivatives_at(cu, cv);
+        let dl = if v_ruled {
+            (d.du.x * d.du.x + d.du.y * d.du.y + d.du.z * d.du.z).sqrt()
+        } else {
+            (d.dv.x * d.dv.x + d.dv.y * d.dv.y + d.dv.z * d.dv.z).sqrt()
+        };
+        let ds = if v_ruled {
+            (d.dv.x * d.dv.x + d.dv.y * d.dv.y + d.dv.z * d.dv.z).sqrt()
+        } else {
+            (d.du.x * d.du.x + d.du.y * d.du.y + d.du.z * d.du.z).sqrt()
+        };
+        let expected = dl * (hu - lu) + ds * (hs - ls);
+        let pa = p3(x);
+        let pb = p3(y);
+        let pc = p3(z);
+        let actual = dist3(pa, pb).max(dist3(pb, pc)).max(dist3(pa, pc));
+        if actual > 3.0 * expected.max(1e-9) {
+            log::debug!(
+                "RIBBON_ZIPPER: triangle 3D diameter {:.3} >> cell scale {:.3} (cross-bundle chord) — bail",
+                actual, expected
+            );
+            return None;
+        }
+        checked.push((x, y, z));
+    }
+    if checked.is_empty() {
+        return None;
+    }
+
+    // ── Build the mesh ────────────────────────────────────────────────
+    let mut mesh = TriangleMesh::new();
+    let mut vertex_map: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let oriented_normal = |d: &draper_geometry::SurfaceDerivatives| -> [f64; 3] {
+        let nn = d.normal();
+        if forward {
+            [nn.x, nn.y, nn.z]
+        } else {
+            [-nn.x, -nn.y, -nn.z]
+        }
+    };
+    for &ri in rot.iter() {
+        let vi = mesh.add_vertex(boundary_points[ri]);
+        let d = nurbs.derivatives_at(boundary_uvs[ri].u, boundary_uvs[ri].v);
+        mesh.add_vertex_normal(vi, oriented_normal(&d));
+        vertex_map.insert(ri, vi);
+    }
+
+    // Global winding: the UV-normalized triangles are consistently
+    // oriented in the polygon; decide the 3D flip from the first
+    // triangle against the oriented surface normal.
+    let (t0a, t0b, t0c) = checked[0];
+    let p0 = boundary_points[rot[t0a]];
+    let p1 = boundary_points[rot[t0b]];
+    let p2 = boundary_points[rot[t0c]];
+    let e1 = (
+        p1.x - p0.x,
+        p1.y - p0.y,
+        p1.z - p0.z,
+    );
+    let e2 = (
+        p2.x - p0.x,
+        p2.y - p0.y,
+        p2.z - p0.z,
+    );
+    let nrm = (
+        e1.1 * e2.2 - e1.2 * e2.1,
+        e1.2 * e2.0 - e1.0 * e2.2,
+        e1.0 * e2.1 - e1.1 * e2.0,
+    );
+    let uv0 = boundary_uvs[rot[t0a]];
+    let uv1 = boundary_uvs[rot[t0b]];
+    let uv2 = boundary_uvs[rot[t0c]];
+    let cc = (
+        (uv0.u + uv1.u + uv2.u) / 3.0,
+        (uv0.v + uv1.v + uv2.v) / 3.0,
+    );
+    let d0 = nurbs.derivatives_at(cc.0, cc.1);
+    let sn = d0.normal();
+    let sn_oriented = if forward {
+        [sn.x, sn.y, sn.z]
+    } else {
+        [-sn.x, -sn.y, -sn.z]
+    };
+    let dot = nrm.0 * sn_oriented[0] + nrm.1 * sn_oriented[1] + nrm.2 * sn_oriented[2];
+    let flip = dot < 0.0;
+
+    for &(ta, tb, tc) in checked.iter() {
+        let va = vertex_map[&rot[ta]];
+        let vb = vertex_map[&rot[tb]];
+        let vc = vertex_map[&rot[tc]];
+        if flip {
+            mesh.add_triangle(va, vc, vb);
+        } else {
+            mesh.add_triangle(va, vb, vc);
+        }
+    }
+
+    // ── Boundary coverage verification (watertightness) ───────────────
+    {
+        let mut mesh_edges: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+        for tri in &mesh.triangles {
+            for k in 0..3 {
+                let a = tri[k];
+                let b = tri[(k + 1) % 3];
+                mesh_edges.insert((a.min(b), a.max(b)));
+            }
+        }
+        let mut missing = 0usize;
+        for k in 0..n {
+            let va = vertex_map[&rot[k]];
+            let vb = vertex_map[&rot[(k + 1) % n]];
+            if va == vb {
+                continue;
+            }
+            if !mesh_edges.contains(&(va.min(vb), va.max(vb))) {
+                log::debug!(
+                    "RIBBON_ZIPPER: missing boundary edge k={} (rot idx {} → {}, uv ({:.4},{:.4})→({:.4},{:.4}))",
+                    k,
+                    rot[k],
+                    rot[(k + 1) % n],
+                    boundary_uvs[rot[k]].u,
+                    boundary_uvs[rot[k]].v,
+                    boundary_uvs[rot[(k + 1) % n]].u,
+                    boundary_uvs[rot[(k + 1) % n]].v
+                );
+                missing += 1;
+            }
+        }
+        if missing > 0 {
+            log::debug!(
+                "RIBBON_ZIPPER: {} of {} boundary edges missing — bail",
+                missing, n
+            );
+            return None;
+        }
+    }
+
+    log::info!(
+        "RIBBON_ZIPPER: emitted {} tris from {} bnd pts (chains {}+{}, extreme runs {}+{}) — monotone band zipper",
+        mesh.triangle_count(),
+        n,
+        na, nb,
+        min_run.len(),
+        max_run.len()
+    );
+
+    Some(mesh)
+}
+
 
 /// NURBS surface triangulation using UV-space earcutr with Newton-Raphson re-projection.
 ///
@@ -6935,6 +7529,22 @@ fn triangulate_nurbs_cdt(face: &StagedFace, surface: &Surface, params: &Triangul
                     "NURBS_CDT: trying strip for face {} (u_deg={}, v_deg={}, bnd={})",
                     face.id, nurbs.u_degree, nurbs.v_degree, boundary_3d.len()
                 );
+                // s119: monotone band zipper first for coiled ribbons
+                // (criterion-gated no-op in default builds).
+                if let Some(zipper_mesh) = try_ribbon_monotone_zipper(
+                    nurbs,
+                    &boundary_3d,
+                    &boundary_uvs,
+                    face.forward,
+                ) {
+                    log::warn!(
+                        "NURBS_CDT: ribbon zipper returned {} verts, {} tris",
+                        zipper_mesh.vertices.len(), zipper_mesh.triangles.len()
+                    );
+                    if !zipper_mesh.vertices.is_empty() {
+                        return zipper_mesh;
+                    }
+                }
                 if let Some(strip_mesh) = try_strip_triangulation_ruled_nurbs(
                     nurbs,
                     &boundary_3d,
@@ -7591,6 +8201,20 @@ pub fn triangulate_face_with_boundary_and_holes_uv(
             // If strip triangulation fails (e.g., can't find 4 corners), fall back
             // to earcutr as well.
             if nurbs.u_degree == 1 || nurbs.v_degree == 1 {
+                // s119: coiled thin ruled ribbons (helical bands) are
+                // parallelograms in UV, not rectangles — the legacy strip's
+                // corner check rejects them by construction. The monotone
+                // band zipper pairs the rails by u-parameter (rulings) and
+                // is a no-op unless the opt-in chain criterion accepts the
+                // surface (default builds are untouched).
+                if let Some(zipper_mesh) = try_ribbon_monotone_zipper(
+                    nurbs,
+                    boundary_points,
+                    boundary_uvs,
+                    forward,
+                ) {
+                    return zipper_mesh;
+                }
                 if let Some(strip_mesh) = try_strip_triangulation_ruled_nurbs(
                     nurbs,
                     boundary_points,

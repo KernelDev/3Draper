@@ -1067,6 +1067,7 @@ dependencies = [
  "draper-topology",
  "earcut",
  "earcutr",
+ "env_logger",
  "i_triangle",
  "log",
  "proptest",
