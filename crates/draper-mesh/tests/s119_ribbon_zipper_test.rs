@@ -67,7 +67,7 @@ fn helical_band_boundary() -> (Vec<Point3d>, Vec<Point2d>) {
     (pts, uvs)
 }
 
-/// Same band but with STRAIGHT side interiors: the interior side point
+/// Same-band but with STRAIGHT side interiors: the interior side point
 /// is exactly on the chord, the sweep triangle covering its boundary
 /// edges is UV-collinear (and 3D-collinear on this flat surface) and
 /// gets skipped → boundary coverage fails → the zipper must REJECT the
@@ -90,6 +90,90 @@ fn collinear_side_band_boundary() -> (Vec<Point3d>, Vec<Point2d>) {
     }
     push(11.5, 0.5); // exactly on the D–A chord
     (pts, uvs)
+}
+
+/// s120: POINTED-END helical band (the Spit #31359 f11/f13 shape).
+/// Both extreme runs are SINGLE points — the top-rail ends — because
+/// the runout sides slant forward in u as they descend in v. The near
+/// runout is a bunched, nearly-straight slanted chain whose points all
+/// sit below the upper chain's second point, so the sweep races it
+/// ahead while the upper head sits on the shared apex and emits
+/// apex-anchored COLINEAR slivers along the runout. Their UV areas are
+/// pure wiggle noise (alternating sign, ±0.001 off the chord — like
+/// the real pcurve discretization), the exact poison for the
+/// individual sigma-flip: before s120 it oriented neighbouring
+/// slivers inconsistently → same-direction shared spokes → REAL
+/// WINDING-FLIP census pairs (h≈0.02, pattern [a,x,b]/[a,y,b]).
+fn pointed_band_boundary() -> (Vec<Point3d>, Vec<Point2d>) {
+    let nurbs = flat_band_surface();
+    let mut pts = Vec::new();
+    let mut uvs = Vec::new();
+    let mut push = |u: f64, v: f64| {
+        let p = nurbs.point_at(u, v);
+        pts.push(Point3d::new(p.x, p.y, p.z));
+        uvs.push(Point2d::new(u, v));
+    };
+    // Apex A — the u-min point (top rail start).
+    push(5.0, 1.0);
+    // Near runout: 10 bunched points slanting from (5.5, 0.92) down to
+    // (10.5, 0.12), all below the top rail's second point (u=13).
+    for k in 1..=10 {
+        let u = 5.0 + 0.5 * k as f64;
+        let v = 1.0 - 0.08 * k as f64 + if k % 2 == 0 { 0.001 } else { -0.001 };
+        push(u, v);
+    }
+    // Bottom rail: u 11 → 83 at v = 0.12.
+    for k in 0..10 {
+        push(11.0 + 8.0 * k as f64, 0.12);
+    }
+    // Far runout: 4 points climbing back up toward the apex B.
+    for k in 1..=4 {
+        let u = 86.5 + 1.0 * k as f64;
+        let v = 0.12 + 0.17 * k as f64 + if k % 2 == 0 { 0.001 } else { -0.001 };
+        push(u, v);
+    }
+    // Apex B — the u-max point (top rail end).
+    push(93.0, 1.0);
+    // Top rail: u 85 → 13 at v = 1.
+    for k in 1..=10 {
+        push(93.0 - 8.0 * k as f64, 1.0);
+    }
+    (pts, uvs)
+}
+
+/// Count shared edges whose two (or more) triangle usages run in the
+/// SAME direction — the winding-defect pattern of s120 (two triangles
+/// attached to one edge on the same side). Zero for a consistently
+/// wound emission.
+fn same_direction_shared_edges(
+    mesh: &draper_mesh::mesh::TriangleMesh,
+) -> usize {
+    use std::collections::HashMap;
+    let mut dir_use: HashMap<(u32, u32), Vec<(u32, u32)>> = HashMap::new();
+    for tri in &mesh.triangles {
+        for k in 0..3 {
+            let a = tri[k];
+            let b = tri[(k + 1) % 3];
+            dir_use
+                .entry((a.min(b), a.max(b)))
+                .or_default()
+                .push((a, b));
+        }
+    }
+    let mut same = 0;
+    for uses in dir_use.values() {
+        if uses.len() < 2 {
+            continue;
+        }
+        for x in 0..uses.len() {
+            for y in (x + 1)..uses.len() {
+                if uses[x].0 == uses[y].0 {
+                    same += 1;
+                }
+            }
+        }
+    }
+    same
 }
 
 /// Same band, but the bottom rail has a NOTCH that doubles back in u
@@ -259,6 +343,32 @@ fn test_ribbon_monotone_zipper_phases() {
     assert!(
         try_ribbon_monotone_zipper(&nurbs, &cpts, &cuvs, true).is_none(),
         "collinear-side band must be rejected (conservative)"
+    );
+
+    // ── Phase E (s120): pointed-end band — no same-direction spokes ──
+    // The f11/f13 #31359 shape: single-point extreme runs + a bunched
+    // near runout racing ahead of the upper chain → apex-anchored
+    // colinear slivers with noise-sign UV areas. The s120 loop-rule
+    // orientation must keep the emission consistently wound (before
+    // the fix this phase fails with same-direction shared spokes).
+    let (ppts, puvs) = pointed_band_boundary();
+    let pmesh = try_ribbon_monotone_zipper(&nurbs, &ppts, &puvs, true)
+        .expect("zipper must accept the pointed-end band");
+    assert!(
+        pmesh.triangle_count() >= 30,
+        "pointed band must emit a full sweep (got {} tris)",
+        pmesh.triangle_count()
+    );
+    let pmissing = boundary_edges_present(&pmesh, &ppts);
+    assert_eq!(
+        pmissing, 0,
+        "{} boundary edges missing after pointed-band zipper",
+        pmissing
+    );
+    let same = same_direction_shared_edges(&pmesh);
+    assert_eq!(
+        same, 0,
+        "pointed-band emission must have no same-direction shared edges (winding defect)"
     );
 
     // ── Phase C: kill-switch DRAPPER_RIBBON_ZIPPER=0 → no-op ─────────

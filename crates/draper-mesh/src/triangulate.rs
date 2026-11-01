@@ -6902,6 +6902,9 @@ pub fn try_ribbon_monotone_zipper(
     if std::env::var("DRAPPER_RIBBON_ZIPPER").as_deref() == Ok("0") {
         return None;
     }
+    // s120 forensic dump switch (read-only; see the dump block near the
+    // end of this function). Off in default/production runs.
+    let dump_zipper = std::env::var("DRAPPER_DUMP_ZIPPER").is_ok();
     // The s117 chain-projection criterion: env-gated (OPT-IN), thin
     // ruled ribbon, ruling width above the merge tolerance. In default
     // builds this returns false immediately → bit-identical behavior.
@@ -7273,15 +7276,55 @@ pub fn try_ribbon_monotone_zipper(
             return None;
         }
         let (mut x, mut y, mut z) = (ta, tb, tc);
-        if (area2 > 0.0) != (sigma > 0.0) {
-            std::mem::swap(&mut y, &mut z);
-        }
-        // 3D diameter vs the local derivative scale of the UV cell
-        // (cross-bundle chord detector).
+        // UV bbox (order-independent; used for the s120 colinearity
+        // ratio below and the derivative-scale cell further down).
         let lu = (l_of(&uva)).min(l_of(&uvb)).min(l_of(&uvc));
         let hu = (l_of(&uva)).max(l_of(&uvb)).max(l_of(&uvc));
         let ls = (s_of(&uva)).min(s_of(&uvb)).min(s_of(&uvc));
         let hs = (s_of(&uva)).max(s_of(&uvb)).max(s_of(&uvc));
+        // s120: near-colinear slivers carry NOISE-SIGN UV areas. They
+        // arise when one chain races ahead while the opposite head sits
+        // on a SHARED pointed-end vertex (a single-point extreme run:
+        // the helical band's runout tops, f11/f13 #31359, f25 #31360):
+        // the single-step sweep forms degenerate into apex-anchored
+        // strips along the leaving chain, colinear in (L,S). Their own
+        // area sign is rail/runout wiggle noise, so the individual
+        // sigma-flip orients them inconsistently — same-direction
+        // shared spokes that surface as REAL WINDING-FLIP census pairs
+        // (h≈0.02). For such slivers orient by the LOOP rule instead:
+        // loop-adjacent (boundary) edges must run forward in rot order
+        // — the boundary direction is the reliable local orientation
+        // signal (it is exactly what sigma aggregates over the loop,
+        // and it is consistent with the sigma-normalized wedge
+        // neighbour across the shared spoke).
+        let colin = area2.abs() <= 1e-2 * ((hu - lu) * (hs - ls)).max(1e-15);
+        let mut oriented_by_loop = false;
+        if colin {
+            let fwd = |a: usize, b: usize| (b + n - a) % n == 1;
+            let (mut f, mut bw) = (0usize, 0usize);
+            for (a, b) in [(ta, tb), (tb, tc), (tc, ta)] {
+                if fwd(a, b) {
+                    f += 1;
+                } else if fwd(b, a) {
+                    bw += 1;
+                }
+            }
+            if f + bw > 0 {
+                oriented_by_loop = true;
+                if bw > f {
+                    // All boundary edges currently run backward —
+                    // reverse the cycle. (f == bw is impossible for a
+                    // non-degenerate triangle: two loop-adjacent edges
+                    // of one cycle always agree in direction.)
+                    std::mem::swap(&mut y, &mut z);
+                }
+            }
+        }
+        if !oriented_by_loop && (area2 > 0.0) != (sigma > 0.0) {
+            std::mem::swap(&mut y, &mut z);
+        }
+        // 3D diameter vs the local derivative scale of the UV cell
+        // (cross-bundle chord detector).
         let (cu, cv) = if v_ruled {
             ((lu + hu) * 0.5, (ls + hs) * 0.5)
         } else {
@@ -7372,6 +7415,21 @@ pub fn try_ribbon_monotone_zipper(
     };
     let dot = nrm.0 * sn_oriented[0] + nrm.1 * sn_oriented[1] + nrm.2 * sn_oriented[2];
     let flip = dot < 0.0;
+    // s120: confidence of the global flip decision (|dot| vs the
+    // normal magnitudes). A dot near 0 means the first checked
+    // triangle is nearly perpendicular to the surface — the flip is
+    // then a coin flip and the whole face's winding hangs on it.
+    let nrm_len = (nrm.0 * nrm.0 + nrm.1 * nrm.1 + nrm.2 * nrm.2).sqrt();
+    let sn_len = (sn.x * sn.x + sn.y * sn.y + sn.z * sn.z).sqrt();
+    let flip_cos = if nrm_len > 1e-15 && sn_len > 1e-15 {
+        dot / (nrm_len * sn_len)
+    } else {
+        0.0
+    };
+    log::debug!(
+        "RIBBON_ZIPPER: global flip decision dot={:.6} cos={:.4} (flip={}) from tri rot=({},{},{})",
+        dot, flip_cos, flip, t0a, t0b, t0c
+    );
 
     for &(ta, tb, tc) in checked.iter() {
         let va = vertex_map[&rot[ta]];
@@ -7432,6 +7490,138 @@ pub fn try_ribbon_monotone_zipper(
         min_run.len(),
         max_run.len()
     );
+
+    // ── s120 forensic dump (DRAPPER_DUMP_ZIPPER, read-only) ───────────
+    //
+    // Answers the s119-addendum question for the residual f11/f13
+    // winding pairs: is the same-direction shared edge ([a,x,b]/[a,y,b])
+    // already present in the EMISSION, or does it only form when the
+    // merge weld folds two distinct boundary vertices together? Prints:
+    //   * face identity (ranges/degrees/cps) and the emission structure
+    //     (rot loop with UV + 3D, chain cores, extreme runs, side flags);
+    //   * every emitted triangle (local mesh vertex ids + rot positions);
+    //   * SELFSCAN: same-direction shared edges in the emitted mesh —
+    //     a non-empty list convicts the sweep/fan emission itself;
+    //   * NEARPAIR: non-adjacent boundary points closer than 5e-2 —
+    //     weld candidates at merge-tolerance scale (a non-empty list
+    //     with an empty SELFSCAN points at the merge).
+    if dump_zipper {
+        let cps_v = nurbs.control_points.first().map_or(0, |r| r.len());
+        println!(
+            "ZIPPERDUMP BEGIN n={} tris={} u=[{:.4},{:.4}] v=[{:.4},{:.4}] deg={}/{} cps={}x{} ruled={} flip={} sigma={:.4}",
+            n,
+            mesh.triangle_count(),
+            u0, u1, v0, v1,
+            nurbs.u_degree, nurbs.v_degree,
+            nurbs.control_points.len(),
+            cps_v,
+            if v_ruled { 'v' } else { 'u' },
+            flip, sigma
+        );
+        for k in 0..n {
+            let ri = rot[k];
+            let p = &boundary_points[ri];
+            let uv = &boundary_uvs[ri];
+            println!(
+                "ZIPPERDUMP ROT k={} orig={} vtx={} l={:.6} s={:.6} p=({:.6},{:.6},{:.6})",
+                k, ri, vertex_map[&ri], l_of(uv), s_of(uv), p.x, p.y, p.z
+            );
+        }
+        let idx_list = |v: &[usize]| -> String {
+            v.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        println!(
+            "ZIPPERDUMP STRUCT upper_core=[{}] lower_core=[{}] min_run=[{}] max_run=[{}] up_lead={} up_trail={} lo_lead={} lo_trail={}",
+            idx_list(upper_core),
+            idx_list(lower_core),
+            idx_list(&min_run),
+            idx_list(&max_run),
+            up_lead, up_trail, lo_lead, lo_trail
+        );
+        for (ti, &(ta, tb, tc)) in checked.iter().enumerate() {
+            println!(
+                "ZIPPERDUMP TRI t={} rot=({},{},{}) vtx=({},{},{})",
+                ti,
+                ta, tb, tc,
+                vertex_map[&rot[ta]], vertex_map[&rot[tb]], vertex_map[&rot[tc]]
+            );
+        }
+        // Self-scan 1: same-direction shared edges in the emitted mesh.
+        let mut dir_use: std::collections::HashMap<(u32, u32), Vec<(u32, u32, usize)>> =
+            std::collections::HashMap::new();
+        for (ti, tri) in mesh.triangles.iter().enumerate() {
+            for w in 0..3 {
+                let a = tri[w];
+                let b = tri[(w + 1) % 3];
+                dir_use
+                    .entry((a.min(b), a.max(b)))
+                    .or_default()
+                    .push((a, b, ti));
+            }
+        }
+        let mut keys: Vec<_> = dir_use.keys().copied().collect();
+        keys.sort_unstable();
+        let mut same_dir = 0usize;
+        for key in &keys {
+            let uses = &dir_use[key];
+            if uses.len() < 2 {
+                continue;
+            }
+            for x in 0..uses.len() {
+                for y in (x + 1)..uses.len() {
+                    let (a1, _b1, t1) = uses[x];
+                    let (a2, _b2, t2) = uses[y];
+                    if a1 == a2 {
+                        // Both triangles traverse the undirected edge in
+                        // the SAME direction — the winding-defect pattern.
+                        same_dir += 1;
+                        let q1 = &mesh.triangles[t1];
+                        let q2 = &mesh.triangles[t2];
+                        let pc = |vi: u32| {
+                            let p = &mesh.vertices[vi as usize];
+                            format!("({:.5},{:.5},{:.5})", p.x, p.y, p.z)
+                        };
+                        println!(
+                            "ZIPPERDUMP SAME-DIR edge=({},{}) tris=({},{},{})+({},{},{})",
+                            key.0, key.1, q1[0], q1[1], q1[2], q2[0], q2[1], q2[2]
+                        );
+                        println!(
+                            "ZIPPERDUMP SAME-DIR coordsT1={} {} {} | T2={} {} {}",
+                            pc(q1[0]), pc(q1[1]), pc(q1[2]),
+                            pc(q2[0]), pc(q2[1]), pc(q2[2])
+                        );
+                    }
+                }
+            }
+        }
+        // Self-scan 2: non-adjacent near-duplicate boundary points
+        // (weld candidates).
+        let mut near = 0usize;
+        for k1 in 0..n {
+            for k2 in (k1 + 2)..n {
+                if k1 == 0 && k2 == n - 1 {
+                    continue; // closing adjacency of the loop
+                }
+                let d = boundary_points[rot[k1]].distance_to(&boundary_points[rot[k2]]);
+                if d < 5e-2 {
+                    near += 1;
+                    println!(
+                        "ZIPPERDUMP NEARPAIR d={:.6} k=({},{}) orig=({},{}) l=({:.4},{:.4}) s=({:.4},{:.4})",
+                        d, k1, k2, rot[k1], rot[k2],
+                        l_of(&boundary_uvs[rot[k1]]), l_of(&boundary_uvs[rot[k2]]),
+                        s_of(&boundary_uvs[rot[k1]]), s_of(&boundary_uvs[rot[k2]])
+                    );
+                }
+            }
+        }
+        println!(
+            "ZIPPERDUMP END same_dir_edges={} near_pairs={}",
+            same_dir, near
+        );
+    }
 
     Some(mesh)
 }
