@@ -13922,7 +13922,34 @@ impl<'a> StepConverter<'a> {
         // without it, project_point() can return different UVs for the same
         // 3D point (e.g., u=0 vs u=2π on periodic surfaces), causing the UV
         // polygon to jump and self-intersect.
-        let mut prev_edge_last_uv: Option<Point2d> = None;
+        let mut prev_cursor: Option<(Point3d, Point2d)> = None;
+        // s122: the chain seed is now a full CURSOR (traversal-end 3D point
+        // + its UV). On ribbon-chain faces (see `ribbon_chain_face` below)
+        // some loop edges have their raw point arrays REVERSED relative to
+        // the traversal (measured on Vulcan #10220: EVERY drifted edge); the
+        // cursor's 3D point lets the chain start at the CONTIGUOUS end
+        // (draper_mesh::ribbon_chain_reversal) instead of seeding a Newton
+        // step across the whole coil bundle. Non-ribbon faces keep the
+        // exact legacy behaviour (cursor == raw last point/UV).
+        //
+        // s122: ribbon-chain mode for this surface (the s117 opt-in
+        // criterion, env DRAPPER_RIBBON_CHAIN=1). Only these faces get
+        //   (a) contiguous-direction chaining (kill-switch
+        //       DRAPPER_RIBBON_CHAIN_DIR=0) and
+        //   (b) the per-face reprojection drift gate with an
+        //       independent-projection fallback (the s119-п.1 plan;
+        //       kill-switch DRAPPER_RIBBON_DRIFT_GUARD=0).
+        // Everything else is bit-identical to the pre-s122 code.
+        let ribbon_chain_face = matches!(&face_data.surface, Surface::Nurbs(ref n)
+            if draper_mesh::nurbs_ribbon_chain_projection(n));
+        let chain_dir_fix = ribbon_chain_face
+            && std::env::var("DRAPPER_RIBBON_CHAIN_DIR").as_deref() != Ok("0");
+        // s122: per-edge buffers — the drift gate below may recompute the
+        // whole loop with the independent projection before assembly.
+        let mut outer_edge_params: Vec<Vec<f64>> = Vec::new();
+        let mut outer_edge_pts: Vec<Vec<Point3d>> = Vec::new();
+        let mut outer_edge_uvs: Vec<Vec<Point2d>> = Vec::new();
+        let mut outer_edge_c2d_idx: Vec<usize> = Vec::new();
         let mut edges_without_step_id = 0usize;
         let mut edge_debug_info: Vec<String> = Vec::new();
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
@@ -13932,11 +13959,68 @@ impl<'a> StepConverter<'a> {
 
             if step_id != 0 {
                 let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                // Compute UV for each boundary point using actual parameter values
-                let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, prev_edge_last_uv);
-                // Track last UV for next edge's initial guess
-                if let Some(last_uv) = uvs.last() {
-                    prev_edge_last_uv = Some(*last_uv);
+                // s122: chain in the 3D-CONTIGUOUS direction. When the raw
+                // array is reversed relative to the loop traversal (its
+                // LAST point continues the previous edge — the measured
+                // root cause of every #10220 drift edge), project the
+                // REVERSED array so the chain seed lands on the contiguous
+                // end, then restore raw order.
+                let rev_buf: Option<Vec<Point3d>> = if chain_dir_fix {
+                    prev_cursor
+                        .as_ref()
+                        .and_then(|(pp, _)| {
+                            if draper_mesh::ribbon_chain_reversal(pp, &pts) {
+                                Some(pts.iter().rev().cloned().collect())
+                            } else {
+                                None
+                            }
+                        })
+                } else {
+                    None
+                };
+                // s122 debug (read-only): the reversal decision per edge.
+                if std::env::var("DRAPPER_DUMP_EDGE_PTS").is_ok() && ribbon_chain_face {
+                    let (df, db) = match prev_cursor.as_ref() {
+                        Some((pp, _)) if pts.len() >= 2 => (
+                            pts.first().unwrap().distance_to(pp),
+                            pts.last().unwrap().distance_to(pp),
+                        ),
+                        _ => (f64::NAN, f64::NAN),
+                    };
+                    println!(
+                        "EDGEREV fs={} ei={} sid={} rev={} d_fwd={:.4} d_bwd={:.4}",
+                        face_data.step_face_id, edge_idx, step_id, rev_buf.is_some(), df, db
+                    );
+                }
+                // s122: keep params aligned with the (possibly reversed)
+                // point order — the PCURVE path indexes params 1:1 with
+                // points.
+                let params_proj: Vec<f64> = if rev_buf.is_some() {
+                    params.iter().rev().copied().collect()
+                } else {
+                    params.clone()
+                };
+                let pts_proj: &[Point3d] = rev_buf.as_deref().unwrap_or(&pts);
+                let mut uvs = self.compute_edge_uvs_with_points(
+                    &params_proj,
+                    pts_proj,
+                    &face_data.surface,
+                    curve_2d,
+                    prev_cursor.map(|(_, uv)| uv),
+                    false,
+                );
+                let reversed_edge = rev_buf.is_some();
+                if reversed_edge {
+                    uvs.reverse();
+                }
+                // Track the traversal-end point + UV for the next edge's
+                // chain seed (for a reversed array the traversal END is
+                // the raw FIRST point — the chain walked last → first).
+                if let (Some(p_end), Some(uv_end)) = (
+                    if reversed_edge { pts.first() } else { pts.last() },
+                    if reversed_edge { uvs.first() } else { uvs.last() },
+                ) {
+                    prev_cursor = Some((*p_end, *uv_end));
                 }
                 // session-80 diagnostics (DRAPPER_DUMP_EDGE_COLLECTION):
                 // per-edge dump for ALL surface types (not just Nurbs) —
@@ -13980,9 +14064,35 @@ impl<'a> StepConverter<'a> {
                         p_n.map(|p| p.x).unwrap_or(0.0), p_n.map(|p| p.y).unwrap_or(0.0), p_n.map(|p| p.z).unwrap_or(0.0)
                     );
                 }
+                // s122 forensic dump (read-only): per-point 3D + UV +
+                // reprojection error for NURBS faces. Answers the
+                // drift-mechanism question for the #10220 ribbon faces
+                // (which edges carry the big errors, which v-levels the
+                // rails sit at, whether the chain seed was contiguous).
+                if std::env::var("DRAPPER_DUMP_EDGE_PTS").is_ok() {
+                    if let Surface::Nurbs(ref nurbs) = face_data.surface {
+                        for (i, (p, uv)) in pts.iter().zip(uvs.iter()).enumerate() {
+                            let sp = nurbs.point_at(uv.u, uv.v);
+                            let err = ((p.x - sp.x).mul_add(
+                                p.x - sp.x,
+                                (p.y - sp.y).mul_add(p.y - sp.y, (p.z - sp.z) * (p.z - sp.z)),
+                            ))
+                            .sqrt();
+                            println!(
+                                "EDGEPTS fs={} ei={} sid={} i={} p=({:.6},{:.6},{:.6}) uv=({:.6},{:.6}) err={:.4e}",
+                                face_data.step_face_id, edge_idx, step_id, i,
+                                p.x, p.y, p.z, uv.u, uv.v, err
+                            );
+                        }
+                    }
+                }
                 edge_debug_info.push(format!("step_id={}→{}pts", step_id, pts.len()));
-                boundary_points.extend(pts);
-                boundary_uvs.extend(uvs);
+                // s122: buffer per-edge; assembly happens after the drift
+                // gate (loop order preserved — identical polygon).
+                outer_edge_params.push(params);
+                outer_edge_pts.push(pts);
+                outer_edge_uvs.push(uvs);
+                outer_edge_c2d_idx.push(edge_idx);
             } else {
                 log::warn!("BREP face: edge has step_id=0 (no cache), surface={:?}, edge_id={}",
                     std::mem::discriminant(&face_data.surface), edge.id);
@@ -13992,6 +14102,69 @@ impl<'a> StepConverter<'a> {
                 boundary_uvs.extend(pts_uv);
                 edges_without_step_id += 1;
             }
+        }
+
+        // ── s122: per-face chain-projection drift gate ────────────────────
+        //
+        // The s119-п.1 plan (reaffirmed by the s121/s122 reconnaissance):
+        // the ribbon-chain criterion is drift-BLIND — it cannot know whether
+        // the chain pass actually tracked the correct coil branch on THIS
+        // face. Gate by the reprojection error over the whole outer loop
+        // (p90 vs median — the zipper's drift statistic); when it fires,
+        // recompute every edge with the INDEPENDENT per-point projection
+        // (the exact chain-off/default behaviour), so the face falls
+        // through to the legacy emission path instead of feeding drifted
+        // UVs to the zipper/CDT. Never-worse by construction: the drifted
+        // chain mode measured +4 REAL on #10220 vs default (s121
+        // addendum). Kill-switch: DRAPPER_RIBBON_DRIFT_GUARD=0.
+        if ribbon_chain_face
+            && !outer_edge_pts.is_empty()
+            && std::env::var("DRAPPER_RIBBON_DRIFT_GUARD").as_deref() != Ok("0")
+        {
+            if let Surface::Nurbs(ref nurbs) = face_data.surface {
+                let mut errs: Vec<f64> = Vec::new();
+                for (e_pts, e_uvs) in outer_edge_pts.iter().zip(outer_edge_uvs.iter()) {
+                    for (p, uv) in e_pts.iter().zip(e_uvs.iter()) {
+                        let sp = nurbs.point_at(uv.u, uv.v);
+                        errs.push(p.distance_to(&sp));
+                    }
+                }
+                errs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                if draper_mesh::ribbon_drift_gate(&errs) {
+                    let med = errs[errs.len() / 2];
+                    let p90 = errs[((errs.len() as f64 * 0.9) as usize).min(errs.len() - 1)];
+                    log::warn!(
+                        "RIBBON_CHAIN drift gate: face {} p90={:.2e} > 3×median={:.2e} ({} pts) — recomputing {} edges with independent projection",
+                        face_data.step_face_id, p90, med, errs.len(), outer_edge_pts.len()
+                    );
+                    let mut fixed: Vec<Vec<Point2d>> = Vec::with_capacity(outer_edge_pts.len());
+                    for (e_idx, (e_pts, e_params)) in outer_edge_pts
+                        .iter()
+                        .zip(outer_edge_params.iter())
+                        .enumerate()
+                    {
+                        let curve_2d = face_data
+                            .edge_curves_2d
+                            .get(outer_edge_c2d_idx[e_idx])
+                            .and_then(|c| c.as_ref());
+                        let uvs = self.compute_edge_uvs_with_points(
+                            e_params,
+                            e_pts,
+                            &face_data.surface,
+                            curve_2d,
+                            None,
+                            true,
+                        );
+                        fixed.push(uvs);
+                    }
+                    outer_edge_uvs = fixed;
+                }
+            }
+        }
+        // s122: assemble the outer loop (loop order preserved).
+        for (e_pts, e_uvs) in outer_edge_pts.into_iter().zip(outer_edge_uvs.into_iter()) {
+            boundary_points.extend(e_pts);
+            boundary_uvs.extend(e_uvs);
         }
 
         // For curved surfaces, also sample inner edges (holes) using the cache
@@ -14010,7 +14183,7 @@ impl<'a> StepConverter<'a> {
 
                         if step_id != 0 {
                             let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
+                            let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None, false);
                             hole_pts.extend(pts);
                             hole_uvs.extend(uvs);
                         } else {
@@ -14039,7 +14212,7 @@ impl<'a> StepConverter<'a> {
 
                 if step_id != 0 {
                     let (pts, params) = edge_cache.discretize_step_edge(step_id, edge, n_samples);
-                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None);
+                    let uvs = self.compute_edge_uvs_with_points(&params, &pts, &face_data.surface, curve_2d, None, false);
                     boundary_points.extend(pts);
                     boundary_uvs.extend(uvs);
                 } else {
@@ -15420,6 +15593,10 @@ impl<'a> StepConverter<'a> {
         surface: &Surface,
         curve_2d: Option<&Curve2d>,
         initial_uv: Option<Point2d>,
+        // s122: force the INDEPENDENT per-point projection (the drift-gate
+        // fallback — reproduces the exact chain-off/default behaviour for a
+        // face whose chain pass drifted).
+        force_independent: bool,
     ) -> Vec<Point2d> {
         // ── PCURVE path with validation ──────────────────────────────────
         //
@@ -15507,8 +15684,11 @@ impl<'a> StepConverter<'a> {
                 let v_range = v_max - v_min;
                 // s117: coiled thin ruled ribbons need CHAIN projection —
                 // see nurbs_ribbon_chain_projection (edge_cache.rs).
-                let use_chain_newton = (u_range < 10.0 && v_range < 10.0)
-                    || draper_mesh::nurbs_ribbon_chain_projection(nurbs);
+                // s122: `force_independent` disables the chain entirely (the
+                // per-face drift-gate fallback path).
+                let use_chain_newton = !force_independent
+                    && ((u_range < 10.0 && v_range < 10.0)
+                        || draper_mesh::nurbs_ribbon_chain_projection(nurbs));
 
                 let mut uvs = Vec::with_capacity(points_3d.len());
                 // Use the previous edge's last UV as the initial guess for the

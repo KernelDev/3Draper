@@ -2307,6 +2307,70 @@ pub fn nurbs_ribbon_chain_projection(
     min_width > merge_tol
 }
 
+/// s122: should the chain projection walk this edge's raw point array in
+/// REVERSE order?
+///
+/// MEASURED ROOT CAUSE (s122, forensics EDGEPTS on Vulcan #10220): every
+/// drifted ribbon edge has its raw discretization REVERSED relative to the
+/// face-loop traversal (raw[0] sits at the traversal END). The legacy
+/// chaining seeded the first raw point from the previous edge's last UV —
+/// for a reversed edge that seed is a full coil-bundle diameter (~0.73)
+/// away from its target, and the 2D Newton lands on a NEIGHBOURING COIL
+/// BRANCH: f25 edges 9/21 slide to v=0.0746 (rail 0.1726), f27 edges
+/// 8/11/17/20/23/26 to v=0.9253 (rail 0.8276), the f25 notch walls 28/29
+/// scatter across u by whole turns (err 5-6e-2) — while every
+/// 3D-contiguous edge measures err ~1e-7 (the curves lie exactly ON the
+/// surface). Chaining from the CONTIGUOUS end keeps every Newton step
+/// local, which is the only regime where the projection is single-valued
+/// on a self-adjacent coiled bundle.
+///
+/// The test is purely 3D-metric: `prev_point` is the traversal-end point
+/// of the previous edge (whose UV is the chain seed). Returns true when
+/// the raw LAST point is strictly closer to it than the raw FIRST —
+/// i.e. the array must be walked back-to-front so the chain starts at
+/// the contiguous end. GAP arrays (neither end close — e.g. after a
+/// loop-wrap) return false and keep the legacy forward chaining.
+///
+/// Only called for `nurbs_ribbon_chain_projection` faces (the opt-in
+/// DRAPPER_RIBBON_CHAIN=1 mode), so default-mode censuses stay
+/// bit-identical. Kill-switch: DRAPPER_RIBBON_CHAIN_DIR=0.
+pub fn ribbon_chain_reversal(prev_point: &Point3d, pts: &[Point3d]) -> bool {
+    if pts.len() < 2 {
+        return false;
+    }
+    let (first, last) = (pts.first().unwrap(), pts.last().unwrap());
+    let d_fwd = first.distance_to(prev_point);
+    let d_bwd = last.distance_to(prev_point);
+    d_bwd < d_fwd
+}
+
+/// s122: per-face chain-projection FAILURE THRESHOLD (the s119-п.1 plan,
+/// reaffirmed by s121/s122 reconnaissance: "the criterion is drift-blind
+/// today — gate by reprojection error per face, fall back to the legacy
+/// path for that face").
+///
+/// Given the sorted per-point reprojection errors |P − S(uv)| of ONE
+/// face's whole outer boundary loop, decide whether the chain pass
+/// drifted: p90 must be within 3× of the median (the same statistic the
+/// s119 zipper uses as its drift detector — measured: clean ribbon loops
+/// sit at ~1e-7 median with p90 within 2×, while a single drifted edge
+/// lifts 21% of f27's points to 6× and the f25 notch walls to 5000×).
+///
+/// When this fires, the converter recomputes the face's UVs with the
+/// independent per-point projection (the exact chain-off/default
+/// behaviour), so the face falls through to the legacy emission path
+/// instead of feeding drifted UVs downstream — never-worse by
+/// construction. Kill-switch: DRAPPER_RIBBON_DRIFT_GUARD=0.
+pub fn ribbon_drift_gate(sorted_errs: &[f64]) -> bool {
+    let n = sorted_errs.len();
+    if n == 0 {
+        return false;
+    }
+    let med = sorted_errs[n / 2];
+    let p90 = sorted_errs[((n as f64 * 0.9) as usize).min(n - 1)];
+    p90 > 3.0 * med.max(1e-6)
+}
+
 /// Compute adaptive grid size for brute-force NURBS point projection.
 ///
 /// Larger UV ranges need finer grids to ensure the closest UV is found.
