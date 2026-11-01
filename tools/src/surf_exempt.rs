@@ -593,6 +593,241 @@ pub fn knife_fin(
     )
 }
 
+// ─────────────────────────────────────────────────────────────────
+// session-121: COIL-TURN-WELD exemption (the census layer of the s120
+// verdict on the residual zipped-face REAL pairs).
+//
+// A same-face >170° pair on a coiled ribbon (helical band, Nurbs with
+// a degree-1 direction) whose fold is rooted in coil geometry that
+// the merge tolerance cannot represent:
+//   - adjacent turns of the tangle sit closer than the tolerance and
+//     the merge welds them into one seam (s120 measured: f11 x f13
+//     gap 0.0079 < merge_tol 0.0156, point k=253 of f13 welded onto
+//     f11's rail vertex), so fix_inconsistent_winding's greedy flood
+//     pits two individually-correct emissions against each other and
+//     manufactures thin same-face pairs (BFS collateral); or
+//   - the band / turn gap of the ribbon is itself narrower than the
+//     tolerance (s18: f28 ruling width 8.9e-3 < 2e-2 "merge-doomed by
+//     geometry"), so the turns physically self-overlap (intrinsic
+//     FOLD-OVER, identical in default and zipper modes).
+// A faithful mesh necessarily folds there. Not debt.
+//
+// Guards (all must hold):
+//   1. thin: max(h0,h1) < 2×eff_tol — a near-miss REAL by the eff_tol
+//      ruler (at least one apex >= eff_tol; both under it is sub-tol
+//      weld noise, which callers check BEFORE this class);
+//   2. ruled ribbon: the owning face's surface is a Nurbs with a
+//      degree-1 direction (deg 3/1: iso-curves of the other parameter
+//      are straight rulings). Analytic faces (the Cylinder/Torus/
+//      Plane chronics) and Nurbs deg 2/3 (#27977 f30 SLIVER 1.2x,
+//      #31356 f3) stay flagged;
+//   3. weld witness (either):
+//      (a) STAR — a cross-face interior edge at one of the pair's
+//          four triad vertices: the welded rail is in the merged mesh
+//          at the pair (f11: e(594,595) f=(11,13); f26: e(1358,1404)
+//          f=(24,26)); or
+//      (b) RIM-GAP — the owning face's boundary polyline returns
+//          within eff_tol of itself at a FAR position of the loop
+//          (index distance >= n/4; wrap-around neighbours and the
+//          closing duplicate excluded): the other rail of the same
+//          turn or an adjacent turn sits closer than the tolerance
+//          (f25 far=0.0135 < 0.0179; f28 far=0.0111 < 0.0200).
+//          Ribbon faces whose rim stays apart (Vulcan #10220 f25
+//          far=0.039, f27 far=0.051 vs tol 0.02) stay flagged — their
+//          folds are emission debt (the s118 projection zigzag),
+//          fixable, not exemptible.
+//
+// Callers gate on: same-face (fid0 == fid1), >170°, non-subtol,
+// non-knife, and the DRAPPER_COIL_TURN_EXEMPT=0 kill-switch.
+
+/// Weld-witness facts for `coil_turn_weld`, computed by the caller
+/// from the merged mesh (star) and the face's boundary polylines
+/// (rim gap). Both are diagnostics-grade inputs; the guard only
+/// needs `star` OR `rim_far < eff_tol`.
+pub struct CoilWitness {
+    /// (a) a cross-face interior edge touches one of the pair's four
+    /// triad vertices (the welded seam in the merged mesh)
+    pub star: bool,
+    /// which edge (v0, v1)
+    pub star_edge: (u32, u32),
+    /// which two faces share it (fid_a, fid_b), fid_a != fid_b
+    pub star_faces: (u64, u64),
+    /// (b) the owning face's rim polyline far-loop min distance
+    /// (world space; None if the face has no usable polyline)
+    pub rim_far: Option<f64>,
+}
+
+/// Evaluate the coil-turn-weld exemption. `h0`/`h1` are the apex
+/// heights of the two triangles over the shared edge (line distances,
+/// same metric as the sub-tol classification). `eff_tol` is the BREP
+/// effective tolerance (merge + every weld pass). `surface` is the
+/// OWNING face's surface (same-face pair: one surface), already in
+/// world space.
+pub fn coil_turn_weld(
+    h0: f64,
+    h1: f64,
+    eff_tol: f64,
+    surface: Option<&Surface>,
+    w: Option<&CoilWitness>,
+) -> (bool, String) {
+    // guard 1: thin near-miss by the ruler
+    if h0.max(h1) >= 2.0 * eff_tol {
+        return (
+            false,
+            format!("not-thin h={:.4}/{:.4} vs 2tol={:.4}", h0, h1, 2.0 * eff_tol),
+        );
+    }
+    // guard 2: ruled ribbon (Nurbs with a degree-1 direction)
+    let ruled = match surface {
+        Some(Surface::Nurbs(n)) => n.u_degree == 1 || n.v_degree == 1,
+        _ => false,
+    };
+    if !ruled {
+        return (false, "not-ruled".to_string());
+    }
+    // guard 3: weld witness — star OR rim-gap
+    let Some(w) = w else {
+        return (false, "no-witness".to_string());
+    };
+    if w.star {
+        return (
+            true,
+            format!(
+                " star e({},{}) f=({},{})",
+                w.star_edge.0, w.star_edge.1, w.star_faces.0, w.star_faces.1
+            ),
+        );
+    }
+    match w.rim_far {
+        Some(gap) if gap < eff_tol => {
+            (true, format!(" rim-gap {:.5} < tol {:.4}", gap, eff_tol))
+        }
+        Some(gap) => (
+            false,
+            format!("rim-gap {:.5} >= tol {:.4}", gap, eff_tol),
+        ),
+        None => (false, "no-witness".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod coil_turn_weld_tests {
+    use super::*;
+    use draper_geometry::NurbsSurface;
+
+    fn ruled_nurbs() -> Surface {
+        // A deg 3/1 ribbon: u cubic (4 cps), v linear (2 cps) —
+        // the helical-band class (ruled in v).
+        let cps = vec![
+            vec![Point3d::new(0.0, 0.0, 0.0), Point3d::new(0.02, 0.0, 0.0)],
+            vec![Point3d::new(1.0, 0.5, 0.0), Point3d::new(1.02, 0.5, 0.0)],
+            vec![Point3d::new(2.0, 0.0, 0.0), Point3d::new(2.02, 0.0, 0.0)],
+            vec![Point3d::new(3.0, 0.5, 0.0), Point3d::new(3.02, 0.5, 0.0)],
+        ];
+        Surface::Nurbs(NurbsSurface {
+            u_degree: 3,
+            v_degree: 1,
+            control_points: cps,
+            weights: vec![vec![1.0, 1.0]; 4],
+            u_knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+            v_knots: vec![0.0, 0.0, 1.0, 1.0],
+            u_closed: false,
+            v_closed: false,
+        })
+    }
+
+    fn witness(star: bool, rim: Option<f64>) -> CoilWitness {
+        CoilWitness {
+            star,
+            star_edge: (594, 595),
+            star_faces: (11, 13),
+            rim_far: rim,
+        }
+    }
+
+    /// The f11 pair: thin (0.021 < 2x0.0156), ruled, star witness.
+    #[test]
+    fn accepts_star_witness() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(
+            0.0207,
+            0.0209,
+            0.0156,
+            Some(&s),
+            Some(&witness(true, Some(0.021))),
+        );
+        assert!(ok, "should accept: {}", why);
+        assert!(why.contains("star"), "reason: {}", why);
+    }
+
+    /// The f25 pair: thin, ruled, no star but the rim returns at
+    /// 0.0135 < tol 0.0179 (the #31360 remainder).
+    #[test]
+    fn accepts_rim_gap_witness() {
+        let s = ruled_nurbs();
+        let (ok, why) =
+            coil_turn_weld(0.0265, 0.0000, 0.0179, Some(&s), Some(&witness(false, Some(0.0135))));
+        assert!(ok, "should accept: {}", why);
+        assert!(why.contains("rim-gap"), "reason: {}", why);
+    }
+
+    /// Vulcan #10220 f25/f27: thin, ruled, but the rim stays apart
+    /// (0.039/0.051 vs tol 0.02) — emission debt stays flagged.
+    #[test]
+    fn rejects_rim_apart() {
+        let s = ruled_nurbs();
+        let (ok, why) =
+            coil_turn_weld(0.0230, 0.0010, 0.0200, Some(&s), Some(&witness(false, Some(0.039))));
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("rim-gap"), "reason: {}", why);
+    }
+
+    /// A FAT pair (default-mode #31359 f13 h=0.06/0.27) — the fold is
+    /// well above the ruler, real debt.
+    #[test]
+    fn rejects_fat() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(0.0603, 0.0560, 0.0156, Some(&s), Some(&witness(true, None)));
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("not-thin"), "reason: {}", why);
+    }
+
+    /// Analytic faces (Cylinder/Torus chronics) and Nurbs deg 2/3
+    /// (#27977 f30, #31356 f3) stay flagged even when thin with a
+    /// witness.
+    #[test]
+    fn rejects_not_ruled() {
+        let cyl = Surface::Cylinder(draper_geometry::CylinderSurface {
+            origin: Point3d::new(0.0, 0.0, 0.0),
+            axis: draper_geometry::Direction3d::new(0.0, 0.0, 1.0).unwrap(),
+            radius: 1.0,
+            x_dir: draper_geometry::Direction3d::new(1.0, 0.0, 0.0).unwrap(),
+        });
+        let (ok, why) = coil_turn_weld(0.0279, 0.0118, 0.0161, Some(&cyl), Some(&witness(true, Some(0.0107))));
+        assert!(!ok, "must reject the Cylinder: {}", why);
+        assert!(why.contains("not-ruled"), "reason: {}", why);
+
+        // Nurbs deg 2/3 (f30-class): thin + rim witness, still flagged
+        let mut n = ruled_nurbs();
+        if let Surface::Nurbs(ref mut nn) = n {
+            nn.u_degree = 2;
+            nn.v_degree = 3;
+        }
+        let (ok, why) = coil_turn_weld(0.0239, 0.0027, 0.0167, Some(&n), Some(&witness(false, Some(0.0117))));
+        assert!(!ok, "must reject the deg-2/3 Nurbs: {}", why);
+        assert!(why.contains("not-ruled"), "reason: {}", why);
+    }
+
+    /// No witness at all → flagged.
+    #[test]
+    fn rejects_no_witness() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(0.0207, 0.0209, 0.0156, Some(&s), Some(&witness(false, None)));
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("no-witness"), "reason: {}", why);
+    }
+}
+
 #[cfg(test)]
 mod knife_fin_tests {
     use super::*;

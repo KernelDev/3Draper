@@ -281,6 +281,10 @@ fn main() {
         let mut brep_exempt = 0usize;
         let mut brep_subtol = 0usize;
         let mut brep_knife = 0usize;
+        let mut brep_coil = 0usize;
+        // session-121: per-(instance, face) cache of the rim polyline
+        // far-loop min distance — the RIM-GAP witness input.
+        let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -573,12 +577,201 @@ fn main() {
                 brep_knife += 1;
             }
             let knife_str = if knife { " KNIFE-FIN" } else { "" };
+            // session-121: COIL-TURN-WELD exemption — a same-face >170°
+            // pair on a coiled ribbon (Nurbs with a degree-1 direction)
+            // whose thin fold (max h < 2×eff_tol) is rooted in coil
+            // geometry the merge tolerance cannot represent: adjacent
+            // turns welded into one seam (f11 x f13 gap 0.0079 < 0.0156 →
+            // BFS collateral) or the band / turn gap narrower than the
+            // tolerance (f28 w=8.9e-3 — merge-doomed by geometry).
+            // Kill-switch: DRAPPER_COIL_TURN_EXEMPT=0. Not debt.
+            let (coil, coil_why, coil_star, coil_rim) =
+                if !tangent_exempt && !subtol && !knife && fid0 == fid1
+                    && std::env::var("DRAPPER_COIL_TURN_EXEMPT").as_deref() != Ok("0")
+                {
+                    // witness (a) STAR: a cross-face interior edge at one
+                    // of the pair's four triad vertices (the welded rail
+                    // in the merged mesh at the pair).
+                    let star = {
+                        use std::collections::HashSet;
+                        let mut triad: HashSet<u32> = HashSet::new();
+                        for &v in mesh.triangles[t0].iter().chain(mesh.triangles[t1].iter()) {
+                            triad.insert(v);
+                        }
+                        // Collect ALL cross-face star edges, then pick the
+                        // DETERMINISTIC minimum key — edge_to_tris is a
+                        // HashMap, and first-found would vary run to run
+                        // (s117 lesson-5: diagnostics must be reproducible).
+                        let mut founds: Vec<((u32, u32), (u64, u64))> = Vec::new();
+                        for (ek, et) in &edge_to_tris {
+                            if et.len() != 2 {
+                                continue;
+                            }
+                            if !triad.contains(&ek.0) && !triad.contains(&ek.1) {
+                                continue;
+                            }
+                            let (wa, _, _) = et[0];
+                            let (wb, _, _) = et[1];
+                            let fa = fids.and_then(|ids| ids.get(wa).copied()).unwrap_or(0);
+                            let fb = fids.and_then(|ids| ids.get(wb).copied()).unwrap_or(0);
+                            if fa != fb {
+                                founds.push((*ek, (fa, fb)));
+                            }
+                        }
+                        founds.sort_by_key(|(e, _)| *e);
+                        founds.first().copied()
+                    };
+                    // witness (b) RIM-GAP: the owner face's rim polyline
+                    // returns within eff_tol of itself at a FAR position
+                    // of the loop (index distance >= n/4, wrap neighbours
+                    // and the closing duplicate excluded). Cached per face.
+                    let rim_far = if let Some(c) = rim_far_cache.get(&fid0) {
+                        *c
+                    } else {
+                        let v = (|| -> Option<f64> {
+                            let f = face_by_id.get(&fid0)?;
+                            let tf = |p: &Point3d| -> Point3d {
+                                match xform {
+                                    Some(m) => Point3d::new(
+                                        m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
+                                        m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
+                                        m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
+                                    ),
+                                    None => *p,
+                                }
+                            };
+                            let mut self_min = f64::INFINITY;
+                            for poly in f.outer_boundary.iter().chain(f.inner_boundaries.iter()) {
+                                let w: Vec<Point3d> = poly.iter().map(tf).collect();
+                                let n = w.len();
+                                if n < 8 {
+                                    continue;
+                                }
+                                let far = (n / 4).max(3);
+                                for i in 0..n {
+                                    for j in (i + far)..n {
+                                        if i + n - j <= 2 {
+                                            continue; // loop-closure neighbour
+                                        }
+                                        let d = (w[i].x - w[j].x).powi(2)
+                                            + (w[i].y - w[j].y).powi(2)
+                                            + (w[i].z - w[j].z).powi(2);
+                                        if d < self_min {
+                                            self_min = d;
+                                        }
+                                    }
+                                }
+                            }
+                            if self_min.is_infinite() {
+                                None
+                            } else {
+                                Some(self_min.sqrt())
+                            }
+                        })();
+                        rim_far_cache.insert(fid0, v);
+                        v
+                    };
+                    let w = surf_exempt::CoilWitness {
+                        star: star.is_some(),
+                        star_edge: star.map(|(e, _)| e).unwrap_or((0, 0)),
+                        star_faces: star.map(|(_, f)| f).unwrap_or((0, 0)),
+                        rim_far,
+                    };
+                    let r = surf_exempt::coil_turn_weld(
+                        h0,
+                        h1,
+                        eff_tol.unwrap_or(0.0),
+                        surf0.as_ref(),
+                        Some(&w),
+                    );
+                    (r.0, r.1, star, rim_far)
+                } else {
+                    (false, String::new(), None, None)
+                };
+            if coil {
+                brep_coil += 1;
+            }
+            let coil_str = if coil { " COIL-TURN" } else { "" };
+            // session-121 recon (read-only, env-gated): for each REAL
+            // (non-exempt / non-subtol / non-knife / non-coil) pair, dump
+            // the triad's edges + the coil witness values. Reuses the
+            // cascade-computed star / rim-gap.
+            if std::env::var("DRAPPER_DUMP_TRIAD_WITNESS").is_ok()
+                && !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+            {
+                let mut wit: Vec<String> = Vec::new();
+                for ti in [t0, t1] {
+                    let tri = &mesh.triangles[ti];
+                    for (v0, v1) in [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])] {
+                        let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                        let Some(et) = edge_to_tris.get(&key) else {
+                            continue;
+                        };
+                        if et.len() != 2 {
+                            continue; // boundary edge of the mesh
+                        }
+                        let (wa, _, _) = et[0];
+                        let (wb, _, _) = et[1];
+                        let fa = fids.and_then(|ids| ids.get(wa).copied()).unwrap_or(0);
+                        let fb = fids.and_then(|ids| ids.get(wb).copied()).unwrap_or(0);
+                        let shared = if key == *edge { " [shared]" } else { "" };
+                        wit.push(format!(
+                            "e({},{}) t=({},{}) f=({},{}){}{}",
+                            v0,
+                            v1,
+                            wa,
+                            wb,
+                            fa,
+                            fb,
+                            if fa != fb { " CROSS-FACE" } else { "" },
+                            shared
+                        ));
+                    }
+                }
+                let star_note = match coil_star {
+                    Some((e, f)) => format!(
+                        " || star e({},{}) f=({},{})",
+                        e.0, e.1, f.0, f.1
+                    ),
+                    None => String::new(),
+                };
+                let poly_note = match coil_rim {
+                    Some(g) => format!(" POLY far={:.5}", g),
+                    None => " POLY far=n/a".to_string(),
+                };
+                // POLYLINE / RIM-GAP: printed from the cascade-computed
+                // value (same far-loop rule the exemption uses: index
+                // distance >= n/4, wrap neighbours and the closing
+                // duplicate excluded).
+                println!(
+                    "    WITNESS brep#{} {} real-pair class={} tris=({:?},{:?}) faces=({},{}) types=({},{}) h=({:.4},{:.4}) tol={:.4}: {}{}{}",
+                    inst.brep_id,
+                    inst.name,
+                    class,
+                    mesh.triangles[t0],
+                    mesh.triangles[t1],
+                    fid0,
+                    fid1,
+                    st0,
+                    st1,
+                    h0,
+                    h1,
+                    eff_tol.unwrap_or(0.0),
+                    wit.join(" | "),
+                    star_note,
+                    poly_note
+                );
+            }
             println!(
-                "[{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 subtol_str,
                 knife_str,
+                coil_str,
                 exempt_str,
                 i,
                 inst.name,
@@ -600,6 +793,7 @@ fn main() {
                 coincident_str,
                 owner_note,
                 if knife { &knife_why } else { "" },
+                if coil { &coil_why } else { "" },
                 params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
@@ -608,10 +802,11 @@ fn main() {
 
             *hist
                 .entry(format!(
-                    "{}{}{}{} | {} | {}",
+                    "{}{}{}{}{} | {} | {}",
                     if tangent_exempt { "EXEMPT+" } else { "" },
                     if subtol { "SUBTOL+" } else { "" },
                     if knife { "KNIFE-FIN+" } else { "" },
+                    if coil { "COIL-TURN+" } else { "" },
                     sliver_class,
                     st0,
                     st1
@@ -619,10 +814,11 @@ fn main() {
                 .or_insert(0) += 1;
             *grand
                 .entry(format!(
-                    "{}{}{}{}{}+{} | {} | {}",
+                    "{}{}{}{}{}{}+{} | {} | {}",
                     if tangent_exempt { "TANGENT-EXEMPT " } else { "" },
                     if subtol { "SUBTOL " } else { "" },
                     if knife { "KNIFE-FIN " } else { "" },
+                    if coil { "COIL-TURN " } else { "" },
                     class,
                     if coincide { "+COIN" } else { "" },
                     sliver_class,
@@ -675,7 +871,7 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} real){}",
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} real){}",
                 i,
                 inst.name,
                 inst.brep_id,
@@ -683,7 +879,8 @@ fn main() {
                 brep_exempt,
                 brep_subtol,
                 brep_knife,
-                brep_pairs - brep_exempt - brep_subtol - brep_knife,
+                brep_coil,
+                brep_pairs - brep_exempt - brep_subtol - brep_knife - brep_coil,
                 eff_tol
                     .map(|t| format!(" eff_tol={:.4}", t))
                     .unwrap_or_default()

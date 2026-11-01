@@ -156,13 +156,14 @@ fn main() {
     let mut total_surf_exempt = 0; // >170° but justified by surface geometry
     let mut total_subtol = 0; // >170° non-exempt but under the BREP eff_tol (session-74)
     let mut total_knife = 0; // >170° thin-wall pinch fins, two offset copies across a resolvable gap (session-94)
+    let mut total_coil = 0; // >170° coil-turn-weld folds, unrepresentable at the merge tolerance (session-121)
 
-    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, knife>170, max_nonexempt)
-    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, usize, f64)> = Vec::new();
+    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, knife>170, coil>170, max_nonexempt)
+    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, usize, usize, f64)> = Vec::new();
 
     println!("\n{:-<139}", "");
-    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>12}",
-        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "KnifeFin", "Outliers");
+    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8} {:>12}",
+        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "KnifeFin", "CoilTurn", "Outliers");
     println!("{:-<139}", "");
 
     for (i, p) in pending.iter().enumerate() {
@@ -222,8 +223,12 @@ fn main() {
             let mut exempt_count = 0; // >170° justified by surface geometry
             let mut subtol_count = 0; // >170° non-exempt but under eff_tol (session-74)
             let mut knife_count = 0; // >170° thin-wall pinch fins (session-94)
+            let mut coil_count = 0; // >170° coil-turn-weld folds (session-121)
             let mut max_angle_nonexempt: f64 = 0.0;
-            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, bool, String)> = Vec::new();
+            // session-121: per-(instance, face) cache of the rim polyline
+            // far-loop min distance — the RIM-GAP witness input.
+            let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
+            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, bool, bool, String)> = Vec::new();
 
             for (edge, tris) in &edge_to_tris {
                 if tris.len() != 2 { continue; }
@@ -246,12 +251,17 @@ fn main() {
                         let mut exempt = false;
                         let mut subtol = false;
                         let mut knife = false;
+                        let mut coil = false;
                         let mut reason = String::new();
                         if angle_deg > 170.0 {
                             let fid0 = face_ids.and_then(|ids| ids.get(tris[0]).copied()).unwrap_or(0);
                             let fid1 = face_ids.and_then(|ids| ids.get(tris[1]).copied()).unwrap_or(0);
                             let s0 = face_surface(fid0);
                             let s1 = face_surface(fid1);
+                            // Session-74 metric: apex heights over the shared
+                            // edge — needed by the sub-tol classification AND
+                            // the session-121 coil-turn-weld exemption.
+                            let (h0, h1) = apex_heights(mesh, edge, tris);
                             let v = surf_exempt::evaluate(
                                 &mesh.vertices,
                                 &mesh.triangles[tris[0]],
@@ -271,7 +281,6 @@ fn main() {
                                 // Both apex heights under the BREP's effective
                                 // vertex-resolution tolerance → the fold lives
                                 // below what the welded mesh can represent.
-                                let (h0, h1) = apex_heights(mesh, edge, tris);
                                 subtol = h0 < tol && h1 < tol;
                                 if subtol {
                                     subtol_count += 1;
@@ -296,7 +305,132 @@ fn main() {
                                         knife_count += 1;
                                     }
                                 }
-                                if !subtol && !knife {
+                                if !subtol && !knife && fid0 == fid1
+                                    && std::env::var("DRAPPER_COIL_TURN_EXEMPT").as_deref()
+                                        != Ok("0")
+                                {
+                                    // session-121: COIL-TURN-WELD — a same-face
+                                    // thin (max h < 2×eff_tol) pair on a coiled
+                                    // ribbon (Nurbs with a degree-1 direction)
+                                    // whose fold is rooted in coil geometry the
+                                    // merge tolerance cannot represent (welded
+                                    // adjacent turns / band narrower than tol).
+                                    // Witnesses: (a) STAR — a cross-face interior
+                                    // edge at the pair's triad star; (b) RIM-GAP —
+                                    // the owner face's rim polyline returns
+                                    // within eff_tol at a FAR position of the
+                                    // loop. Not debt.
+                                    let star = {
+                                        use std::collections::HashSet;
+                                        let mut triad: HashSet<u32> = HashSet::new();
+                                        for &vv in mesh.triangles[tris[0]].iter() {
+                                            triad.insert(vv);
+                                        }
+                                        for &vv in mesh.triangles[tris[1]].iter() {
+                                            triad.insert(vv);
+                                        }
+                                        // Deterministic pick: minimum key over
+                                        // ALL cross-face star edges (HashMap
+                                        // order varies run to run — s117
+                                        // lesson-5).
+                                        let mut founds: Vec<((u32, u32), (u64, u64))> =
+                                            Vec::new();
+                                        for (ek, ets) in &edge_to_tris {
+                                            if ets.len() != 2 {
+                                                continue;
+                                            }
+                                            if !triad.contains(&ek.0) && !triad.contains(&ek.1) {
+                                                continue;
+                                            }
+                                            let fa =
+                                                face_ids.and_then(|ids| ids.get(ets[0]).copied())
+                                                    .unwrap_or(0);
+                                            let fb =
+                                                face_ids.and_then(|ids| ids.get(ets[1]).copied())
+                                                    .unwrap_or(0);
+                                            if fa != fb {
+                                                founds.push((*ek, (fa, fb)));
+                                            }
+                                        }
+                                        founds.sort_by_key(|(e, _)| *e);
+                                        founds.first().copied()
+                                    };
+                                    let rim_far =
+                                        rim_far_cache.get(&fid0).copied().unwrap_or_else(|| {
+                                            let v = (|| -> Option<f64> {
+                                                let f = face_by_id.get(&fid0)?;
+                                                let tf = |p: &Point3d| -> Point3d {
+                                                    match xform {
+                                                        Some(m) => Point3d::new(
+                                                            m[0][0] * p.x + m[0][1] * p.y
+                                                                + m[0][2] * p.z
+                                                                + m[0][3],
+                                                            m[1][0] * p.x + m[1][1] * p.y
+                                                                + m[1][2] * p.z
+                                                                + m[1][3],
+                                                            m[2][0] * p.x + m[2][1] * p.y
+                                                                + m[2][2] * p.z
+                                                                + m[2][3],
+                                                        ),
+                                                        None => *p,
+                                                    }
+                                                };
+                                                let mut self_min = f64::INFINITY;
+                                                for poly in f
+                                                    .outer_boundary
+                                                    .iter()
+                                                    .chain(f.inner_boundaries.iter())
+                                                {
+                                                    let w: Vec<Point3d> =
+                                                        poly.iter().map(tf).collect();
+                                                    let n = w.len();
+                                                    if n < 8 {
+                                                        continue;
+                                                    }
+                                                    let far = (n / 4).max(3);
+                                                    for i in 0..n {
+                                                        for j in (i + far)..n {
+                                                            if i + n - j <= 2 {
+                                                                continue;
+                                                            }
+                                                            let d = (w[i].x - w[j].x).powi(2)
+                                                                + (w[i].y - w[j].y).powi(2)
+                                                                + (w[i].z - w[j].z).powi(2);
+                                                            if d < self_min {
+                                                                self_min = d;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                if self_min.is_infinite() {
+                                                    None
+                                                } else {
+                                                    Some(self_min.sqrt())
+                                                }
+                                            })();
+                                            rim_far_cache.insert(fid0, v);
+                                            v
+                                        });
+                                    let w = surf_exempt::CoilWitness {
+                                        star: star.is_some(),
+                                        star_edge: star.map(|(e, _)| e).unwrap_or((0, 0)),
+                                        star_faces: star.map(|(_, f)| f).unwrap_or((0, 0)),
+                                        rim_far,
+                                    };
+                                    let (cc, why) = surf_exempt::coil_turn_weld(
+                                        h0,
+                                        h1,
+                                        tol,
+                                        s0.as_ref(),
+                                        Some(&w),
+                                    );
+                                    if cc {
+                                        coil = true;
+                                        reason = why;
+                                        coil_count += 1;
+                                    }
+                                }
+                                if !subtol && !knife && !coil {
                                     max_angle_nonexempt = max_angle_nonexempt.max(angle_deg);
                                 }
                             } else {
@@ -311,7 +445,7 @@ fn main() {
                             mesh.triangles[tris[0]],
                             mesh.triangles[tris[1]],
                             fid0, fid1,
-                            exempt, subtol, knife, reason,
+                            exempt, subtol, knife, coil, reason,
                         ));
                     }
                 }
@@ -324,6 +458,7 @@ fn main() {
             total_surf_exempt += exempt_count;
             total_subtol += subtol_count;
             total_knife += knife_count;
+            total_coil += coil_count;
 
             // Use a simple outlier criterion: angles beyond 3σ from the mean
             let mean = if !angles.is_empty() {
@@ -337,12 +472,12 @@ fn main() {
             let outlier_count = angles.iter().filter(|&&a| a > threshold && a > 30.0).count();
             total_outlier_angles += outlier_count;
 
-            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, knife_count, max_angle_nonexempt));
+            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, knife_count, coil_count, max_angle_nonexempt));
 
             let is_wt = interior_count > 0 && extreme_count == 0;
             if is_wt { total_watertight += 1; } else { total_not_watertight += 1; }
 
-            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>8} {:>12}",
+            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>8} {:>8} {:>12}",
                 i + 1,
                 inst.name,
                 interior_count,
@@ -352,13 +487,14 @@ fn main() {
                 exempt_count,
                 subtol_count,
                 knife_count,
+                coil_count,
                 outlier_count,
             );
 
             // Print details for worst outliers
             if !outlier_edges.is_empty() {
                 outlier_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, knife, reason) in outlier_edges.iter().take(5) {
+                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, knife, coil, reason) in outlier_edges.iter().take(5) {
                     let p0 = &mesh.vertices[*v0 as usize];
                     let p1 = &mesh.vertices[*v1 as usize];
                     let mid = Point3d::new(
@@ -378,6 +514,8 @@ fn main() {
                             " [sub-tol weld-noise]".to_string()
                         } else if *knife {
                             format!(" [knife-fin pinch: {}]", reason)
+                        } else if *coil {
+                            format!(" [coil-turn weld: {}]", reason)
                         } else {
                             " *** BAD ***".to_string()
                         }
@@ -408,12 +546,13 @@ fn main() {
     println!("  Surf-exempt (>170°):    {} (tangency/shallow junctions — not bugs)", total_surf_exempt);
     println!("  Sub-tol weld-noise:     {} (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)", total_subtol);
     println!("  Knife-fin pinch:        {} (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)", total_knife);
+    println!("  Coil-turn weld:         {} (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)", total_coil);
 
     // Count truly extreme angles (>170°) NOT justified by surface
     // geometry — these are actual bugs (back-to-back triangles with
     // opposite normals on non-tangent surfaces)
     let mut truly_extreme = 0;
-    for (_, _, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
+    for (_, _, _, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
         if *max_nonexempt > 170.0 { truly_extreme += 1; }
     }
 

@@ -160,10 +160,29 @@ fn s106_cyl_band_killswitch_reproduces_needles() {
     // manufactured — the post-winding record catches them and phase-2
     // splits the survivors), so the OFF leg disables it too.
     std::env::set_var("DRAPPER_BORNFOLD_WINDING_RECORD", "0");
+    // s121 OFF-leg maintenance (the s108 lesson, deferred since s120):
+    // with the s108+ layers default-ON the OFF leg no longer reproduces
+    // the needles (measured 0/0 vs the expected ≥1/≥1 — the path changed,
+    // NOT an s120 regression; stash-verified on clean HEAD in s120).
+    // The DEGEN_FAN_SPLIT layer (s108) is the fourth switch of the same
+    // (7,7)/(37,37) needle family — the OFF leg must also disable it.
+    std::env::set_var("DRAPPER_DEGEN_FAN_SPLIT", "0");
+    // The SEAM_FOLD_SPLIT layer (s100, 2-phase bornfold) also splits the
+    // needle-family survivors in the final mesh — disabled too (measured:
+    // with only DEGEN_FAN off the leg still returns 0).
+    std::env::set_var("DRAPPER_SEAM_FOLD_SPLIT", "0");
+    // The WINDING_DEFLIP layer (s115, default ON) post-cascade-repairs
+    // WINDING-FLIP pairs — with it on, the HOUSING (37,37) needle (a
+    // winding-manufactured fold) no longer re-appears (measured: with
+    // SEAM_FOLD off, (7,7) returns but (37,37) still reads 0).
+    std::env::set_var("DRAPPER_WINDING_DEFLIP", "0");
     let comp = brep_instance("compressor-13920_top.stp", 2860);
     let drill = brep_instance("drill_top.stp", 47598);
     std::env::remove_var("DRAPPER_CYL_BAND_GRID");
     std::env::remove_var("DRAPPER_BORNFOLD_WINDING_RECORD");
+    std::env::remove_var("DRAPPER_DEGEN_FAN_SPLIT");
+    std::env::remove_var("DRAPPER_SEAM_FOLD_SPLIT");
+    std::env::remove_var("DRAPPER_WINDING_DEFLIP");
     let comp = comp.expect("COLLECTOR BREP#2860 triangulation failed (kill-switch leg)");
     let drill = drill.expect("HOUSING BREP#47598 triangulation failed (kill-switch leg)");
     let folds7 = same_face_needle_pairs(&comp, 7);

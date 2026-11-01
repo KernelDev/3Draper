@@ -144,9 +144,29 @@ fn s98_cast_extension_killswitch_reproduces_groove_folds() {
     // depth, a feature not a bug). This leg pins the s98 cascade alone,
     // so the s100 pass must be off here too.
     std::env::set_var("DRAPPER_SEAM_FOLD_SPLIT", "0");
+    // s121 OFF-leg maintenance (same disease as the s106 leg): with the
+    // s107/s108/s115 layers default-ON the OFF leg no longer reproduces
+    // the groove folds (measured 0 vs the expected ≥5 — path changed by
+    // the later fixes, not an s98 regression). The winding-family layers
+    // that now gate these folds are disabled too.
+    std::env::set_var("DRAPPER_BORNFOLD_WINDING_RECORD", "0");
+    std::env::set_var("DRAPPER_DEGEN_FAN_SPLIT", "0");
+    std::env::set_var("DRAPPER_WINDING_DEFLIP", "0");
+    std::env::set_var("DRAPPER_CAST_ROW_LATTICE", "0");
+    std::env::set_var("DRAPPER_BAND_LATTICE", "0");
+    // The CYL_BAND_GRID layer (s106, default ON — it did not exist at
+    // s98) now supports the SLEEVE groove walls (Cylinder family) even
+    // with the s98 cascade off — measured: without this the leg reads 0.
+    std::env::set_var("DRAPPER_CYL_BAND_GRID", "0");
     let inst = sleeve_instance();
     std::env::remove_var("DRAPPER_CAST_EXTEND");
     std::env::remove_var("DRAPPER_SEAM_FOLD_SPLIT");
+    std::env::remove_var("DRAPPER_BORNFOLD_WINDING_RECORD");
+    std::env::remove_var("DRAPPER_DEGEN_FAN_SPLIT");
+    std::env::remove_var("DRAPPER_WINDING_DEFLIP");
+    std::env::remove_var("DRAPPER_CAST_ROW_LATTICE");
+    std::env::remove_var("DRAPPER_BAND_LATTICE");
+    std::env::remove_var("DRAPPER_CYL_BAND_GRID");
     let inst = inst.expect("SLEEVE BREP#32629 triangulation failed (kill-switch leg)");
     let folds = groove_fold_pairs(&inst);
     assert!(
