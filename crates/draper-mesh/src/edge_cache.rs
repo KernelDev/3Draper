@@ -2231,21 +2231,30 @@ pub struct CircleInconsistency {
 /// edge's last point, so its projection is a continuation, not a
 /// fresh multi-valued solve.
 ///
-/// Kill-switch semantics: OPT-IN via DRAPPER_RIBBON_CHAIN=1. Measured
-/// (s117 A/B, forensics/s117/): the UV layer IMPROVES dramatically (f28
-/// rims land exactly on v=0/v=1, projection err 6.18e-2 → 1.04e-2,
-/// u-jumps 200-500 → 13-26) but the OVERALL Vulcan census REGRESSED
-/// 50 → 54 REAL: with correct UV the ribbons no longer fall to the 3D
-/// ear-clip — instead they hit TWO downstream layers that are not ready
-/// for them: (a) is_degenerate_uv's numerical step (1e-4 parametric ×
-/// 1e-6 3D tolerance) false-positives "100% boundary degenerate" on
-/// coiled ribbons (|dS/du| ≈ 5e-8 for a ~1-unit-wide coil bundle with
-/// u_range 3570) → "fan impossible, falling through to CDT"; (b) the
-/// NURBS_FILLET_BAND rescue then accepts the sub-patch ribbon
-/// (non-rim 5 → 0 looks like a win) but emits 2233 tris of which 1866
-/// are degenerate — 84% merge loss (f28), while the legacy ear-clip
-/// path only lost 50/301. Default OFF until (a)+(b) are fixed; the
-/// criterion stays here so the follow-up session can flip it.
+/// Kill-switch semantics (s122-п.2): DEFAULT ON — kill-switch
+/// DRAPPER_RIBBON_CHAIN=0. History: s117 shipped this OPT-IN (the UV
+/// layer improved dramatically — f28 rims land exactly on v=0/v=1,
+/// projection err 6.18e-2 → 1.04e-2, u-jumps 200-500 → 13-26 — but the
+/// OVERALL Vulcan census regressed 50 → 54 REAL: with correct UV the
+/// ribbons no longer fall to the 3D ear-clip — instead they hit TWO
+/// downstream layers that were not ready for them: (a)
+/// is_degenerate_uv's numerical step false-positives "100% boundary
+/// degenerate" on coiled ribbons; (b) the NURBS_FILLET_BAND rescue
+/// accepted the sub-patch ribbon with 84% merge loss. s118 fixed (a)+(b).
+/// s119 added the monotone-band zipper (never-worsen gated). s121
+/// re-evaluated default-ON and REJECTED it with numbers (+4 REAL on
+/// #10220: 17 default vs 21 chain — the criterion was drift-blind).
+/// s122-п.1 closed that blocker: the contiguous-direction chaining
+/// (DRAPPER_RIBBON_CHAIN_DIR, default on) + the per-face reprojection
+/// DRIFT GATE with independent-projection fallback
+/// (DRAPPER_RIBBON_DRIFT_GUARD, default on) make the chain path
+/// never-worse by construction — a face whose chain pass drifts is
+/// recomputed with the exact chain-off behaviour. Measured (s122,
+/// forensics/s122/): default-flip censuses Spit 13 → 11 REAL / Vulcan
+/// 48 → 48 (identical); all_files 26/27 identical, Spit bnd 10.0% →
+/// 8.4% (−2448 boundary edges — full boundary emission instead of the
+/// ear-clip loss); kill-switch DRAPPER_RIBBON_CHAIN=0 restores the
+/// pre-s122 default bit-exactly.
 ///
 /// s118: (a) is fixed in is_degenerate_at (span-scaled numerical step)
 /// and (b) in the NURBS_FILLET_BAND accept gate (merge-sliver share).
@@ -2266,7 +2275,9 @@ pub struct CircleInconsistency {
 pub fn nurbs_ribbon_chain_projection(
     nurbs: &draper_geometry::NurbsSurface,
 ) -> bool {
-    if std::env::var("DRAPPER_RIBBON_CHAIN").as_deref() != Ok("1") {
+    // s122-п.2: DEFAULT ON (kill-switch DRAPPER_RIBBON_CHAIN=0) — the
+    // never-worse blocker is closed by the s122 drift gate + fallback.
+    if std::env::var("DRAPPER_RIBBON_CHAIN").as_deref() == Ok("0") {
         return false;
     }
     let (u0, u1) = nurbs.u_range();
@@ -2331,9 +2342,9 @@ pub fn nurbs_ribbon_chain_projection(
 /// the contiguous end. GAP arrays (neither end close — e.g. after a
 /// loop-wrap) return false and keep the legacy forward chaining.
 ///
-/// Only called for `nurbs_ribbon_chain_projection` faces (the opt-in
-/// DRAPPER_RIBBON_CHAIN=1 mode), so default-mode censuses stay
-/// bit-identical. Kill-switch: DRAPPER_RIBBON_CHAIN_DIR=0.
+/// Only called for `nurbs_ribbon_chain_projection` faces (s122-п.2:
+/// DEFAULT ON; DRAPPER_RIBBON_CHAIN=0 disables the whole layer →
+/// pre-s122 default bit-exactly). Kill-switch: DRAPPER_RIBBON_CHAIN_DIR=0.
 pub fn ribbon_chain_reversal(prev_point: &Point3d, pts: &[Point3d]) -> bool {
     if pts.len() < 2 {
         return false;

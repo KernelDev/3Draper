@@ -6876,9 +6876,10 @@ fn try_strip_triangulation_ruled_nurbs(
 ///
 /// Never-worsen guards (each returns None → the caller falls through
 /// to the legacy strip/CDT/ear-clip path):
-///   - the s117 opt-in criterion `nurbs_ribbon_chain_projection`
-///     (env DRAPPER_RIBBON_CHAIN=1; default OFF → this function is a
-///     no-op in default builds, keeping default censuses bit-identical),
+///   - the s117 criterion `nurbs_ribbon_chain_projection`
+///     (s122-п.2: DEFAULT ON; kill-switch DRAPPER_RIBBON_CHAIN=0
+///     disables the whole chain+zipper layer → pre-s122 default
+///     bit-exactly),
 ///     plus its own kill-switch DRAPPER_RIBBON_ZIPPER=0;
 ///   - strict u-monotonicity of both chains (Vulcan f25's notch with
 ///     drifted UVs doubles back in u → rejected);

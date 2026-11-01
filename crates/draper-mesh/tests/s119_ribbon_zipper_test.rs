@@ -379,10 +379,13 @@ fn test_ribbon_monotone_zipper_phases() {
     );
     std::env::remove_var("DRAPPER_RIBBON_ZIPPER");
 
-    // ── Phase D: default mode (no DRAPPER_RIBBON_CHAIN) → no-op ──────
-    std::env::remove_var("DRAPPER_RIBBON_CHAIN");
+    // ── Phase D: kill-switch DRAPPER_RIBBON_CHAIN=0 → no-op ───────
+    // (s122-п.2: the criterion is DEFAULT ON — the legacy no-env
+    // no-op phase became the kill-switch phase.)
+    std::env::set_var("DRAPPER_RIBBON_CHAIN", "0");
     assert!(
         try_ribbon_monotone_zipper(&nurbs, &pts, &uvs, true).is_none(),
-        "zipper must be inert without the opt-in chain env"
+        "kill-switch must disable the whole chain+zipper layer"
     );
+    std::env::remove_var("DRAPPER_RIBBON_CHAIN");
 }

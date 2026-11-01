@@ -18747,3 +18747,39 @@ Spit (−2 REAL, −2448 bnd); 26/27 файлов неизменны. Блоки
 4. Атрибуция kill-switchами (DIR×GUARD матрица 48/48/52) — единственный
    способ доказать, ЧТО именно даёт never-worse; одиночный A/B
    «до/после» показал бы только 52→48 без причин.
+
+## s122 — п.2: DRAPPER_RIBBON_CHAIN → DEFAULT ON (kill-switch
+## DRAPPER_RIBBON_CHAIN=0). Spit 13→11 REAL, Vulcan 48→48, all_files
+## 26/27 идентичны + Spit bnd 10.0%→8.4% (−2448 рёбер)
+
+Решение по числам (условие s117 «default OFF until fixed» выполнено;
+блокиратор s121 «+4 REAL, критерий дрейф-слеп» снят п.1):
+
+- Ценз: default-flip Spit 13→11 (#31359 2→1 real на застёгнутых
+  инстанцах; #31356/#27977 без изменений), Vulcan 48→48 (гейт
+  нейтрализует #10220 полностью — f25/f27 фолбэк == старый default).
+- all_files: 26/27 строк идентичны старому default; Spit bnd
+  10.0%→8.4% (10870→9622 рёбер, +3986 tris — полная граничная
+  эмиссия вместо потери ear-clip). Статусы 22 ok/4 leaky/1 BAD.
+- Kill-switch DRAPPER_RIBBON_CHAIN=0: пер-BREP строки ценза Spit и
+  Vulcan БИТ-ИДЕНТИЧНЫ pre-s122 default — точное восстановление.
+- angle_check brick/drill/trans/comp: бит-идентичны s121 (в этих
+  файлах нет chain-eligible лент).
+- Сьюты: draper-mesh 449 (s119-тест Phase D переписана под
+  kill-switch-семантику), draper-step lib 169 + ВСЕ 26
+  интеграционных. OFF-леги s98 (8 свитчей) / s106 (5) прошли БЕЗ
+  добавления RIBBON_CHAIN=0 — их поверхности Cylinder/cast,
+  критерий Nurbs-only, слой инертен.
+- История слоёв в док-комменте критерия обновлена (s117 opt-in →
+  s118 (a)+(b) → s119 zipper → s121 reject с числами → s122 flip).
+
+НОВАЯ БАЗОВАЯ ЛИНИЯ для будущих сессий: default Spit 11 / Vulcan 48
+(#10220 17+1 coil); восстановление pre-s122 = DRAPPER_RIBBON_CHAIN=0.
+
+### Осталось (s123+)
+1. Порядок полигона в traversal-порядке (реверс raw-массивов при
+   extend) — убирает зигзаг через клубок; кандидат на улучшение
+   default ear-clip тоже.
+2. Sawtooth-zipper (стек-свип или сегменты) — путь к нулю thin-пар
+   f25/f27 (сейчас гейт их откатывает на ear-clip default-долга).
+3. п.3 s122: #31359 Cone×Nurbs (7,11) h=(0.0011,0.0163) атрибуция.

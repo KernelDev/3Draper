@@ -13932,8 +13932,9 @@ impl<'a> StepConverter<'a> {
         // step across the whole coil bundle. Non-ribbon faces keep the
         // exact legacy behaviour (cursor == raw last point/UV).
         //
-        // s122: ribbon-chain mode for this surface (the s117 opt-in
-        // criterion, env DRAPPER_RIBBON_CHAIN=1). Only these faces get
+        // s122: ribbon-chain mode for this surface (the s117 criterion;
+        // s122-п.2 flipped it DEFAULT ON, kill-switch
+        // DRAPPER_RIBBON_CHAIN=0). Only these faces get
         //   (a) contiguous-direction chaining (kill-switch
         //       DRAPPER_RIBBON_CHAIN_DIR=0) and
         //   (b) the per-face reprojection drift gate with an
