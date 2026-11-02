@@ -13951,6 +13951,11 @@ impl<'a> StepConverter<'a> {
         let mut outer_edge_pts: Vec<Vec<Point3d>> = Vec::new();
         let mut outer_edge_uvs: Vec<Vec<Point2d>> = Vec::new();
         let mut outer_edge_c2d_idx: Vec<usize> = Vec::new();
+        // s123: per-edge reversal flag — whether the edge's RAW point
+        // array runs against the loop traversal (only detected under
+        // chain_dir_fix; false otherwise). The traversal-order assembly
+        // below uses it to keep the polygon continuous.
+        let mut outer_edge_rev: Vec<bool> = Vec::new();
         let mut edges_without_step_id = 0usize;
         let mut edge_debug_info: Vec<String> = Vec::new();
         for (edge_idx, edge) in face_data.outer_edges.iter().enumerate() {
@@ -14094,6 +14099,7 @@ impl<'a> StepConverter<'a> {
                 outer_edge_pts.push(pts);
                 outer_edge_uvs.push(uvs);
                 outer_edge_c2d_idx.push(edge_idx);
+                outer_edge_rev.push(reversed_edge);
             } else {
                 log::warn!("BREP face: edge has step_id=0 (no cache), surface={:?}, edge_id={}",
                     std::mem::discriminant(&face_data.surface), edge.id);
@@ -14162,10 +14168,33 @@ impl<'a> StepConverter<'a> {
                 }
             }
         }
-        // s122: assemble the outer loop (loop order preserved).
-        for (e_pts, e_uvs) in outer_edge_pts.into_iter().zip(outer_edge_uvs.into_iter()) {
-            boundary_points.extend(e_pts);
-            boundary_uvs.extend(e_uvs);
+        // s123: assemble the outer loop in TRAVERSAL order. The raw
+        // point arrays of loop edges may be REVERSED relative to the
+        // face's traversal (the measured root cause of every #10220
+        // drift edge — s122-п.1: a reversed edge makes the assembled
+        // polygon JUMP across the coil bundle, 0.73 out-and-back, so
+        // the zipper/earcut see a self-intersecting loop and fall back
+        // to a budget-capped CDT lattice = the thin-pair emission
+        // debt). With the s122 chain-direction fix the reversal is
+        // already KNOWN per edge; here the reversed buffers are simply
+        // assembled back-to-front so the polygon is continuous. Only
+        // active for ribbon-chain faces (the layer where reversal is
+        // detected); every other face is bit-identical to legacy.
+        // Kill-switch: DRAPPER_LOOP_TRAVERSAL_ORDER=0.
+        let traversal_order = ribbon_chain_face
+            && std::env::var("DRAPPER_LOOP_TRAVERSAL_ORDER").as_deref() != Ok("0");
+        for ((e_pts, e_uvs), rev) in outer_edge_pts
+            .into_iter()
+            .zip(outer_edge_uvs.into_iter())
+            .zip(outer_edge_rev.into_iter())
+        {
+            if rev && traversal_order {
+                boundary_points.extend(e_pts.iter().rev().cloned());
+                boundary_uvs.extend(e_uvs.iter().rev().copied());
+            } else {
+                boundary_points.extend(e_pts);
+                boundary_uvs.extend(e_uvs);
+            }
         }
 
         // For curved surfaces, also sample inner edges (holes) using the cache

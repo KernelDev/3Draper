@@ -282,9 +282,14 @@ fn main() {
         let mut brep_subtol = 0usize;
         let mut brep_knife = 0usize;
         let mut brep_coil = 0usize;
+        let mut brep_junction = 0usize;
         // session-121: per-(instance, face) cache of the rim polyline
         // far-loop min distance — the RIM-GAP witness input.
         let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
+        // session-123 recon: lazy per-BREP vertex → distinct-face-ids map
+        // (the HUB witness input for the junction-sliver exemption —
+        // built on first use, one pass over triangles + face ids).
+        let mut vertex_faces: Option<HashMap<u32, std::collections::HashSet<u64>>> = None;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -692,15 +697,156 @@ fn main() {
                 brep_coil += 1;
             }
             let coil_str = if coil { " COIL-TURN" } else { "" };
+            // session-123: JUNCTION-SLIVER (cross-face multi-face-hub
+            // duplicate coverage) — the s122-п.3 class. The witness
+            // (lazy per-BREP vertex→distinct-faces map + two-sided
+            // plane deviations) is computed for cross-face REAL pairs
+            // past the coil cascade, or whenever the recon dump asks
+            // for it. Kill-switch: DRAPPER_JUNCTION_SLIDER=0. Not debt.
+            let junction_candidate = !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+                && fid0 != fid1
+                && std::env::var("DRAPPER_JUNCTION_SLIDER").as_deref() != Ok("0");
+            // session-123 recon (read-only, env-gated): dump the
+            // junction witness facts BEFORE deciding thresholds (the
+            // s121 lesson-1 method: measure the planned witness
+            // first — the accepted thresholds in surf_exempt are the
+            // measured ones).
+            let junction_recon = std::env::var("DRAPPER_DUMP_JUNCTION").is_ok()
+                && !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+                && fid0 != fid1;
+            let mut junction_witness: Option<surf_exempt::JunctionWitness> = None;
+            if junction_candidate || junction_recon {
+                if vertex_faces.is_none() {
+                    let mut vf: HashMap<u32, std::collections::HashSet<u64>> =
+                        HashMap::new();
+                    for (ti, tri) in mesh.triangles.iter().enumerate() {
+                        let fid = fids
+                            .and_then(|ids| ids.get(ti).copied())
+                            .unwrap_or(u64::MAX);
+                        for &v in tri.iter() {
+                            vf.entry(v).or_default().insert(fid);
+                        }
+                    }
+                    vertex_faces = Some(vf);
+                }
+                let vf = vertex_faces.as_ref().unwrap();
+                // Deterministic hub pick: iterate the pair's vertices
+                // in sorted order, keep the FIRST maximum (s117
+                // lesson-5: diagnostics must be reproducible).
+                let mut vs: Vec<u32> = mesh.triangles[t0]
+                    .iter()
+                    .chain(mesh.triangles[t1].iter())
+                    .copied()
+                    .collect();
+                vs.sort_unstable();
+                vs.dedup();
+                let mut hub_max = 0usize;
+                let mut hub_vertex = 0u32;
+                for v in vs {
+                    let c = vf.get(&v).map(|s| s.len()).unwrap_or(0);
+                    if c > hub_max {
+                        hub_max = c;
+                        hub_vertex = v;
+                    }
+                }
+                // Two-sided plane deviations: max distance of the
+                // other triangle's vertices from this triangle's
+                // plane.
+                let plane_dev = |ta: usize, tb: usize| -> Option<f64> {
+                    let tri_a = &mesh.triangles[ta];
+                    let (pa, pb, pc) = (
+                        &mesh.vertices[tri_a[0] as usize],
+                        &mesh.vertices[tri_a[1] as usize],
+                        &mesh.vertices[tri_a[2] as usize],
+                    );
+                    let e1 = [pb.x - pa.x, pb.y - pa.y, pb.z - pa.z];
+                    let e2 = [pc.x - pa.x, pc.y - pa.y, pc.z - pa.z];
+                    let n = [
+                        e1[1] * e2[2] - e1[2] * e2[1],
+                        e1[2] * e2[0] - e1[0] * e2[2],
+                        e1[0] * e2[1] - e1[1] * e2[0],
+                    ];
+                    let l = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                    if l < 1e-15 {
+                        return None;
+                    }
+                    let mut d_max = 0.0f64;
+                    for &v in mesh.triangles[tb].iter() {
+                        let p = &mesh.vertices[v as usize];
+                        let d = ((p.x - pa.x) * n[0]
+                            + (p.y - pa.y) * n[1]
+                            + (p.z - pa.z) * n[2])
+                            .abs()
+                            / l;
+                        d_max = d_max.max(d);
+                    }
+                    Some(d_max)
+                };
+                let d10 = plane_dev(t0, t1); // t1 verts vs t0 plane
+                let d01 = plane_dev(t1, t0); // t0 verts vs t1 plane
+                let plane_dev = match (d10, d01) {
+                    (Some(a), Some(b)) => Some([a, b]),
+                    _ => None,
+                };
+                junction_witness = Some(surf_exempt::JunctionWitness {
+                    hub_max,
+                    hub_vertex,
+                    plane_dev,
+                });
+                if junction_recon {
+                    println!(
+                        "    JUNCTION brep#{} {} faces=({},{}) types=({},{}) class={} ang={:.2} h=({:.4},{:.4}) areas=({:.6},{:.6}) tol={:.4} hub=v{}x{} plane_dev=({:?},{:?})",
+                        inst.brep_id,
+                        inst.name,
+                        fid0,
+                        fid1,
+                        st0,
+                        st1,
+                        class,
+                        ang,
+                        h0,
+                        h1,
+                        area0,
+                        area1,
+                        eff_tol.unwrap_or(0.0),
+                        hub_vertex,
+                        hub_max,
+                        d10,
+                        d01
+                    );
+                }
+            }
+            let (junction, junction_why) = if junction_candidate {
+                surf_exempt::junction_sliver(
+                    h0,
+                    h1,
+                    eff_tol.unwrap_or(0.0),
+                    junction_witness.as_ref(),
+                )
+            } else {
+                (false, String::new())
+            };
+            if junction {
+                brep_junction += 1;
+            }
+            let junction_str = if junction { " JUNCTION-SLIDER" } else { "" };
             // session-121 recon (read-only, env-gated): for each REAL
-            // (non-exempt / non-subtol / non-knife / non-coil) pair, dump
-            // the triad's edges + the coil witness values. Reuses the
-            // cascade-computed star / rim-gap.
+            // (non-exempt / non-subtol / non-knife / non-coil /
+            // non-junction) pair, dump the triad's edges + the coil
+            // witness values. Reuses the cascade-computed star /
+            // rim-gap.
             if std::env::var("DRAPPER_DUMP_TRIAD_WITNESS").is_ok()
                 && !tangent_exempt
                 && !subtol
                 && !knife
                 && !coil
+                && !junction
             {
                 let mut wit: Vec<String> = Vec::new();
                 for ti in [t0, t1] {
@@ -766,12 +912,13 @@ fn main() {
                 );
             }
             println!(
-                "[{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 subtol_str,
                 knife_str,
                 coil_str,
+                junction_str,
                 exempt_str,
                 i,
                 inst.name,
@@ -794,6 +941,7 @@ fn main() {
                 owner_note,
                 if knife { &knife_why } else { "" },
                 if coil { &coil_why } else { "" },
+                if junction { &junction_why } else { "" },
                 params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
@@ -802,11 +950,12 @@ fn main() {
 
             *hist
                 .entry(format!(
-                    "{}{}{}{}{} | {} | {}",
+                    "{}{}{}{}{}{} | {} | {}",
                     if tangent_exempt { "EXEMPT+" } else { "" },
                     if subtol { "SUBTOL+" } else { "" },
                     if knife { "KNIFE-FIN+" } else { "" },
                     if coil { "COIL-TURN+" } else { "" },
+                    if junction { "JUNCTION-SLIDER+" } else { "" },
                     sliver_class,
                     st0,
                     st1
@@ -814,11 +963,12 @@ fn main() {
                 .or_insert(0) += 1;
             *grand
                 .entry(format!(
-                    "{}{}{}{}{}{}+{} | {} | {}",
+                    "{}{}{}{}{}{}{}+{} | {} | {}",
                     if tangent_exempt { "TANGENT-EXEMPT " } else { "" },
                     if subtol { "SUBTOL " } else { "" },
                     if knife { "KNIFE-FIN " } else { "" },
                     if coil { "COIL-TURN " } else { "" },
+                    if junction { "JUNCTION-SLIDER " } else { "" },
                     class,
                     if coincide { "+COIN" } else { "" },
                     sliver_class,
@@ -871,7 +1021,7 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} real){}",
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} junction-sliver, {} real){}",
                 i,
                 inst.name,
                 inst.brep_id,
@@ -880,7 +1030,13 @@ fn main() {
                 brep_subtol,
                 brep_knife,
                 brep_coil,
-                brep_pairs - brep_exempt - brep_subtol - brep_knife - brep_coil,
+                brep_junction,
+                brep_pairs
+                    - brep_exempt
+                    - brep_subtol
+                    - brep_knife
+                    - brep_coil
+                    - brep_junction,
                 eff_tol
                     .map(|t| format!(" eff_tol={:.4}", t))
                     .unwrap_or_default()

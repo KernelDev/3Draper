@@ -18846,3 +18846,126 @@ same-face. Документировать как хронику (как #10203/#
    витков; runout-зона сводит ВСЕ витки + конус в одну плоскость,
    где любые две грани могут дать тонкую пару (кандидат в census-
    exemption: cross-face junction-sliver с общей плоскостью).
+
+# Worklog — s123: junction-sliver census exemption (п.1) + traversal-order loop assembly (п.2) (2026-11-02, двадцать третья STEP-сессия)
+
+Baseline: commit `a4a2f7b` (после s122 п.3). Вход: Spit 11 / Vulcan 48
+REAL (новый default s122 п.2).
+
+## п.0 — эпоха-восстановление (fetch-first, урок s121-п.5)
+
+Sandbox восстановлен из бэкапа, предшествующего ВСЕМУ workstream'у
+(локальный HEAD был `377910b` — 22-я сессия; правки s78–s122
+отсутствовали в рабочем дереве, включая незакоммиченные потери).
+Протокол: `git fetch origin` принёс `377910b..a4a2f7b` (168 коммитов
+s78–s122 п.3 — всё было запушено), `pull --ff-only` восстановил
+полностью. Проверки выживания кода (winding_deflip, GLOBAL_STEPS
+reset, DRAPPER_RIBBON_CHAIN) — все на месте. Сборка 12m35s (307
+крейтов), baseline-валидация: fold_face_probe Spit 11/11 и Vulcan
+48/48 — состав REAL-пар бит-идентичен референсам s122
+(forensics/s122/onzip_spit_after.txt, default_vulcan.txt).
+
+## п.1 — JUNCTION-SLIVER census exemption: класс #31359 (7,11) закрыт, Spit 11→9
+
+Реализация кандидата s122 п.3 («cross-face junction-sliver: shared
+plane + both h<2×tol + multi-face hub») по методологии s121-п.1
+(измерить свидетеля ДО порогов — DRAPPER_DUMP_JUNCTION read-only
+дамп в fold_face_probe).
+
+Измеренный witness (forensics/s123/junc_recon_{spit,vulcan}.txt):
+- #31359 f(7,11) ×2 (Cone×Nurbs 105x2): h=(0.0011,0.0163) <
+  2×tol=0.0312, hub v320 = 4 грани, plane_dev=(5.3e-5, 3.6e-6) —
+  копланарны;
+- #10203 f(108,1118) (Torus×Plane): h=(0.0022,0.0212) < 2×tol=0.0316,
+  hub v4006 = 3 грани, plane_dev=(3.8e-15, 4.0e-16) — точно
+  копланарны (тот же класс, WINDING-FLIP сторона);
+- негативный контроль #10220 f(8,27): h=0.2627 ≫ 2×tol, plane_dev
+  3.0e-3, hub 2 — НЕ проходит ни один guard.
+
+Пороги (измеренные, не подобранные): thin max(h) < 2×eff_tol
+(метрика coil); coplanar max(d10,d01) < 0.1×eff_tol (целевые 5.3e-5 /
+3.8e-15 vs отвергнутый 3.0e-3 при tol 0.02 — полоса 10% разделяет
+с обеих сторон); hub ≥ 3 разных граней на вершине пары (2 = обычная
+смежность).
+
+surf_exempt::junction_sliver(h0,h1,eff_tol,Option<&JunctionWitness>)
++ JunctionWitness{hub_max,hub_vertex,plane_dev} + kill-switch
+DRAPPER_JUNCTION_SLIDER=0. Wired: fold_face_probe (после coil,
+census-префикс " JUNCTION-SLIDER", recon-дамп объединён с
+witness-вычислением) + angle_check (таблица колонка JunctSl, summary,
+outlier-вывод). Hub-подсчёт: ленивая per-BREP карта
+vertex→distinct-faces, детерминированный pick (sorted, first-max —
+урок s117-п.5).
+
+Гейты: unit 21/21 (7 новых junction + 14 прежних, все пороги —
+измеренные значения пар); Spit 11→9 (обе (7,11) закрыты), Vulcan
+48→47 (f(108,1118) закрыта); kill-switch DRAPPER_JUNCTION_SLIDER=0 ==
+pre-change классификация бит-идентично (Spit 2108/2108 census-строк
+IDENTICAL; Vulcan census IDENTICAL — варианс только в
+пре-существующих near-miss WARN-логах конвертера, недетерминизм
+которых воспроизводится и между base и s122-референсом: 170/196 vs
+188/195 — лог-шум, не классификация); angle_check
+brick/drill/trans/comp: Junction=0 везде, SubTol 1/917/167/121 ==
+base, brick FAIL 1 хроника нетронута.
+
+## п.2 — TRAVERSAL-ORDER loop assembly: Vulcan 47→34 (−13)
+
+Реализация второго кандидата s122 п.1: остаточный эмиссионный долг
+chain-режима — ПОРЯДОК ТОЧЕК ПОЛИГОНА. boundary_points собирал raw
+массивы as-is; реверсированное ребро (s122: 100% дрейф-рёбер #10220)
+заставляло полигон прыгать через bundle (0.73 out-and-back) →
+zipper/earcut reject → budget-capped CDT lattice = thin pairs.
+
+Правка (converter.rs collect_face_boundary_loops_cached): per-edge
+флаг outer_edge_rev (заполняется из s122-детекции reversed_edge,
+только под chain_dir_fix), сборка внешнего контура в порядке обхода —
+реверсированные буферы extend'ятся back-to-front (3D + UV
+согласованно). Область: только ribbon_chain_face (где реверс
+детектируется); все прочие грани бит-идентичны. Kill-switch:
+DRAPPER_LOOP_TRAVERSAL_ORDER=0.
+
+Гейты: Vulcan 47→34 REAL нетто −13 (ушло 15: f(25,25)×12 [FAT×5,
+SLIVER×6, WIND×1], f(27,27) FAT×2, f(8,27)×1 — та самая не-thin
+пара; пришло 2: f(28,28) FAT, f(27,27) SLIVER — все на #10220,
+клубок, ровно зона предсказания s122 п.1); Spit 9→9 IDENTICAL
+(spit-клубки #31360 без зигзага / уже COIL-exempt); kill-switch
+LOOP=0 == JS-прогон (п.1, оба JUNCTION=ON) бит-идентично: Spit
+415/415, Vulcan 1429/1429 census-строк; all_files 26/27 идентичны,
+единственный diff Vulcan (обоснованный: 177898→177582 tris, 20472→
+20083 bnd, 7.4→7.3% — чистый полигон лент); determinism 2 прогона
+новым бинарем 1347/1347 census-строк 0 diff; angle_check контроли
+бит-идентичны base (Junction=0, SubTol 1/917/167/121, статусы);
+suites: draper-mesh 449 passed, draper-step 255 passed (lib 169 + 26
+integration файлов), 0 failed.
+
+## Итоговый default baseline s123: Spit 9 / Vulcan 34 REAL
+
+Spit 9: #31356 f(5,5)/f(26,26)/f(3,3) ×2 инстанции (Cylinder/Nurbs
+same-face FAT — хроника s111+), #27977 f(65,65)/f(7,7) Torus + f(30,30)
+Nurbs SLIVER.
+Vulcan 34: #10203 SLIVER-семейство f(1100–1182) 23 пары (same-face
+Torus, хроническое семейство — s124 кандидат на атрибуцию), #10220
+остаток 5 (f(27,27)×2 FAT + f(27,27) SLIVER + f(28,28) FAT — runout/
+sawtooth-зона, кандидат sawtooth-zipper), #10204 f(3,3)×2, #10212
+f(8,8)/f(12,12)/f(19,19), #10203 f(45,45) WINDING.
+
+## Уроки
+1. Epoch-восстановление снова fetch-first: 168 коммитов вернулись
+   одним pull'ом; бит-идентичная baseline-валидация до любых правок
+   (Spit 11/11, Vulc 48/48 по составу пар) — обязательная преамбула.
+2. Пороги exemption'а из измерений, а не из плана: план s122 п.3
+   давал качественные критерии; дамп показал точные значения
+   (plane_dev 5.3e-5 vs 3.0e-3 при полосе 0.1×tol) и БОНУС-пару
+   #10203 f(108,1118) того же класса, которую план не упоминал.
+3. Traversal-order assembly — самый дешёвый фикс сессии: −13 REAL за
+   одну правку порядка сборки; реверс-детекция уже была (s122),
+   оставалось применить её к сборке полигона.
+4. Census kill-switch гейт сравнивать по ОТСОРТИРОВАННЫМ census-строкам
+   пар (порядок вывода — HashMap iteration, варьирует между
+   прогонами; near-miss WARN-числа конвертера тоже варьируют — лог,
+   не метрика).
+
+Next (s124): #10203 SLIVER-семейство f(11xx) атрибуция (23 пары,
+крупнейший остаток Vulcan); #10220 runout-остаток f(27,27)/f(28,28)
+(sawtooth-capable zipper — stack sweep / segmented); Spit #31356
+same-face FAT ×6 (хроника с s111 — переоценка после п.2-слоя).

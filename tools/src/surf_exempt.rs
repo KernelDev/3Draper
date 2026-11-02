@@ -710,6 +710,183 @@ pub fn coil_turn_weld(
     }
 }
 
+// ── session-123: junction-sliver (cross-face multi-face-hub
+// duplicate-coverage) exemption ─────────────────────────────────────
+//
+// s122-п.3 decoded the last #31359 REAL pair (f(7,11), Cone×Nurbs,
+// ×2 instances): BOTH triangles lie in ONE plane — the runout plane
+// where every coil winding meets the cone (a MULTI-FACE junction: the
+// pair's apex is a hub vertex of 4 faces; 20 junction-plane points
+// shared by 5 faces) — and the edge geometry is WELD-ASSEMBLED (the
+// ribbon's own runout points sit 0.003–0.016 off the junction curve,
+// within eff_tol 0.0156, and weld onto it). A thin coplanar duplicate
+// coverage whose knife-edge REAL exists only through the hub apex
+// (~1× tol): not representable at the merge tolerance, not debt. The
+// s123 recon measured the same class on Vulcan #10203 f(108,1118)
+// (Torus×Plane, plane_dev 3.8e-15, hub 3) and the negative controls:
+// #10220 f(8,27) is thick (h 0.2627 ≫ 2×tol) AND not coplanar
+// (3.0e-3) AND hub 2 — stays REAL.
+//
+// Callers gate on: cross-face (fid0 != fid1), >170°, non-subtol,
+// non-knife, non-coil, and the DRAPPER_JUNCTION_SLIDER=0 kill-switch.
+
+/// Witness facts for `junction_sliver`, computed by the caller from
+/// the merged mesh.
+pub struct JunctionWitness {
+    /// max over the pair's four vertices of the number of DISTINCT
+    /// faces whose triangles use that vertex (3+ = a multi-face hub —
+    /// the runout/junction structure; a plain two-face adjacency
+    /// scores 2)
+    pub hub_max: usize,
+    /// which vertex reaches `hub_max`
+    pub hub_vertex: u32,
+    /// two-sided plane deviations `[d10, d01]`: max distance of t1's
+    /// vertices from t0's plane and vice versa (None if either
+    /// triangle is degenerate)
+    pub plane_dev: Option<[f64; 2]>,
+}
+
+/// Evaluate the junction-sliver exemption. `h0`/`h1` are the apex
+/// heights of the two triangles over the shared edge (same metric as
+/// the sub-tol classification); `eff_tol` is the BREP effective
+/// tolerance (merge + every weld pass).
+pub fn junction_sliver(
+    h0: f64,
+    h1: f64,
+    eff_tol: f64,
+    w: Option<&JunctionWitness>,
+) -> (bool, String) {
+    // guard 1: thin by the ruler (both apexes under 2×eff_tol — the
+    // coil-turn metric; measured negative control: the #10220 f(8,27)
+    // fold at h=0.2627 vs 2×tol=0.0400 stays REAL)
+    if h0.max(h1) >= 2.0 * eff_tol {
+        return (
+            false,
+            format!("not-thin h={:.4}/{:.4} vs 2tol={:.4}", h0, h1, 2.0 * eff_tol),
+        );
+    }
+    let Some(w) = w else {
+        return (false, "no-witness".to_string());
+    };
+    // guard 2: coplanar — both triangles in ONE plane. Measured
+    // witnesses sit at 5.3e-5 (#31359, tol 0.0156) and 3.8e-15
+    // (#10203, tol 0.0158) while the rejected #10220 fold deviates
+    // 3.0e-3 with tol 0.0200; the 10%-of-ruler band separates the
+    // classes on both sides.
+    let Some([d10, d01]) = w.plane_dev else {
+        return (false, "no-plane".to_string());
+    };
+    if d10.max(d01) >= 0.1 * eff_tol {
+        return (
+            false,
+            format!(
+                "not-coplanar dev=({:.5},{:.5}) vs 0.1tol={:.5}",
+                d10,
+                d01,
+                0.1 * eff_tol
+            ),
+        );
+    }
+    // guard 3: multi-face hub — one of the pair's vertices is used by
+    // 3+ distinct faces (the junction/runout structure)
+    if w.hub_max < 3 {
+        return (false, format!("no-hub max={}", w.hub_max));
+    }
+    (
+        true,
+        format!(
+            " hub v{}×{}faces dev=({:.2e},{:.2e})",
+            w.hub_vertex, w.hub_max, d10, d01
+        ),
+    )
+}
+
+#[cfg(test)]
+mod junction_sliver_tests {
+    use super::*;
+
+    fn witness(hub: usize, d10: f64, d01: f64) -> JunctionWitness {
+        JunctionWitness {
+            hub_max: hub,
+            hub_vertex: 314,
+            plane_dev: Some([d10, d01]),
+        }
+    }
+
+    /// The #31359 f(7,11) pair (measured): thin (0.0163 < 2×0.0156),
+    /// coplanar (5.3e-5 / 3.6e-6), hub 4 — exempt.
+    #[test]
+    fn accepts_31359_pair() {
+        let w = witness(4, 5.33e-5, 3.63e-6);
+        let (ok, why) = junction_sliver(0.0011, 0.0163, 0.0156, Some(&w));
+        assert!(ok, "why={why}");
+        assert!(why.contains("hub v314×4faces"));
+    }
+
+    /// The #10203 f(108,1118) pair (measured): thin (0.0212 <
+    /// 2×0.0158), exactly coplanar (3.8e-15 / 4.0e-16), hub 3 — exempt.
+    #[test]
+    fn accepts_10203_pair() {
+        let w = witness(3, 3.81e-15, 4.04e-16);
+        let (ok, why) = junction_sliver(0.0022, 0.0212, 0.0158, Some(&w));
+        assert!(ok, "why={why}");
+    }
+
+    /// The #10220 f(8,27) negative control (measured): h=0.2627 ≫
+    /// 2×tol=0.0400 — stays REAL (not-thin fires before the plane /
+    /// hub guards even run).
+    #[test]
+    fn rejects_thick_fold() {
+        let w = witness(2, 1.9e-5, 3.05e-3);
+        let (ok, why) = junction_sliver(0.2627, 0.0017, 0.0200, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("not-thin"));
+    }
+
+    /// A thin coplanar pair WITHOUT a hub (plain two-face adjacency,
+    /// hub 2) — the coil-turn class already owns same-face pairs, and
+    /// a cross-face pair without the junction structure stays REAL.
+    #[test]
+    fn rejects_no_hub() {
+        let w = witness(2, 1e-6, 1e-6);
+        let (ok, why) = junction_sliver(0.001, 0.002, 0.0156, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("no-hub"));
+    }
+
+    /// A thin hub pair that is NOT coplanar (a genuine fold-back —
+    /// the #10220 plane deviation 3.0e-3 vs 0.1×tol band) — stays
+    /// REAL.
+    #[test]
+    fn rejects_not_coplanar() {
+        let w = witness(4, 1.9e-5, 3.05e-3);
+        let (ok, why) = junction_sliver(0.0011, 0.0163, 0.0200, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("not-coplanar"));
+    }
+
+    /// Degenerate triangle → no plane → not exempt.
+    #[test]
+    fn rejects_no_plane() {
+        let w = JunctionWitness {
+            hub_max: 4,
+            hub_vertex: 314,
+            plane_dev: None,
+        };
+        let (ok, why) = junction_sliver(0.0011, 0.0163, 0.0156, Some(&w));
+        assert!(!ok);
+        assert_eq!(why, "no-plane");
+    }
+
+    /// Missing witness (e.g. mesh without face ids) — not exempt.
+    #[test]
+    fn rejects_no_witness() {
+        let (ok, why) = junction_sliver(0.0011, 0.0163, 0.0156, None);
+        assert!(!ok);
+        assert_eq!(why, "no-witness");
+    }
+}
+
 #[cfg(test)]
 mod coil_turn_weld_tests {
     use super::*;
