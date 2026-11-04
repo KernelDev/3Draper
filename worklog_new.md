@@ -18969,3 +18969,123 @@ Next (s124): #10203 SLIVER-семейство f(11xx) атрибуция (23 п�
 крупнейший остаток Vulcan); #10220 runout-остаток f(27,27)/f(28,28)
 (sawtooth-capable zipper — stack sweep / segmented); Spit #31356
 same-face FAT ×6 (хроника с s111 — переоценка после п.2-слоя).
+
+# Worklog — s124: THIN-FACE census exemption (п.1 #10203 f(11xx) атрибуция + п.3 Spit-переоценка) (2026-11-04, двадцать четвёртая STEP-сессия)
+
+Baseline: commit `bf513f4` (после s123). Вход: Spit 9 / Vulcan 34 REAL.
+
+## п.0 — эпоха-восстановление (fetch-first, протокол s121-п.5/s123-п.0)
+
+Sandbox восстановлен из бэкапа, предшествующего ВСЕМУ workstream'у:
+локальный HEAD был `377910b` (22-я сессия). `git fetch origin` принёс
+`377910b..bf513f4` (169 коммитов s116–s123 — всё было запушено),
+`pull --ff-only` восстановил полностью. Проверки выживания кода:
+winding_deflip (converter.rs/watertight.rs), GLOBAL_STEPS reset
+(parametric_domain.rs HAMILTONIAN_STEP_BUDGET=80M + lib.rs re-export +
+converter.rs new_with_params), DRAPPER_RIBBON_CHAIN — все на месте.
+Сборка 12m57s (307 крейтов); baseline-валидация: fold_face_probe
+Spit 415/415 + Vulcan 1347/1347 census-строк бит-идентичны
+forensics/s123/to_{spit,vulcan}.txt (Spit 9 / Vulcan 34 по составу).
+
+## п.1 — #10203 f(11xx): INHERENTLY-THIN CRESCENT, THIN-FACE exemption: Vulcan 34→10
+
+Атрибуция по методологии s121-п.1 (измерить свидетеля ДО порогов).
+
+Структура (DRAPPER_DUMP_PAIR_VERTS + два новых read-only дампа:
+DRAPPER_DUMP_PLANAR_POLY — точный production-полигон планарного пути
+после 1e-6 dedup/inner-wire-swap/CCW-нормализации, и
+DRAPPER_DUMP_FACE_MESH — per-face эмиссия до merge; оба с _FILTER по
+метке brep{b}_f{face}_{type}):
+
+- ВСЕ 24 пары — инстансы ОДНОЙ грани (brep_idx=14 NAUO_29530, face id
+  шаг 3: 1100..1182): Плоский СЕРП, полигон 29 вершин: короткая дуга
+  p0..p7 (шаг 0.016) → радиальный прыжок p7→p8 (0.3325) → длинная
+  дуга p9..p27 (шаг 0.016-0.017) → замыкание p28→p0 (0.0209).
+  Perimeter 0.785, площадь 0.0209, почти-дубликат p8→p9 (0.0004).
+- Эмиссия ear_clip: каскад игл вдоль дуг против длинных хорд
+  (t1 (6,7,8) h=0.0026 — сагитта дуги; t2/t3 против хорд p5-p8/p4-p8),
+  игла на дубликате t4 (8,9,10) h=0.0003, мост t5 (4,8,10), веер от
+  p28 (t11-t25) и кап-иглы. Часть пар — корректные бабочки, часть —
+  реальные same-side наложения (t8/t9 на хорде p2-p11, t10/t11 на
+  p1-p12).
+- КЛЮЧЕВОЙ ФАКТ: шаг дискретизации дуг 0.016 ≈ eff_tol=0.0158 —
+  игольчатые высоты пар (0.0159/0.0160 = 1.01×tol) живут РОВНО на
+  границе разрешения; широкая кап-пара f1118 h=0.0360 = 2.28×tol.
+- Сигнатуры идентичны на всех 24 гранях (areas=(0.0001,0.0020) /
+  (0.0020,0.0002), h=(0.0007,0.0160)/(0.0159,0.0014)) — один
+  эмиссионный паттерн на инстансированной геометрии.
+- Патч грани в merged-меше: 24 треугольника, mean width w=2A/P
+  = 2×0.020927/0.7847 = 0.0533 = 3.38×tol.
+
+ВЕРДИКТ: грань ИЗНАЧАЛЬНО тонкая (серп шириной 0.02-0.034 = 1.3-2.1×
+tol при периметре 0.79) — ЛЮБАЯ триангуляция есть цепь тонких
+треугольников; пары — геометрия уровня разрешения (плоский аналог
+COIL-TURN), а не эмиссионный долг. Фикс эмиссии (crescent-zipper)
+оставил бы те же тонкие пары (CURVED-180/sub-tol) — census-exemption
+единственная честная диспозиция.
+
+THIN-FACE exemption (surf_exempt::thin_face + ThinFaceWitness{width,
+area, perim, tris}; wired fold_face_probe (lazy per-BREP face→patch
+metrics карта, census-префикс " THIN-FACE", строка в summary) +
+angle_check (колонка ThinFace, summary, outlier-флаг)). Гарды из
+измерений:
+- thin PAIR: max(h) < 3×eff_tol (семейство ≤2.28; отвергнутые
+  #10212 f(8,8)/f(12,12) fat 3.8, #31356 f(5,5) 5.45, f(26,26) 14.5);
+- thin FACE: patch mean width 2A/P < 4×eff_tol (семейство 3.38;
+  h-проходящие негативы: #10204 f(3,3) 5.47, #10212 f(19,19) 27.7,
+  #10220 f(27,27) 40.9).
+Kill-switch: DRAPPER_THIN_FACE_EXEMPT=0.
+
+## п.3 — Spit-переоценка (план s123): 4 из 9 — тот же класс, Spit 9→6
+
+Измерение THINFACE-witness на Spit (forensics/s124/tf_spit.txt):
+- #31356 f(3,3) Nurbs(deg=2/3, cps=3x60) ×2 инстанции: w/tol=2.23,
+  h/tol=1.0 — тонкая Nurbs-полоса, ТОТ ЖЕ класс → THIN-FACE;
+- #27977 f(30,30) Nurbs(4x7)!fwd: w/tol=1.30, h/tol=1.43 — волнистая
+  тонкая лента (s121 «thin WITH witnesses, stays REAL» — теперь у
+  класса есть прямой witness: сама грань тоньше 1.5× разрешения) →
+  THIN-FACE;
+- #31356 f(5,5)/f(26,26) Cylinder FAT (w/tol 4.35/4.44, h/tol
+  5.45/14.5) и #27977 f(7,7)/f(65,65) Torus FAT (w/tol 106/39) —
+  жирные пары на толстых гранях = долг покрытия → остаются REAL.
+
+## Гейты
+
+- Vulcan 34→10 REAL (24 THIN-FACE; остаток точно негативные контроли:
+  #10220 f(27,27)×2FAT+SLIVER + f(28,28)FAT, #10204 f(3,3)×2, #10212
+  f(8,8)/f(12,12)/f(19,19), #10203 f(45,45)); Spit 9→6 (3 THIN-FACE).
+- Kill-switch DRAPPER_THIN_FACE_EXEMPT=0 == pre-change классификация
+  бит-идентично: Spit 415/415, Vulcan 1347/1347 census-строк.
+- all_files 27/27 БИТ-ИДЕНТИЧНЫ s123 (to_vulcan: 177582 tris, 20083
+  bnd, 7.3%) — правки конвертера env-гейтированы (дампы), меш-путь
+  нетронут.
+- angle_check brick/drill/trans/comp: SubTol 1/917/167/121 == s123,
+  JunctSl=0, ThinFace=0 (класс на контролях инертен), brick FAIL 1
+  хроника нетронута; Spit/Vulcan: ThinFace 3/24 == census.
+- determinism: 2 прогона Vulcan новым бинарем 1347/1347 0 diff.
+- unit: surf_exempt 30/30 (9 новых thin_face, пороги измеренные,
+  включая band-boundaries тест 2.9/3.9× проходит, 3.1/4.1× нет);
+  draper-mesh 449; draper-step 255 (lib 169 + все 26 интеграционных файлов) 0 fail.
+- OFF-legs (s98/s106) не гонялись: census-only правка, новые
+  mesh-path выключатели не добавлялись (рассуждение как в s123).
+
+## Уроки
+1. Эпоха-восстановление в третий раз: 169 коммитов одним fetch —
+   «всё было запушено» остаётся единственной гарантией.
+2. Same-face thin пары на инстансированной геометрии имеют
+   ИДЕНТИЧНЫЕ сигнатуры (areas/h до 4 знака) — один атрибуционный
+   анализ покрывает всё семейство.
+3. Mean width 2A/P патча — дешёвый и разделяющий witness «изначально
+   тонкой грани»; полосы: pair 2.28→3.8, face 3.38→5.47 (среди
+   h-проходящих).
+4. Плоский серп = планарный аналог coil-ленты: перед проектированием
+   эмиссионного фикса для тонкой геометрии спроси, останутся ли пары
+   тонкими ПОСЛЕ фикса (здесь — да → exemption, не zipper).
+
+Next (s125): п.2 #10220 runout-остаток f(27,27)×2FAT+SLIVER +
+f(28,28)FAT — sawtooth-capable zipper (stack sweep / segmented: нижний
+рельс f27 чередует rail/seam уровни на 1-2 витка = mid-chain reflex,
+строгая монотонность s119 его отвергает); кандидаты атрибуции новых
+f(28,28)/f(27,27)SL после traversal-order; #10212 f(8,8)/f(12,12)
+Plane WINDING-FLIP FAT (w/tol=1.54 — тонкая грань, жирная пара —
+долг покрытия, отдельный класс); #10204 f(3,3) Cylinder ×2.

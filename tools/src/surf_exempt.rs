@@ -801,6 +801,89 @@ pub fn junction_sliver(
     )
 }
 
+/// session-124: THIN-FACE — a same-face >170° pair on an INHERENTLY
+/// THIN face (patch mean width 2A/P under 4×eff_tol). Any
+/// triangulation of a legitimately thin face is a chain of thin
+/// triangles: the pairs are resolution-level GEOMETRY (the feature is
+/// a few mesh-resolution cells wide), not emission debt — the planar
+/// crescent analogue of the coil-turn class.
+///
+/// Measured family (Vulcan #10203 f(11xx), 24 pairs, all instanced
+/// copies of one crescent face: short arc → 0.33 radial jump → long
+/// arc → 0.021 cap, arcs discretized at 0.016 ≈ tol): w=0.0533 =
+/// 3.38×tol=0.0158, pair h=(0.0007,0.0160) fold / (0.0159,0.0014)
+/// winding / (0.0360,0.0012) f1118 cap — max h/tol 1.01–2.28.
+/// Measured re-evaluation positives (Spit): #31356 f(3,3) thin Nurbs
+/// strip 3×60 cps (w/tol=2.23, h/tol 1.0), #27977 f(30,30) wiggly
+/// ribbon (w/tol=1.30, h/tol 1.43) — the s124-п.3 chronic classes.
+/// Measured negatives: #10212 f(8,8)/f(12,12) fat pairs (w/tol=1.54
+/// but max h/tol=3.8 — fat pairs on a thin face are coverage debt),
+/// #10204 f(3,3) (w/tol=5.47, h/tol 2.22), #10220 runout f(27,27)
+/// (w/tol=40.9), #31356 f(5,5)/f(26,26) FAT (w/tol 4.35/4.44, h/tol
+/// 5.45/14.5), #10203 f(45,45) Sphere (w/tol=33.3).
+///
+/// Kill-switch: DRAPPER_THIN_FACE_EXEMPT=0. Not debt.
+pub struct ThinFaceWitness {
+    /// Patch mean width 2A/P of the face's own triangle patch in the
+    /// merged mesh (instance frame).
+    pub width: f64,
+    /// Patch area (diagnostics).
+    pub area: f64,
+    /// Patch boundary perimeter (diagnostics).
+    pub perim: f64,
+    /// Patch triangle count (diagnostics).
+    pub tris: usize,
+}
+
+pub fn thin_face(
+    h0: f64,
+    h1: f64,
+    eff_tol: f64,
+    w: Option<&ThinFaceWitness>,
+) -> (bool, String) {
+    // guard 1: thin PAIR — the thicker apex under 3×eff_tol. Measured
+    // family max 2.28× (#10203 f1118 winding cap h=0.0360 vs
+    // tol=0.0158); rejected fat pairs at 3.8× (#10212 f(8,8)
+    // h=0.0614), 5.45× (#31356 f(5,5)), 14.5× (f(26,26)).
+    if h0.max(h1) >= 3.0 * eff_tol {
+        return (
+            false,
+            format!(
+                "not-thin-pair h={:.4}/{:.4} vs 3tol={:.4}",
+                h0,
+                h1,
+                3.0 * eff_tol
+            ),
+        );
+    }
+    let Some(w) = w else {
+        return (false, "no-witness".to_string());
+    };
+    // guard 2: thin FACE — the patch mean width under 4×eff_tol: the
+    // whole feature is a few resolution cells wide, so its interior
+    // adjacency pairs cannot be resolved at this tolerance. Measured
+    // family 3.38× (#10203 crescent) and 2.23×/1.30× (Spit strips);
+    // h-guard-passing negatives at 5.47× (#10204 f(3,3)), 27.7×
+    // (#10212 f(19,19)), 40.9× (#10220 f(27,27)).
+    if !(w.width < 4.0 * eff_tol) {
+        return (
+            false,
+            format!(
+                "not-thin-face w={:.4} vs 4tol={:.4}",
+                w.width,
+                4.0 * eff_tol
+            ),
+        );
+    }
+    (
+        true,
+        format!(
+            " w={:.4}<4tol A={:.5} P={:.3} tris={}",
+            w.width, w.area, w.perim, w.tris
+        ),
+    )
+}
+
 #[cfg(test)]
 mod junction_sliver_tests {
     use super::*;
@@ -1149,5 +1232,121 @@ mod knife_fin_tests {
         let (ok, why) = knife_fin(&verts, &tri0, &tri1, 0.001);
         assert!(!ok, "must reject: {}", why);
         assert!(why.contains("degenerate"), "reason: {}", why);
+    }
+}
+
+#[cfg(test)]
+mod thin_face_tests {
+    use super::*;
+
+    fn witness(width: f64, area: f64, perim: f64, tris: usize) -> ThinFaceWitness {
+        ThinFaceWitness {
+            width,
+            area,
+            perim,
+            tris,
+        }
+    }
+
+    /// The #10203 f(11xx) crescent family (measured): fold pairs
+    /// h=(0.0007,0.0160) with w=0.0533 vs tol=0.0158 (w/tol=3.38) —
+    /// exempt.
+    #[test]
+    fn accepts_10203_crescent_fold() {
+        let w = witness(0.0533, 0.020927, 0.7847, 24);
+        let (ok, why) = thin_face(0.0007, 0.0160, 0.0158, Some(&w));
+        assert!(ok, "why={why}");
+        assert!(why.contains("w=0.0533"));
+    }
+
+    /// The family winding pairs (measured): h=(0.0159,0.0014) — the
+    /// arc-discretization needle level ≈ 1.0×tol — exempt.
+    #[test]
+    fn accepts_10203_crescent_winding() {
+        let w = witness(0.0533, 0.020927, 0.7847, 24);
+        let (ok, _why) = thin_face(0.0159, 0.0014, 0.0158, Some(&w));
+        assert!(ok);
+    }
+
+    /// The f1118 wide-cap pair (measured): h=(0.0360,0.0012) = 2.28×
+    /// tol — still under the 3× pair band — exempt.
+    #[test]
+    fn accepts_10203_f1118_cap() {
+        let w = witness(0.0533, 0.020927, 0.7847, 24);
+        let (ok, _why) = thin_face(0.0360, 0.0012, 0.0158, Some(&w));
+        assert!(ok);
+    }
+
+    /// The Spit re-evaluation positives (measured): #31356 f(3,3)
+    /// thin Nurbs strip (w/tol=2.23, h/tol 1.0) and #27977 f(30,30)
+    /// wiggly ribbon (w/tol=1.30, h/tol 1.43) — the same class.
+    #[test]
+    fn accepts_spit_thin_strips() {
+        let w1 = witness(0.0434, 0.053638, 2.4726, 204); // 31356 f3
+        let (ok1, _) = thin_face(0.0194, 0.0011, 0.0194, Some(&w1));
+        assert!(ok1);
+        let w2 = witness(0.0217, 0.747889, 68.8081, 181); // 27977 f30
+        let (ok2, _) = thin_face(0.0239, 0.0027, 0.0167, Some(&w2));
+        assert!(ok2);
+    }
+
+    /// Negative control #10212 f(8,8)/f(12,12) (measured): the FACE
+    /// is thinner than the family (w/tol=1.54) but the pair is FAT
+    /// (h=0.0614 = 3.8×tol) — fat pairs on a thin face are coverage
+    /// debt, stays REAL.
+    #[test]
+    fn rejects_fat_pair_on_thin_face() {
+        let w = witness(0.0249, 0.106873, 8.6006, 140);
+        let (ok, why) = thin_face(0.0614, 0.0607, 0.0161, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("not-thin-pair"));
+    }
+
+    /// Negative control #10204 f(3,3) (measured): thin pair
+    /// (h/tol 2.22 passes the pair guard) but the face is thick
+    /// (w/tol=5.47) — a local fold on a real face, stays REAL.
+    #[test]
+    fn rejects_thin_pair_on_thick_face() {
+        let w = witness(0.0775, 0.881050, 22.7259, 382);
+        let (ok, why) = thin_face(0.0315, 0.0081, 0.0142, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("not-thin-face"));
+    }
+
+    /// Negative control #31356 f(5,5) FAT (measured): fails BOTH
+    /// guards (h/tol 5.45, w/tol 4.35) — the pair guard fires first.
+    #[test]
+    fn rejects_31356_fat_cylinder() {
+        let w = witness(0.0845, 2.947257, 69.7453, 917);
+        let (ok, why) = thin_face(0.0120, 0.1058, 0.0194, Some(&w));
+        assert!(!ok);
+        assert!(why.starts_with("not-thin-pair"));
+    }
+
+    /// Boundary tightness: the guard band sits between the family
+    /// (w/tol 3.38, max h/tol 2.28) and the nearest negatives
+    /// (h 3.8×, w 5.47×) — a pair at 2.9×/3.9× must still pass, at
+    /// 3.1×/4.1× must fail (documents the band, not a coincidence).
+    #[test]
+    fn band_boundaries() {
+        let w_ok = witness(3.9, 1.0, 0.5, 10); // w = 3.9×tol
+        let (ok, _) = thin_face(2.9, 0.001, 1.0, Some(&w_ok));
+        assert!(ok, "inside the band must pass");
+        let w_out = witness(4.1, 1.0, 0.5, 10); // w = 4.1×tol
+        let (ok2, why2) = thin_face(2.9, 0.001, 1.0, Some(&w_out));
+        assert!(!ok2);
+        assert!(why2.starts_with("not-thin-face"));
+        let (ok3, why3) = thin_face(3.1, 0.001, 1.0, Some(&w_ok));
+        assert!(!ok3);
+        assert!(why3.starts_with("not-thin-pair"));
+    }
+
+    /// Missing witness (e.g. face id absent from the patch map) —
+    /// not exempt.
+    #[test]
+    fn rejects_no_witness() {
+        let (ok, why) = thin_face(0.0160, 0.0007, 0.0158, None);
+        assert!(!ok);
+        assert_eq!(why, "no-witness");
     }
 }

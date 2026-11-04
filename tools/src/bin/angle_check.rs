@@ -158,14 +158,15 @@ fn main() {
     let mut total_knife = 0; // >170° thin-wall pinch fins, two offset copies across a resolvable gap (session-94)
     let mut total_coil = 0; // >170° coil-turn-weld folds, unrepresentable at the merge tolerance (session-121)
     let mut total_junction = 0; // >170° cross-face junction-sliver duplicate coverage, multi-face hub (session-123)
+    let mut total_thinface = 0; // >170° same-face pairs on inherently thin faces (session-124)
 
-    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, knife>170, coil>170, junction>170, max_nonexempt)
-    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, usize, usize, usize, f64)> = Vec::new();
+    // (name, interior, sharp, extreme, max_angle, exempt>170, subtol>170, knife>170, coil>170, junction>170, thinface>170, max_nonexempt)
+    let mut per_brep_stats: Vec<(String, usize, usize, usize, f64, usize, usize, usize, usize, usize, usize, f64)> = Vec::new();
 
-    println!("\n{:-<139}", "");
-    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
-        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "KnifeFin", "CoilTurn", "JunctSl", "Outliers");
-    println!("{:-<139}", "");
+    println!("\n{:-<148}", "");
+    println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
+        "#", "Name", "Interior", "Sharp>60", "Extreme>90", "MaxAngle°", "Exempt", "SubTol", "KnifeFin", "CoilTurn", "JunctSl", "ThinFace", "Outliers");
+    println!("{:-<148}", "");
 
     for (i, p) in pending.iter().enumerate() {
         if let Some(inst) = ctx.triangulate_pending(p) {
@@ -226,6 +227,7 @@ fn main() {
             let mut knife_count = 0; // >170° thin-wall pinch fins (session-94)
             let mut coil_count = 0; // >170° coil-turn-weld folds (session-121)
             let mut junction_count = 0; // >170° cross-face junction-sliver pairs (session-123)
+            let mut thinface_count = 0; // >170° same-face pairs on inherently thin faces (session-124)
             let mut max_angle_nonexempt: f64 = 0.0;
             // session-121: per-(instance, face) cache of the rim polyline
             // far-loop min distance — the RIM-GAP witness input.
@@ -233,7 +235,11 @@ fn main() {
             // session-123: lazy per-BREP vertex → distinct-face-ids map
             // (the HUB witness input for the junction-sliver exemption).
             let mut vertex_faces: Option<HashMap<u32, std::collections::HashSet<u64>>> = None;
-            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, bool, bool, bool, String)> = Vec::new();
+            // session-124: lazy per-BREP face → patch metrics map
+            // (area, boundary perimeter, tri count) — the THIN-FACE
+            // witness input.
+            let mut face_patch: Option<HashMap<u64, (f64, f64, usize)>> = None;
+            let mut outlier_edges: Vec<(u32, u32, f64, [u32; 3], [u32; 3], u64, u64, bool, bool, bool, bool, bool, bool, String)> = Vec::new();
 
             for (edge, tris) in &edge_to_tris {
                 if tris.len() != 2 { continue; }
@@ -258,6 +264,7 @@ fn main() {
                         let mut knife = false;
                         let mut coil = false;
                         let mut junction = false;
+                        let mut thinface = false;
                         let mut reason = String::new();
                         if angle_deg > 170.0 {
                             let fid0 = face_ids.and_then(|ids| ids.get(tris[0]).copied()).unwrap_or(0);
@@ -548,7 +555,121 @@ fn main() {
                                         junction_count += 1;
                                     }
                                 }
-                                if !subtol && !knife && !coil && !junction {
+                                if !subtol && !knife && !coil && !junction && fid0 == fid1
+                                    && std::env::var("DRAPPER_THIN_FACE_EXEMPT").as_deref()
+                                        != Ok("0")
+                                {
+                                    // session-124: THIN-FACE — a same-face
+                                    // >170° pair on an INHERENTLY THIN face
+                                    // (patch mean width 2A/P under 4×eff_tol,
+                                    // pair max h under 3×eff_tol): any
+                                    // triangulation of a legitimately thin
+                                    // face is a chain of thin triangles —
+                                    // resolution-level geometry, not debt (the
+                                    // planar crescent analogue of the
+                                    // coil-turn class; the #10203 f(11xx)
+                                    // family + #31356 f(3,3) / #27977
+                                    // f(30,30)).
+                                    if face_patch.is_none() {
+                                        let mut tri_by_face: HashMap<u64, Vec<usize>> =
+                                            HashMap::new();
+                                        for (ti, tri) in mesh.triangles.iter().enumerate() {
+                                            let fid = face_ids
+                                                .and_then(|ids| ids.get(ti).copied())
+                                                .unwrap_or(u64::MAX);
+                                            tri_by_face.entry(fid).or_default().push(ti);
+                                        }
+                                        let mut fp: HashMap<u64, (f64, f64, usize)> =
+                                            HashMap::new();
+                                        for (fid, tis) in tri_by_face {
+                                            let mut area = 0.0f64;
+                                            let mut edge_count: HashMap<(u32, u32), u32> =
+                                                HashMap::new();
+                                            for &ti in &tis {
+                                                let tri = &mesh.triangles[ti];
+                                                let (a, b, c) = (
+                                                    &mesh.vertices[tri[0] as usize],
+                                                    &mesh.vertices[tri[1] as usize],
+                                                    &mesh.vertices[tri[2] as usize],
+                                                );
+                                                let e1 = [
+                                                    b.x - a.x,
+                                                    b.y - a.y,
+                                                    b.z - a.z,
+                                                ];
+                                                let e2 = [
+                                                    c.x - a.x,
+                                                    c.y - a.y,
+                                                    c.z - a.z,
+                                                ];
+                                                let n = [
+                                                    e1[1] * e2[2] - e1[2] * e2[1],
+                                                    e1[2] * e2[0] - e1[0] * e2[2],
+                                                    e1[0] * e2[1] - e1[1] * e2[0],
+                                                ];
+                                                let l = (n[0] * n[0] + n[1] * n[1]
+                                                    + n[2] * n[2])
+                                                    .sqrt();
+                                                if l > 1e-15 {
+                                                    area += 0.5 * l;
+                                                }
+                                                for (v0, v1) in [
+                                                    (tri[0], tri[1]),
+                                                    (tri[1], tri[2]),
+                                                    (tri[2], tri[0]),
+                                                ] {
+                                                    let key = if v0 < v1 {
+                                                        (v0, v1)
+                                                    } else {
+                                                        (v1, v0)
+                                                    };
+                                                    *edge_count.entry(key).or_insert(0) += 1;
+                                                }
+                                            }
+                                            let mut perim = 0.0f64;
+                                            for (key, cnt) in edge_count {
+                                                if cnt == 1 {
+                                                    let (p, q) = (
+                                                        &mesh.vertices[key.0 as usize],
+                                                        &mesh.vertices[key.1 as usize],
+                                                    );
+                                                    perim += ((p.x - q.x).powi(2)
+                                                        + (p.y - q.y).powi(2)
+                                                        + (p.z - q.z).powi(2))
+                                                    .sqrt();
+                                                }
+                                            }
+                                            fp.insert(fid, (area, perim, tis.len()));
+                                        }
+                                        face_patch = Some(fp);
+                                    }
+                                    let fp = face_patch.as_ref().unwrap();
+                                    if let Some(&(area_f, perim_f, ntris_f)) = fp.get(&fid0) {
+                                        let w = if perim_f > 1e-12 {
+                                            2.0 * area_f / perim_f
+                                        } else {
+                                            0.0
+                                        };
+                                        let w = surf_exempt::ThinFaceWitness {
+                                            width: w,
+                                            area: area_f,
+                                            perim: perim_f,
+                                            tris: ntris_f,
+                                        };
+                                        let (tf, why) = surf_exempt::thin_face(
+                                            h0,
+                                            h1,
+                                            tol,
+                                            Some(&w),
+                                        );
+                                        if tf {
+                                            thinface = true;
+                                            reason = why;
+                                            thinface_count += 1;
+                                        }
+                                    }
+                                }
+                                if !subtol && !knife && !coil && !junction && !thinface {
                                     max_angle_nonexempt = max_angle_nonexempt.max(angle_deg);
                                 }
                             } else {
@@ -563,7 +684,7 @@ fn main() {
                             mesh.triangles[tris[0]],
                             mesh.triangles[tris[1]],
                             fid0, fid1,
-                            exempt, subtol, knife, coil, junction, reason,
+                            exempt, subtol, knife, coil, junction, thinface, reason,
                         ));
                     }
                 }
@@ -578,6 +699,7 @@ fn main() {
             total_knife += knife_count;
             total_coil += coil_count;
             total_junction += junction_count;
+            total_thinface += thinface_count;
 
             // Use a simple outlier criterion: angles beyond 3σ from the mean
             let mean = if !angles.is_empty() {
@@ -591,12 +713,12 @@ fn main() {
             let outlier_count = angles.iter().filter(|&&a| a > threshold && a > 30.0).count();
             total_outlier_angles += outlier_count;
 
-            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, knife_count, coil_count, junction_count, max_angle_nonexempt));
+            per_brep_stats.push((inst.name.clone(), interior_count, sharp_count, extreme_count, max_angle, exempt_count, subtol_count, knife_count, coil_count, junction_count, thinface_count, max_angle_nonexempt));
 
             let is_wt = interior_count > 0 && extreme_count == 0;
             if is_wt { total_watertight += 1; } else { total_not_watertight += 1; }
 
-            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
+            println!("{:>4} {:>34} {:>10} {:>10} {:>10} {:>10.2} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>12}",
                 i + 1,
                 inst.name,
                 interior_count,
@@ -608,13 +730,14 @@ fn main() {
                 knife_count,
                 coil_count,
                 junction_count,
+                thinface_count,
                 outlier_count,
             );
 
             // Print details for worst outliers
             if !outlier_edges.is_empty() {
                 outlier_edges.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, knife, coil, junction, reason) in outlier_edges.iter().take(5) {
+                for (v0, v1, ang, t0, t1, fid0, fid1, exempt, subtol, knife, coil, junction, thinface, reason) in outlier_edges.iter().take(5) {
                     let p0 = &mesh.vertices[*v0 as usize];
                     let p1 = &mesh.vertices[*v1 as usize];
                     let mid = Point3d::new(
@@ -638,6 +761,8 @@ fn main() {
                             format!(" [coil-turn weld: {}]", reason)
                         } else if *junction {
                             format!(" [junction-sliver: {}]", reason)
+                        } else if *thinface {
+                            format!(" [thin-face: {}]", reason)
                         } else {
                             " *** BAD ***".to_string()
                         }
@@ -670,12 +795,13 @@ fn main() {
     println!("  Knife-fin pinch:        {} (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)", total_knife);
     println!("  Coil-turn weld:         {} (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)", total_coil);
     println!("  Junction-sliver:        {} (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)", total_junction);
+    println!("  Thin-face:              {} (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)", total_thinface);
 
     // Count truly extreme angles (>170°) NOT justified by surface
     // geometry — these are actual bugs (back-to-back triangles with
     // opposite normals on non-tangent surfaces)
     let mut truly_extreme = 0;
-    for (_, _, _, _, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
+    for (_, _, _, _, _, _, _, _, _, _, _, max_nonexempt) in &per_brep_stats {
         if *max_nonexempt > 170.0 { truly_extreme += 1; }
     }
 

@@ -6291,6 +6291,41 @@ impl<'a> StepConverter<'a> {
             let face_mesh = self.surface_to_mesh_cached(face_data, &params, bbox, &mut edge_cache);
             draper_mesh::parametric_domain::clear_current_face_label();
 
+            // ── s124 recon hook: per-face emitted mesh (read-only) ──────
+            // DRAPPER_DUMP_FACE_MESH=<dir> (+ optional _FILTER=<label
+            // substring>): the emitted per-face mesh (vertices + triangle
+            // indices in EMISSION order, before merge/weld) for offline
+            // needle-pair provenance against the merged census (the
+            // #10203 f(11xx) same-face Plane thin-pair family).
+            if let Ok(dir) = std::env::var("DRAPPER_DUMP_FACE_MESH") {
+                let label = format!("brep{}_f{}_{}", brep_id, face_id, surface_type);
+                let filter = std::env::var("DRAPPER_DUMP_FACE_MESH_FILTER")
+                    .unwrap_or_default();
+                if filter.is_empty() || label.contains(&filter) {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = format!("{}/mesh_{}.txt", dir, label);
+                    let mut s = String::with_capacity(1 << 15);
+                    s.push_str(&format!(
+                        "# FACEMESH label={} step={} fwd={} verts={} tris={}\n",
+                        label,
+                        step_face_id,
+                        face_data.forward,
+                        face_mesh.vertices.len(),
+                        face_mesh.triangles.len()
+                    ));
+                    for (vi, v) in face_mesh.vertices.iter().enumerate() {
+                        s.push_str(&format!(
+                            "v {:6} {:.9} {:.9} {:.9}\n",
+                            vi, v.x, v.y, v.z
+                        ));
+                    }
+                    for (ti, t) in face_mesh.triangles.iter().enumerate() {
+                        s.push_str(&format!("t {:6} {} {} {}\n", ti, t[0], t[1], t[2]));
+                    }
+                    let _ = std::fs::write(&path, s);
+                }
+            }
+
             // ── s102 emission audit hook ────────────────────────────────
             // DRAPPER_UV_AUDIT_FACE="2442,2429" selects STEP faces;
             // DRAPPER_UV_AUDIT_OUT (default /tmp/s102) receives
@@ -15217,6 +15252,53 @@ impl<'a> StepConverter<'a> {
             // neighbors nets REAL +18 (see thin_strip_zipper doc) —
             // so the gate is opt-in (DRAPPER_THIN_STRIP_ZIPPER=1)
             // until the Nurbs fan class is fixed (s77).
+            //
+            // ── s124 recon: dump the FINAL planar polygon (read-only) ──
+            // DRAPPER_DUMP_PLANAR_POLY=<dir> (+ optional _FILTER=<label
+            // substring>): the exact outer polygon handed to the
+            // triangulator (post 1e-6 dedup, post inner-wire swap, post
+            // CCW normalization) with full 9-decimal precision, for
+            // offline needle-pair provenance (the #10203 f(11xx)
+            // same-face Plane thin-pair family).
+            if let Ok(dir) = std::env::var("DRAPPER_DUMP_PLANAR_POLY") {
+                let label = draper_mesh::parametric_domain::current_face_label();
+                let filter = std::env::var("DRAPPER_DUMP_PLANAR_POLY_FILTER")
+                    .unwrap_or_default();
+                if filter.is_empty() || label.contains(&filter) {
+                    let _ = std::fs::create_dir_all(&dir);
+                    let path = format!("{}/poly_{}.txt", dir, label);
+                    let mut s = String::with_capacity(1 << 14);
+                    s.push_str(&format!(
+                        "# PLANARPOLY label={} n_outer={} n_holes={} fwd={}\n",
+                        label,
+                        outer_points_3d.len(),
+                        hole_points_2d.len(),
+                        forward
+                    ));
+                    for (i, (p, q)) in
+                        outer_points_3d.iter().zip(outer_2d.iter()).enumerate()
+                    {
+                        s.push_str(&format!(
+                            "p {:5} {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                            i, q.u, q.v, p.x, p.y, p.z
+                        ));
+                    }
+                    for (hi, (hp, hq)) in hole_points_3d
+                        .iter()
+                        .zip(hole_points_2d.iter())
+                        .enumerate()
+                    {
+                        s.push_str(&format!("hole {} n={}\n", hi, hp.len()));
+                        for (i, (p, q)) in hp.iter().zip(hq.iter()).enumerate() {
+                            s.push_str(&format!(
+                                "h {} {:5} {:.9} {:.9} {:.9} {:.9} {:.9}\n",
+                                hi, i, q.u, q.v, p.x, p.y, p.z
+                            ));
+                        }
+                    }
+                    let _ = std::fs::write(&path, s);
+                }
+            }
             if let Some(strip_tris) = draper_mesh::triangulate::thin_strip_zipper(&outer_2d) {
                 log::info!(
                     "THIN_STRIP_ZIPPER accepted: planar face with {} boundary pts → {} zipper tris (was ear_clip corner-fan)",

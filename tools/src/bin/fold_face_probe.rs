@@ -283,6 +283,7 @@ fn main() {
         let mut brep_knife = 0usize;
         let mut brep_coil = 0usize;
         let mut brep_junction = 0usize;
+        let mut brep_thinface = 0usize;
         // session-121: per-(instance, face) cache of the rim polyline
         // far-loop min distance — the RIM-GAP witness input.
         let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
@@ -290,6 +291,10 @@ fn main() {
         // (the HUB witness input for the junction-sliver exemption —
         // built on first use, one pass over triangles + face ids).
         let mut vertex_faces: Option<HashMap<u32, std::collections::HashSet<u64>>> = None;
+        // session-124 recon: lazily-built per-face patch metrics
+        // (area, boundary perimeter, tri count) for the same-face
+        // thin-pair witness (inherently-thin face class).
+        let mut face_patch: Option<HashMap<u64, (f64, f64, usize)>> = None;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -836,6 +841,136 @@ fn main() {
                 brep_junction += 1;
             }
             let junction_str = if junction { " JUNCTION-SLIDER" } else { "" };
+            // session-124: THIN-FACE exemption — a same-face >170° pair
+            // on an INHERENTLY THIN face (patch mean width 2A/P under
+            // 4×eff_tol): any triangulation of a legitimately thin
+            // face is a chain of thin triangles; the pairs are
+            // resolution-level geometry (the planar crescent analogue
+            // of the coil-turn class). The #10203 f(11xx) family + the
+            // Spit re-evaluation classes (#31356 f(3,3), #27977
+            // f(30,30)). Kill-switch: DRAPPER_THIN_FACE_EXEMPT=0. Not
+            // debt.
+            let thinface_candidate = !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+                && !junction
+                && fid0 == fid1
+                && std::env::var("DRAPPER_THIN_FACE_EXEMPT").as_deref() != Ok("0");
+            // session-124 recon (read-only, env-gated): dump the face
+            // patch's mean width (2A/P) vs eff_tol for same-face REAL
+            // pairs — the witness facts BEFORE thresholds (the s121
+            // lesson-1 method).
+            let thinface_recon = std::env::var("DRAPPER_DUMP_THINFACE").is_ok()
+                && !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+                && fid0 == fid1;
+            let mut thinface_witness: Option<surf_exempt::ThinFaceWitness> = None;
+            if thinface_candidate || thinface_recon {
+                if face_patch.is_none() {
+                    // Build per-face patch metrics ONCE per BREP mesh:
+                    // area sum + boundary-edge perimeter (edges used
+                    // exactly once within the face's own triangles).
+                    use std::collections::HashMap as Map;
+                    let mut tri_by_face: Map<u64, Vec<usize>> = Map::new();
+                    for (ti, tri) in mesh.triangles.iter().enumerate() {
+                        let fid = fids
+                            .and_then(|ids| ids.get(ti).copied())
+                            .unwrap_or(u64::MAX);
+                        tri_by_face.entry(fid).or_default().push(ti);
+                    }
+                    let mut fp: HashMap<u64, (f64, f64, usize)> = HashMap::new();
+                    for (fid, tis) in tri_by_face {
+                        let mut area = 0.0f64;
+                        let mut edge_count: Map<(u32, u32), u32> = Map::new();
+                        for &ti in &tis {
+                            let tri = &mesh.triangles[ti];
+                            let (a, b, c) = (
+                                &mesh.vertices[tri[0] as usize],
+                                &mesh.vertices[tri[1] as usize],
+                                &mesh.vertices[tri[2] as usize],
+                            );
+                            area += tri_area(a, b, c);
+                            for (v0, v1) in [
+                                (tri[0], tri[1]),
+                                (tri[1], tri[2]),
+                                (tri[2], tri[0]),
+                            ] {
+                                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                                *edge_count.entry(key).or_insert(0) += 1;
+                            }
+                        }
+                        let mut perim = 0.0f64;
+                        for (key, cnt) in edge_count {
+                            if cnt == 1 {
+                                let (p, q) = (
+                                    &mesh.vertices[key.0 as usize],
+                                    &mesh.vertices[key.1 as usize],
+                                );
+                                perim += ((p.x - q.x).powi(2)
+                                    + (p.y - q.y).powi(2)
+                                    + (p.z - q.z).powi(2))
+                                .sqrt();
+                            }
+                        }
+                        fp.insert(fid, (area, perim, tis.len()));
+                    }
+                    face_patch = Some(fp);
+                }
+                let fp = face_patch.as_ref().unwrap();
+                if let Some(&(area_f, perim_f, ntris_f)) = fp.get(&fid0) {
+                    let w = if perim_f > 1e-12 {
+                        2.0 * area_f / perim_f
+                    } else {
+                        0.0
+                    };
+                    thinface_witness = Some(surf_exempt::ThinFaceWitness {
+                        width: w,
+                        area: area_f,
+                        perim: perim_f,
+                        tris: ntris_f,
+                    });
+                    if thinface_recon {
+                        let tol = eff_tol.unwrap_or(0.0);
+                        println!(
+                            "    THINFACE brep#{} {} faces=({},{}) type={} class={} ang={:.2} h=({:.4},{:.4}) areas=({:.6},{:.6}) tol={:.4} patchA={:.6} patchP={:.4} w={:.4} w/tol={:.2} patch_tris={}",
+                            inst.brep_id,
+                            inst.name,
+                            fid0,
+                            fid1,
+                            st0,
+                            class,
+                            ang,
+                            h0,
+                            h1,
+                            area0,
+                            area1,
+                            tol,
+                            area_f,
+                            perim_f,
+                            w,
+                            if tol > 1e-12 { w / tol } else { f64::INFINITY },
+                            ntris_f
+                        );
+                    }
+                }
+            }
+            let (thinface, thinface_why) = if thinface_candidate {
+                surf_exempt::thin_face(
+                    h0,
+                    h1,
+                    eff_tol.unwrap_or(0.0),
+                    thinface_witness.as_ref(),
+                )
+            } else {
+                (false, String::new())
+            };
+            if thinface {
+                brep_thinface += 1;
+            }
+            let thinface_str = if thinface { " THIN-FACE" } else { "" };
             // session-121 recon (read-only, env-gated): for each REAL
             // (non-exempt / non-subtol / non-knife / non-coil /
             // non-junction) pair, dump the triad's edges + the coil
@@ -912,13 +1047,14 @@ fn main() {
                 );
             }
             println!(
-                "[{}{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 subtol_str,
                 knife_str,
                 coil_str,
                 junction_str,
+                thinface_str,
                 exempt_str,
                 i,
                 inst.name,
@@ -942,6 +1078,7 @@ fn main() {
                 if knife { &knife_why } else { "" },
                 if coil { &coil_why } else { "" },
                 if junction { &junction_why } else { "" },
+                if thinface { &thinface_why } else { "" },
                 params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
@@ -1021,7 +1158,7 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} junction-sliver, {} real){}",
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} junction-sliver, {} thin-face, {} real){}",
                 i,
                 inst.name,
                 inst.brep_id,
@@ -1031,12 +1168,14 @@ fn main() {
                 brep_knife,
                 brep_coil,
                 brep_junction,
+                brep_thinface,
                 brep_pairs
                     - brep_exempt
                     - brep_subtol
                     - brep_knife
                     - brep_coil
-                    - brep_junction,
+                    - brep_junction
+                    - brep_thinface,
                 eff_tol
                     .map(|t| format!(" eff_tol={:.4}", t))
                     .unwrap_or_default()
