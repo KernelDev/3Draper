@@ -1,0 +1,183 @@
+f 1 Cylinder 22262 false
+f 2 Cylinder 22264 false
+f 3 Cylinder 22267 true
+f 4 Cylinder 22269 false
+f 5 Cylinder 22271 true
+f 6 Cylinder 22273 true
+f 7 Cylinder 22274 true
+f 8 Cylinder 22275 true
+f 9 Cylinder 22276 true
+f 10 Torus 22278 true
+f 11 Cylinder 22279 true
+f 12 Plane 22282 true
+f 13 Plane 22283 true
+f 14 Cylinder 22284 true
+f 15 Torus 22286 true
+f 16 Cylinder 22289 true
+f 17 Nurbs(deg=2/3, cps=3x16) 22291 true
+f 18 Nurbs(deg=2/3, cps=3x12) 22293 true
+f 19 Nurbs(deg=2/3, cps=3x4) 22295 true
+f 20 Nurbs(deg=2/3, cps=3x18) 22296 true
+f 21 Sphere 22297 true
+f 22 Sphere 22298 true
+f 23 Nurbs(deg=2/3, cps=3x8) 22300 true
+f 24 Sphere 22301 true
+f 25 Sphere 22302 true
+f 26 Sphere 22303 true
+f 27 Sphere 22304 true
+f 28 Sphere 22305 true
+f 29 Sphere 22306 true
+f 30 Sphere 22308 true
+f 31 Sphere 22311 true
+f 32 Nurbs(deg=2/3, cps=3x8) 22313 true
+f 33 Sphere 22315 true
+f 34 Sphere 22318 true
+f 35 Sphere 22319 true
+f 36 Plane 22320 true
+f 37 Sphere 22321 true
+f 38 Sphere 22322 true
+f 39 Plane 22324 true
+f 40 Sphere 22325 true
+f 41 Plane 22326 true
+f 42 Nurbs(deg=2/3, cps=3x8) 22327 true
+f 43 Cylinder 22328 true
+f 44 Cylinder 22329 true
+f 45 Nurbs(deg=2/3, cps=3x11) 22330 true
+f 46 Cylinder 22333 true
+f 47 Cylinder 22335 true
+f 48 Nurbs(deg=2/3, cps=3x11) 22337 true
+f 49 Nurbs(deg=2/3, cps=3x8) 22340 true
+f 50 Cylinder 22342 true
+f 51 Cylinder 22343 true
+f 52 Nurbs(deg=2/3, cps=3x11) 22344 true
+f 53 Nurbs(deg=2/3, cps=3x8) 22345 true
+f 54 Cylinder 22346 true
+f 55 Nurbs(deg=2/3, cps=3x6) 22348 true
+f 56 Cylinder 22349 true
+f 57 Nurbs(deg=2/3, cps=3x13) 22350 true
+f 58 Nurbs(deg=2/3, cps=3x8) 22351 true
+f 59 Cylinder 22352 true
+f 60 Cylinder 22353 true
+f 61 Cylinder 22355 true
+f 62 Nurbs(deg=2/3, cps=3x11) 22357 true
+f 63 Cylinder 22359 true
+f 64 Cylinder 22362 true
+f 65 Nurbs(deg=2/3, cps=3x11) 22364 true
+f 66 Nurbs(deg=2/3, cps=3x8) 22366 true
+f 67 Cylinder 22367 true
+f 68 Cylinder 22368 true
+f 69 Nurbs(deg=2/3, cps=3x11) 22369 true
+f 70 Nurbs(deg=2/3, cps=3x8) 22371 true
+f 71 Cylinder 22372 true
+f 72 Nurbs(deg=2/3, cps=3x6) 22373 true
+f 73 Cylinder 22374 true
+f 74 Nurbs(deg=2/3, cps=3x13) 22375 true
+f 75 Cylinder 22376 true
+f 76 Plane 22377 false
+f 77 Plane 22379 true
+f 78 Plane 22381 true
+f 79 Plane 22384 true
+f 80 Sphere 22386 true
+f 81 Cylinder 22388 true
+f 82 Sphere 22391 true
+f 83 Cylinder 22393 false
+f 84 Sphere 22395 true
+f 85 Nurbs(deg=2/3, cps=3x8) 22396 true
+f 86 Sphere 22397 true
+f 87 Cylinder 22398 false
+f 88 Sphere 22400 true
+f 89 Cylinder 22401 true
+f 90 Sphere 22406 true
+f 91 Cylinder 22408 false
+f 92 Cylinder 22410 true
+f 93 Cylinder 22413 false
+f 94 Sphere 22414 true
+f 95 Cylinder 22415 true
+f 96 Sphere 22416 true
+f 97 Cylinder 22417 false
+f 98 Sphere 22419 true
+f 99 Nurbs(deg=2/3, cps=3x8) 22420 true
+f 100 Sphere 22421 true
+f 101 Cylinder 22422 false
+f 102 Sphere 22423 true
+f 103 Cylinder 22424 true
+f 104 Sphere 22425 true
+f 105 Cylinder 22428 false
+f 106 Cylinder 22430 true
+f 107 Cylinder 22432 false
+f 108 Plane 22435 true
+f 109 Plane 22437 true
+f 110 Plane 22438 true
+f 111 Plane 22439 true
+f 112 Nurbs(deg=2/3, cps=3x8) 22440 true
+f 113 Nurbs(deg=2/3, cps=3x11) 22441 true
+f 114 Plane 22443 true
+f 115 Nurbs(deg=2/3, cps=3x11) 22444 true
+f 116 Nurbs(deg=2/3, cps=3x8) 22445 true
+f 117 Nurbs(deg=2/3, cps=3x11) 22446 true
+f 118 Sphere 22447 true
+f 119 Nurbs(deg=2/3, cps=3x8) 22448 true
+f 120 Nurbs(deg=2/3, cps=3x6) 22450 true
+f 121 Sphere 22452 true
+f 122 Nurbs(deg=2/3, cps=3x15) 22454 true
+f 123 Nurbs(deg=2/3, cps=3x8) 22457 true
+f 124 Nurbs(deg=2/3, cps=3x11) 22459 true
+f 125 Plane 22461 true
+f 126 Nurbs(deg=2/3, cps=3x11) 22462 true
+f 127 Nurbs(deg=2/3, cps=3x8) 22463 true
+f 128 Nurbs(deg=2/3, cps=3x11) 22464 true
+f 129 Sphere 22466 true
+f 130 Nurbs(deg=2/3, cps=3x8) 22467 true
+f 131 Nurbs(deg=2/3, cps=3x8) 22468 true
+f 132 Nurbs(deg=3/3, cps=11x4) 22469 true
+f 133 Nurbs(deg=2/3, cps=3x11) 22470 true
+f 134 Plane 22471 true
+f 135 Cylinder 22472 true
+f 136 Plane 22474 false
+f 137 Plane 22476 false
+f 138 Cylinder 22479 true
+f 139 Plane 22481 false
+f 140 Plane 22483 false
+f 141 Cylinder 22484 true
+f 142 Plane 22485 false
+f 143 Plane 22486 false
+f 144 Plane 22488 false
+f 145 Cylinder 22489 true
+f 146 Cylinder 22490 true
+f 147 Plane 22491 false
+f 148 Plane 22492 false
+f 149 Plane 22493 false
+f 150 Cylinder 22494 true
+f 151 Plane 22496 false
+f 152 Cylinder 22498 true
+f 153 Plane 22501 false
+f 154 Cylinder 22503 true
+f 155 Plane 22505 false
+f 156 Plane 22507 false
+f 157 Cylinder 22508 true
+f 158 Plane 22509 false
+f 159 Cylinder 22510 true
+f 160 Plane 22512 false
+f 161 Cylinder 22513 true
+f 162 Plane 22514 false
+f 163 Cylinder 22515 true
+f 164 Plane 22516 false
+f 165 Plane 22517 true
+f 166 Cylinder 22518 false
+f 167 Plane 22520 false
+f 168 Cylinder 22523 true
+f 169 Plane 22525 false
+f 170 Cylinder 22534 true
+f 171 Plane 22536 true
+f 172 Plane 22537 false
+f 173 Cylinder 22538 true
+f 174 Cylinder 22539 true
+f 175 Cylinder 22540 false
+f 176 Plane 22541 true
+f 177 Cylinder 22542 false
+f 178 Plane 22545 true
+f 179 Cylinder 22547 true
+f 180 Plane 22549 false
+f 181 Cylinder 22552 true
+f 182 Plane 22554 true
+f 183 Cone 0 true

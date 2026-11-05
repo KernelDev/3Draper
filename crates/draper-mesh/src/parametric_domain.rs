@@ -5866,6 +5866,44 @@ pub fn current_face_label() -> String {
     CURRENT_FACE_LABEL.with(|l| l.borrow().clone())
 }
 
+// s125: ribbon-face merge guard scope (thread-local). The STEP converter
+// sets this around each per-face merge_deduplicating call so the
+// self-flip-weld refusal (mesh.rs, session-62 v4b) can be scoped to
+// RIBBON-CHAIN faces only. Rationale (s125 forensics, Vulcan #10220):
+// the ribbon coil faces (Nurbs deg=3/1 cps=220x2) carry near-duplicate
+// polygon points from adjacent coil turns (inter-turn pitch 0.014-0.018
+// < merge_tol 0.02) — the merge tolerance path welds a triangle apex
+// into a NEIGHBORING TURN's point slot, moving it 0.7-0.9×tol ACROSS the
+// shared edge and manufacturing same-face FOLD-OVER pairs (the f27/f28
+// runout residue: 4 REAL pairs + the coil-exempt pair + 20 sub-tol).
+// Refusing those self flip-welds kills all of them. The UNSCOPED guard
+// ("1", all faces) is NOT a win: on the #10203 thin crescents the same
+// welds perform useful cleanup (needle apex welds into a duplicate-index
+// slot → triangle dropped as same-face duplicate), so the broad guard
+// SURFACES 5 new REAL pairs there (net 10→10). The ribbon scope keeps
+// the crescents' cleanup path untouched.
+thread_local! {
+    static RIBBON_MERGE_GUARD: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// Mark the next per-face merge as a ribbon-chain face (enables the
+/// ribbon-scoped self flip-weld refusal). Pair with
+/// [`clear_ribbon_merge_guard`] after the merge call.
+pub fn set_ribbon_merge_guard() {
+    RIBBON_MERGE_GUARD.with(|g| g.set(true));
+}
+
+/// Clear the ribbon-face merge guard flag.
+pub fn clear_ribbon_merge_guard() {
+    RIBBON_MERGE_GUARD.with(|g| g.set(false));
+}
+
+/// Whether the current per-face merge belongs to a ribbon-chain face.
+pub fn ribbon_merge_guard_active() -> bool {
+    RIBBON_MERGE_GUARD.with(|g| g.get())
+}
+
 /// session-68: CYL_RULED_BAND — ruled-band strip for cylinder patch
 /// faces (the drill HOUSING bnd-debt class, s67 root cause).
 ///

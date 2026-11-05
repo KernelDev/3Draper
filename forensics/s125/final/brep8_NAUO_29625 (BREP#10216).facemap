@@ -1,0 +1,35 @@
+f 1 Cone 22719 true
+f 2 Cylinder 22720 true
+f 3 Cylinder 22724 false
+f 4 Cone 22727 false
+f 5 Cone 22728 false
+f 6 Cone 22729 false
+f 7 Cone 22730 false
+f 8 Cone 22732 true
+f 9 Nurbs(deg=2/1, cps=3x2) 22735 true
+f 10 Plane 22737 true
+f 11 Plane 22739 true
+f 12 Cone 22742 false
+f 13 Cone 22743 false
+f 14 Cylinder 22744 false
+f 15 Plane 22745 true
+f 16 Nurbs(deg=2/1, cps=5x2) 22746 true
+f 17 Plane 22748 false
+f 18 Plane 22749 true
+f 19 Nurbs(deg=2/1, cps=3x2) 22750 true
+f 20 Nurbs(deg=2/1, cps=3x2) 22751 true
+f 21 Cylinder 22752 true
+f 22 Nurbs(deg=2/1, cps=11x2) 22753 true
+f 23 Cylinder 22754 true
+f 24 Nurbs(deg=2/1, cps=11x2) 22757 true
+f 25 Plane 22759 true
+f 26 Cylinder 22761 false
+f 27 Cylinder 22764 true
+f 28 Nurbs(deg=2/1, cps=5x2) 22766 true
+f 29 Plane 22767 false
+f 30 Cone 22768 true
+f 31 Cylinder 22769 true
+f 32 Plane 22770 true
+f 33 Cone 22772 true
+f 34 Cylinder 0 true
+f 35 Cylinder 0 true

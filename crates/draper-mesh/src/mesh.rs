@@ -1288,24 +1288,44 @@ impl TriangleMesh {
         // checked ONCE per merge call — the per-vertex loop stays clean).
         let dump_tol_welds = std::env::var("DRAPPER_DUMP_WELDS").is_ok();
 
-        // session-62: FLIP GUARD (env DRAPPER_MERGE_FLIP_GUARD=1, default
-        // OFF — bit-identical default). The tolerance path may weld an
-        // incoming vertex V into an existing vertex E up to merge_tol away.
-        // When a triangle of the incoming mesh using V is THIN (height
-        // below the weld distance), the replacement V→E lands the apex on
-        // the far side of the opposite edge and the triangle's normal
-        // FLIPS — measured (session-62, drill_top GEAR): merge_tol 15.3e-3
-        // exceeds the 9.03e-3 ring sampling step, the weld v63→v62 flips
-        // the hair (144,63,145) (height 5.6e-5) into (144,62,145) → 18
-        // same-face FOLD-OVER pairs surviving to the final mesh as the
-        // (1,1)/(12,12) families. Harmless welds (shift along a dense arc,
-        // e.g. cone faces f3..f8 with a 7.09e-3 step: every triangle keeps
-        // its normal sign) are allowed through — refusing them (the
+        // session-62: FLIP GUARD (env DRAPPER_MERGE_FLIP_GUARD, tri-state
+        // since s125). The tolerance path may weld an incoming vertex V
+        // into an existing vertex E up to merge_tol away. When a triangle
+        // of the incoming mesh using V is THIN (height below the weld
+        // distance), the replacement V→E lands the apex on the far side
+        // of the opposite edge and the triangle's normal FLIPS — measured
+        // (session-62, drill_top GEAR): merge_tol 15.3e-3 exceeds the
+        // 9.03e-3 ring sampling step, the weld v63→v62 flips the hair
+        // (144,63,145) (height 5.6e-5) into (144,62,145) → 18 same-face
+        // FOLD-OVER pairs surviving to the final mesh as the (1,1)/(12,12)
+        // families. Harmless welds (shift along a dense arc, e.g. cone
+        // faces f3..f8 with a 7.09e-3 step: every triangle keeps its
+        // normal sign) are allowed through — refusing them (the
         // edge/self guards v2/v3) opened holes instead (GEAR 49→340/293).
         // The guard refuses a tolerance weld iff replacing V's position
         // with E's position changes the signed-normal orientation of ANY
         // incoming triangle that uses V. Bit-exact reuse is untouched.
-        let flip_guard = std::env::var("DRAPPER_MERGE_FLIP_GUARD").as_deref() == Ok("1");
+        //
+        // s125 SCOPE TRI-STATE:
+        //   unset       → RIBBON scope, ON (the s125 default: refuse
+        //                 self flip-welds only when the converter marked
+        //                 the incoming face as a ribbon-chain face — see
+        //                 parametric_domain::set_ribbon_merge_guard)
+        //   "ribbon"    → same as unset (explicit)
+        //   "1"         → ALL faces (the s62 broad A/B leg)
+        //   "0"         → OFF (kill-switch, bit-identical pre-s125)
+        // The ribbon scope exists because the broad guard is NOT a net
+        // win on Vulcan: it kills the #10220 ribbon-coil manufactured
+        // folds (4 REAL) but SURFACES 5 new REAL needle pairs on the
+        // #10203 thin crescents, where the same welds drop needle
+        // triangles as same-face duplicates (cleanup). Net 10→10. The
+        // ribbon scope keeps the crescent cleanup path untouched.
+        let flip_guard_all_faces =
+            std::env::var("DRAPPER_MERGE_FLIP_GUARD").as_deref() == Ok("1");
+        let flip_guard_off =
+            std::env::var("DRAPPER_MERGE_FLIP_GUARD").as_deref() == Ok("0");
+        let flip_guard = !flip_guard_off;
+        let flip_guard_ribbon_only = !flip_guard_all_faces;
         // session-62 v4 refinement: apply the flip refusal ONLY to SELF
         // welds (E added by this same merge call). Cross-face tolerance
         // welds (seam chains into earlier faces) MUST stay: refusing them
@@ -1342,7 +1362,20 @@ impl TriangleMesh {
                         .any(|f| f == incoming_fid),
                     Err(_) => true,
                 };
+                let ribbon_scoped = !flip_guard_ribbon_only
+                    || crate::parametric_domain::ribbon_merge_guard_active();
+                // s125 scope semantics: BOTH modes refuse SELF welds only
+                // (E added by this merge call) — cross-face refusals opened
+                // boundary holes on GEAR in the broad mode (s62: 620 pairs)
+                // and REGRESSED the Spit junction zone in the ribbon mode
+                // (s125 A/B: #31359 f(11,11)×4 + f(13,13)×2 resurfaced as
+                // REAL when ribbon cross-face welds were refused — the
+                // junction slide-on welds close the runout). The surviving
+                // cross-face manufactured fold (Vulcan #10220 f28 FAT, late
+                // point welded into the NEIGHBOR face's shared-rail slot,
+                // disp 0.0176) stays a documented chronic.
                 if flip_guard
+                    && ribbon_scoped
                     && guard_this_face
                     && dedup_map.last_get_was_tolerance()
                     && (existing_idx as usize) >= merge_start_vertices

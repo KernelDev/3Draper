@@ -19089,3 +19089,130 @@ f(28,28)FAT — sawtooth-capable zipper (stack sweep / segmented: нижний
 f(28,28)/f(27,27)SL после traversal-order; #10212 f(8,8)/f(12,12)
 Plane WINDING-FLIP FAT (w/tol=1.54 — тонкая грань, жирная пара —
 долг покрытия, отдельный класс); #10204 f(3,3) Cylinder ×2.
+
+# Worklog — s125: RIBBON-SCOPED merge self flip-weld refusal (п.1 #10220 runout-остаток ПОЛНОСТЬЮ переатрибуирован: merge-manufactured, не эмиссия) (2026-11-05, двадцать пятая STEP-сессия)
+
+Baseline: commit `b473c0e` (после s124). Вход: Spit 6 / Vulcan 10 REAL.
+План s124-next: sawtooth-capable zipper для #10220 f(27,27)×2FAT+SLIVER +
+f(28,28)FAT. План ОПРОВЕРГНУТ форензикой — пары не эмиссионные.
+
+## п.0 — эпоха-восстановление (fetch-first, 4-й раз)
+
+Sandbox пережил рестарт середины сессии (инструментальные вызовы падали
+5 подряд); main уже был `b473c0e` (эпоха-восстановление s124-сессии
+сохранилось), origin/main == main, дерево чистое, target/release
+бинари выжили. Полная baseline-валидация ПЕРЕД правками: fold_face_probe
+Spit 415/415 + Vulcan 1347/1347 census-строк бит-идентичны
+forensics/s124/tf_on_{spit,vulcan}.txt; состав REAL Spit 6 / Vulcan 10
+— точно s124.
+
+## п.1 — форензика #10220 f27/f28: пары РОЖДАЮТСЯ В MERGE, не в эмиссии
+
+Инструменты (все env-gated, read-only, бит-инертные):
+- ДАМП-ФИКСЫ s125 в DRAPPER_DUMP_FACE_MESH (converter.rs): (а) sanitize
+  имени файла — Nurbs-метка содержит "deg=3/1", слэш молча redirect'ил
+  запись в несуществующий подпуть (s124 работал только потому, что
+  #10203 = Plane без слэша); (б) per-ATTEMPT суффикс `_a<N>` — §1.2
+  gated retry ПЕРЕЗАПИСЫВАЛ дамп первого attempt'а даже когда retry
+  отвергнут (#10220: retry 2437 дефектов vs first 2428 — first побеждает,
+  дамп был retry'ного);
+- DRAPPER_DUMP_STAGE_OBJS (scan_fold_pairs_stage): brep_id в имя стадии
+  (10 call sites) — 23 инстанса Vulcan перезаписывали друг друга;
+- forensics/s125/: base/def/ks0 census, fm10220 per-face эмиссии,
+  stages p13(first)/p14(retry), final OBJ+fmap+transform.
+
+Цепочка атрибуции (метод s122: instance-фрейм census ↔ local-фрейм
+эмиссии через обратный instance-transform, напечатанный
+DRAPPER_DUMP_SURF_PARAMS):
+1. Census mid= не находится в эмиссии f27/f28 НИ по одному ребру пар;
+   все 5 вершин каждой пары находятся в эмиссии ТОЧНО (3.2e-4 = точность
+   4-десятичной печати transform) — но треугольников с этими наборами
+   НЕТ (9 пар: найден только SLIVER t0 = emission tri 966).
+2. Stage-бисекция (d-after-merge → winding): все треугольники пар уже
+   на САМОЙ РАННЕЙ стадии. Merge не создаёт треугольники…
+3. РАЗРЕШЕНИЕ: эмиссия f27 содержит 175 СИРОТ (1076-1258 — полигональные
+   точки без треугольников; f28 — 144), а активные поздние вершины
+   (v1278/v1279/v1284) лежат 0.0142/0.0171 от сирот. MERGE tolerance-путь
+   сваривает АКТИВНЫЙ апекс в СЛОТ СИРОТЫ (|Δ|=0.71-0.86× merge_tol),
+   ДВИГАЯ апекс через ребро → правильный тайлинг становится same-side
+   FOLD-OVER. Реконструкция карты сварок (scripts/s125_merge_map.py):
+   FAT#2 t0 ← emission tri 1033 (1278,44,1279) с v1278→слот v1255
+   (0.0142); SLIVER t1 ← tri 1037 (1278,60,44) тот же вельд; f28: все
+   4 пары ← tris 232/236/240/241 с вельдами v320/v321/v322/v410
+   (0.0107-0.0178).
+4. ПРИЧИНА близнецов: клубок = лента с межвитковым шагом 0.014-0.018 <
+   merge_tol 0.02 — соседние ВИТКИ полигона сшиваются сваркой (ложная
+   идентификация разных точек). Это тот же класс, что s56 drill-HM
+   lattice collapse и s62 GEAR hair flips (обе сессии оставили guard
+   default OFF).
+
+## п.2 — A/B гейты трёх вариантов guard'а (измерение ДО правки)
+
+Существующий DRAPPER_MERGE_FLIP_GUARD (s62 v4b: self-only, refuse
+flip-welds) на brep 7: 75 пар → 49, **0 REAL** — все 4 пары + COIL-exempt
++ 20 sub-tol убиты. НО полный Vulcan: #10220 0 REAL, а #10203 +5 НОВЫХ
+REAL (f(1256/1258/1416/1418/1420) Plane WINDING-FLIPFAT, инстансы одной
+грани, h=0.0159/0.0127) — нетто 10→10. На серпах те же сварки делают
+ПОЛЕЗНУЮ чистку (игла → duplicate-index → dropped); guard их сохраняет.
+Дискриминатор семантический (ribbon vs thin-crescent), не числовой.
+
+Cross-face расширение (ribbon + все welds, не только self): Vulcan
+f(27,27)×2 ВЕРНУЛИСЬ (9 REAL), Spit регресс +6 REAL (#31359 f(11,11)×4 +
+f(13,13)×2 — junction slide-on сварки закрывают runout, s122). ОТКАТ.
+
+## п.3 — РЕАЛИЗАЦИЯ: ribbon-scoped self flip-weld refusal (default ON)
+
+- parametric_domain.rs: thread-local RIBBON_MERGE_GUARD
+  (set/clear/active, паттерн current_face_label).
+- mesh.rs merge_deduplicating: DRAPPER_MERGE_FLIP_GUARD tri-state:
+  unset/"ribbon" → RIBBON scope ON (default; refuse self flip-welds
+  только на ribbon-флагнутых гранях), "1" → ALL faces (s62 semantics
+  сохранён), "0" → OFF (kill-switch, бит-идентичен pre-s125). Self-only
+  ограничение сохранено В ОБОИХ режимах (cross-face refusals вредны —
+  измерено s62 GEAR 620 пар и s125 Spit junction).
+- converter.rs: ribbon-флаг выставлен на всех 4 merge-сайтах (detailed /
+  chunked process_one_face / legacy / simple loop) — критерий тот же
+  один: matches!(surface, Nurbs(n) if nurbs_ribbon_chain_projection(n)).
+
+## Гейты
+
+- Kill-switch =0: Spit 415/415, Vulcan 1347/1347 БИТ-ИДЕНТИЧНЫ baseline
+  (перепроверено после открата cross-face).
+- Default: Vulcan 10→7 REAL (f27 FAT×2+SLIVER убиты; f28 FAT —
+  cross-face вельд в слот СОСЕДНЕЙ грани, задокументированный хроник);
+  #10220 census 75→52 строк (sub-tol 70→49); ИЗМЕНЕНИЯ ТОЛЬКО на #10220
+  (diff по BREP: все 150 удалённых/104 добавленных строки — BREP#10220).
+  Spit 6 REAL БИТ-ИДЕНТИЧЕН baseline (весь census diff пуст).
+- all_files: 26/27 идентичны; Vulcan only: tris 177582→178093 (+511 —
+  отказные вельды сохраняют треугольники), bnd 20083→21175 (7.3→7.7%,
+  статус leaky сохранён; +bnd = честная геометрия: сшивка соседних
+  витков была ложной). Статусы 22 ok/4 leaky/1 BAD — все на месте.
+- angle_check brick/drill/trans/comp: СВОДКИ БИТ-ИДЕНТИЧНЫ s124 (brick
+  FAIL 1 хроника нетронута).
+- determinism: 2 прогона Vulcan 1324/1324 census-строк 0 diff.
+- suites: draper-mesh 450 (449 + 1 новый s125_ribbon_flip_guard_test:
+  4 сценария — default-refuses/killswitch-restores/nonribbon-welds/
+  broad-mode); draper-step 255 (lib 169 + 26 файлов 86) 0 failed.
+
+## Уроки
+
+1. Пары >170° на merged-меше НЕ обязаны быть эмиссионным долгом:
+   сначала stage-бисекция (d-after-merge), потом attribution — план
+   "sawtooth zipper" был бы ремонтом не той подсистемы.
+2. Двухслойные дамп-ловушки в одном хуке: слэш в Nurbs-метке (молчаливый
+   fs::write fail) и retry-перезапись (attempt counter) — оба крались
+   в уже "работающем" инструменте s124.
+3. Межвитковый шаг клубка ≈ merge_tol — фундаментальная коллизия
+   допусков: сшивающий weldding ОБЯЗАН знать, что точка соседнего витка
+   ≠ та же точка. Ribbon-scope — минимальный хирургический ответ.
+4. Guard-дизайн по измерениям всех трёх классов (ribbon / crescent /
+   junction): self-only + ribbon-scope — единственная комбинация без
+   регрессий; обе альтернативы (broad "1", ribbon+cross-face) нетто-0
+   или хуже, измерено, а не предположено.
+
+Next (s126): #10212 f(8,8)/f(12,12)/f(19,19) Plane WINDING-FLIP FAT
+(тонкая грань w/tol=1.54, жирные пары — долг покрытия, отдельный класс);
+#10204 f(3,3) Cylinder ×2; #10220 f(28,28) cross-face chronic (вариант:
+ribbon-зона cross-face с flip-фильтром И junction-гвардом — только если
+найдётся дискриминатор better-than-measured); Spit #31356 f(5,5)/f(26,26)
+Cylinder FAT ×2 + #27977 f(7,7)/f(65,65) Torus FAT.

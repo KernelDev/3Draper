@@ -2406,7 +2406,15 @@ impl BrepSession {
         let mut face_mesh_with_ids = face_mesh.clone();
         face_mesh_with_ids.triangle_face_ids = Some(vec![face_id; face_tri_count]);
 
+        // s125: scope the merge self flip-weld refusal to ribbon-chain
+        // faces (the #10220 coil-ribbon manufactured-fold class).
+        let ribbon_face_s125 = matches!(&face_data.surface, Surface::Nurbs(ref n)
+            if draper_mesh::nurbs_ribbon_chain_projection(n));
+        if ribbon_face_s125 {
+            draper_mesh::parametric_domain::set_ribbon_merge_guard();
+        }
         self.mesh.merge_deduplicating(&face_mesh_with_ids, &mut self.dedup_map);
+        draper_mesh::parametric_domain::clear_ribbon_merge_guard();
         self.total_face_vertices += face_mesh_with_ids.vertices.len();
         let tri_end = self.mesh.triangle_count();
 
@@ -5529,7 +5537,15 @@ impl<'a> StepConverter<'a> {
                 fbmin.x, fbmin.y, fbmin.z, fbmax.x, fbmax.y, fbmax.z);
             total_face_vertices += face_mesh.vertices.len();
             let pre_merge_tri_count = mesh.triangle_count();
+            // s125: scope the merge self flip-weld refusal to ribbon-chain
+            // faces (the #10220 coil-ribbon manufactured-fold class).
+            let ribbon_face_s125 = matches!(&face_data.surface, Surface::Nurbs(ref n)
+                if draper_mesh::nurbs_ribbon_chain_projection(n));
+            if ribbon_face_s125 {
+                draper_mesh::parametric_domain::set_ribbon_merge_guard();
+            }
             mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+            draper_mesh::parametric_domain::clear_ribbon_merge_guard();
             let post_merge_tri_count = mesh.triangle_count();
             let face_tri_count = face_mesh.triangle_count();
             let added_tris = post_merge_tri_count - pre_merge_tri_count;
@@ -5584,7 +5600,7 @@ impl<'a> StepConverter<'a> {
         // face-aware weld guard prevents over-merging within a single face
         // (e.g., thin annulus rings).
         {
-            draper_mesh::scan_fold_pairs_stage(&mesh, "after-merge");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-after-merge", brep_id));
             // Always run weld if there are boundary edges — even a few
             // boundary edges indicate non-aliased shared edges that need
             // tolerance-based welding to close.
@@ -5625,7 +5641,7 @@ impl<'a> StepConverter<'a> {
             }
 
             // Remove duplicate triangles BEFORE T-junction repair.
-            draper_mesh::scan_fold_pairs_stage(&mesh, "after-weld");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-after-weld", brep_id));
             let pre_dedup = mesh.triangle_count();
             let dup_removed = mesh.remove_duplicate_triangles();
             if dup_removed > 0 {
@@ -5656,7 +5672,7 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
-            draper_mesh::scan_fold_pairs_stage(&mesh, "after-tj");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-after-tj", brep_id));
 
             // Gap filling: fill missing triangles for boundary edge loops.
             // SAFETY GUARD: Only fill when boundary_edge_count is SMALL (< 50).
@@ -5676,7 +5692,7 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
-            draper_mesh::scan_fold_pairs_stage(&mesh, "after-gapfill");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-after-gapfill", brep_id));
         }
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
@@ -5686,7 +5702,7 @@ impl<'a> StepConverter<'a> {
         // function uses BFS flood-fill to propagate consistent winding
         // from a reference triangle to all connected triangles.
         draper_mesh::fix_inconsistent_winding(&mut mesh);
-        draper_mesh::scan_fold_pairs_stage(&mesh, "after-winding");
+        draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-after-winding", brep_id));
         // When the STEP file uses different VERTEX_POINT entities for the
         // same geometric boundary (e.g., Plane face uses LINE, NURBS face
         // uses NURBS curve), bit-exact dedup can't merge the boundary
@@ -6303,7 +6319,29 @@ impl<'a> StepConverter<'a> {
                     .unwrap_or_default();
                 if filter.is_empty() || label.contains(&filter) {
                     let _ = std::fs::create_dir_all(&dir);
-                    let path = format!("{}/mesh_{}.txt", dir, label);
+                    // s125: sanitize the filename — Nurbs labels contain
+                    // "deg=3/1" whose '/' silently redirects the write into
+                    // a non-existent subpath (std::fs::write error ignored,
+                    // no file; the s124 #10203 recon worked only because
+                    // Plane/Cylinder labels carry no slash).
+                    let safe_label = label.replace('/', "-");
+                    // s125: per-ATTEMPT suffix — the §1.2 gated retry calls
+                    // triangulate_brep_detailed a second time with halved
+                    // params and the plain label would overwrite the FIRST
+                    // attempt's dump, even when the retry is rejected and
+                    // the first mesh is the one that ships (#10220: retry
+                    // 2437 defects vs first 2428 — first wins, dump was
+                    // the retry's).
+                    static DUMP_ATTEMPT: std::sync::atomic::AtomicUsize =
+                        std::sync::atomic::AtomicUsize::new(0);
+                    let attempt = DUMP_ATTEMPT.fetch_add(
+                        1,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                    let path = format!(
+                        "{}/mesh_{}_a{}.txt",
+                        dir, safe_label, attempt
+                    );
                     let mut s = String::with_capacity(1 << 15);
                     s.push_str(&format!(
                         "# FACEMESH label={} step={} fwd={} verts={} tris={}\n",
@@ -6558,7 +6596,15 @@ impl<'a> StepConverter<'a> {
             }
 
             let pre_merge_tri_count = mesh.triangle_count();
+            // s125: scope the merge self flip-weld refusal to ribbon-chain
+            // faces (the #10220 coil-ribbon manufactured-fold class).
+            let ribbon_face_s125 = matches!(&face_data.surface, Surface::Nurbs(ref n)
+                if draper_mesh::nurbs_ribbon_chain_projection(n));
+            if ribbon_face_s125 {
+                draper_mesh::parametric_domain::set_ribbon_merge_guard();
+            }
             mesh.merge_deduplicating(&face_mesh_with_ids, &mut dedup_map);
+            draper_mesh::parametric_domain::clear_ribbon_merge_guard();
             let post_merge_tri_count = mesh.triangle_count();
             let added_tris = post_merge_tri_count - pre_merge_tri_count;
             let lost_tris = face_tri_count as isize - added_tris as isize;
@@ -6717,7 +6763,7 @@ impl<'a> StepConverter<'a> {
         // (3.05.078.stp Step#87, annulus width 2.28mm < weld_tol 2.6mm).
         // See the non-detailed path above for the full philosophy comment.
         {
-            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-merge");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-d-after-merge", brep_id));
             // Check watertightness BEFORE welding — if the mesh is already
             // watertight via edge cache + merge_deduplicating, skip welding
             // to avoid creating degenerate triangles.
@@ -6798,7 +6844,7 @@ impl<'a> StepConverter<'a> {
             // disconnected components (wrong Euler characteristic).
             // Removing duplicates first ensures T-junction repair only
             // sees REAL T-junctions, not artifacts of duplicate geometry.
-            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-weld");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-d-after-weld", brep_id));
             let pre_dedup = mesh.triangle_count();
             let dup_removed = mesh.remove_duplicate_triangles();
             if dup_removed > 0 {
@@ -6837,7 +6883,7 @@ impl<'a> StepConverter<'a> {
                     }
                 }
             }
-            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-tj");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-d-after-tj", brep_id));
 
             // Gap filling: fill missing triangles for boundary edge loops.
             // This catches small holes where a face's triangulation didn't
@@ -6864,7 +6910,7 @@ impl<'a> StepConverter<'a> {
                     );
                 }
             }
-            draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-gapfill");
+            draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-d-after-gapfill", brep_id));
         }
 
         // ─── Session-100 PHASE 1: record born-fold seam pairs ───────────
@@ -6887,7 +6933,7 @@ impl<'a> StepConverter<'a> {
 
         // ─── Fix inconsistent winding (face orientation repair) ──────────
         draper_mesh::fix_inconsistent_winding(&mut mesh);
-        draper_mesh::scan_fold_pairs_stage(&mesh, "d-after-winding");
+        draper_mesh::scan_fold_pairs_stage(&mesh, &format!("b{}-d-after-winding", brep_id));
 
         // ─── session-107: record the BFS-manufactured pairs too ────────
         // fix_inconsistent_winding's greedy flood-fill manufactures 180°
@@ -7676,7 +7722,15 @@ impl<'a> StepConverter<'a> {
         let mut dedup_map = draper_mesh::mesh::VertexDedupMap::with_tolerance(merge_tol);
         for face_data in &face_data_list {
             let face_mesh = self.surface_to_mesh(face_data, params, bbox);
+            // s125: scope the merge self flip-weld refusal to ribbon-chain
+            // faces (the #10220 coil-ribbon manufactured-fold class).
+            let ribbon_face_s125 = matches!(&face_data.surface, Surface::Nurbs(ref n)
+                if draper_mesh::nurbs_ribbon_chain_projection(n));
+            if ribbon_face_s125 {
+                draper_mesh::parametric_domain::set_ribbon_merge_guard();
+            }
             mesh.merge_deduplicating(&face_mesh, &mut dedup_map);
+            draper_mesh::parametric_domain::clear_ribbon_merge_guard();
         }
         if mesh.vertex_count() == 0 { None } else { Some(mesh) }
     }

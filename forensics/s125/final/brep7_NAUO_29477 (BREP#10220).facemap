@@ -1,0 +1,32 @@
+f 1 Cylinder 136730 true
+f 2 Cone 136735 true
+f 3 Cylinder 136741 true
+f 4 Cylinder 135805 true
+f 5 Cylinder 135811 true
+f 6 Cylinder 135802 true
+f 7 Cylinder 135808 true
+f 8 Cylinder 22390 true
+f 9 Cylinder 22392 true
+f 10 Cylinder 22403 true
+f 11 Cylinder 22399 true
+f 12 Cylinder 135824 true
+f 13 Cylinder 135814 true
+f 14 Cylinder 135818 true
+f 15 Cylinder 135821 true
+f 16 Cylinder 22527 true
+f 17 Cylinder 22533 true
+f 18 Cylinder 22532 true
+f 19 Cylinder 22531 true
+f 20 Cylinder 22530 true
+f 21 Cylinder 22016 true
+f 22 Plane 22017 false
+f 23 Plane 17913 true
+f 24 Cylinder 135827 true
+f 25 Nurbs(deg=3/1, cps=220x2) 135831 true
+f 26 Cylinder 135834 true
+f 27 Nurbs(deg=3/1, cps=220x2) 135837 false
+f 28 Nurbs(deg=3/1, cps=220x2) 135840 true
+f 29 Plane 135842 true
+f 30 Cone 135846 true
+f 31 Cylinder 135850 true
+f 32 Plane 135851 true
