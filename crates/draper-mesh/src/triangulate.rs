@@ -9078,6 +9078,72 @@ pub(crate) fn normalize_uv_polygon(boundary_uv: &mut [Point2d], u_period: Option
     }
 }
 
+/// s127 (hole-window reseat): after `normalize_uv_polygon` runs on the
+/// OUTER ring and — independently — on each hole ring, a seam gap-shift
+/// applied to the outer can move the outer's axis window by ±period
+/// while the hole (contiguous, never individually shifted) stays on its
+/// raw branch. The hole then lies OUTSIDE the outer polygon's axis
+/// window entirely (measured, Vulcan BREP#10212 f19: outer shifted to
+/// u∈[−0.90, 0.00], hole rings left at u∈[5.43, 5.49] ≡ [−0.85, −0.79]),
+/// and every downstream consumer (earcutr hole punching, the per-face
+/// CDT's constrained rims) misplaces or drops the hole — the "legacy
+/// spike-chain" garbage emissions.
+///
+/// Fix: shift the hole ring by k·period (integer k) so its axis MIDPOINT
+/// lands inside the outer ring's [min, max] axis window. Only fires when
+/// the midpoint is currently OUTSIDE that window (never-worsen: in-window
+/// holes — the common case — are untouched, k = 0). Pure arithmetic on
+/// periodic coordinates: surface.point_at(u ± k·period, v) is the same
+/// 3D point, so index↔3D correspondence is unchanged.
+///
+/// Kill-switch: DRAPPER_HOLE_WINDOW_RESEAT=0 (checked by the caller).
+pub(crate) fn reseat_hole_ring_window(
+    hole: &mut [Point2d],
+    outer: &[Point2d],
+    period: f64,
+    u_axis: bool,
+) {
+    if hole.is_empty() || outer.len() < 3 || period <= 0.0 {
+        return;
+    }
+    let get = |p: &Point2d| -> f64 {
+        if u_axis {
+            p.u
+        } else {
+            p.v
+        }
+    };
+    let mut omin = f64::INFINITY;
+    let mut omax = f64::NEG_INFINITY;
+    for p in outer {
+        let x = get(p);
+        omin = omin.min(x);
+        omax = omax.max(x);
+    }
+    if !(omax > omin) {
+        return;
+    }
+    let hmid = hole.iter().map(|p| get(p)).sum::<f64>() / hole.len() as f64;
+    // Only genuinely-out-of-window holes move (never-worsen).
+    if hmid >= omin && hmid <= omax {
+        return;
+    }
+    // Nearest integer k bringing the midpoint into the window.
+    let wmid = 0.5 * (omin + omax);
+    let k = ((wmid - hmid) / period).round();
+    if k == 0.0 {
+        return;
+    }
+    let shift = k * period;
+    for p in hole.iter_mut() {
+        if u_axis {
+            p.u += shift;
+        } else {
+            p.v += shift;
+        }
+    }
+}
+
 /// Get the period of the surface's u parameter, if periodic.
 pub(crate) fn surface_u_period(surface: &Surface) -> Option<f64> {
     match surface {

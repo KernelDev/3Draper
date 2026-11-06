@@ -10976,13 +10976,17 @@ pub fn triangulate_surface_consistent(
         let n = UVPOLY_CALL.fetch_add(1, Ordering::SeqCst);
         let _ = std::fs::create_dir_all(&dir);
         let mut out = String::new();
+        // s127: include the current face label (set by the converter around
+        // surface_to_mesh_cached) so UV polygons correlate 1:1 with the
+        // DRAPPER_DUMP_FACE_MESH emissions without geometric fingerprinting.
         out.push_str(&format!(
-            "# surface={:?} forward={} depth={} outer={} holes={}\n",
+            "# surface={:?} forward={} depth={} outer={} holes={} label={}\n",
             surface.type_name(),
             forward,
             depth,
             boundary_uvs.len(),
-            hole_uvs.len()
+            hole_uvs.len(),
+            current_face_label()
         ));
         for p in boundary_uvs {
             out.push_str(&format!("o {:.9} {:.9}\n", p.u, p.v));
@@ -11205,9 +11209,42 @@ pub fn triangulate_surface_consistent(
     crate::triangulate::normalize_uv_polygon(&mut outer_uv, u_period, v_period);
 
     let mut normalized_holes_uv: Vec<Vec<Point2d>> = Vec::new();
+    // s127 kill-switch: DRAPPER_HOLE_WINDOW_RESEAT=0 restores the pre-s127
+    // independent-hole normalization (holes left on their raw periodic
+    // branch when the outer ring's seam gap-shift moved the window).
+    let hole_reseat_on = std::env::var("DRAPPER_HOLE_WINDOW_RESEAT")
+        .as_deref()
+        != Ok("0");
     for huv in hole_uvs {
         let mut nhuv = huv.clone();
         crate::triangulate::normalize_uv_polygon(&mut nhuv, u_period, v_period);
+        // s127 hole-window reseat: `normalize_uv_polygon` shifts the OUTER
+        // ring across the seam by ±period (gap-shift) but each hole is
+        // normalized independently — a contiguous hole ring never shifts
+        // on its own, so when the outer moves the hole can end up OUTSIDE
+        // the outer's axis window (Vulcan BREP#10212 f19: outer
+        // u∈[−0.90,0.00] vs holes u∈[5.43,5.49]). earcutr/CDT then
+        // misplace or drop the hole. Reseat shifts such holes by k·period
+        // so their axis midpoint lands inside the outer's window; holes
+        // already in-window are untouched (k=0, never-worsen).
+        if hole_reseat_on {
+            if let Some(period) = u_period {
+                crate::triangulate::reseat_hole_ring_window(
+                    &mut nhuv,
+                    &outer_uv,
+                    period,
+                    true,
+                );
+            }
+            if let Some(period) = v_period {
+                crate::triangulate::reseat_hole_ring_window(
+                    &mut nhuv,
+                    &outer_uv,
+                    period,
+                    false,
+                );
+            }
+        }
         normalized_holes_uv.push(nhuv);
     }
 
@@ -13599,6 +13636,29 @@ pub fn triangulate_surface_consistent(
                             && legacy_extra_bnd > 0
                             && std::env::var("DRAPPER_TORUS_CDT_RESCUE").as_deref()
                                 != Ok("0"))
+                        // s127: debt-laden CYLINDER faces — the
+                        // BREP#10212 f2 class (holes present: excluded from
+                        // every structural strip — crescent / CAST /
+                        // CYL_RULED_BAND all require holes_2d empty — and
+                        // from the s64 rescue when n_unused == 0; measured
+                        // f2: extra_bnd=128, 107 same-direction winding
+                        // conflicts, NO rescue path) AND the BREP#10204 f3 /
+                        // Spit #31356 f5/f26 class (hole-free but the
+                        // CYL_RULED_BAND strip REJECTS the boundary as
+                        // non-monotone chains — measured f3: A:27/89 B:0/33,
+                        // extra_bnd=53; f5: A:0/112 B:31/176, extra_bnd=117)
+                        // so the face falls through to the legacy
+                        // spike-chain with debt and no path either).
+                        // Route through the per-face CDT under the existing
+                        // never-worsen gates below (strictly-greater rims
+                        // via s64, or the s127 equal-rim clean-interior arm
+                        // with its fold gate — the s65 drill_top lesson:
+                        // fold-gate every structural change).
+                        // Kill-switch: DRAPPER_CYL_HOLED_CDT=0.
+                        || (matches!(surface, Surface::Cylinder(_))
+                            && legacy_extra_bnd > 0
+                            && std::env::var("DRAPPER_CYL_HOLED_CDT").as_deref()
+                                != Ok("0"))
                     {
                         // session-65 candidate 1 (crescent region-drop):
                         // the two-chain monotone strip. Deterministic and
@@ -14617,6 +14677,36 @@ pub fn triangulate_surface_consistent(
                                 && cdt_ring_edges >= legacy_ring_edges
                                 && cdt_extra_bnd < legacy_extra_bnd
                                 && cdt_interior_dropped == 0;
+                            // s127: EQUAL-RIM CLEAN-INTERIOR arm — the
+                            // BREP#10212 f2 class (and the hole-free f3/f5/
+                            // f26 class where the ruled band rejected).
+                            // The legacy spike-chain emission already
+                            // carries EVERY rim edge
+                            // (cdt_ring_edges == legacy_ring_edges, so the
+                            // s64 strictly-greater gate cannot fire) but
+                            // its interior is debt-laden: one-sided slit
+                            // seams from the appended Steiner lattice
+                            // (measured f2: extra_bnd 128) plus
+                            // same-direction winding conflicts (107) that
+                            // fix_inconsistent_winding later "repairs" by
+                            // flipping 47% of the face. Accept the CDT
+                            // when it is FULLY clean (extra_bnd == 0) at
+                            // equal rim coverage and passes the fold gate
+                            // (the s65 drill_top lesson: fold-gate every
+                            // structural change). Cylinder faces whose
+                            // structural strip was ACCEPTED never reach
+                            // here (strip_accepted short-circuits the CDT
+                            // block), so accepted-band faces keep their
+                            // s68 behavior bit-identically.
+                            let cyl_holed_equal_rim = matches!(surface, Surface::Cylinder(_))
+                                && legacy_extra_bnd > 0
+                                && std::env::var("DRAPPER_CYL_HOLED_CDT")
+                                    .as_deref()
+                                    != Ok("0")
+                                && cdt_ring_edges == legacy_ring_edges
+                                && cdt_extra_bnd == 0;
+                            let count_emission_folds_needed =
+                                torus_windmill || cyl_holed_equal_rim;
                             // s114 MEASURED-AND-REVERTED: an UNCONDITIONAL
                             // Torus fold gate (folds counted for every
                             // candidate, cf<=lf gating every arm) REGRESSES
@@ -14630,7 +14720,7 @@ pub fn triangulate_surface_consistent(
                             // gate; band-lattice results satisfy it by
                             // construction (every Steiner used).
                             let (torus_fold_ok, legacy_emission_folds, cdt_emission_folds) =
-                                if torus_windmill {
+                                if count_emission_folds_needed {
                                     let count_folds = |flat: &[usize]| -> usize {
                                         use std::collections::HashMap;
                                         // Resolve 3D for every used vertex.
@@ -14715,6 +14805,14 @@ pub fn triangulate_surface_consistent(
                                         && cdt_extra_bnd == 0
                                         && cdt_interior_dropped == 0)
                                     || (torus_windmill
+                                        && torus_fold_ok)
+                                    // s127 equal-rim clean-interior arm (the
+                                    // #10212 f2 class): every rim edge
+                                    // already present in the legacy, but the
+                                    // interior carries slit-seam debt; the
+                                    // CDT is fully clean (extra_bnd == 0)
+                                    // and fold-gated (cf <= lf).
+                                    || (cyl_holed_equal_rim
                                         && torus_fold_ok));
                             if cdt_improves {
                                 log::warn!(
@@ -14728,7 +14826,7 @@ pub fn triangulate_surface_consistent(
                                 cdt_extra_bnd,
                                 tris.len() / 3,
                                 cdt2.len(),
-                                if torus_windmill { " [TORUS WINDMILL]" } else { "" },
+                                if torus_windmill { " [TORUS WINDMILL]" } else if cyl_holed_equal_rim { " [CYL EQUAL-RIM]" } else { "" },
                                 legacy_emission_folds,
                                 cdt_emission_folds,
                             );

@@ -1,0 +1,363 @@
+Loading STEP file: test/compressor-13920_top.stp
+STEP file parsed: 2950 entities
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
+----------------------------------------------------------------------------------------------------------------------------------------------------
+[2026-11-06T09:11:55Z WARN  draper_topology::healing] healing: 1 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (607, 608) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (623, 624) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (627, 628) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (631, 632) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (635, 636) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (707, 708) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (711, 712) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (715, 716) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (719, 720) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (723, 724) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (727, 728) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (731, 732) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (735, 736) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (739, 740) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (743, 744) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (747, 748) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (751, 752) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:11:55Z WARN  draper_step::converter] EARCUTR_DIAG: outer=222pts, holes=3 (60 total hole pts), total_tris=286, degenerate=0, forward=false
+[2026-11-06T09:11:55Z WARN  draper_step::converter]   outer uv bbox: [5.2501,12.7161] x [-21.5289,-13.7502]
+[2026-11-06T09:11:55Z WARN  draper_step::converter]   hole 0 uv bbox: [8.8750,9.1250] x [-21.2748,-21.0252] (20 pts)
+[2026-11-06T09:11:55Z WARN  draper_step::converter]   hole 1 uv bbox: [12.2538,12.5038] x [-15.1339,-14.8842] (20 pts)
+[2026-11-06T09:11:55Z WARN  draper_step::converter]   hole 2 uv bbox: [5.4703,5.7203] x [-15.1753,-14.9257] (20 pts)
+[2026-11-06T09:11:55Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=95, u=[3.1416,4.4969] (range=1.3553), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:00Z WARN  draper_mesh::parametric_domain] [fbrep1889_f2_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 94 → 95, 622 → 437 tris, 172 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:00Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 267 verts (154 new, 113 reused), 437 tris — 138 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:00Z WARN  draper_step::converter] BREP #1889 face #2 (STEP #821, Torus): 138 of 437 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:00Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=51, u=[2.8097,3.1416] (range=0.3319), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:00Z WARN  draper_mesh::parametric_domain] [fbrep1889_f3_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 525 → 0, rim edges 50 → 51, 569 → 135 tris, 43 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:00Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 94 verts (46 new, 48 reused), 135 tris — 44 degenerate, 0 same-face dup skipped, 1 cross-face dup skipped
+[2026-11-06T09:12:00Z WARN  draper_step::converter] BREP #1889 face #3 (STEP #835, Torus): 45 of 135 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:00Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=96, u=[0.7888,2.3683] (range=1.5796), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:05Z WARN  draper_mesh::parametric_domain] [fbrep1889_f11_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 533 → 0, rim edges 95 → 96, 622 → 274 tris, 90 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:05Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 186 verts (73 new, 113 reused), 274 tris — 40 degenerate, 1 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:05Z WARN  draper_step::converter] BREP #1889 face #11 (STEP #976, Torus): 41 of 274 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:05Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 9 verts (5 new, 4 reused), 8 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:05Z WARN  draper_step::converter] BREP #1889 face #13 (STEP #1003, Cylinder): 3 of 8 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:05Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=33, u=[1.5708,3.6072] (range=2.0365), v=[0.5067,6.2832] (range=5.7765), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:06Z WARN  draper_mesh::parametric_domain] [fbrep1889_f14_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 32 → 33, 560 → 107 tris, 38 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:06Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 71 verts (43 new, 28 reused), 107 tris — 21 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:06Z WARN  draper_step::converter] BREP #1889 face #14 (STEP #1016, Torus): 21 of 107 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:06Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 9 verts (4 new, 5 reused), 8 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:06Z WARN  draper_step::converter] BREP #1889 face #18 (STEP #1069, Cylinder): 3 of 8 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:06Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=33, u=[0.0780,6.2314] (range=6.1534), v=[0.5067,6.2832] (range=5.7765), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:06Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0780,6.2314], v=[0.5067,6.2832], 33 bnd pts, 0 holes
+[2026-11-06T09:12:07Z WARN  draper_mesh::parametric_domain] [fbrep1889_f19_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 533 → 0, rim edges 32 → 33, 559 → 107 tris, 38 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:07Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 71 verts (29 new, 42 reused), 107 tris — 21 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:07Z WARN  draper_step::converter] BREP #1889 face #19 (STEP #1081, Torus): 21 of 107 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:07Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=51, u=[0.0000,0.3408] (range=0.3408), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:07Z WARN  draper_mesh::parametric_domain] [fbrep1889_f20_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 520 → 0, rim edges 50 → 51, 568 → 135 tris, 43 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:07Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 94 verts (35 new, 59 reused), 135 tris — 42 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:07Z WARN  draper_step::converter] BREP #1889 face #20 (STEP #1094, Torus): 42 of 135 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:07Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=95, u=[0.0000,6.2523] (range=6.2523), v=[4.7124,6.2832] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:07Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2523], v=[4.7124,6.2832], 95 bnd pts, 0 holes
+[2026-11-06T09:12:08Z WARN  draper_mesh::parametric_domain] [fbrep1889_f21_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 534 → 0, rim edges 94 → 95, 620 → 437 tris, 172 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:08Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 267 verts (150 new, 117 reused), 437 tris — 138 degenerate, 0 same-face dup skipped, 1 cross-face dup skipped
+[2026-11-06T09:12:08Z WARN  draper_step::converter] BREP #1889 face #21 (STEP #1108, Torus): 139 of 437 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:08Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 12 verts (8 new, 4 reused), 12 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:08Z WARN  draper_step::converter] BREP #1889 face #26 (STEP #1190, Cylinder): 3 of 12 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:08Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=38, u=[3.6577,5.7671] (range=2.1094), v=[0.5067,6.2832] (range=5.7765), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:17Z WARN  draper_mesh::parametric_domain] [fbrep1889_f27_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 533 → 0, rim edges 37 → 38, 564 → 92 tris, 28 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:17Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 66 verts (42 new, 24 reused), 92 tris — 1 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:17Z WARN  draper_step::converter] BREP #1889 face #27 (STEP #1203, Torus): 1 of 92 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=94, u=[0.0000,6.2101] (range=6.2101), v=[0.0000,1.5708] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2101], v=[0.0000,1.5708], 94 bnd pts, 0 holes
+[2026-11-06T09:12:17Z WARN  draper_mesh::parametric_domain] [fbrep1889_f30_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 93 → 94, 621 → 260 tris, 84 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=94, u=[0.0000,3.1416] (range=3.1416), v=[0.0000,1.5708] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:17Z WARN  draper_mesh::parametric_domain] [fbrep1889_f33_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 93 → 94, 621 → 260 tris, 84 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:17Z WARN  draper_step::converter] EARCUTR_DIAG: outer=86pts, holes=3 (154 total hole pts), total_tris=244, degenerate=0, forward=false
+[2026-11-06T09:12:17Z WARN  draper_step::converter]   outer uv bbox: [6.1000,11.9000] x [-20.0481,-14.2519]
+[2026-11-06T09:12:17Z WARN  draper_step::converter]   hole 0 uv bbox: [7.7500,8.2500] x [-18.7497,-18.2503] (30 pts)
+[2026-11-06T09:12:17Z WARN  draper_step::converter]   hole 1 uv bbox: [8.2250,8.9750] x [-17.8745,-17.1255] (62 pts)
+[2026-11-06T09:12:17Z WARN  draper_step::converter]   hole 2 uv bbox: [7.0430,7.7930] x [-17.8745,-17.1255] (62 pts)
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=94, u=[0.0000,6.2101] (range=6.2101), v=[0.0000,1.5708] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2101], v=[0.0000,1.5708], 94 bnd pts, 0 holes
+[2026-11-06T09:12:17Z WARN  draper_mesh::parametric_domain] [fbrep1889_f35_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 93 → 94, 621 → 260 tris, 84 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:17Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 178 verts (126 new, 52 reused), 260 tris — 0 degenerate, 0 same-face dup skipped, 2 cross-face dup skipped
+[2026-11-06T09:12:17Z WARN  draper_step::converter] BREP #1889 face #35 (STEP #1332, Torus): 2 of 260 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:17Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=94, u=[0.0000,3.1416] (range=3.1416), v=[0.0000,1.5708] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:17Z WARN  draper_mesh::parametric_domain] [fbrep1889_f46_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 93 → 94, 621 → 260 tris, 84 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:17Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 178 verts (106 new, 72 reused), 260 tris — 0 degenerate, 0 same-face dup skipped, 2 cross-face dup skipped
+[2026-11-06T09:12:17Z WARN  draper_step::converter] BREP #1889 face #46 (STEP #1470, Torus): 2 of 260 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: 138 short boundary edges, 412 boundary vertices (tol=0.0671mm) — welding
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD PASS 1: 138 short edges processed, 2 welded, 125 skipped (same-face), 136 skipped (no candidate)
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: PASS 3 (seam-specific) welded 50 boundary vertices (tol=0.067144)
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: 52 vertices welded
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: removed 13 degenerate + 0 same-face duplicate triangles after welding (kept 0 cross-face duplicates)
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: 140 short boundary edges, 360 boundary vertices (tol=0.0711mm) — welding
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD PASS 1: 140 short edges processed, 2 welded, 140 skipped (same-face), 138 skipped (no candidate)
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: 2 vertices welded
+[2026-11-06T09:12:17Z WARN  draper_mesh::watertight] WELD: removed 0 degenerate + 0 same-face duplicate triangles after welding (kept 0 cross-face duplicates)
+[2026-11-06T09:12:18Z ERROR draper_step::converter] BUG: BREP #1889 detailed not watertight: 476 boundary edges (6.30%), 8 non-manifold (tol=3.81e-5)
+[2026-11-06T09:12:18Z ERROR draper_step::converter]   Dedup stats: 4263 face vertices → 2522 unique (1741 shared), dedup_rate=40.8%, exact_hits=1397, tolerance_hits=290, misses=2576
+[2026-11-06T09:12:18Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-06T09:12:18Z ERROR draper_step::converter] Edge consistency: 7075/7075 consistent, 0 inconsistent (0.00%), max_dist=0.00e0
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889 detailed: NOT watertight — 476 boundary edges, 8 non-manifold edges, χ=-151
+[2026-11-06T09:12:18Z WARN  draper_topology::healing] healing: 1 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (607, 608) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (623, 624) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (627, 628) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (631, 632) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (635, 636) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (707, 708) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (711, 712) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (715, 716) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (719, 720) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (723, 724) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (727, 728) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (731, 732) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (735, 736) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (739, 740) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (743, 744) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (747, 748) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] BREP #1889: skipped 2 step_ids at vertex_pair (751, 752) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:18Z WARN  draper_step::converter] EARCUTR_DIAG: outer=286pts, holes=3 (60 total hole pts), total_tris=350, degenerate=0, forward=false
+[2026-11-06T09:12:18Z WARN  draper_step::converter]   outer uv bbox: [5.2501,12.7161] x [-21.5289,-13.7500]
+[2026-11-06T09:12:18Z WARN  draper_step::converter]   hole 0 uv bbox: [8.8750,9.1250] x [-21.2748,-21.0252] (20 pts)
+[2026-11-06T09:12:18Z WARN  draper_step::converter]   hole 1 uv bbox: [12.2538,12.5038] x [-15.1339,-14.8842] (20 pts)
+[2026-11-06T09:12:18Z WARN  draper_step::converter]   hole 2 uv bbox: [5.4703,5.7203] x [-15.1753,-14.9257] (20 pts)
+[2026-11-06T09:12:18Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=127, u=[3.1416,4.4969] (range=1.3553), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:22Z WARN  draper_mesh::parametric_domain] [fbrep1889_f2_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 126 → 127, 654 → 835 tris, 355 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:22Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 482 verts (231 new, 251 reused), 835 tris — 382 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:22Z WARN  draper_step::converter] BREP #1889 face #2 (STEP #821, Torus): 382 of 835 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:22Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=67, u=[2.8097,3.1416] (range=0.3319), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:22Z WARN  draper_mesh::parametric_domain] [fbrep1889_f3_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 525 → 0, rim edges 66 → 67, 585 → 415 tris, 175 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:22Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 242 verts (93 new, 149 reused), 415 tris — 226 degenerate, 3 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:22Z WARN  draper_step::converter] BREP #1889 face #3 (STEP #835, Torus): 229 of 415 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:22Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=128, u=[0.7888,2.3683] (range=1.5796), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:26Z WARN  draper_mesh::parametric_domain] [fbrep1889_f11_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 533 → 0, rim edges 127 → 128, 654 → 854 tris, 364 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:26Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 492 verts (129 new, 363 reused), 854 tris — 476 degenerate, 1 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:26Z WARN  draper_step::converter] BREP #1889 face #11 (STEP #976, Torus): 477 of 854 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:26Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 9 verts (5 new, 4 reused), 8 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:26Z WARN  draper_step::converter] BREP #1889 face #13 (STEP #1003, Cylinder): 3 of 8 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:26Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=33, u=[1.5708,3.6072] (range=2.0365), v=[0.5067,6.2832] (range=5.7765), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain] [fbrep1889_f14_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 32 → 33, 560 → 183 tris, 76 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 11→12 dist=0.045316
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 12→14 dist=0.045316
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 17→18 dist=0.045316
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 21→23 dist=0.067913
+[2026-11-06T09:12:27Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 4/33 boundary edges for surface Discriminant(4) (n_bnd=33, n_holes=0, verts=98, tris=155, filled=0)
+[2026-11-06T09:12:27Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 98 verts (57 new, 41 reused), 155 tris — 41 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:27Z WARN  draper_step::converter] BREP #1889 face #14 (STEP #1016, Torus): 41 of 155 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:27Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 9 verts (5 new, 4 reused), 8 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:27Z WARN  draper_step::converter] BREP #1889 face #18 (STEP #1069, Cylinder): 3 of 8 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:27Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=33, u=[0.0780,6.2314] (range=6.1534), v=[0.5067,6.2832] (range=5.7765), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:27Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0780,6.2314], v=[0.5067,6.2832], 33 bnd pts, 0 holes
+[2026-11-06T09:12:28Z WARN  draper_mesh::parametric_domain] [fbrep1889_f19_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 533 non-rim bnd edges — re-routing through per-face CDT (ring edges 32 → 33, extra bnd 533 → 0, 559 → 609 tris, emission folds 0 → 0)
+[2026-11-06T09:12:28Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 369 verts (34 new, 335 reused), 691 tris — 376 degenerate, 106 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:28Z WARN  draper_step::converter] BREP #1889 face #19 (STEP #1081, Torus): 482 of 691 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:28Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=67, u=[0.0000,0.3408] (range=0.3408), v=[4.7124,6.2832] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:28Z WARN  draper_mesh::parametric_domain] [fbrep1889_f20_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 520 → 0, rim edges 66 → 67, 584 → 415 tris, 175 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:28Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 242 verts (81 new, 161 reused), 415 tris — 232 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:28Z WARN  draper_step::converter] BREP #1889 face #20 (STEP #1094, Torus): 232 of 415 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:28Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=127, u=[0.0000,6.2607] (range=6.2607), v=[4.7124,6.2832] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:28Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2607], v=[4.7124,6.2832], 127 bnd pts, 0 holes
+[2026-11-06T09:12:30Z WARN  draper_mesh::parametric_domain] [fbrep1889_f21_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 126 → 127, 654 → 835 tris, 355 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:30Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 482 verts (227 new, 255 reused), 835 tris — 380 degenerate, 1 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:30Z WARN  draper_step::converter] BREP #1889 face #21 (STEP #1108, Torus): 381 of 835 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:30Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 12 verts (8 new, 4 reused), 12 tris — 3 degenerate, 0 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:30Z WARN  draper_step::converter] BREP #1889 face #26 (STEP #1190, Cylinder): 3 of 12 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:30Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=38, u=[3.6577,5.7671] (range=2.1094), v=[0.5067,6.2832] (range=5.7765), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:38Z WARN  draper_mesh::parametric_domain] [fbrep1889_f27_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 533 non-rim bnd edges — re-routing through per-face CDT (ring edges 37 → 38, extra bnd 533 → 0, 564 → 576 tris, emission folds 0 → 0)
+[2026-11-06T09:12:38Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 337 verts (45 new, 292 reused), 630 tris — 330 degenerate, 95 same-face dup skipped, 5 cross-face dup skipped
+[2026-11-06T09:12:38Z WARN  draper_step::converter] BREP #1889 face #27 (STEP #1203, Torus): 430 of 630 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:38Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=126, u=[0.0000,6.2299] (range=6.2299), v=[0.0000,1.5708] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:38Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2299], v=[0.0000,1.5708], 126 bnd pts, 0 holes
+[2026-11-06T09:12:42Z WARN  draper_mesh::parametric_domain] [fbrep1889_f30_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 671 non-rim bnd edges — re-routing through per-face CDT (ring edges 125 → 126, extra bnd 671 → 0, 790 → 666 tris, emission folds 0 → 0)
+[2026-11-06T09:12:42Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 645 verts (213 new, 432 reused), 1131 tris — 312 degenerate, 173 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:42Z WARN  draper_step::converter] BREP #1889 face #30 (STEP #1243, Torus): 485 of 1131 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:42Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=126, u=[0.0000,3.1416] (range=3.1416), v=[0.0000,1.5708] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:42Z WARN  draper_mesh::parametric_domain] [fbrep1889_f33_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 622 non-rim bnd edges — re-routing through per-face CDT (ring edges 125 → 126, extra bnd 622 → 0, 745 → 570 tris, emission folds 0 → 0)
+[2026-11-06T09:12:42Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 461 verts (155 new, 306 reused), 785 tris — 227 degenerate, 103 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:42Z WARN  draper_step::converter] BREP #1889 face #33 (STEP #1290, Torus): 330 of 785 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:42Z WARN  draper_step::converter] EARCUTR_DIAG: outer=118pts, holes=3 (154 total hole pts), total_tris=276, degenerate=0, forward=false
+[2026-11-06T09:12:42Z WARN  draper_step::converter]   outer uv bbox: [6.1000,11.9000] x [-20.0490,-14.2510]
+[2026-11-06T09:12:42Z WARN  draper_step::converter]   hole 0 uv bbox: [7.7500,8.2500] x [-18.7497,-18.2503] (30 pts)
+[2026-11-06T09:12:42Z WARN  draper_step::converter]   hole 1 uv bbox: [8.2250,8.9750] x [-17.8745,-17.1255] (62 pts)
+[2026-11-06T09:12:42Z WARN  draper_step::converter]   hole 2 uv bbox: [7.0430,7.7930] x [-17.8745,-17.1255] (62 pts)
+[2026-11-06T09:12:42Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 272 verts (212 new, 60 reused), 276 tris — 0 degenerate, 0 same-face dup skipped, 1 cross-face dup skipped
+[2026-11-06T09:12:42Z WARN  draper_step::converter] BREP #1889 face #34 (STEP #1319, Plane): 1 of 276 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:42Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=126, u=[0.0000,6.2299] (range=6.2299), v=[0.0000,1.5708] (range=1.5708), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:42Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2299], v=[0.0000,1.5708], 126 bnd pts, 0 holes
+[2026-11-06T09:12:42Z WARN  draper_mesh::parametric_domain] [fbrep1889_f35_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 622 non-rim bnd edges — re-routing through per-face CDT (ring edges 125 → 126, extra bnd 622 → 0, 745 → 570 tris, emission folds 0 → 0)
+[2026-11-06T09:12:42Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 461 verts (147 new, 314 reused), 785 tris — 215 degenerate, 100 same-face dup skipped, 2 cross-face dup skipped
+[2026-11-06T09:12:42Z WARN  draper_step::converter] BREP #1889 face #35 (STEP #1332, Torus): 317 of 785 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:42Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=126, u=[0.0000,3.1416] (range=3.1416), v=[0.0000,1.5708] (range=1.5708), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:43Z WARN  draper_mesh::parametric_domain] [fbrep1889_f46_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 670 non-rim bnd edges — re-routing through per-face CDT (ring edges 125 → 126, extra bnd 670 → 0, 794 → 666 tris, emission folds 0 → 0)
+[2026-11-06T09:12:43Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 564 verts (121 new, 443 reused), 994 tris — 365 degenerate, 103 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:43Z WARN  draper_step::converter] BREP #1889 face #46 (STEP #1470, Torus): 468 of 994 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: 180 short boundary edges, 804 boundary vertices (tol=0.0671mm) — welding
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD PASS 1: 180 short edges processed, 2 welded, 178 skipped (same-face), 178 skipped (no candidate)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: PASS 3 (seam-specific) welded 65 boundary vertices (tol=0.067144)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: 67 vertices welded
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: removed 12 degenerate + 7 same-face duplicate triangles after welding (kept 0 cross-face duplicates)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: 186 short boundary edges, 717 boundary vertices (tol=0.0748mm) — welding
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD PASS 1: 186 short edges processed, 3 welded, 194 skipped (same-face), 181 skipped (no candidate)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: PASS 3 (seam-specific) welded 6 boundary vertices (tol=0.074824)
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: 9 vertices welded
+[2026-11-06T09:12:43Z WARN  draper_mesh::watertight] WELD: removed 1 degenerate + 0 same-face duplicate triangles after welding (kept 0 cross-face duplicates)
+[2026-11-06T09:12:45Z ERROR draper_step::converter] BUG: BREP #1889 detailed not watertight: 888 boundary edges (8.70%), 819 non-manifold (tol=3.81e-5)
+[2026-11-06T09:12:45Z ERROR draper_step::converter]   Dedup stats: 7519 face vertices → 3111 unique (4408 shared), dedup_rate=58.6%, exact_hits=1583, tolerance_hits=2755, misses=3181
+[2026-11-06T09:12:45Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-06T09:12:45Z ERROR draper_step::converter] Edge consistency: 9318/9318 consistent, 0 inconsistent (0.00%), max_dist=0.00e0
+[2026-11-06T09:12:45Z WARN  draper_step::converter] BREP #1889 detailed: NOT watertight — 888 boundary edges, 819 non-manifold edges, χ=-95
+   1             COMP-13920 (BREP#1889)       7067        605        115     180.00        0       10        0        0        0        0           14
+      outlier: edge(59,1150) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(9.526,0.150,20.960)  tris=[59,1151,1150]/[1203,1150,59]
+      outlier: edge(59,1044) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(9.551,0.102,20.917)  tris=[59,1044,1086]/[59,1044,60]
+      outlier: edge(44,323) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.449,0.102,20.917)  tris=[323,44,43]/[324,323,44]
+      outlier: edge(44,393) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.474,0.150,20.960)  tris=[393,392,44]/[393,1438,44]
+      outlier: edge(140,830) angle=180.00° faces=[10,10] SAME-FACE [sub-tol weld-noise] midpoint=(11.917,0.150,14.667)  tris=[140,834,830]/[826,830,140]
+[2026-11-06T09:12:56Z WARN  draper_topology::healing] healing: 21 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2240, 2242) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2245, 2246) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2249, 2250) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2253, 2254) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2256, 2258) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2261, 2262) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2265, 2266) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2269, 2270) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2273, 2274) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2277, 2281) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2278, 2282) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2283, 2284) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2285, 2286) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2289, 2290) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2293, 2294) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:12:56Z WARN  draper_mesh::parametric_domain] [fbrep2860_f1_Nurbs(deg=3/3, cps=7x4)] NURBS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 50 → 0, rim edges 163 → 164, 211 → 366 tris, 102 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain] [fbrep2860_f7_Cylinder] unused-ring-vertex/region-drop rescue: 32 ring verts unused, 63 non-rim bnd edges — re-routing through per-face CDT (ring edges 75 → 108, extra bnd 63 → 0, 137 → 260 tris, emission folds 0 → 0)
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 20→18 dist=2.322678
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 24→1 dist=2.290292
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 2/108 boundary edges for surface Discriminant(1) (n_bnd=108, n_holes=1, verts=184, tris=262, filled=2)
+[2026-11-06T09:12:57Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 199 verts (160 new, 39 reused), 292 tris — 0 degenerate, 1 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:57Z WARN  draper_step::converter] BREP #2860 face #7 (STEP #2429, Cylinder): 1 of 292 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 13→2 dist=0.101331
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 1/97 boundary edges for surface Discriminant(3) (n_bnd=97, n_holes=0, verts=249, tris=247, filled=0)
+[2026-11-06T09:12:57Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 504 verts (417 new, 87 reused), 689 tris — 73 degenerate, 20 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:57Z WARN  draper_step::converter] BREP #2860 face #8 (STEP #2442, Sphere): 93 of 689 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain] [fbrep2860_f9_Sphere] unused-ring-vertex/region-drop rescue: 2 ring verts unused, 159 non-rim bnd edges — re-routing through per-face CDT (ring edges 93 → 97, extra bnd 159 → 0, 242 → 285 tris, emission folds 0 → 0)
+[2026-11-06T09:12:57Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 581 verts (442 new, 139 reused), 1046 tris — 40 degenerate, 20 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:57Z WARN  draper_step::converter] BREP #2860 face #9 (STEP #2453, Sphere): 60 of 1046 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:57Z WARN  draper_mesh::parametric_domain] [fbrep2860_f10_Nurbs(deg=3/3, cps=4x18)] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 407 non-rim bnd edges — re-routing through per-face CDT (ring edges 37 → 38, extra bnd 407 → 0, 232 → 378 tris, emission folds 0 → 0)
+[2026-11-06T09:12:57Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 209 verts (15 new, 194 reused), 378 tris — 323 degenerate, 19 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:57Z WARN  draper_step::converter] BREP #2860 face #10 (STEP #2536, Nurbs(deg=3/3, cps=4x18)): 342 of 378 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:58Z WARN  draper_mesh::parametric_domain] [fbrep2860_f11_Nurbs(deg=3/3, cps=4x18)] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 404 non-rim bnd edges — re-routing through per-face CDT (ring edges 37 → 38, extra bnd 404 → 0, 237 → 366 tris, emission folds 0 → 0)
+[2026-11-06T09:12:58Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 203 verts (13 new, 190 reused), 366 tris — 309 degenerate, 21 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:12:58Z WARN  draper_step::converter] BREP #2860 face #11 (STEP #2617, Nurbs(deg=3/3, cps=4x18)): 330 of 366 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:12:59Z WARN  draper_mesh::parametric_domain] [fbrep2860_f12_Cylinder] CYL_RULED_BAND rescue: ruled band between cached rim chains accepted (non-rim bnd edges 76 → 0, rim edges 28 → 35, 88 → 33 tris, interior Steiners dropped)
+[2026-11-06T09:12:59Z WARN  draper_mesh::parametric_domain] [fbrep2860_f13_Cylinder] region-drop rescue: two-chain monotone strip accepted (76 non-rim bnd edges → 0, rim edges 34 → 35, 94 → 33 tris, interior Steiners dropped)
+[2026-11-06T09:12:59Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=32, u=[0.0000,3.1416] (range=3.1416), v=[1.5708,6.2832] (range=4.7124), wrap_u=false, wrap_v=false
+[2026-11-06T09:12:59Z WARN  draper_mesh::parametric_domain] [fbrep2860_f14_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 31 → 32, 559 → 30 tris, 0 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:59Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=32, u=[0.0000,5.9792] (range=5.9792), v=[1.5708,6.2832] (range=4.7124), wrap_u=true, wrap_v=false
+[2026-11-06T09:12:59Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,5.9792], v=[1.5708,6.2832], 32 bnd pts, 0 holes
+[2026-11-06T09:12:59Z WARN  draper_mesh::parametric_domain] [fbrep2860_f16_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 31 → 32, 559 → 30 tris, 0 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:12:59Z WARN  draper_mesh::parametric_domain] [fbrep2860_f17_Nurbs(deg=3/3, cps=7x4)] NURBS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 50 → 0, rim edges 163 → 164, 211 → 366 tris, 102 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:13:00Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=90, u=[0.0000,6.1934] (range=6.1934), v=[2.6880,3.1416] (range=0.4536), wrap_u=true, wrap_v=false
+[2026-11-06T09:13:00Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.1934], v=[2.6880,3.1416], 90 bnd pts, 0 holes
+[2026-11-06T09:13:00Z WARN  draper_mesh::parametric_domain] [fbrep2860_f20_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 89 → 90, 617 → 156 tris, 34 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:13:00Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=90, u=[0.0000,3.1416] (range=3.1416), v=[2.6880,3.1416] (range=0.4536), wrap_u=false, wrap_v=false
+[2026-11-06T09:13:00Z WARN  draper_mesh::parametric_domain] [fbrep2860_f27_Torus] TORUS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 530 → 0, rim edges 89 → 90, 617 → 156 tris, 34 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:13:00Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 124 verts (34 new, 90 reused), 156 tris — 0 degenerate, 0 same-face dup skipped, 16 cross-face dup skipped
+[2026-11-06T09:13:00Z WARN  draper_step::converter] BREP #2860 face #27 (STEP #2858, Torus): 16 of 156 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:00Z WARN  draper_mesh::watertight] WELD: 69 short boundary edges, 596 boundary vertices (tol=0.0671mm) — welding
+[2026-11-06T09:13:00Z WARN  draper_mesh::watertight] WELD PASS 1: 69 short edges processed, 0 welded, 70 skipped (same-face), 69 skipped (no candidate)
+[2026-11-06T09:13:00Z WARN  draper_mesh::watertight] WELD: no vertices welded
+[2026-11-06T09:13:03Z ERROR draper_step::converter] BUG: BREP #2860 detailed not watertight: 685 boundary edges (10.39%), 196 non-manifold (tol=3.81e-5)
+[2026-11-06T09:13:03Z ERROR draper_step::converter]   Dedup stats: 3778 face vertices → 2226 unique (1552 shared), dedup_rate=41.1%, exact_hits=1133, tolerance_hits=420, misses=2225
+[2026-11-06T09:13:03Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-06T09:13:03Z ERROR draper_step::converter] Edge consistency: 5907/5907 consistent, 0 inconsistent (0.00%), max_dist=0.00e0
+[2026-11-06T09:13:03Z WARN  draper_step::converter] BREP #2860 detailed: NOT watertight — 685 boundary edges, 196 non-manifold edges, χ=-121
+[2026-11-06T09:13:13Z WARN  draper_topology::healing] healing: 21 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2240, 2242) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2245, 2246) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2249, 2250) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2253, 2254) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2256, 2258) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2261, 2262) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2265, 2266) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2269, 2270) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2273, 2274) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2277, 2281) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2278, 2282) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2283, 2284) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2285, 2286) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2289, 2290) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_step::converter] BREP #2860: skipped 2 step_ids at vertex_pair (2293, 2294) — 2 shape groups (shape_tol=0.0671)
+[2026-11-06T09:13:13Z WARN  draper_mesh::parametric_domain] [fbrep2860_f1_Nurbs(deg=3/3, cps=7x4)] NURBS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 50 → 0, rim edges 155 → 156, 203 → 706 tris, 276 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:13:15Z WARN  draper_mesh::parametric_domain] [fbrep2860_f7_Cylinder] unused-ring-vertex/region-drop rescue: 44 ring verts unused, 141 non-rim bnd edges — re-routing through per-face CDT (ring edges 87 → 132, extra bnd 141 → 0, 213 → 340 tris, emission folds 0 → 0)
+[2026-11-06T09:13:15Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 18→84 dist=2.322678
+[2026-11-06T09:13:15Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 7→1 dist=2.290292
+[2026-11-06T09:13:15Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 2/132 boundary edges for surface Discriminant(1) (n_bnd=132, n_holes=1, verts=236, tris=342, filled=2)
+[2026-11-06T09:13:15Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 287 verts (229 new, 58 reused), 438 tris — 4 degenerate, 7 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:15Z WARN  draper_step::converter] BREP #2860 face #7 (STEP #2429, Cylinder): 11 of 438 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:22Z WARN  draper_mesh::parametric_domain] [fbrep2860_f8_Sphere] unused-ring-vertex/region-drop rescue: 61 ring verts unused, 258 non-rim bnd edges — re-routing through per-face CDT (ring edges 77 → 141, extra bnd 258 → 0, 305 → 375 tris, emission folds 0 → 0)
+[2026-11-06T09:13:22Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 704 verts (583 new, 121 reused), 1249 tris — 68 degenerate, 21 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:22Z WARN  draper_step::converter] BREP #2860 face #8 (STEP #2442, Sphere): 89 of 1249 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:22Z WARN  draper_mesh::parametric_domain] [fbrep2860_f9_Sphere] unused-ring-vertex/region-drop rescue: 33 ring verts unused, 255 non-rim bnd edges — re-routing through per-face CDT (ring edges 105 → 141, extra bnd 255 → 0, 334 → 411 tris, emission folds 0 → 0)
+[2026-11-06T09:13:22Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 929 verts (631 new, 298 reused), 1711 tris — 95 degenerate, 56 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:22Z WARN  draper_step::converter] BREP #2860 face #9 (STEP #2453, Sphere): 151 of 1711 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:22Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 34→2 dist=0.033292
+[2026-11-06T09:13:22Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 1/38 boundary edges for surface Discriminant(7) (n_bnd=38, n_holes=0, verts=340, tris=233, filled=1)
+[2026-11-06T09:13:22Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 340 verts (15 new, 325 reused), 233 tris — 144 degenerate, 22 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:22Z WARN  draper_step::converter] BREP #2860 face #10 (STEP #2536, Nurbs(deg=3/3, cps=4x18)): 166 of 233 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain]   MISSING boundary edge: mesh_idx 307→2 dist=0.044666
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] DIAG: earcutr missing 1/38 boundary edges for surface Discriminant(7) (n_bnd=38, n_holes=0, verts=337, tris=238, filled=1)
+[2026-11-06T09:13:23Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 337 verts (13 new, 324 reused), 238 tris — 148 degenerate, 21 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:23Z WARN  draper_step::converter] BREP #2860 face #11 (STEP #2617, Nurbs(deg=3/3, cps=4x18)): 169 of 238 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] [fbrep2860_f12_Cylinder] CYL_RULED_BAND rescue: ruled band between cached rim chains accepted (non-rim bnd edges 76 → 0, rim edges 28 → 35, 88 → 33 tris, interior Steiners dropped)
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] [fbrep2860_f13_Cylinder] region-drop rescue: two-chain monotone strip accepted (76 non-rim bnd edges → 0, rim edges 34 → 35, 94 → 33 tris, interior Steiners dropped)
+[2026-11-06T09:13:23Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=32, u=[0.0000,3.1416] (range=3.1416), v=[1.5708,6.2832] (range=4.7124), wrap_u=false, wrap_v=false
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] [fbrep2860_f14_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 530 non-rim bnd edges — re-routing through per-face CDT (ring edges 31 → 32, extra bnd 530 → 0, 559 → 440 tris, emission folds 0 → 0)
+[2026-11-06T09:13:23Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 240 verts (17 new, 223 reused), 446 tris — 396 degenerate, 13 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:23Z WARN  draper_step::converter] BREP #2860 face #14 (STEP #2660, Torus): 409 of 446 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:23Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=32, u=[0.0000,5.9792] (range=5.9792), v=[1.5708,6.2832] (range=4.7124), wrap_u=true, wrap_v=false
+[2026-11-06T09:13:23Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,5.9792], v=[1.5708,6.2832], 32 bnd pts, 0 holes
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] [fbrep2860_f16_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 530 non-rim bnd edges — re-routing through per-face CDT (ring edges 31 → 32, extra bnd 530 → 0, 559 → 440 tris, emission folds 0 → 0)
+[2026-11-06T09:13:23Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 240 verts (1 new, 239 reused), 446 tris — 394 degenerate, 14 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:23Z WARN  draper_step::converter] BREP #2860 face #16 (STEP #2683, Torus): 408 of 446 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:23Z WARN  draper_mesh::parametric_domain] [fbrep2860_f17_Nurbs(deg=3/3, cps=7x4)] NURBS_FILLET_BAND rescue: few-level band grid accepted (non-rim bnd edges 50 → 0, rim edges 155 → 156, 203 → 706 tris, 276 analytic level pts, interior Steiners dropped)
+[2026-11-06T09:13:25Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=90, u=[0.0000,6.2163] (range=6.2163), v=[2.6880,3.1416] (range=0.4536), wrap_u=true, wrap_v=false
+[2026-11-06T09:13:25Z WARN  draper_mesh::triangulate] TORUS_UNWRAP: wrap_u=true, wrap_v=false, u=[0.0000,6.2163], v=[2.6880,3.1416], 90 bnd pts, 0 holes
+[2026-11-06T09:13:25Z WARN  draper_mesh::parametric_domain] [fbrep2860_f20_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 553 non-rim bnd edges — re-routing through per-face CDT (ring edges 89 → 90, extra bnd 553 → 0, 640 → 570 tris, emission folds 0 → 0)
+[2026-11-06T09:13:25Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 333 verts (169 new, 164 reused), 574 tris — 216 degenerate, 6 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:25Z WARN  draper_step::converter] BREP #2860 face #20 (STEP #2763, Torus): 222 of 574 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:25Z WARN  draper_mesh::triangulate] TORUS_UNWRAP_CHECK: n_bnd=90, u=[0.0000,3.1416] (range=3.1416), v=[2.6880,3.1416] (range=0.4536), wrap_u=false, wrap_v=false
+[2026-11-06T09:13:25Z WARN  draper_mesh::parametric_domain] [fbrep2860_f27_Torus] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 553 non-rim bnd edges — re-routing through per-face CDT (ring edges 89 → 90, extra bnd 553 → 0, 640 → 570 tris, emission folds 0 → 0)
+[2026-11-06T09:13:25Z WARN  draper_mesh::mesh] MERGE_DEGEN: other has 333 verts (127 new, 206 reused), 574 tris — 216 degenerate, 6 same-face dup skipped, 0 cross-face dup skipped
+[2026-11-06T09:13:25Z WARN  draper_step::converter] BREP #2860 face #27 (STEP #2858, Torus): 222 of 574 triangles lost during merge (degenerate/duplicate)
+[2026-11-06T09:13:25Z WARN  draper_mesh::watertight] WELD: 43 short boundary edges, 489 boundary vertices (tol=0.0671mm) — welding
+[2026-11-06T09:13:25Z WARN  draper_mesh::watertight] WELD PASS 1: 43 short edges processed, 0 welded, 93 skipped (same-face), 43 skipped (no candidate)
+[2026-11-06T09:13:25Z WARN  draper_mesh::watertight] WELD: no vertices welded
+[2026-11-06T09:13:29Z ERROR draper_step::converter] BUG: BREP #2860 detailed not watertight: 507 boundary edges (4.88%), 366 non-manifold (tol=3.81e-5)
+[2026-11-06T09:13:29Z ERROR draper_step::converter]   Dedup stats: 6085 face vertices → 3320 unique (2765 shared), dedup_rate=45.4%, exact_hits=1288, tolerance_hits=1488, misses=3309
+[2026-11-06T09:13:29Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-06T09:13:29Z ERROR draper_step::converter] Edge consistency: 9877/9877 consistent, 0 inconsistent (0.00%), max_dist=0.00e0
+[2026-11-06T09:13:29Z WARN  draper_step::converter] BREP #2860 detailed: NOT watertight — 507 boundary edges, 366 non-manifold edges, χ=-138
+   2        COLLECTOR-13920 (BREP#2860)       9511       2073        918     180.00        0      111        0        0        0        0          178
+      outlier: edge(2970,2993) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.053,12.340,15.899)  tris=[2970,2993,2971]/[2970,2993,2992]
+      outlier: edge(2826,2937) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.355,12.340,15.199)  tris=[2937,2826,2938]/[2937,2826,2837]
+      outlier: edge(2819,2938) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.420,12.340,15.184)  tris=[2938,2819,2939]/[2938,2819,2826]
+      outlier: edge(2966,2989) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.229,12.340,16.095)  tris=[2966,2989,2967]/[2966,2989,2988]
+      outlier: edge(2963,2986) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.414,12.340,16.168)  tris=[2963,2986,2964]/[2963,2986,2985]
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Summary:
+  Total BREPs:            2
+  Interior edges total:   16578
+  Sharp angles (>60°):    2678 (16.15%)
+  Extreme angles (>90°):  1033 (6.23%)
+  Statistical outliers:   192
+  Surf-exempt (>170°):    0 (tangency/shallow junctions — not bugs)
+  Sub-tol weld-noise:     121 (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)
+  Knife-fin pinch:        0 (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)
+  Coil-turn weld:         0 (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)
+  Junction-sliver:        0 (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)
+  Thin-face:              0 (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)
+
+✓ PASS: No truly extreme angles (>170°) beyond surface-justified exemptions

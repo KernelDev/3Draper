@@ -1,0 +1,5 @@
+# surface="Cylinder" forward=true depth=0 outer=4 holes=0 label=brep10203_f31_Cylinder
+o 6.253180805 -0.000000000
+o 0.000000000 -0.000000000
+o 6.283185307 0.015167479
+o 6.253180805 0.015167479
