@@ -1,0 +1,124 @@
+Loading STEP file: test/brick_thin_round.stp
+STEP file parsed: 1547 entities
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
+----------------------------------------------------------------------------------------------------------------------------------------------------
+[2026-11-07T07:42:51Z WARN  draper_topology::healing] healing: 112 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (557, 558) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (561, 562) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (565, 566) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (569, 570) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (593, 594) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (597, 598) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (601, 602) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (605, 606) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (641, 642) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (649, 650) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (653, 654) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (657, 658) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (661, 662) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (665, 666) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (701, 702) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (705, 706) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (710, 714) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f6_Cylinder] unused-ring-vertex/region-drop rescue: 60 ring verts unused, 32 non-rim bnd edges — re-routing through per-face CDT (ring edges 193 → 256, extra bnd 32 → 0, 223 → 258 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] EARCUTR_DIAG: outer=310pts, holes=1 (132 total hole pts), total_tris=442, degenerate=0, forward=true
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   outer uv bbox: [-0.0156,0.0000] x [0.0000,0.0156]
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 0 uv bbox: [-0.0104,-0.0052] x [0.0052,0.0104] (132 pts)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f11_Cylinder] unused-ring-vertex/region-drop rescue: 168 ring verts unused, 22 non-rim bnd edges — re-routing through per-face CDT (ring edges 144 → 320, extra bnd 22 → 0, 160 → 360 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] EARCUTR_DIAG: outer=128pts, holes=5 (310 total hole pts), total_tris=446, degenerate=0, forward=false
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   outer uv bbox: [-0.0141,-0.0014] x [0.0014,0.0141]
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 0 uv bbox: [-0.0108,-0.0047] x [0.0048,0.0108] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 1 uv bbox: [-0.0051,-0.0027] x [0.0027,0.0051] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 2 uv bbox: [-0.0129,-0.0105] x [0.0027,0.0051] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 3 uv bbox: [-0.0051,-0.0027] x [0.0105,0.0129] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 4 uv bbox: [-0.0129,-0.0105] x [0.0105,0.0129] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f32_Cylinder] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 12 non-rim bnd edges — re-routing through per-face CDT (ring edges 319 → 320, extra bnd 12 → 0, 329 → 334 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD: 0 short boundary edges, 6 boundary vertices (tol=0.0000mm) — welding
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD PASS 1: 0 short edges processed, 0 welded, 0 skipped (same-face), 0 skipped (no candidate)
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD: no vertices welded
+[2026-11-07T07:42:51Z ERROR draper_step::converter] BUG: BREP #1498 detailed not watertight: 1093 boundary edges (22.25%), 0 non-manifold (tol=2.49e-8)
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Dedup stats: 3757 face vertices → 1851 unique (1906 shared), dedup_rate=50.7%, exact_hits=1904, tolerance_hits=0, misses=1853
+[2026-11-07T07:42:51Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] Vertex near-miss diagnostic: 46 boundary vertex pairs from different faces are close but not bit-identical (max_dist=8.34e-5, tol=1.00e-6)
+[2026-11-07T07:42:51Z ERROR draper_step::converter] Edge consistency: 3820/3828 consistent, 8 inconsistent (0.21%), max_dist=8.34e-5
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1046, 1049), dist=8.34e-5, faces=[12, 11]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1046, 1046), dist=8.34e-5, faces=[11, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1093, 1094), dist=8.34e-5, faces=[12, 32]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (922, 1051), dist=8.34e-5, faces=[12, 11]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (922, 922), dist=8.34e-5, faces=[11, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1093, 1093), dist=8.34e-5, faces=[32, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1125, 1125), dist=8.34e-5, faces=[32, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1125, 1126), dist=8.34e-5, faces=[12, 32]
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498 detailed: NOT watertight — 1093 boundary edges, 0 non-manifold edges, χ=-151
+[2026-11-07T07:42:51Z WARN  draper_topology::healing] healing: 112 self-intersection hits detected — report-only (remove_self_intersecting_faces=false)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (557, 558) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (561, 562) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (565, 566) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (569, 570) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (593, 594) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (597, 598) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (601, 602) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (605, 606) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (641, 642) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (649, 650) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (653, 654) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (657, 658) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (661, 662) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (665, 666) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (701, 702) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (705, 706) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498: skipped 2 step_ids at vertex_pair (710, 714) — 2 shape groups (shape_tol=0.0000)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f6_Cylinder] unused-ring-vertex/region-drop rescue: 60 ring verts unused, 32 non-rim bnd edges — re-routing through per-face CDT (ring edges 193 → 256, extra bnd 32 → 0, 223 → 258 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] EARCUTR_DIAG: outer=310pts, holes=1 (132 total hole pts), total_tris=442, degenerate=0, forward=true
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   outer uv bbox: [-0.0156,0.0000] x [0.0000,0.0156]
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 0 uv bbox: [-0.0104,-0.0052] x [0.0052,0.0104] (132 pts)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f11_Cylinder] unused-ring-vertex/region-drop rescue: 168 ring verts unused, 22 non-rim bnd edges — re-routing through per-face CDT (ring edges 144 → 320, extra bnd 22 → 0, 160 → 360 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_step::converter] EARCUTR_DIAG: outer=128pts, holes=5 (310 total hole pts), total_tris=446, degenerate=0, forward=false
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   outer uv bbox: [-0.0141,-0.0014] x [0.0014,0.0141]
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 0 uv bbox: [-0.0108,-0.0047] x [0.0048,0.0108] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 1 uv bbox: [-0.0051,-0.0027] x [0.0027,0.0051] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 2 uv bbox: [-0.0129,-0.0105] x [0.0027,0.0051] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 3 uv bbox: [-0.0051,-0.0027] x [0.0105,0.0129] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_step::converter]   hole 4 uv bbox: [-0.0129,-0.0105] x [0.0105,0.0129] (62 pts)
+[2026-11-07T07:42:51Z WARN  draper_mesh::parametric_domain] [fbrep1498_f32_Cylinder] unused-ring-vertex/region-drop rescue: 0 ring verts unused, 12 non-rim bnd edges — re-routing through per-face CDT (ring edges 319 → 320, extra bnd 12 → 0, 329 → 334 tris, emission folds 0 → 0)
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD: 0 short boundary edges, 6 boundary vertices (tol=0.0000mm) — welding
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD PASS 1: 0 short edges processed, 0 welded, 0 skipped (same-face), 0 skipped (no candidate)
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] WELD: no vertices welded
+[2026-11-07T07:42:51Z ERROR draper_step::converter] BUG: BREP #1498 detailed not watertight: 1093 boundary edges (22.25%), 0 non-manifold (tol=2.49e-8)
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Dedup stats: 3757 face vertices → 1851 unique (1906 shared), dedup_rate=50.7%, exact_hits=1904, tolerance_hits=0, misses=1853
+[2026-11-07T07:42:51Z ERROR draper_step::converter] More than 1% boundary edges — edge cache is NOT working correctly!
+[2026-11-07T07:42:51Z WARN  draper_mesh::watertight] Vertex near-miss diagnostic: 37 boundary vertex pairs from different faces are close but not bit-identical (max_dist=8.34e-5, tol=1.00e-6)
+[2026-11-07T07:42:51Z ERROR draper_step::converter] Edge consistency: 3820/3828 consistent, 8 inconsistent (0.21%), max_dist=8.34e-5
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1046, 1049), dist=8.34e-5, faces=[12, 11]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1046, 1046), dist=8.34e-5, faces=[11, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1093, 1094), dist=8.34e-5, faces=[12, 32]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (922, 1051), dist=8.34e-5, faces=[12, 11]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (922, 922), dist=8.34e-5, faces=[11, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1093, 1093), dist=8.34e-5, faces=[32, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1125, 1125), dist=8.34e-5, faces=[32, 12]
+[2026-11-07T07:42:51Z ERROR draper_step::converter]   Inconsistent edge: vertices (1125, 1126), dist=8.34e-5, faces=[12, 32]
+[2026-11-07T07:42:51Z WARN  draper_step::converter] BREP #1498 detailed: NOT watertight — 1093 boundary edges, 0 non-manifold edges, χ=-151
+   1                          BREP#1498       3820        994        151      90.18        0        0        0        0        0        0            0
+      outlier: edge(416,424) angle=90.18° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.008)  tris=[416,424,252]/[416,424,759]
+      outlier: edge(397,404) angle=90.17° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.008)  tris=[397,312,404]/[749,404,397]
+      outlier: edge(375,383) angle=90.16° faces=[6,9] cross-face midpoint=(-0.008,0.003,-0.010)  tris=[306,375,383]/[709,375,383]
+      outlier: edge(357,365) angle=90.15° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.007)  tris=[253,357,365]/[357,365,759]
+      outlier: edge(342,347) angle=90.14° faces=[6,9] cross-face midpoint=(-0.005,0.003,-0.009)  tris=[342,347,297]/[647,342,347]
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Summary:
+  Total BREPs:            1
+  Interior edges total:   3820
+  Sharp angles (>60°):    994 (26.02%)
+  Extreme angles (>90°):  151 (3.95%)
+  Statistical outliers:   0
+  Surf-exempt (>170°):    0 (tangency/shallow junctions — not bugs)
+  Sub-tol weld-noise:     0 (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)
+  Knife-fin pinch:        0 (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)
+  Coil-turn weld:         0 (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)
+  Junction-sliver:        0 (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)
+  Thin-face:              0 (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)
+
+✓ PASS: No truly extreme angles (>170°) beyond surface-justified exemptions

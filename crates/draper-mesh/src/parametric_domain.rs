@@ -12841,6 +12841,10 @@ pub fn triangulate_surface_consistent(
     // resolution is unchanged. If the CDT fails outright (degenerate
     // boundary polygon), fall back to the legacy spike-chain path — a
     // partial mesh is better than none (never-worsen).
+    // s129: hoisted from the band-selection block so the Step-6
+    // refinement site can see whether this face's triangulation was
+    // rescued by the per-face CDT re-route (the block below assigns).
+    let mut rescued_by_cdt = false;
     let triangle_indices: Vec<usize> = {
         // session-65: TWO-CHAIN MONOTONE STRIP triangulation.
         //
@@ -13189,7 +13193,7 @@ pub fn triangulate_surface_consistent(
             // and OFF Torus (s51: Delaunay near the rim creates more
             // fold pairs, drill HM 4105→5470).
             // Kill-switch: DRAPPER_UNUSED_CDT_RESCUE=0.
-            let mut rescued_by_cdt = false;
+            rescued_by_cdt = false;
             if !tris.is_empty() {
                 // session-69: Torus faces now ENTER this block — the
                 // s64 blanket exclusion (s51: the per-face CDT made
@@ -15891,6 +15895,14 @@ pub fn triangulate_surface_consistent(
     // averaging, each midpoint costs just 1 surface.point_at() evaluation.
     // ============================================================
     if !matches!(surface, Surface::Plane(_)) && params.max_deviation > 0.0 {
+        // s129: kill-switch DRAPPER_CHORD_REFINE=0 disables Step 6 for
+        // non-NURBS curved surfaces (NURBS are already at 0 iters above).
+        // Diagnostic + gate tool for the #27977 f65 one-sided-notch
+        // attribution (the +68-tris delta between the accepted
+        // per-face CDT (639) and the shipped emission (707)).
+        let chord_refine_on = std::env::var("DRAPPER_CHORD_REFINE")
+            .map(|v| v != "0")
+            .unwrap_or(true);
         // Use 0 refinement iterations for NURBS, 2 for other curved surfaces.
         //
         // NURBS chord-error refinement is DISABLED because:
@@ -15916,6 +15928,28 @@ pub fn triangulate_surface_consistent(
         //    are shared between faces via STEP's SURFACE entity)
         // 3. The refinement creates vertices that ARE bit-identical across faces
         let max_refine_iters = if matches!(surface, Surface::Nurbs(_)) {
+            0
+        } else if !chord_refine_on {
+            0
+        } else if rescued_by_cdt
+            && std::env::var("DRAPPER_REFINE_SKIP_RESCUED")
+                .map(|v| v == "1")
+                .unwrap_or(false)
+        {
+            // s129 п.1: a face whose triangulation was RESCUED by the
+            // per-face CDT re-route ships the ACCEPTED CDT as-is — the
+            // acceptance already chose this mesh as the best for the
+            // face; post-hoc chord refinement manufactures a one-sided
+            // interior notch on it (#27977 f7/f65: accepted 639/531
+            // clean (extra_bnd=0, folds=0) shipped as 707/631 with a
+            // 10-11-edge interior slit → FOLD-OVERFAT REAL census
+            // pairs). ships == accepted at the EMISSION level.
+            // s129 measurement: default stays OFF — shipping the
+            // unrefined CDT changes the merged composition and the
+            // #27977 census regresses 2→8 REAL (6 new WINDING-FLIPFAT
+            // on f71: the f(7,7)/f(65,65) pairs themselves live at the
+            // MERGED level (weld/FIW chain), their geometry is run-
+            // invariant). Opt-in diagnostic: DRAPPER_REFINE_SKIP_RESCUED=1.
             0
         } else {
             2
@@ -17948,6 +17982,43 @@ fn refine_mesh_chord_error_uv(
         1e-10 // Effectively no minimum for analytic surfaces
     };
 
+    // s129: position-dedup for Step-6 midpoints. A split midpoint that
+    // lands (at deterministic-rounded resolution) on an EXISTING mesh
+    // vertex must REUSE that vertex instead of adding a duplicate:
+    // duplicate-position vertices fork the surrounding triangles'
+    // shared edges into ONE-SIDED boundary edges (#27977 f7/f65 — the
+    // accepted per-face CDT (639 tris, extra_bnd=0, folds 0) shipped as
+    // 707 tris with an 11-edge one-sided notch; the notch edges and the
+    // FOLD-OVERFAT census pairs are manufactured by Step-6 midpoints
+    // hitting existing pinch-zone vertex positions). Kill-switch:
+    // DRAPPER_CHORD_REFINE_DEDUP=0 → legacy behavior, bit-exact.
+    let refine_dedup_on = std::env::var("DRAPPER_CHORD_REFINE_DEDUP")
+        .map(|v| v != "0")
+        .unwrap_or(true);
+    // s129 diag: DRAPPER_TRACE_REFINE=<substr> — per-iteration Step-6
+    // trace for faces whose current_face_label() contains <substr>.
+    let trace_fl = std::env::var("DRAPPER_TRACE_REFINE").unwrap_or_default();
+    let do_trace = !trace_fl.is_empty() && {
+        let lbl = current_face_label();
+        !lbl.is_empty() && lbl.contains(&trace_fl)
+    };
+    if do_trace {
+        eprintln!(
+            "[REFINE] {} enter: verts={} tris={}",
+            current_face_label(),
+            mesh.vertices.len(),
+            mesh.triangles.len()
+        );
+    }
+    let mut refine_pos_map: HashMap<[u64; 3], u32> = HashMap::new();
+    if refine_dedup_on {
+        for (vi, v) in mesh.vertices.iter().enumerate() {
+            let rp = deterministic_round_point(*v);
+            let key = [rp.x.to_bits(), rp.y.to_bits(), rp.z.to_bits()];
+            refine_pos_map.entry(key).or_insert(vi as u32);
+        }
+    }
+
     for _iter in 0..max_iterations {
         // Find edges that need subdivision
         let mut edges_to_split: HashMap<(u32, u32), u32> = HashMap::new();
@@ -18092,6 +18163,22 @@ fn refine_mesh_chord_error_uv(
                 let chord_error = (dx * dx + dy * dy + dz * dz).sqrt();
 
                 if chord_error > max_deviation {
+                    // s129 Guard A: never mark an edge whose split
+                    // midpoint would land, at deterministic-rounded
+                    // resolution, ON one of its endpoints — the products
+                    // would be position-degenerate (pinch-zone class).
+                    // Kill-switch DRAPPER_CHORD_REFINE_DEDUP=0 reverts.
+                    if refine_dedup_on {
+                        let rp = deterministic_round_point(p_surf);
+                        let key = [rp.x.to_bits(), rp.y.to_bits(), rp.z.to_bits()];
+                        let p0r = deterministic_round_point(p0);
+                        let p1r = deterministic_round_point(p1);
+                        let k0 = [p0r.x.to_bits(), p0r.y.to_bits(), p0r.z.to_bits()];
+                        let k1 = [p1r.x.to_bits(), p1r.y.to_bits(), p1r.z.to_bits()];
+                        if key == k0 || key == k1 {
+                            continue;
+                        }
+                    }
                     edges_to_split.insert(edge, u32::MAX); // Placeholder
                 }
             }
@@ -18107,7 +18194,8 @@ fn refine_mesh_chord_error_uv(
         // which reshuffled the refined mesh on every run. Iterate sorted.
         let mut split_order: Vec<(u32, u32)> = edges_to_split.keys().copied().collect();
         split_order.sort_unstable();
-        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
+        let mut dedup_reuse = 0usize;
+        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();        let mut new_edges: HashMap<(u32, u32), u32> = HashMap::new();
         for edge in &split_order {
             let v0 = edge.0;
             let v1 = edge.1;
@@ -18158,24 +18246,83 @@ fn refine_mesh_chord_error_uv(
             let p_surf = deterministic_round_point(surface.point_at(mid_u, mid_v));
             let n = surface.normal_at(mid_u, mid_v);
 
-            let vi = mesh.add_vertex(p_surf);
-            mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
-
-            // Store UV for the new vertex
-            vertex_uvs.push(Point2d::new(mid_u, mid_v));
-
-            // New vertices from chord-error refinement are NOT boundary vertices —
-            // they're computed from surface.point_at(), not from the edge cache.
-            // Marking them as non-boundary ensures that future refinement iterations
-            // can still split edges involving these vertices.
-            is_boundary_vertex.push(false);
+            // s129 Guard B: position-dedup the split vertex. Reuse an
+            // existing mesh vertex at the same deterministic-rounded
+            // position instead of adding a duplicate (a duplicate forks
+            // shared edges into one-sided boundary edges). When reusing,
+            // no vertex is added, so vertex_uvs / is_boundary_vertex stay
+            // in sync with mesh.vertices (they are only pushed together
+            // with add_vertex). Deterministic: lowest existing index
+            // wins (map built in index order; split_order is sorted).
+            let vi = if refine_dedup_on {
+                let key = [p_surf.x.to_bits(), p_surf.y.to_bits(), p_surf.z.to_bits()];
+                if let Some(&existing) = refine_pos_map.get(&key) {
+                    dedup_reuse += 1;
+                    existing
+                } else {
+                    let vi = mesh.add_vertex(p_surf);
+                    mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                    // Store UV for the new vertex
+                    vertex_uvs.push(Point2d::new(mid_u, mid_v));
+                    // New vertices from chord-error refinement are NOT
+                    // boundary vertices (computed from surface.point_at()).
+                    is_boundary_vertex.push(false);
+                    refine_pos_map.insert(key, vi);
+                    vi
+                }
+            } else {
+                let vi = mesh.add_vertex(p_surf);
+                mesh.add_vertex_normal(vi, [n.x, n.y, n.z]);
+                // Store UV for the new vertex
+                vertex_uvs.push(Point2d::new(mid_u, mid_v));
+                // New vertices from chord-error refinement are NOT
+                // boundary vertices (computed from surface.point_at()).
+                is_boundary_vertex.push(false);
+                vi
+            };
 
             new_edges.insert(*edge, vi);
         }
 
+        if do_trace {
+            eprintln!(
+                "[REFINE] {} iter {}: marked={} inserted={} dedup_reuse={}",
+                current_face_label(),
+                _iter,
+                edges_to_split.len(),
+                new_edges.len(),
+                dedup_reuse
+            );
+        }
         // Rebuild the triangle list, splitting triangles that have edges marked for subdivision
         let old_triangles = std::mem::take(&mut mesh.triangles);
         mesh.triangles.reserve(old_triangles.len());
+
+        // s129: position-degeneracy filter for subdivision products —
+        // drop a product whose two corners share a deterministic-rounded
+        // position (mirrors the Step-5 assembly filter; the deduped split
+        // vertex may coincide with the triangle's own corner in pinch
+        // zones). Kill-switch DRAPPER_CHORD_REFINE_DEDUP=0 disables.
+        let vkeys: Vec<[u64; 3]> = mesh
+            .vertices
+            .iter()
+            .map(|v| {
+                let rp = deterministic_round_point(*v);
+                [rp.x.to_bits(), rp.y.to_bits(), rp.z.to_bits()]
+            })
+            .collect();
+        macro_rules! push_nondeg {
+            ([$a:expr, $b:expr, $c:expr]) => {{
+                let t = [$a, $b, $c];
+                let bad = refine_dedup_on
+                    && (vkeys[t[0] as usize] == vkeys[t[1] as usize]
+                        || vkeys[t[1] as usize] == vkeys[t[2] as usize]
+                        || vkeys[t[0] as usize] == vkeys[t[2] as usize]);
+                if !bad {
+                    mesh.triangles.push(t);
+                }
+            }};
+        }
 
         for tri in &old_triangles {
             let mut split_verts = [None; 3];
@@ -18200,11 +18347,11 @@ fn refine_mesh_chord_error_uv(
                 let v2 = tri[(split_k + 2) % 3];
 
                 if forward {
-                    mesh.triangles.push([v0, vm, v2]);
-                    mesh.triangles.push([vm, v1, v2]);
+                    push_nondeg!([v0, vm, v2]);
+                    push_nondeg!([vm, v1, v2]);
                 } else {
-                    mesh.triangles.push([v0, v2, vm]);
-                    mesh.triangles.push([vm, v2, v1]);
+                    push_nondeg!([v0, v2, vm]);
+                    push_nondeg!([vm, v2, v1]);
                 }
             } else if n_splits == 2 {
                 let split_edges: Vec<usize> = split_verts
@@ -18223,23 +18370,23 @@ fn refine_mesh_chord_error_uv(
 
                 if (k0 + 1) % 3 == k1 {
                     if forward {
-                        mesh.triangles.push([v0, vm0, vm1]);
-                        mesh.triangles.push([vm0, v1, vm1]);
-                        mesh.triangles.push([v0, vm1, v2]);
+                        push_nondeg!([v0, vm0, vm1]);
+                        push_nondeg!([vm0, v1, vm1]);
+                        push_nondeg!([v0, vm1, v2]);
                     } else {
-                        mesh.triangles.push([v0, vm1, vm0]);
-                        mesh.triangles.push([vm0, vm1, v1]);
-                        mesh.triangles.push([v0, v2, vm1]);
+                        push_nondeg!([v0, vm1, vm0]);
+                        push_nondeg!([vm0, vm1, v1]);
+                        push_nondeg!([v0, v2, vm1]);
                     }
                 } else {
                     if forward {
-                        mesh.triangles.push([v0, vm0, v1]);
-                        mesh.triangles.push([v2, vm1, vm0]);
-                        mesh.triangles.push([vm0, v0, vm1]);
+                        push_nondeg!([v0, vm0, v1]);
+                        push_nondeg!([v2, vm1, vm0]);
+                        push_nondeg!([vm0, v0, vm1]);
                     } else {
-                        mesh.triangles.push([v0, v1, vm0]);
-                        mesh.triangles.push([v2, vm0, vm1]);
-                        mesh.triangles.push([vm0, vm1, v0]);
+                        push_nondeg!([v0, v1, vm0]);
+                        push_nondeg!([v2, vm0, vm1]);
+                        push_nondeg!([vm0, vm1, v0]);
                     }
                 }
             } else {
@@ -18252,19 +18399,39 @@ fn refine_mesh_chord_error_uv(
                 let v2 = tri[2];
 
                 if forward {
-                    mesh.triangles.push([v0, vm0, vm2]);
-                    mesh.triangles.push([vm0, v1, vm1]);
-                    mesh.triangles.push([vm2, vm1, v2]);
-                    mesh.triangles.push([vm0, vm1, vm2]);
+                    push_nondeg!([v0, vm0, vm2]);
+                    push_nondeg!([vm0, v1, vm1]);
+                    push_nondeg!([vm2, vm1, v2]);
+                    push_nondeg!([vm0, vm1, vm2]);
                 } else {
-                    mesh.triangles.push([v0, vm2, vm0]);
-                    mesh.triangles.push([vm0, vm1, v1]);
-                    mesh.triangles.push([vm2, v2, vm1]);
-                    mesh.triangles.push([vm0, vm2, vm1]);
+                    push_nondeg!([v0, vm2, vm0]);
+                    push_nondeg!([vm0, vm1, v1]);
+                    push_nondeg!([vm2, v2, vm1]);
+                    push_nondeg!([vm0, vm2, vm1]);
                 }
             }
         }
 
+        if do_trace {
+            let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
+            for tri in &mesh.triangles {
+                for k in 0..3 {
+                    let a = tri[k];
+                    let b = tri[(k + 1) % 3];
+                    *usage.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+                }
+            }
+            let once = usage.values().filter(|&&n| n == 1).count();
+            let dup3 = usage.values().filter(|&&n| n >= 3).count();
+            eprintln!(
+                "[REFINE] {} iter {} done: tris={} once-edges={} (>=3-use: {})",
+                current_face_label(),
+                _iter,
+                mesh.triangles.len(),
+                once,
+                dup3
+            );
+        }
         // Update face_normals if present
         if let Some(ref mut face_normals) = mesh.face_normals {
             let n_old = face_normals.len();

@@ -19692,3 +19692,146 @@ winding) — цель: ships == accepted CDT; (2) #10220 f(28,28) —
 карта путей round-граней, rim-дифф против brick_thin; (4) гейты:
 REAL Vulcan 1 / Spit 2 (базлайн s128 бит-идентичен), all_files
 22/4/1, детерминизм, контрольный корпус angle/watertight.
+
+---
+
+# Worklog — s129: #27977 ПОЛНАЯ атрибуция клапана (Step-6 chord-refinement производит надрез на принятом CDT) + фикс-DEDUP (position-dedup мидпоинтов) + skip-rescued эксперимент (2026-11-07, двадцать восьмая STEP-сессия)
+
+Сессионная преамбула: 9-й эпоха-рестарт — sandbox восстанавливался из
+бэкапа ДО s123 (локальный HEAD был 377910b); fetch-first восстановил
+377910b..68f58ae (s123..s128, всё было запушено). Rust переустановлен
+ровно 1.98.1 (rustc/cargo 1.98.1, 48a229cea/797e8a9bc), PATH в
+~/.bashrc, бинари пересобраны 7m30s (angle_check, fold_face_probe,
+watertight_check, all_files_test). Преамбула-урок: фоновые процессы
+НЕ переживают смену shell-сессии между tool-вызовами (nohup/setsid
+умирают молча, /tmp/build.log пуст) — длинные сборки только
+foreground с 10-минутными окнами (cargo resume).
+
+## п.0 — baseline-ревалидация (ДО правок; всё зелёное)
+
+- census: Spit 423/423 + Vulcan 1328/1328 отсортированно-бит-идентичны
+  forensics/s128/base_* (мультидорожечная сортировка, comparator
+  scripts/s129_census_cmp.py: census-строки = ^[A-Z] — «^[» цепляет
+  и WARN-таймстампы «[2», s128-числа 414/1318 = пары без 9/10
+  сводок). REAL Spit 2 (#27977 f(7,7)/f(65,65) Torus) / Vulcan 1
+  (#10220 f(28,28) Nurbs) — точно s128.
+- детерминизм 2×Spit + 2×Vulcan: бит-идентичны.
+- angle_check 4 контроля: сводки IDENTICAL (без outlier-листингов —
+  ограниченный листинг из пула равных 180.00° sub-tol кандидатов,
+  tie-порядок; задокументированный s128-класс п.0(б)).
+- all_files: 22 ok / 4 leaky / 1 BAD IDENTICAL; wt: 37/37 + 49/49
+  IDENTICAL после нормализации таймингов «(T)»/«(lazy: T)» и worst-
+  face tie-листингов.
+- scripts/s126_emission_check.py (запрос из потерянного контекста
+  «починить»): ЗАРАБОТАЛ сразу, EXIT 0, вывод = задокументированная
+  атрибуция s126 (EMISSION-BORN) — чинить нечего, s126 закрыт в 869b8a9.
+
+## п.1 — #27977: место рождения клапана НАЙДЕНО: Step-6 (chord-error
+refinement) производит +66/+100 tris и односторонний надрез НАД
+принятым CDT (ПОЛНАЯ атрибуция; merged-уровень остаётся отдельным долгом)
+
+Инструменты: fm-дампы (DRAPPER_DUMP_FACE_MESH) + TRI_INPUT
+(DRAPPER_DUMP_TRI_INPUT — точный вход+итоговые triangle_indices на
+вызов; событие s113-«3D columns»), target-mode fold_face_probe 7,
+scripts/s129_f65_slit.py (emission vs CDT: rim/slit-классификация
+рёбер, dup-positions, CDT-native/ADDED-треугольники).
+
+1. Цепочка #27977 f65 (первая попытка): решётка-legacy 580 → s88
+   rescue → per-face CDT 639 ПРИНЯТ (extra_bnd 308→0, folds 0→0;
+   tri_0043: n_bnd=279, n_interior=349, n_tris=639) → НО ships a64 =
+   707: ДЕЛЬТА +68 РОЖДАЕТСЯ В STEP-6 (chord-refine, 2 итерации:
+   639→691→705/707, трасса DRAPPER_TRACE_REFINE: once-edges
+   279→282→289). Сагитта-надрез = 10-11 односторонних интерьерных
+   рёбер (f65: 290 bnd = 279 rim + 11; компоненты [279+8+4]).
+2. ЭКСПЕРИМЕНТ-ДОКАЗАТЕЛЬСТВО (DRAPPER_CHORD_REFINE=0): f65 первая
+   попытка ships 639 == принятому CDT, SLIT=0, duppos=0, 639/639
+   cdt-native (fm27977_norefine/). f7: 531==CDT (531/531). Надрез —
+   100% производство Step-6. НО census #27977 при глобальном OFF
+   регрессирует 2→8 REAL (6 новых WINDING-FLIPFAT на f71) —
+   глобальное отключение НЕ фикс.
+3. Микромеханизм (частично): мидпоинты Step-6 попадают на позиции
+   СУЩЕСТВУЮЩИХ вершин (v473/v486 — ОДНА позиция; пинч-зона,
+   «почти совпадающие точки 0.017»); без position-dedup это
+   дубликат-позиции → форк общих рёбер → односторонние рёбра.
+4. ФИКС-DEDUP (закоммичен, default ON, kill-switch
+   DRAPPER_CHORD_REFINE_DEDUP=0 = бит-экзакт легаси): Guard A (не
+   помечать ребро, если мидпоинт на deterministic-rounded позиции
+   конца ребра), Guard B (position-dedup мидпоинта против
+   существующих вершин, reuse с наименьшим индексом), фильтр
+   position-дегенератов продуктов (push_nondeg!, 24 сайта в
+   refine_mesh_chord_error_uv). Эффект: f65 707→705, SLIT 11→10,
+   duppos→0 — закрыл класс дубликат-позиций, остаточный надрез 10
+   рёбер = топология 2-й итерации подразделения (s130).
+5. ЭКСПЕРИМЕНТ skip-rescued (ships==accepted на уровне эмиссии):
+   DRAPPER_REFINE_SKIP_RESCUED (теперь opt-in «=1», default OFF):
+   rescued-грани НЕ реффайнятся → f65/f7 ships == принятому CDT
+   (639/531, SLIT=0). НО census #27977 2→8 REAL — f(7,7)/f(65,65)
+   пары НЕ ушли (их геометрия ИДЕНТИЧНА во всех прогонах: h=
+   (0.1643,0.1554)/(0.1667,0.1732) — стабильно), + 6 новых
+   WINDING-FLIPFAT f71. ВЫВОД: f(7,7)/f(65,65) живут на MERGED-
+   уровне (weld/FIW-цепочка), НЕ в эмиссии граней; чистка эмиссий
+   меняет состав merged-меши и FIW-каскад (класс s126 #10212).
+   Переключатель оставлен opt-in, задокументирован.
+
+### Гейты фикса-DEDUP (default ON; всё зелёное/задокументировано)
+
+- KILL-SWITCH (DEDUP=0): census Spit 423/423 + Vulcan 1328/1328
+  бит-идентичны base (forensics/s129/ks_*) — тройная валидация с
+  s128-refs.
+- census new (DEDUP=ON): Spit 423/423 IDENTICAL (вообще без
+  движения); Vulcan 1328/1328: REF-ONLY 146 ↔ NEW-ONLY 146 —
+  симметричная перестановка subtol-пар (FOF 60/60, FOS 5/5, WFF
+  76/76, WFS 5/5; #10211/#10217), все SUBTOL-exempt; REAL 1=1
+  (#10220 f(28,28) стабилен). Диспозиция: принять, задокументировано
+  (weld-noise churn при неизменном составе классов).
+- all_files: 22/4/1 IDENTICAL; Vulcan row 177260→177262 tris,
+  boundary 19838→19834 (−4, лучше). angle: brick/compressor/
+  transmission IDENTICAL; drill HOUSING_MIRROR +2 extreme/+2 sharp/
+  +1 subtol (шум; 929→930). wt: Spit IDENTICAL; Vulcan #10211
+  boundary 3040→3028 (−12), nonmanifold 274→268 (−6) — лучше;
+  #10217 ±1.
+- детерминизм: IDENTICAL. Тесты: draper-mesh 376 lib + ВСЕ
+  integration ок (boolean 4, edge_cache 1, edge_explicit 11, fuzz
+  12, lod_chord 6, nurbs_fallback 5, ..., proptest, triangulation)
+  0 fail; draper-step --lib не влез в бюджет сессии (>600s debug,
+  прецедент s127) — поведение покрыто release-гейтами корпуса.
+
+## п.2/п.3 — НЕ НАЧАТЫ (бюджет сессии ушёл на п.1-атрибуцию + 2
+эксперимента + гейты). Перенос в s130 без изменений формулировок:
+п.2 #10220 f(28,28) решётка Nurbs-ленты на выкружке рулона; п.3
+brick_thin_round карта путей round-граней + rim-дифф против
+brick_thin. Гейты: REAL Vulcan 1 / Spit 2, all_files 22/4/1,
+детерминизм.
+
+## Уроки
+
+1. «^[» в grep — цепляет и таймстампы: census-строки = ^\[[A-Z];
+  s128-числа «414/1318» — БЕЗ 9/10 «---»-сводок (423/1328 с ними).
+2. Место рождения эмиссии ищи ДВУМЯ дампами: TRI_INPUT (итоговые
+   triangle_indices ДО Step5/6) + FACE_MESH (ships ПОСЛЕ): их
+   расхождение = дельта Step5.5/Step6. f65: 639 vs 707 — Step6.
+3. Фоновые процессы НЕ переживают смену shell-сессии sandbox (умер
+   молча nohup-билд, /tmp пуст) — только foreground-окна.
+4. xargs rm по ls: имена с пробелами («Nurbs(deg=2-3, cps=3x4)»)
+   молча рвутся — while IFS= read -r.
+5. Эмиссионная чистка ≠ merged-чистка: f(7,7)/f(65,65) геометрия
+   инвариантна к состоянию эмиссий (default/dedup/skip) — пары
+   живут на weld/FIW-уровне; «ships==accepted» на эмиссии достигнуто
+   (REFINE=0/SKIP_RESCUED=1), но census НЕ улучшается — гейтить
+   надо MERGED-уровень, не только FACE_MESH-дамп (усложнение урока
+   s128-2: «гейтить пост-сборку» — недостаточно, нужна гейт-проверка
+   после MERGE).
+6. MultiEdit-инструмент НЕ атомарен на практике: при дубликатах
+   old_str применяются ПРЕДШЕСТВУЮЩИЕ правки, а отказ — только
+   текущей; проверяй счётчиком (grep) после каждой правки.
+
+Next (s130): (1) #27977 f(7,7)/f(65,65) MERGED-уровень: форензика
+weld/FIW-цепочки на стыке f65×f7×соседи (пары геометрически
+инвариантны к эмиссиям — искать в merge/weld/FIW-проходах;
+инструмент: STAGES-дампы p*_after-*); (2) остаточный надрез Step-6
+(10 рёбер): топология 2-й итерации подразделения — трасса
+once-edges по итерациям уже в DRAPPER_TRACE_REFINE; (3) п.2 #10220
+f(28,28) решётка Nurbs-ленты (s118-zigzag, родня f25/f27); (4) п.3
+brick_thin_round round-грани; (5) гейты: REAL Vulcan 1 / Spit 2,
+all_files 22/4/1, детерминизм, angle/watertight корпус; draper-step
+--lib полный прогон (не влез в s129).
