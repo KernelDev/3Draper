@@ -18414,11 +18414,14 @@ fn refine_mesh_chord_error_uv(
 
         if do_trace {
             let mut usage: HashMap<(u32, u32), usize> = HashMap::new();
-            for tri in &mesh.triangles {
+            let mut users: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+            for (ti, tri) in mesh.triangles.iter().enumerate() {
                 for k in 0..3 {
                     let a = tri[k];
                     let b = tri[(k + 1) % 3];
-                    *usage.entry((a.min(b), a.max(b))).or_insert(0) += 1;
+                    let e = (a.min(b), a.max(b));
+                    *usage.entry(e).or_insert(0) += 1;
+                    users.entry(e).or_default().push(ti);
                 }
             }
             let once = usage.values().filter(|&&n| n == 1).count();
@@ -18431,6 +18434,48 @@ fn refine_mesh_chord_error_uv(
                 once,
                 dup3
             );
+            // s130 diag: per-iteration mesh + one-sided-edge listing.
+            // Env-gated by DRAPPER_DUMP_REFINE_ITERS=<dir> (requires
+            // DRAPPER_TRACE_REFINE=<substr> to select the face). Zero
+            // behavior impact: diagnostics only, never read elsewhere.
+            if let Ok(dir) = std::env::var("DRAPPER_DUMP_REFINE_ITERS") {
+                let _ = std::fs::create_dir_all(&dir);
+                let lbl = current_face_label();
+                let base = format!(
+                    "{}/{}_iter{}_t{}",
+                    dir, lbl, _iter, mesh.triangles.len()
+                );
+                let mut obj = String::with_capacity(1 << 18);
+                for v in &mesh.vertices {
+                    obj.push_str(&format!("v {:.9} {:.9} {:.9}\n", v.x, v.y, v.z));
+                }
+                for t in &mesh.triangles {
+                    obj.push_str(&format!(
+                        "f {} {} {}\n",
+                        t[0] + 1,
+                        t[1] + 1,
+                        t[2] + 1
+                    ));
+                }
+                let _ = std::fs::write(format!("{}.obj", base), obj);
+                let mut lines = String::new();
+                let mut e_sorted: Vec<(&(u32, u32), &usize)> = usage.iter().collect();
+                e_sorted.sort_by_key(|(e, _)| *e);
+                for (e, n) in e_sorted {
+                    if *n == 1 {
+                        let a = mesh.vertices[e.0 as usize];
+                        let b = mesh.vertices[e.1 as usize];
+                        let ts = users.get(e).map(|v| v.as_slice()).unwrap_or(&[]);
+                        lines.push_str(&format!(
+                            "once e=({}, {}) pos=({:.6},{:.6},{:.6})/({:.6},{:.6},{:.6}) tris={:?}\n",
+                            e.0, e.1, a.x, a.y, a.z, b.x, b.y, b.z, ts
+                        ));
+                    } else if *n >= 3 {
+                        lines.push_str(&format!("nm e=({}, {}) n={}\n", e.0, e.1, n));
+                    }
+                }
+                let _ = std::fs::write(format!("{}.txt", base), lines);
+            }
         }
         // Update face_normals if present
         if let Some(ref mut face_normals) = mesh.face_normals {

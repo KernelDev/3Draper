@@ -19835,3 +19835,145 @@ f(28,28) решётка Nurbs-ленты (s118-zigzag, родня f25/f27); (4) 
 brick_thin_round round-грани; (5) гейты: REAL Vulcan 1 / Spit 2,
 all_files 22/4/1, детерминизм, angle/watertight корпус; draper-step
 --lib полный прогон (не влез в s129).
+
+---
+
+# Worklog — s130: #27977 ПОЛНАЯ ПЕРЕАТРИБУЦИЯ (обе REAL-пары EMISSION-BORN в per-face CDT, НЕ weld/FIW) + п.2 механизм надреза Step-6 (NEAR-класс за пределами Guard B) + поитерационный дамп-инструмент (2026-11-12, двадцать девятая STEP-сессия)
+
+Сессионная преамбула: 10-й эпоха-рестарт — sandbox восстановлен из
+бэкапа ДО s129 (локальный HEAD был 377910b = Сессия 23!); fetch-first
+восстановил 377910b..633e745 (Vision 2036 §1.4/§1.5/§3.1–§3.3 + швы
++ s100..s129 п.1, 175 коммитов, всё было запушено). Rust переустановлен
+ровно 1.98.1 (48a229cea/797e8a9bc), PATH в ~/.bashrc, бинари
+пересобраны 7m53s. Повторный запрос потерянного контекста «починить
+scripts/s126_emission_check.py»: снова EXIT 0, вывод = s126-атрибуция
+(EMISSION-BORN) — артефакты fm10212 пришли с reset; чинить нечего.
+
+## п.0 — baseline-ревалидация (ДО правок; всё зелёное)
+
+- census: Spit 423/423 + Vulcan 1328/1328 отсортированно-бит-идентичны
+  forensics/s129/new_* (base_* = kill-switch OFF-базлайн — с ним
+  ожидаемая перестановка 146↔146 subtol, класс s129). REAL Spit 2
+  (#27977 f(7,7) h=(0.1643,0.1554) ang=173.31 / f(65,65)
+  h=(0.1667,0.1732) ang=174.18, обе Torus) / Vulcan 1 (#10220 f(28,28)
+  Nurbs h=(0.0124,0.0847)) — точно s129-п.1 (DEDUP=ON).
+- детерминизм 2×Spit + 2×Vulcan: бит-идентичны.
+- angle 4 контроля: SUMMARIES IDENTICAL (brick_thin_round/compressor/
+  transmission/drill; outlier-листинги — tie-порядок, класс s128(б)).
+- all_files: 22 ok/4 leaky/1 BAD IDENTICAL; Vulcan 177262 tris /
+  boundary 19834 (−4) — точно DEDUP-ON эффект s129.
+- wt: tie-порядок worst-face (Face #16↔#9, #38/#27/#15/#7) + µs-тайминги
+  — классы s128(а)/(б).
+
+## п.1 — #27977 f(7,7)/f(65,65): ПОЛНАЯ ПЕРЕАТРИБУЦИЯ — пары
+EMISSION-BORN в per-face CDT (ОПРОВЕРГНУТО «weld/FIW-цепочка» из s129)
+
+Инструменты: scripts/s130_stage_track.py (STAGES-дампы
+DRAPPER_DUMP_STAGE_OBJS, p0/p1 × {b27977-d-after-merge/weld/tj/gapfill/
+winding + d-after-flapclean/bornfold-split/deflip/postweldwind}),
+scripts/s130_emission_origin.py (fm-дампы обеих попыток + norefine
+из s129), INST #27977 = identity (кадры совпадают).
+
+1. СТАДИЙНЫЙ ТРЕКИНГ: обе пары рождаются на b27977-d-after-merge (p0 —
+   ШИПИТСЯ p0: postweldwind h совпадает с census 0.02-точностью) и НЕ
+   МЕНЯЮТСЯ ни одной стадией дальше (weld/tj/gapfill/winding/flapclean/
+   bornfold-split/deflip/postweldwind — все «PAIR … IDENTICAL» по
+   стадийно). p1 (gated-retry): f(7,7) присутствует в ДРУГОЙ геометрии
+   (h=(0.1691,0.1599) ang=173.58 — эмиссия a79), f(65,65) ОТСУТСТВУЕТ
+   (33 near-pairs без census-совпадения). Гипотеза s129 «живут на
+   MERGED-уровне (weld/FIW-цепочка)» — ОПРОВЕРГНУТА: repair-проходы
+   их не создают и не трогают.
+2. ЭМИССИОННАЯ ПРИРОДА: пары существуют ДОСЛОВНО (точные h/ang/позиции)
+   в шипящихся пофасовых эмиссиях ПЕРВОГО прохода: f7-a6 (631 tris
+   default / 531 norefine) и f65-a64 (705 default / 639 norefine) —
+   EXACT MATCH обоих вариантов. В norefine (REFINE=0) пары ТОЖЕ ЕСТЬ —
+   они в CDT-базе ДО Step-6; ЭТО объясняет s129-инвариантность
+   (REFINE=0/SKIP_RESCUED меняют Step-6, не CDT-базу: «ships==
+   accepted» было верно, но пара НЕ в надрезе Step-6, а в самом CDT).
+3. СЛЕПАЯ ЗОНА АКЦЕПТАНСА: f7/f65 (Torus) прошли через per-face CDT
+   rescue по ARM 1 (cdt_ring_edges > legacy_ring_edges: 174→175 /
+   278→279) — БЕЗ fold-гейта. «emission folds 0→0» в rescue-логах =
+   ДЕФОЛТ (true,0,0) ветки count_emission_folds_needed=false (счёт
+   выполняется только для torus_windmill/cyl_holed_equal_rim;
+   torus_windmill требует cdt_interior_dropped==0 — f7: 658→531,
+   CDT меньше легаси → interior dropped >0 → windmill=false). Счёт
+   cf на cdt_flat дал бы ≥1 (пара в cdt_flat с ang=173.31/174.18 >170
+   по winding-конвенции — проверено сканером эмиссий).
+4. УРОК s114 АКТУАЛЕН: безусловный fold-гейт (cf<=lf на все рукава)
+   регрессирует 57→91 REAL (crescent-класс: emission-фолды саб-тол
+   поглощаются Step-5 weld на merge). Кандидат-дизайн для s131:
+   FAT-only fold-гейт на arm 1 (обе высоты апексов > brep eff_tol,
+   как SUBTOL-экземпция census; саб-тол фолды остаются без гейта) —
+   НО помить торговлю: отказ от CDT возвращает legacy extra_bnd 486/308
+   (border-debt); возможно нужен не отказ, а CDT-ретрай с fold-aware
+   плейсментом (windmill-класс уже так делает). Гейтить обязательно:
+   census REAL 2/1, all_files, determinism, angle/wt.
+
+## п.2 — Step-6 надрез (10 рёбер): МЕХАНИЗМ УСТАНОВЛЕН = NEAR-класс
+(0.006–0.024) за пределами Guard B (EXACT); 10 = 3 (iter0) + 7 (iter1)
+
+Инструменты: DRAPPER_TRACE_REFINE (существ.) + НОВЫЙ
+DRAPPER_DUMP_REFINE_ITERS=<dir> (env-gated поитерационный дамп obj +
+once/nm-листинг; имя файла *_iter{i}_t{tris} — РАЗЛИЧАЕТ проходы p0/p1:
+одинаковые (face,iter) перезаписываются!), scripts/s130_slit_classify.py
+(rim-vs-slit по TRI_INPUT-полигону; ПОЗИЦИИ b-строк = поля 4–6, а НЕ
+3–5: формат «b u v x y z» — первый сабмит ловил (v,x,y)).
+
+- Трасса f65 (p0): enter 460/639 → iter0 marked=26 inserted=26
+  reuse=0 → 691, once 279→282 (+3) → iter1 marked=9 inserted=9 reuse=1
+  → 705, once →289 (+7). Рим ПОСТОЯНЕН 279 → SLIT = 3+7 = 10
+  (после-DEDUP состояние s129). Дропов products в iter0 НЕТ (691 =
+  639 + 2×26 точно) — «односторонние от дропов» НЕ подтверждилось.
+- Все 10 надрезов в компактной пинч-зоне x∈[-8.40,-8.27],
+  y∈[-1.47,-0.38], z∈[2.52,2.89] с ПОЧТИ-СОВПАДАЮЩИМИ парами вершин:
+  v479/v481 = 0.0119, v492/v493 = 0.006, v407/v473 = 0.023. Guard B
+  (s129) дедупит ТОЛЬКО бит-точные позиции (deterministic_round) —
+  NEAR-пары (0.006–0.024 ≠ exact) не дедупятся → форк рёбер.
+- Структура зоны: одно-ребёрный FLAP (tri 494 = (v473,v488,v487) висит
+  на единственном 2-use ребре v488-v487, два других ребра one-sided) +
+  НЕМАНИФОЛД 3-use рёбра (v394-v487: users 380/493/495; v431-v493:
+  users 526/528/538) — то же семейство, что s126 #10212 (FIW-cascade
+  over broken emission) и s125 f27 runout.
+- Дизайн фикса для s131 (Guard C): проксимити-дедуп мидпоинта в
+  пределах eff_tol С UV-дискриминатором (ближняя вершина ДАЛЬНЕГО UV =
+  другой лист поверхности → форк; ближняя вершина БЛИЖНЕГО UV =
+  легитимная плотность того же листа) — БЕЗ UV-дискриминатора проксимити
+  на 0.02–0.03 заденет плотные зоны у рима (шаг рима 0.018!) и отменит
+  сплиты массово. Гейтить: census, all_files, angle (density!), det.
+
+## п.3/п.4 — НЕ НАЧАТЫ (бюджет ушёл на п.1-переатрибуцию с опровержением
+s129 + п.2 механизм + инструмент). Перенос в s131 без изменений
+формулировок: п.3 #10220 f(28,28) решётка Nurbs-ленты (s118-zigzag,
+родня f25/f27); п.4 brick_thin_round карта путей round-граней.
+
+## Гейты сессии
+
+- Код: только env-gated диагностика (DRAPPER_DUMP_REFINE_ITERS; счётчик
+  tris в имени). Sanity: census Spit после правок 423/423 IDENTICAL
+  (sanity_spit.txt) — производство бит-нейтрально.
+- НОВЫЙ артефакт: forensics/s130/ (33M — прецедент s128=32M):
+  base/det/sanity census, ac_×4, wt_×2, allfiles, fp7_spit (SURF_PARAMS
+  + INST), stages_27977 (18 obj/fmap × 2 прохода), fm27977 (fm+tri),
+  refiters (поитерационные дампы t691/t705/t839/t888), refine трейсы.
+
+## Уроки
+
+1. fm-проверка эмиссии обязана сравнивать BOTH default И norefine
+   (s129-вывод «MERGED-уровень» вырос из ships-only сравнения; пара
+   сидела в CDT-базе, невидимой для REFINE-экспериментов).
+2. «emission folds 0→0» в rescue-логах бывает ДЕФОЛТОМ (true,0,0):
+   различай windmill=false (счёт не выполнялся) vs реальный ноль —
+   иначе акцептанс без гейта читается как «проверено».
+3. Дампы (face,iter) перезаписываются между проходами: имя файла
+   обязано нести размер состояния (t{tris}) или номер прохода.
+4. TRI_INPUT b-строка = «b u v x y z» (6 полей) — 3D в 4–6, не 3–5.
+5. Стадийный трекер обязан определять шипящийся проход ПОЗИЦИОННО
+   (postweldwind h-совпадение), а не по порядку файлов.
+
+Next (s131): (1) #27977 emission-born: FAT-fold гейт arm 1 (cf_fat<=lf_fat, обе высоты
+> brep eff_tol) vs CDT-ретрай с fold-aware плейсментом — эксперимент
+с kill-switch, гейты census REAL 2/1 + all_files + angle + det;
+(2) Guard C (проксимити-дедуп + UV-дискриминатор) для Step-6 надреза;
+(3) п.3 #10220 f(28,28) Nurbs-лента; (4) п.4 brick_thin_round; (5)
+гейты: REAL Vulcan 1 / Spit 2, all_files 22/4/1, детерминизм, angle/wt
+корпус; draper-step --lib полный прогон (не влез в s129/s130).
