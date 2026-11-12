@@ -1,0 +1,122 @@
+Loading STEP file: test/8500-02_Vulcan.STEP
+STEP file parsed: 153455 entities
+Structure parsed: 23 BRep instances (lazy: 48.7ms)
+
+--------------------------------------------------------------------------------
+   #                           Name    Verts     Tris   Boundary    NonManf Degenerate   Watertight
+--------------------------------------------------------------------------------
+   1        NAUO_29425 (BREP#10218)       65      126          0          0          0          YES  (105.8ms)
+   2        NAUO_29437 (BREP#10221)      286      572          0         14          0           NO  (103.5ms)
+   3        NAUO_29446 (BREP#10219)     1153     2186        130         12          0           NO  (283.3ms)
+      Face #1: 122 tris, 62 boundary edges
+      Face #3: 182 tris, 62 boundary edges
+      Face #6: 176 tris, 3 boundary edges
+      Face #13: 100 tris, 2 boundary edges
+      Face #12: 56 tris, 1 boundary edges
+   4        NAUO_29625 (BREP#10216)       57      152          2         31          0           NO  (798.7ms)
+      Face #15: 20 tris, 1 boundary edges
+      Face #18: 17 tris, 1 boundary edges
+   5        NAUO_29636 (BREP#10210)     1627     3126        272         16          0           NO  (210.0ms)
+      Face #7: 97 tris, 68 boundary edges
+      Face #26: 91 tris, 60 boundary edges
+      Face #27: 124 tris, 31 boundary edges
+      Face #6: 124 tris, 31 boundary edges
+      Face #13: 31 tris, 11 boundary edges
+      ... and 10 more faces with boundary edges
+   6        NAUO_29645 (BREP#10204)     1474     2661        708          3          0           NO  (174.7ms)
+      Face #15: 246 tris, 124 boundary edges
+      Face #11: 246 tris, 124 boundary edges
+      Face #7: 248 tris, 121 boundary edges
+      Face #10: 248 tris, 121 boundary edges
+      Face #12: 124 tris, 62 boundary edges
+      ... and 6 more faces with boundary edges
+   7        NAUO_29467 (BREP#10211)    12488    23727       3028        268          0           NO  (9.4s)
+      Face #96: 142 tris, 113 boundary edges
+      Face #80: 132 tris, 110 boundary edges
+      Face #88: 136 tris, 110 boundary edges
+      Face #102: 133 tris, 108 boundary edges
+      Face #104: 131 tris, 106 boundary edges
+      ... and 79 more faces with boundary edges
+   8        NAUO_29477 (BREP#10220)     2342     3445       2897        398          0           NO  (5.2s)
+      Face #27: 976 tris, 790 boundary edges
+      Face #25: 791 tris, 637 boundary edges
+      Face #28: 251 tris, 284 boundary edges
+      Face #29: 172 tris, 172 boundary edges
+      Face #2: 140 tris, 83 boundary edges
+      ... and 27 more faces with boundary edges
+   9        NAUO_29625 (BREP#10216)       57      152          2         31          0           NO  (111.4µs)
+      Face #15: 20 tris, 1 boundary edges
+      Face #18: 17 tris, 1 boundary edges
+  10        NAUO_29636 (BREP#10210)     1627     3126        272         16          0           NO  (116.1µs)
+      Face #7: 97 tris, 68 boundary edges
+      Face #26: 91 tris, 60 boundary edges
+      Face #6: 124 tris, 31 boundary edges
+      Face #27: 124 tris, 31 boundary edges
+      Face #13: 31 tris, 11 boundary edges
+      ... and 10 more faces with boundary edges
+  11        NAUO_29645 (BREP#10204)     1474     2661        708          3          0           NO  (93.4µs)
+      Face #15: 246 tris, 124 boundary edges
+      Face #11: 246 tris, 124 boundary edges
+      Face #10: 248 tris, 121 boundary edges
+      Face #7: 248 tris, 121 boundary edges
+      Face #17: 124 tris, 62 boundary edges
+      ... and 6 more faces with boundary edges
+  12        NAUO_29498 (BREP#10217)     4382     8745       2097        610          0           NO  (1.3s)
+      Face #29: 293 tris, 174 boundary edges
+      Face #47: 297 tris, 172 boundary edges
+      Face #32: 239 tris, 128 boundary edges
+      Face #26: 221 tris, 127 boundary edges
+      Face #50: 220 tris, 127 boundary edges
+      ... and 53 more faces with boundary edges
+  13        NAUO_29509 (BREP#10218)       65      126          0          0          0          YES  (43.7µs)
+  14        NAUO_29519 (BREP#10211)    12488    23727       3028        268          0           NO  (877.3µs)
+      Face #96: 142 tris, 113 boundary edges
+      Face #88: 136 tris, 110 boundary edges
+      Face #80: 132 tris, 110 boundary edges
+      Face #102: 133 tris, 108 boundary edges
+      Face #104: 131 tris, 106 boundary edges
+      ... and 79 more faces with boundary edges
+  15        NAUO_29530 (BREP#10203)    13189    25511       2750        329          0           NO  (9.0s)
+      Face #33: 1093 tris, 558 boundary edges
+      Face #3: 932 tris, 109 boundary edges
+      Face #25: 422 tris, 62 boundary edges
+      Face #4: 270 tris, 30 boundary edges
+      Face #34: 508 tris, 30 boundary edges
+      ... and 705 more faces with boundary edges
+  16        NAUO_29541 (BREP#10218)       65      126          0          0          0          YES  (186.8µs)
+  17        NAUO_29553 (BREP#10205)     2376     4752          0          0          0          YES  (330.7ms)
+  18        NAUO_29562 (BREP#10218)       65      126          0          0          0          YES  (65.3µs)
+  19        NAUO_29571 (BREP#10206)     2360     4720          0          0          0          YES  (329.7ms)
+  20        NAUO_29583 (BREP#10211)    12488    23727       3028        268          0           NO  (1.2ms)
+      Face #96: 142 tris, 113 boundary edges
+      Face #80: 132 tris, 110 boundary edges
+      Face #88: 136 tris, 110 boundary edges
+      Face #102: 133 tris, 108 boundary edges
+      Face #82: 134 tris, 106 boundary edges
+      ... and 79 more faces with boundary edges
+  21        NAUO_29592 (BREP#10212)     2023     4063         27          2          0           NO  (475.6ms)
+      Face #18: 614 tris, 15 boundary edges
+      Face #2: 589 tris, 12 boundary edges
+  22        NAUO_29604 (BREP#10211)    12488    23727       3028        268          0           NO  (1.2ms)
+      Face #96: 142 tris, 113 boundary edges
+      Face #80: 132 tris, 110 boundary edges
+      Face #88: 136 tris, 110 boundary edges
+      Face #102: 133 tris, 108 boundary edges
+      Face #82: 134 tris, 106 boundary edges
+      ... and 79 more faces with boundary edges
+  23        NAUO_29614 (BREP#10211)    12488    23727       3028        268          0           NO  (1.1ms)
+      Face #96: 142 tris, 113 boundary edges
+      Face #88: 136 tris, 110 boundary edges
+      Face #80: 132 tris, 110 boundary edges
+      Face #102: 133 tris, 108 boundary edges
+      Face #82: 134 tris, 106 boundary edges
+      ... and 79 more faces with boundary edges
+--------------------------------------------------------------------------------
+
+Summary:
+  Total BReps:    23
+  Watertight:     6 (26%)
+  Not watertight: 17
+  Failed:         0
+  Total vertices: 97127
+  Total triangles: 185011

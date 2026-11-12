@@ -136,6 +136,39 @@ pub fn triangulate_polygon_cdt(
     // (defects == 0) stay bit-identical — the rescue never fires.
     // Kill-switch DRAPPER_LATTICE_BAND=0; debug DRAPPER_LATTICE_DEBUG.
     if !interior_2d.is_empty() && hole_index_ranges.is_empty() {
+        // s133 STRUCTURAL-FIRST router (DRAPPER_TORUS_FAMILY_STRUCT):
+        // the #27977 family faces' arm-1 CDTs come out "healthy" by
+        // the defect census (every point used, edges intact) yet
+        // carry 43–95 FAT folds that the repair passes mostly absorb
+        // — 2 survive to the census as REAL pairs (s130/s131/s132:
+        // the defect-triggered rescue NEVER FIRES for them). The
+        // family switch routes every lattice face through the
+        // structural classes FIRST: an accepted structural emission
+        // is fold-clean by construction (the s83/s114/s115/s132/s133
+        // guard stack — every point used, rim edges once, uniform
+        // winding, area within 0.5%, zero unexplained needles); a
+        // reject keeps the standard CDT bit-exactly (never-worsen).
+        // Opt-in, MEASURED against the merged census (the s132
+        // lesson: emission changes shift the weld graph — the switch
+        // ships only if the corpus gates stay green).
+        if std::env::var("DRAPPER_TORUS_FAMILY_STRUCT").as_deref() == Ok("1") {
+            if let Some(structured) = structured_lattice_triangulation(
+                &all_2d,
+                n_boundary,
+                interior_start,
+                interior_2d.len(),
+            ) {
+                if std::env::var("DRAPPER_LATTICE_DEBUG").is_ok() {
+                    eprintln!(
+                        "[LATTICE structural-first {}] -> structured {} tris (CDT {})",
+                        crate::parametric_domain::current_face_label(),
+                        structured.len(),
+                        triangles.len()
+                    );
+                }
+                return structured;
+            }
+        }
         let defects = cdt_defect_count(
             &all_2d,
             &triangles,
@@ -604,6 +637,7 @@ fn cdt_defect_count(
 fn band_ring_split(
     all_2d: &[[f64; 2]],
     n_boundary: usize,
+    veps_rel: f64,
 ) -> Option<(Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>)> {
     let n = n_boundary;
     if n < 8 {
@@ -622,7 +656,12 @@ fn band_ring_split(
     if vspan <= 0.0 {
         return None;
     }
-    let veps = 1e-9 * vspan;
+    // s133: the veps is a PARAMETER — the top-level split keeps the
+    // historical tight 1e-9 (bit-identical default); the notch
+    // decomposition's sub-band calls pass 1e-3 so the excursion
+    // bottom's sub-tol micro-wiggle (f6: 10 edges, 0.02% of vspan)
+    // reads as the neutral cap bridge it is.
+    let veps = veps_rel * vspan;
     let sgn = |i: usize| -> i8 {
         let dv = all_2d[(i + 1) % n][1] - all_2d[i][1];
         if dv > veps {
@@ -735,6 +774,633 @@ fn band_ring_split(
     Some((cap_low, cap_high, left, right))
 }
 
+/// s133 helper: the u of a v-ascending chain at level v (linear per
+/// segment, clamped outside the chain's v-range).
+fn chain_u_at_v(all_2d: &[[f64; 2]], chain: &[usize], v: f64) -> f64 {
+    let last = chain.len() - 1;
+    if v <= all_2d[chain[0]][1] {
+        return all_2d[chain[0]][0];
+    }
+    if v >= all_2d[chain[last]][1] {
+        return all_2d[chain[last]][0];
+    }
+    for w in chain.windows(2) {
+        let (a, b) = (all_2d[w[0]], all_2d[w[1]]);
+        if v >= a[1] && v <= b[1] {
+            let t = if b[1] > a[1] {
+                (v - a[1]) / (b[1] - a[1])
+            } else {
+                0.0
+            };
+            return a[0] + t * (b[0] - a[0]);
+        }
+    }
+    all_2d[chain[last]][0]
+}
+
+/// s133 NOTCH/VALLEY band class (#27977 f6 slot-cap / f65 saddle):
+/// a band whose TOP chain carries ONE downward excursion (a slot
+/// notched into the top cap — f6 — or a wide V-valley between the
+/// wall tops — f65) splits every lattice row above the excursion
+/// bottom into two u-segments; the single-band zipper cannot express
+/// that. Instead of generalizing the zipper to multi-component
+/// strips, the face is CUT into three sub-bands by two v-monotone
+/// chords from the excursion's bottom vertices down to cap points
+/// INSIDE THE FLANK BOTTOMS' OWN INTER-COLUMN GAPS (the lattice
+/// columns are the rows' verticals — a chord crossing a column
+/// splits the column between slabs, breaks the chain u-monotonicity
+/// and folds the strips; measured on the f65 L-slab: +7.5% area,
+/// thousands of overlapping triangle pairs). Each chord is a rim
+/// edge of BOTH adjacent sub-bands (an interior edge of the full
+/// face, count 2); every sub-band is a plain 2-sign-block band
+/// served by the PROVEN classes (s83 dense walls, s114/s115 sharp
+/// caps, s132 flat caps, s133 coarse walls — the 2-point chords ARE
+/// coarse walls) — no new strip machinery. An excursion narrower
+/// than the lattice (both flank bottoms in ONE gap — the f65
+/// valley) leaves the M slab column-free: a dedicated two-chain
+/// prism zip (cap segment × excursion bottom) covers it. Runs ONLY
+/// on the family switch DRAPPER_TORUS_FAMILY_STRUCT=1 and ONLY
+/// after the legacy band split already failed (never-worsen: any
+/// guard returning None keeps the legacy reject bit-exactly). The
+/// sub-calls run with a LOOSE sign veps (1e-3 of vspan) so the
+/// excursion bottom's sub-tol micro-wiggle (f6: 10 edges over
+/// 0.02% of vspan) reads as the neutral cap bridge it is.
+#[allow(clippy::too_many_lines)]
+fn notch_band_decompose(
+    all_2d: &[[f64; 2]],
+    n_boundary: usize,
+    interior_start: usize,
+    n_interior: usize,
+    dbg: bool,
+) -> Option<Vec<[u32; 3]>> {
+    macro_rules! nreject {
+        ($reason:expr) => {{
+            if dbg {
+                eprintln!("[LATTICE reject s133-notch] {}", $reason);
+            }
+            return None;
+        }};
+    }
+    // ── 0. CCW ring + extents ──────────────────────────────────────
+    let mut poly_s = 0.0f64;
+    for i in 0..n_boundary {
+        let a = all_2d[i];
+        let b = all_2d[(i + 1) % n_boundary];
+        poly_s += a[0] * b[1] - b[0] * a[1];
+    }
+    let ring: Vec<usize> = if poly_s >= 0.0 {
+        (0..n_boundary).collect()
+    } else {
+        (0..n_boundary).rev().collect()
+    };
+    let (vmin, vmax) = {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &i in ring.iter() {
+            lo = lo.min(all_2d[i][1]);
+            hi = hi.max(all_2d[i][1]);
+        }
+        (lo, hi)
+    };
+    let vspan = vmax - vmin;
+    let umin = ring.iter().map(|&i| all_2d[i][0]).fold(f64::INFINITY, f64::min);
+    let uspan = ring.iter().map(|&i| all_2d[i][0]).fold(f64::NEG_INFINITY, f64::max) - umin;
+    if vspan <= 0.0 || uspan <= 0.0 {
+        nreject!("flat ring");
+    }
+    // ── 1. sign blocks (loose veps: sub-tol wiggles are neutral) ───
+    let veps = 1e-3 * vspan;
+    let n = ring.len();
+    let sgn = |k: usize| -> i8 {
+        let dv = all_2d[ring[(k + 1) % n]][1] - all_2d[ring[k]][1];
+        if dv > veps {
+            1
+        } else if dv < -veps {
+            -1
+        } else {
+            0
+        }
+    };
+    let first = (0..n).find(|&k| sgn(k) != 0)?;
+    let mut seq: Vec<(usize, i8)> = Vec::new();
+    for d in 0..n {
+        let k = (first + d) % n;
+        let s = sgn(k);
+        if s != 0 {
+            seq.push((k, s));
+        }
+    }
+    // rotate so position 0 starts a block
+    let mut rot_at = 0usize;
+    if seq.len() > 1 && seq[seq.len() - 1].1 == seq[0].1 {
+        let mut last_tr = 0usize;
+        for k in 1..seq.len() {
+            if seq[k].1 != seq[k - 1].1 {
+                last_tr = k;
+            }
+        }
+        rot_at = last_tr;
+    }
+    let rot: Vec<(usize, i8)> = seq[rot_at..]
+        .iter()
+        .chain(seq[..rot_at].iter())
+        .copied()
+        .collect();
+    let mut blocks: Vec<(usize, usize, i8)> = Vec::new(); // (seq-range, sign)
+    {
+        let m = rot.len();
+        let mut s = 0usize;
+        for k in 1..m {
+            if rot[k].1 != rot[k - 1].1 {
+                blocks.push((s, k - 1, rot[k - 1].1));
+                s = k;
+            }
+        }
+        blocks.push((s, m - 1, rot[m - 1].1));
+    }
+    // ── 2. the m=1 notch layout: [main+][flank−][flank+][main−] ────
+    // (cyclically; the mains are ADJACENT blocks — the bottom cap is
+    // the single neutral bridge main−→main+, the top chain main+→
+    // flank−→flank+→main− carries BOTH flanks). The excursion must
+    // descend FIRST from the main+ side (walking CCW).
+    if blocks.len() != 4 {
+        nreject!(format!("block count {}", blocks.len()));
+    }
+    for w in blocks.windows(2) {
+        if w[0].2 == w[1].2 {
+            nreject!("non-alternating signs");
+        }
+    }
+    if blocks[3].2 == blocks[0].2 {
+        nreject!("cyclic sign pattern");
+    }
+    let ext: Vec<(f64, f64)> = blocks
+        .iter()
+        .map(|b| {
+            let mut lo = f64::INFINITY;
+            let mut hi = f64::NEG_INFINITY;
+            for t in b.0..=b.1 {
+                let k = rot[t].0;
+                for &pt in &[ring[k], ring[(k + 1) % n]] {
+                    let v = all_2d[pt][1];
+                    lo = lo.min(v);
+                    hi = hi.max(v);
+                }
+            }
+            (lo, hi)
+        })
+        .collect();
+    let extent_of = |bi: usize| ext[bi].1 - ext[bi].0;
+    let mut layout: Option<usize> = None;
+    for p in 0..4 {
+        let (f1, f2, mm) = ((p + 1) % 4, (p + 2) % 4, (p + 3) % 4);
+        if blocks[p].2 != 1
+            || blocks[f1].2 != -1
+            || blocks[f2].2 != 1
+            || blocks[mm].2 != -1
+        {
+            continue;
+        }
+        if extent_of(p) < 0.8 * vspan
+            || extent_of(mm) < 0.8 * vspan
+            || extent_of(f1) >= 0.8 * vspan
+            || extent_of(f2) >= 0.8 * vspan
+            || extent_of(f1) < 0.02 * vspan
+            || extent_of(f2) < 0.02 * vspan
+        {
+            continue;
+        }
+        // the two mains must be THE largest two extents
+        let m_ext = extent_of(p).max(extent_of(mm));
+        if extent_of(f1) >= m_ext || extent_of(f2) >= m_ext {
+            continue;
+        }
+        layout = Some(p);
+        break;
+    }
+    let p = match layout {
+        Some(p) => p,
+        None => nreject!(format!("no m=1 notch layout ({} blocks)", blocks.len())),
+    };
+    let (f1, f2, mm) = ((p + 1) % 4, (p + 2) % 4, (p + 3) % 4);
+    // ── 3. chains (ring-position walks; neutral gaps stay inside) ──
+    let walk_chain = |from_pos: usize, to_pos: usize| -> Vec<usize> {
+        let mut c = Vec::new();
+        let mut k = from_pos;
+        c.push(ring[k]);
+        while k != to_pos {
+            k = (k + 1) % n;
+            c.push(ring[k]);
+        }
+        c
+    };
+    let blk_first_pos = |bi: usize| rot[blocks[bi].0].0;
+    let blk_last_pos = |bi: usize| (rot[blocks[bi].1].0 + 1) % n;
+    let block_chain = |bi: usize| walk_chain(blk_first_pos(bi), blk_last_pos(bi));
+    let bridge_chain =
+        |from_b: usize, to_b: usize| walk_chain(blk_last_pos(from_b), blk_first_pos(to_b));
+    let mainp = block_chain(p); // [BR .. TR]   v asc
+    let flm = block_chain(f1); //   [p_a .. p_b] v desc (right flank)
+    let flp = block_chain(f2); //   [p_c .. p_d] v asc  (left flank)
+    let mainm = block_chain(mm); // [TL .. BL]   v desc
+    let ga = bridge_chain(p, f1); //  [TR .. p_a] top-right segment
+    let gb = bridge_chain(f1, f2); // [p_b .. p_c] excursion bottom
+    let gc = bridge_chain(f2, mm); // [p_d .. TL] top-left segment
+    let cap = bridge_chain(mm, p); //  [BL .. BR] bottom cap
+    let vspan_of = |c: &Vec<usize>| {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for &i in c.iter() {
+            lo = lo.min(all_2d[i][1]);
+            hi = hi.max(all_2d[i][1]);
+        }
+        (lo, hi)
+    };
+    // ── 4. bridge guards ───────────────────────────────────────────
+    if cap.len() < 3 {
+        nreject!("bottom cap too short");
+    }
+    {
+        let (clo, chi) = vspan_of(&cap);
+        if chi - clo > veps || chi > vmin + 0.05 * vspan {
+            nreject!("bottom cap not flat/at-bottom");
+        }
+        for w in cap.windows(2) {
+            if all_2d[w[1]][0] <= all_2d[w[0]][0] {
+                nreject!("bottom cap u not ascending");
+            }
+        }
+    }
+    for (name, seg) in [("ga", &ga), ("gc", &gc)] {
+        let (slo, shi) = vspan_of(seg);
+        if shi - slo > veps {
+            nreject!(format!("top segment {} not flat", name));
+        }
+    }
+    {
+        let (blo, bhi) = vspan_of(&gb);
+        let (clo, _) = vspan_of(&cap);
+        if bhi - blo > veps {
+            nreject!("notch bottom not flat");
+        }
+        if blo < clo + 0.05 * vspan {
+            nreject!("notch too shallow");
+        }
+    }
+    let p_b = *flm.last().unwrap(); // right flank bottom vertex
+    let p_c = *flp.first().unwrap(); // left flank bottom vertex
+    if all_2d[p_c][0] > all_2d[p_b][0] + 1e-9 {
+        nreject!("excursion bottom not u-monotone");
+    }
+    // ── 5. chord landing points: GAP CONFINEMENT ───────────────────
+    // The lattice columns (the distinct u clusters of the interior)
+    // are the rows' verticals. A chord whose u-range CROSSES a
+    // column splits that column's points between the two adjacent
+    // slabs and leaves the strip anchors INSIDE the rows' u-range —
+    // the measured consequence (f65 L-slab): the A-chain [anchor,
+    // row, anchor] loses u-monotonicity, the zipper emits fold-over
+    // triangles (thousands of overlap pairs, area +7.5%). Landing
+    // each chord on the cap point nearest the flank bottom WITHIN
+    // the flank bottom's OWN inter-column gap confines the chord to
+    // that gap: no column ever crosses, the anchor (the landing
+    // point) is u-beyond the adjacent columns for BOTH slabs (the
+    // cap spacing is half the column spacing — every gap carries
+    // cap points).
+    let mut cols: Vec<f64> = Vec::new();
+    {
+        // cluster the interior u's into lattice columns (sort first —
+        // the interior array is row-major, the u's repeat per row)
+        let mut us: Vec<f64> = (interior_start..interior_start + n_interior)
+            .map(|i| all_2d[i][0])
+            .collect();
+        us.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        for u in us {
+            match cols.last() {
+                Some(&c) if (u - c).abs() <= 1e-6 * uspan => {}
+                _ => cols.push(u),
+            }
+        }
+    }
+    if cols.len() < 2 {
+        nreject!("interior columns < 2");
+    }
+    let gap_of = |u: f64| -> (f64, f64) {
+        // the open inter-column gap containing u
+        let pos = cols.partition_point(|&c| c < u);
+        (if pos == 0 { f64::NEG_INFINITY } else { cols[pos - 1] },
+         if pos == cols.len() { f64::INFINITY } else { cols[pos] })
+    };
+    let cap_u = |pos: usize| all_2d[cap[pos]][0];
+    let land_in_gap = |u: f64| -> Option<usize> {
+        let (glo, ghi) = gap_of(u);
+        let mut best: Option<usize> = None;
+        let mut bd = f64::INFINITY;
+        for i in 0..cap.len() {
+            let cu = cap_u(i);
+            if cu > glo && cu < ghi {
+                let d = (cu - u).abs();
+                if d < bd {
+                    bd = d;
+                    best = Some(i);
+                }
+            }
+        }
+        best
+    };
+    let land_l = match land_in_gap(all_2d[p_c][0]) {
+        Some(i) if i > 0 => i,
+        _ => nreject!("no cap point in the left flank-bottom gap"),
+    };
+    let land_r = match land_in_gap(all_2d[p_b][0]) {
+        Some(i) if i < cap.len() - 1 => i,
+        _ => nreject!("no cap point in the right flank-bottom gap"),
+    };
+    if land_l == 0 || land_r >= cap.len() - 1 || land_l >= land_r {
+        nreject!(format!("chord landing degenerate {} {}", land_l, land_r));
+    }
+    if (cap_u(land_l) - all_2d[p_c][0]).abs() > 0.1 * uspan
+        || (cap_u(land_r) - all_2d[p_b][0]).abs() > 0.1 * uspan
+    {
+        nreject!("chord slant too large");
+    }
+    // ── 6. composite slab boundaries (v-asc) + assignment ──────────
+    let mut l_right = vec![cap[land_l], p_c];
+    l_right.extend_from_slice(&flp[1..]);
+    let mut flm_rev = flm.clone();
+    flm_rev.reverse();
+    let mut r_left = vec![cap[land_r], p_b];
+    r_left.extend_from_slice(&flm_rev[1..]);
+    let eps_u = 1e-7 * (uspan + vspan);
+    // boundaries must not cross at sampled levels
+    for k in 0..=8 {
+        let v = vmin + (vmax - vmin) * (k as f64) / 8.0;
+        let (ul, ur) = (chain_u_at_v(all_2d, &l_right, v), chain_u_at_v(all_2d, &r_left, v));
+        if ul > ur + eps_u {
+            nreject!("slab boundaries cross");
+        }
+    }
+    let mut int_l: Vec<usize> = Vec::new();
+    let mut int_m: Vec<usize> = Vec::new();
+    let mut int_r: Vec<usize> = Vec::new();
+    for i in interior_start..interior_start + n_interior {
+        let (pu, pv) = (all_2d[i][0], all_2d[i][1]);
+        let ul = chain_u_at_v(all_2d, &l_right, pv);
+        let ur = chain_u_at_v(all_2d, &r_left, pv);
+        if pu < ul - eps_u {
+            int_l.push(i);
+        } else if pu > ur + eps_u {
+            int_r.push(i);
+        } else if pu > ul + eps_u && pu < ur - eps_u {
+            int_m.push(i);
+        } else {
+            nreject!(format!("interior point {} on a chord", i));
+        }
+    }
+    // ── 7. sub-rings (CCW; chords shared by adjacent slabs) ────────
+    let l_ring: Vec<usize> = cap[0..=land_l]
+        .iter()
+        .cloned()
+        .chain(std::iter::once(p_c))
+        .chain(flp[1..].iter().cloned())
+        .chain(gc[1..].iter().cloned())
+        // mainm's TL is already gc's last point and its BL is already
+        // the ring head (cap[0]) — exclude BOTH endpoints (the BL
+        // duplicate corrupted the sub-ring: the split produced garbage
+        // chains and the zipper stuck on a repeated anchor).
+        .chain(mainm[1..mainm.len() - 1].iter().cloned())
+        .collect();
+    let m_ring: Vec<usize> = cap[land_l..=land_r]
+        .iter()
+        .cloned()
+        .chain(std::iter::once(p_b))
+        .chain(gb[1..].iter().cloned())
+        .collect();
+    let r_ring: Vec<usize> = cap[land_r..]
+        .iter()
+        .cloned()
+        .chain(mainp[1..].iter().cloned())
+        .chain(ga[1..].iter().cloned())
+        .chain(flm[1..].iter().cloned())
+        .collect();
+    for (name, r) in [("L", &l_ring), ("M", &m_ring), ("R", &r_ring)] {
+        // s133: the ring floor is a POLYGON floor (>= 3) — the empty-M
+        // prism needs no band machinery (its own two-chain zip); the
+        // band sub-calls keep their own n>=8 floor internally.
+        if r.len() < 3 {
+            nreject!(format!("slab {} ring too short {}", name, r.len()));
+        }
+    }
+    // ── 8. per-slab triangulation (recursive, loose-veps sub-pass) ─
+    let mut merged: Vec<[u32; 3]> = Vec::new();
+    for (name, ring_pts, ints) in [
+        ("L", &l_ring, &int_l),
+        ("M", &m_ring, &int_m),
+        ("R", &r_ring, &int_r),
+    ] {
+        if ints.is_empty() {
+            // Empty-interior slab: only legal for the M slab — the
+            // chords confined the excursion's inter-column gaps, so a
+            // column-free M means the excursion is narrower than the
+            // lattice (f65's valley: both flank bottoms in ONE gap).
+            // The slab is the prism under the excursion bottom: zip
+            // the cap segment against the (u-ascending) excursion
+            // bottom chain — the chords are the closing spokes of the
+            // two-chain walk (each emitted here once and by the L/R
+            // neighbor once = interior edges of the full face). The
+            // bottom chain is the CAP SEGMENT ONLY — m_ring also
+            // carries p_b + the gb tail (they are the top chain).
+            if name != "M" {
+                nreject!(format!("slab {} empty interior", name));
+            }
+            let mut top: Vec<u32> = gb.iter().map(|&g| g as u32).collect();
+            top.reverse(); // p_c .. p_b, u-ascending
+            let bot: Vec<u32> = cap[land_l..=land_r]
+                .iter()
+                .map(|&g| g as u32)
+                .collect();
+            let (m, nb) = (bot.len(), top.len());
+            if m < 2 || nb < 1 {
+                nreject!("empty-M prism degenerate");
+            }
+            let mut ia = 0usize;
+            let mut ib = 0usize;
+            let mut guard_ct = 0usize;
+            loop {
+                let dead_a = ia >= m - 1;
+                let dead_b = ib >= nb - 1;
+                if dead_a && dead_b {
+                    break;
+                }
+                let take_a = if dead_a {
+                    false
+                } else if dead_b {
+                    true
+                } else {
+                    all_2d[bot[ia + 1] as usize][0] <= all_2d[top[ib + 1] as usize][0]
+                };
+                let mut t = if take_a {
+                    let t = [bot[ia], bot[ia + 1], top[ib]];
+                    ia += 1;
+                    t
+                } else {
+                    let t = [bot[ia], top[ib + 1], top[ib]];
+                    ib += 1;
+                    t
+                };
+                let (pa, pb, pc) = (
+                    all_2d[t[0] as usize],
+                    all_2d[t[1] as usize],
+                    all_2d[t[2] as usize],
+                );
+                if (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0]) < 0.0 {
+                    t.swap(1, 2);
+                }
+                merged.push(t);
+                guard_ct += 1;
+                if guard_ct > 4 * (m + nb) {
+                    nreject!("empty-M zip loop");
+                }
+            }
+            if dbg {
+                eprintln!(
+                    "[s133-notch] slab M (empty) prism zip: cap={} top={} tris={}",
+                    m,
+                    nb,
+                    guard_ct
+                );
+            }
+            continue;
+        }
+        let mut sub_pts: Vec<[f64; 2]> = Vec::with_capacity(ring_pts.len() + ints.len());
+        let mut map: Vec<u32> = Vec::with_capacity(ring_pts.len() + ints.len());
+        for &g in ring_pts.iter().chain(ints.iter()) {
+            map.push(g as u32);
+            sub_pts.push(all_2d[g]);
+        }
+        let sub_tris = match structured_lattice_triangulation_inner(
+            &sub_pts,
+            ring_pts.len(),
+            ring_pts.len(),
+            ints.len(),
+            true,
+        ) {
+            Some(t) => t,
+            None => {
+                if dbg {
+                    eprintln!("[s133-notch] slab {} SUB-REJECT", name);
+                }
+                return None;
+            }
+        };
+        if dbg {
+            eprintln!(
+                "[s133-notch] slab {}: ring={} int={} tris={}",
+                name,
+                ring_pts.len(),
+                ints.len(),
+                sub_tris.len()
+            );
+        }
+        for t in sub_tris.iter() {
+            merged.push([map[t[0] as usize], map[t[1] as usize], map[t[2] as usize]]);
+        }
+    }
+    if merged.len() < 3 {
+        nreject!("empty merge");
+    }
+    // ── 9. merged audit: coverage / parent rim / area / winding ────
+    {
+        let mut used = vec![false; interior_start + n_interior];
+        for t in merged.iter() {
+            for &v in t.iter() {
+                if (v as usize) < used.len() {
+                    used[v as usize] = true;
+                }
+            }
+        }
+        for i in 0..interior_start + n_interior {
+            if !used[i] {
+                nreject!(format!("point {} unused", i));
+            }
+        }
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in merged.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let mut rim_set: HashSet<(u32, u32)> = HashSet::new();
+        for i in 0..n_boundary {
+            let j = (i + 1) % n_boundary;
+            rim_set.insert((i.min(j) as u32, i.max(j) as u32));
+        }
+        for (e, cnt) in ecount.iter() {
+            if rim_set.contains(e) {
+                if *cnt != 1 {
+                    nreject!(format!("rim edge {:?} count {}", e, cnt));
+                }
+            } else if *cnt != 2 {
+                nreject!(format!("interior edge {:?} count {}", e, cnt));
+            }
+        }
+        for e in rim_set.iter() {
+            if !ecount.contains_key(e) {
+                nreject!(format!("rim edge {:?} missing", e));
+            }
+        }
+        let area2 = |a: u32, b: u32, c: u32| -> f64 {
+            let pa = all_2d[a as usize];
+            let pb = all_2d[b as usize];
+            let pc = all_2d[c as usize];
+            (pb[0] - pa[0]) * (pc[1] - pa[1]) - (pb[1] - pa[1]) * (pc[0] - pa[0])
+        };
+        let strip_s: f64 = merged.iter().map(|t| area2(t[0], t[1], t[2]) * 0.5).sum();
+        if (strip_s - poly_s * 0.5).abs() > 0.005 * (poly_s * 0.5).abs().max(1e-12) {
+            nreject!(format!(
+                "area mismatch merged {:.6} vs poly {:.6}",
+                strip_s,
+                poly_s * 0.5
+            ));
+        }
+        let noise = 1e-9 * (uspan * uspan + vspan * vspan);
+        let (mut pos, mut neg) = (0usize, 0usize);
+        for t in merged.iter() {
+            let s = area2(t[0], t[1], t[2]);
+            if s > noise {
+                pos += 1;
+            } else if s < -noise {
+                neg += 1;
+            }
+        }
+        if (pos > 0 && neg > 0) || pos + neg == 0 {
+            nreject!(format!("winding mixed {} pos / {} neg", pos, neg));
+        }
+        // normalize to the parent polygon's orientation
+        if (poly_s > 0.0 && neg > 0) || (poly_s < 0.0 && pos > 0) {
+            for t in merged.iter_mut() {
+                t.swap(1, 2);
+            }
+        }
+    }
+    if dbg {
+        eprintln!(
+            "[s133-notch] ACCEPT L(ring={} int={}) M(ring={} int={}) R(ring={} int={}) tris={}",
+            l_ring.len(),
+            int_l.len(),
+            m_ring.len(),
+            int_m.len(),
+            r_ring.len(),
+            int_r.len(),
+            merged.len()
+        );
+    }
+    Some(merged)
+}
+
 /// session-83: STRUCTURAL LATTICE row triangulation — the s78 SAIL_BAND
 /// construction generalized to a GIVEN interior lattice (the adaptive
 /// subdivision's own Steiner points) on a 4-corner monotone ring.
@@ -767,16 +1433,47 @@ fn band_ring_split(
 /// polygon shoelace, zero UV needles (aspect < 1e-3).
 ///
 /// Kill-switch: DRAPPER_LATTICE_BAND=0. Debug: DRAPPER_LATTICE_DEBUG.
+/// Public-shaped entry (unchanged signature for the CDT pipeline and
+/// the replay harness): top-level pass, tight sign veps.
 fn structured_lattice_triangulation(
     all_2d: &[[f64; 2]],
     n_boundary: usize,
     interior_start: usize,
     n_interior: usize,
 ) -> Option<Vec<[u32; 3]>> {
+    structured_lattice_triangulation_inner(
+        all_2d,
+        n_boundary,
+        interior_start,
+        n_interior,
+        false,
+    )
+}
+
+fn structured_lattice_triangulation_inner(
+    all_2d: &[[f64; 2]],
+    n_boundary: usize,
+    interior_start: usize,
+    n_interior: usize,
+    sub_pass: bool,
+) -> Option<Vec<[u32; 3]>> {
     if std::env::var("DRAPPER_LATTICE_BAND").as_deref() == Ok("0") {
         return None;
     }
     let dbg = std::env::var("DRAPPER_LATTICE_DEBUG").is_ok();
+    // s133 FAMILY SWITCH (read once, used by the split below and the
+    // caps section): DRAPPER_TORUS_FAMILY_STRUCT=1 turns on the whole
+    // #27977 Torus emission-migration program at once — the s132
+    // measured lesson: the weld-coupled family (f2/f6/f7/f65/f68) is
+    // NOT locally monotone (f7's flat-cap fix alone spawned a NEW
+    // f(6,6) macro fold on f6's bit-identical emission), so the
+    // family must move to structural emissions ALL AT ONCE. The
+    // switch implies every sub-class flag measured as family-unsafe
+    // to default: s132 flat caps + s133 coarse walls + the s133
+    // notch/valley decomposition. Sub-flags stay for isolation.
+    let family_struct =
+        std::env::var("DRAPPER_TORUS_FAMILY_STRUCT").as_deref() == Ok("1");
+    let coarse_walls_on = family_struct;
     macro_rules! lattice_reject {
         ($reason:expr) => {{
             if dbg {
@@ -789,7 +1486,11 @@ fn structured_lattice_triangulation(
             return None;
         }};
     }
-    if n_boundary < 8 || n_interior < 8 {
+    if n_boundary < 8 || n_interior < if sub_pass { 1 } else { 8 } {
+        // s133: sub-slab relaxation — a notch-decomposition slab is a
+        // NARROW region (f6-M carries a single lattice column, 6
+        // points over 3 rows); the top-level floor stays (a full face
+        // with a handful of interior points is not this class).
         lattice_reject!("tiny input");
     }
     // ── 1. interior row detection (v-const clusters) ───────────────
@@ -833,7 +1534,15 @@ fn structured_lattice_triangulation(
         rows.push(cur);
     }
     let m_rows = rows.len();
-    if m_rows < 4 {
+    // s133 sub-slab relaxation: a notch-decomposition slab is a NARROW
+    // region — a single row may legitimately carry ONE lattice point
+    // (the zipper chains handle 1-point rows), and a small slab (the
+    // M strip under a shallow excursion) may have fewer than 4 rows.
+    // The top-level floors stay (a full face with 1-point rows is the
+    // suspicious class the s83 guards were written for).
+    let row_floor = if sub_pass { 1 } else { 2 };
+    let rows_floor = if sub_pass { 1 } else { 4 };
+    if m_rows < rows_floor {
         lattice_reject!("too few rows");
     }
     for r in rows.iter_mut() {
@@ -852,7 +1561,7 @@ fn structured_lattice_triangulation(
             }
             (lo, hi)
         };
-        if r.len() < 2 || vhi - vlo > row_tol {
+        if r.len() < row_floor || vhi - vlo > row_tol {
             lattice_reject!("row not v-const");
         }
         for w in r.windows(2) {
@@ -914,7 +1623,7 @@ fn structured_lattice_triangulation(
         if std::env::var("DRAPPER_BAND_LATTICE").as_deref() == Ok("0") {
             lattice_reject!("diagonal rim edges (rounded corners)");
         }
-        match band_ring_split(all_2d, n_boundary) {
+        match band_ring_split(all_2d, n_boundary, if sub_pass { 1e-3 } else { 1e-9 }) {
             Some((b, t, l, r)) => {
                 bottom = b;
                 top = t;
@@ -923,6 +1632,24 @@ fn structured_lattice_triangulation(
                 band_caps = true;
             }
             None => {
+                // s133 NOTCH/VALLEY class: the 2-block split failed —
+                // for the #27977 family (f6 slot-cap / f65 saddle) the
+                // ring is a band whose TOP chain carries one downward
+                // excursion; cut it into three plain sub-bands (family
+                // switch only; never reached from a sub-band itself —
+                // no recursion). Any guard failure falls through to
+                // the legacy reject bit-exactly.
+                if family_struct && !sub_pass {
+                    if let Some(t) = notch_band_decompose(
+                        all_2d,
+                        n_boundary,
+                        interior_start,
+                        n_interior,
+                        dbg,
+                    ) {
+                        return Some(t);
+                    }
+                }
                 // rounded/organic corners outside both classes
                 lattice_reject!("diagonal rim edges (rounded corners)");
             }
@@ -1049,8 +1776,10 @@ fn structured_lattice_triangulation(
     // (the s133 program: notch/valley/coarse-wall band classes + a
     // family-wise switch). Default OFF = bit-exact legacy; opt-in
     // DRAPPER_FLAT_CAP_BAND=1 for the s133 continuation.
-    let flat_caps_on =
-        std::env::var("DRAPPER_FLAT_CAP_BAND").as_deref() == Ok("1");
+    // s133: flat caps implied by the family switch (see the top of
+    // the function); the standalone sub-flag stays for isolation.
+    let flat_caps_on = family_struct
+        || std::env::var("DRAPPER_FLAT_CAP_BAND").as_deref() == Ok("1");
     let flat_bottom = flat_caps_on && bottom.len() >= 2;
     let flat_top = flat_caps_on && top.len() >= 2;
     let sharp_bottom = band_caps && !flat_bottom;
@@ -1272,7 +2001,25 @@ fn structured_lattice_triangulation(
         }
         let lvl = row_v[k - 2];
         let anchor_at = |wall: &[usize]| -> usize {
-            let mut best = 1usize;
+            // s133 COARSE-WALL class (#27977 f2/f68): a coarse wall's
+            // first INTERIOR point may sit far ABOVE the row level
+            // (3-pt walls vs 23 rows — the serpentine band's walls
+            // carry no lattice points at all). Returning it as the
+            // anchor put the SAME point into BOTH chains the moment
+            // the row levels reached its band (f2: "zipper stuck k=6
+            // ia=0 ib=0" — the opening triangles (116, 281, 116) /
+            // (116, 308, 116) carry the repeated anchor and are 1D
+            // degenerate on both sides). The anchor MUST be the last
+            // wall position at-or-below the level; when none
+            // qualifies the BOTTOM CORNER (position 0 — the wall's
+            // v-min, shared with the cap) is the only choice that can
+            // NEVER collide with a band (bands hold interior
+            // positions >= 1 only) — the strips below the first
+            // interior wall point fan from the corner exactly like
+            // the cap strips fan from the turn. Dense walls (every
+            // accepted face so far: wall points at the row levels)
+            // always find an interior anchor — bit-identical.
+            let mut best = if coarse_walls_on { 0usize } else { 1usize };
             for p in 1..wall.len() - 1 {
                 if all_2d[wall[p]][1] <= lvl + 1e-12 {
                     best = p;
@@ -1382,7 +2129,14 @@ fn structured_lattice_triangulation(
         if b.len() < 2
             && !(band_caps
                 && ((k == m_rows + 1 && b.len() == 1)
-                    || (flat_caps_on && k == 1 && b.len() == 1)))
+                    || (flat_caps_on && k == 1 && b.len() == 1)
+                    // s133 sub-slab: a narrow notch slab's rows may
+                    // carry a SINGLE lattice point (the chords confined
+                    // to inter-column gaps leave one column inside) —
+                    // every strip's B degenerates to that point and the
+                    // dead-b fan (A walks, fanning to it) is the correct
+                    // strip coverage.
+                    || (sub_pass && b.len() == 1)))
         {
             lattice_reject!(format!("upper row degenerate k={}", k));
         }
@@ -1695,6 +2449,39 @@ fn structured_lattice_triangulation(
             {
                 continue; // sharp cap strip — rim hairpin, exempt
             }
+            // s133 sub-slab CHORD-SLIVER exemption: the cut chords
+            // land inside inter-column gaps, so the strip between a
+            // chord and the adjacent lattice column is a REAL piece
+            // of surface (width = the gap remainder, up to one column
+            // spacing) that no triangulation can fatten — its corner
+            // fans (landing point, col_i, col_{i+1}) are needles by
+            // the s82 aspect ruler exactly like the s115 rim hairpins
+            // ("a real piece of surface between three consecutive
+            // points"). Signature: two vertices share a column u
+            // (|du| under 1e-9 of uspan) with a real v step. The
+            // CAP strips (k=1 flat bottom, k>=m+1 the notch-bottom /
+            // top-segment zip) get the same real-surface treatment as
+            // the sharp hairpins: the last row's ends sit a fraction
+            // of a row step from the cap chain and the fans from the
+            // strip corners over that gap are legitimately thin
+            // (f6-M top strip: (landL, row_last, bottom_i) aspect
+            // 7.2e-4). Scoped to sub_pass ONLY (the top-level f26
+            // row/wall mismatch class keeps the strict guard).
+            if sub_pass
+                && (tri_k[ti] == 1
+                    || tri_k[ti] >= m_rows + 1
+                    || {
+                        let p0 = all_2d[t[0] as usize];
+                        let p1 = all_2d[t[1] as usize];
+                        let p2 = all_2d[t[2] as usize];
+                        let tol = 1e-9 * uspan;
+                        ((p0[0] - p1[0]).abs() <= tol && (p0[1] - p1[1]).abs() > tol)
+                            || ((p1[0] - p2[0]).abs() <= tol && (p1[1] - p2[1]).abs() > tol)
+                            || ((p2[0] - p0[0]).abs() <= tol && (p2[1] - p0[1]).abs() > tol)
+                    })
+            {
+                continue; // sub-slab sliver fan — real surface
+            }
             let p = all_2d[t[0] as usize];
             let q = all_2d[t[1] as usize];
             let r = all_2d[t[2] as usize];
@@ -1731,7 +2518,18 @@ fn structured_lattice_triangulation(
                         }
                     }
                 }
-                lattice_reject!("UV needle in row grid");
+                lattice_reject!(format!(
+                    "UV needle in row grid {:?} aspect {:.2e} ({:.4},{:.4}) ({:.4},{:.4}) ({:.4},{:.4}) k={}",
+                    t,
+                    a / max_e,
+                    all_2d[t[0] as usize][0],
+                    all_2d[t[0] as usize][1],
+                    all_2d[t[1] as usize][0],
+                    all_2d[t[1] as usize][1],
+                    all_2d[t[2] as usize][0],
+                    all_2d[t[2] as usize][1],
+                    tri_k[ti]
+                ));
             }
         }
     }
@@ -3841,6 +4639,248 @@ mod s82_tests {
             "Euler T = 2I + R - 2"
         );
         // every rim edge exactly once, non-rim exactly twice
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in tris.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let n = ring.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let cnt = ecount.get(&key).copied().unwrap_or(0);
+            assert_eq!(cnt, 1, "rim edge ({},{}) count {}", i, j, cnt);
+        }
+        for (e, cnt) in ecount.iter() {
+            let is_rim = (0..n).any(|i| {
+                let j = (i + 1) % n;
+                *e == (i.min(j) as u32, i.max(j) as u32)
+            });
+            if !is_rim {
+                assert_eq!(*cnt, 2, "interior edge {:?} count {}", e, cnt);
+            }
+        }
+    }
+
+    /// s133 NOTCH class (#27977 f6 slot-cap): a band whose top chain
+    /// carries one U-excursion. The notch decomposition must cut it
+    /// into three plain sub-bands (flat caps + coarse chord walls +
+    /// the single-column M strip) — default stays on the rejecting
+    /// path (never-worsen), the family switch accepts.
+    #[test]
+    fn test_s133_notch_band_lattice() {
+        // ring CCW: cap 0..10 (0.25 steps) → right wall ↑ → top-right
+        // → right notch flank ↓ → notch bottom → left flank ↑ →
+        // top-left → left wall ↓
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for i in 0..41 {
+            ring.push([0.25 * i as f64, 0.0]);
+        }
+        for v in 1..=5 {
+            ring.push([10.0, v as f64]); // right wall, top (10,5)
+        }
+        for u in [9.0, 8.0, 7.0] {
+            ring.push([u, 5.0]); // top-right segment → (7,5)
+        }
+        // diagonal flanks (du≈dv → D-class edges → the band path);
+        // the flank bottoms sit BETWEEN lattice columns (4.8 / 6.2) —
+        // on-column bottoms make the gap tie break to the wrong side
+        ring.push([6.6, 4.25]);
+        ring.push([6.2, 3.5]); // right flank bottom = p_b
+        ring.push([5.5, 3.5]);
+        ring.push([4.8, 3.5]); // notch bottom → left flank bottom p_c
+        ring.push([4.4, 4.25]);
+        ring.push([4.0, 5.0]); // left flank top
+        for u in [3.0, 2.0, 1.0, 0.0] {
+            ring.push([u, 5.0]); // top-left segment
+        }
+        for v in [4.0, 3.0, 2.0, 1.0] {
+            ring.push([0.0, v]); // left wall ↓
+        }
+        // interior lattice: integer columns 1..9; rows 1, 2, 3 full,
+        // rows 4 and 4.5 split by the notch (columns 1..4 / 7..9 —
+        // 5 and 6 sit inside the notch void above its bottom)
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for v in [1.0, 2.0, 3.0] {
+            for u in 1..=9 {
+                interior.push([u as f64, v]);
+            }
+        }
+        for v in [4.0, 4.5] {
+            for u in 1..=4 {
+                interior.push([u as f64, v]);
+            }
+            for u in 7..=9 {
+                interior.push([u as f64, v]);
+            }
+        }
+        let total = ring.len() + interior.len();
+        assert!(ring.len() >= 8 && interior.len() >= 20);
+
+        // DEFAULT: the 4-block ring rejects the 2-block split and the
+        // notch class is family-gated → None = bit-exact legacy.
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+        let default = super::structural_lattice_rescue_legacy(&ring, &interior);
+        assert!(
+            default.is_none(),
+            "default must reject the notch band (never-worsen); got {} tris",
+            default.map_or(0, |t| t.len())
+        );
+
+        // FAMILY SWITCH: the notch decomposition must accept.
+        std::env::set_var("DRAPPER_TORUS_FAMILY_STRUCT", "1");
+        let tris = super::structural_lattice_rescue_legacy(&ring, &interior)
+            .expect("s133 notch band: family switch must accept");
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+
+        let mut used = vec![false; total];
+        for t in tris.iter() {
+            for &v in t.iter() {
+                assert!((v as usize) < total, "vertex {} out of range", v);
+                used[v as usize] = true;
+            }
+        }
+        for i in 0..total {
+            assert!(used[i], "point {} unused", i);
+        }
+        assert_eq!(
+            tris.len(),
+            2 * interior.len() + ring.len() - 2,
+            "Euler T = 2I + R - 2"
+        );
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in tris.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let n = ring.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let cnt = ecount.get(&key).copied().unwrap_or(0);
+            assert_eq!(cnt, 1, "rim edge ({},{}) count {}", i, j, cnt);
+        }
+        for (e, cnt) in ecount.iter() {
+            let is_rim = (0..n).any(|i| {
+                let j = (i + 1) % n;
+                *e == (i.min(j) as u32, i.max(j) as u32)
+            });
+            if !is_rim {
+                assert_eq!(*cnt, 2, "interior edge {:?} count {}", e, cnt);
+            }
+        }
+    }
+
+    /// s133 VALLEY class (#27977 f65 saddle): a wide V-excursion with
+    /// NO flat top segments — the L/R sub-bands carry SHARP single-
+    /// point tops (the s114/s115 fans) and the M prism is column-free
+    /// (the empty-M two-chain zip against the valley bottom chain).
+    #[test]
+    fn test_s133_valley_band_lattice() {
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for i in 0..41 {
+            ring.push([0.25 * i as f64, 0.0]);
+        }
+        for v in 1..=5 {
+            ring.push([10.0, v as f64]);
+        }
+        // valley right flank (10,5) → (5.7, 2): DENSE with a slight
+        // sag into R (real flanks are dense arcs — a coarse BENT flank
+        // legitimately rejects on the area guard: the s115 fan-1
+        // spokes poke past it into the valley void)
+        for (u, v) in [
+            (9.303, 4.5),
+            (8.602, 4.0),
+            (7.890, 3.5),
+            (7.168, 3.0),
+            (6.437, 2.5),
+            (5.700, 2.0), // p_b
+        ] {
+            ring.push([u, v]);
+        }
+        // valley bottom chain → p_c
+        ring.push([5.5, 2.0]);
+        ring.push([5.3, 2.0]); // p_c
+        // valley left flank (5.3, 2) → (0, 5): dense, sagging into L
+        for (u, v) in [
+            (4.397, 2.5),
+            (3.499, 3.0),
+            (2.610, 3.5),
+            (1.732, 4.0),
+            (0.863, 4.5),
+            (0.000, 5.0), // TL
+        ] {
+            ring.push([u, v]);
+        }
+        // left wall ↓ — gently CURVED (a perfectly straight wall makes
+        // the s115 fan-1 triangles exactly collinear; real faces carry
+        // arc walls)
+        for (u, v) in [(0.06, 4.0), (0.03, 3.0), (0.015, 2.0), (0.005, 1.0)] {
+            ring.push([u, v]);
+        }
+        // interior: rows 1, 2 full-ish; row 3 clipped by both flanks
+        // (columns 4 and 7 are the RING flank vertices — excluded);
+        // row 3.8 clipped to columns 1, 2 (left) and 9 (right) —
+        // >= 2 points so the TOP-LEVEL row floor (len >= 2) holds
+        // before the decomposition re-clusters per slab
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for u in 1..=9 {
+            interior.push([u as f64, 1.0]);
+        }
+        for u in 1..=5 {
+            interior.push([u as f64, 2.0]);
+        }
+        for u in 6..=9 {
+            interior.push([u as f64, 2.0]);
+        }
+        for u in [1.0, 2.0, 3.0, 8.0, 9.0] {
+            interior.push([u, 3.0]);
+        }
+        for u in [1.0, 2.0, 9.0] {
+            interior.push([u, 3.8]);
+        }
+        let total = ring.len() + interior.len();
+
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+        let default = super::structural_lattice_rescue_legacy(&ring, &interior);
+        assert!(
+            default.is_none(),
+            "default must reject the valley band (never-worsen); got {} tris",
+            default.map_or(0, |t| t.len())
+        );
+
+        std::env::set_var("DRAPPER_TORUS_FAMILY_STRUCT", "1");
+        let tris = super::structural_lattice_rescue_legacy(&ring, &interior)
+            .expect("s133 valley band: family switch must accept");
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+
+        let mut used = vec![false; total];
+        for t in tris.iter() {
+            for &v in t.iter() {
+                assert!((v as usize) < total, "vertex {} out of range", v);
+                used[v as usize] = true;
+            }
+        }
+        for i in 0..total {
+            assert!(used[i], "point {} unused", i);
+        }
+        assert_eq!(
+            tris.len(),
+            2 * interior.len() + ring.len() - 2,
+            "Euler T = 2I + R - 2"
+        );
         use std::collections::HashMap;
         let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
         for t in tris.iter() {

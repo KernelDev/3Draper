@@ -70,13 +70,32 @@ fn main() {
                     }
                 }
                 let unused = used.iter().filter(|&&u| !u).count();
+                // s133: stable digest over the SORTED triangle list —
+                // bit-identity evidence across rebuilds/flag changes
+                // (emission order is deterministic but the sort kills
+                // any residual doubt for comparison purposes).
+                let mut sorted: Vec<[u32; 3]> = tris.clone();
+                for t in sorted.iter_mut() {
+                    t.sort_unstable();
+                }
+                sorted.sort_unstable();
+                let mut h: u64 = 0xcbf29ce484222325;
+                for t in &sorted {
+                    for &v in t {
+                        h ^= v as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                    h ^= 0x5a5a;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
                 println!(
-                    "{}: ACCEPT tris={} unused_pts={} (bnd={} int={})",
+                    "{}: ACCEPT tris={} unused_pts={} (bnd={} int={}) fnv={:016x}",
                     name,
                     tris.len(),
                     unused,
                     bnd.len(),
-                    int.len()
+                    int.len(),
+                    h
                 );
                 n_ok += 1;
             }
