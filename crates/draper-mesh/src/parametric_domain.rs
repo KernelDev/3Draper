@@ -14711,6 +14711,66 @@ pub fn triangulate_surface_consistent(
                                 && cdt_extra_bnd == 0;
                             let count_emission_folds_needed =
                                 torus_windmill || cyl_holed_equal_rim;
+                            // s131: ARM-1 FAT-FOLD instrumentation +
+                            // opt-in gate. The strictly-greater-rim arm
+                            // (s64) was the last structural acceptance
+                            // without a fold gate: #27977 f(7,7)/
+                            // f(65,65) (Torus, Spit) shipped
+                            // emission-born >170° FAT pairs through it
+                            // (ring 174→175 / 278→279, s130 §1.3 — the
+                            // blind spot of count_emission_folds_needed).
+                            // A fold pair counts as FAT when BOTH apex
+                            // heights over the shared edge exceed the
+                            // BREP resolution reference
+                            // (vertex_resolution_tol == merge_tol — the
+                            // census SUBTOL-exemption mirror); sub-tol
+                            // pairs stay ungated — the s114 measured
+                            // lesson (an unconditional TOTAL-count gate
+                            // regressed Spit 57→91 REAL). When the
+                            // tolerance is unset (standalone mesh
+                            // tests, direct callers) the counting
+                            // disables itself: without a resolution
+                            // reference FAT cannot be discriminated.
+                            // s131 MEASURED-AND-DEFAULTED-OFF: the
+                            // rejection form of this gate REGRESSED
+                            // census REAL Spit 2→64 (#27977: the f7/f6/f2
+                            // Torus CDT emissions carry 79/43/70 FAT
+                            // folds vs the legacy's 1/3/3 — but only 2
+                            // pairs survive to the merged census, the
+                            // repair passes absorb the rest; the
+                            // rejected legacy spike-chain's extra_bnd
+                            // 486/447/530 slit debt creates 61 NEW
+                            // merged pairs). The third repetition of
+                            // the emission≠merged lesson (s114
+                            // crescent 57→91, s126 #10212 FIW, s131
+                            // #27977 arm-1). Default OFF = bit-exact
+                            // legacy; opt-in experiment =1; the
+                            // counting/instrumentation is available
+                            // separately via DRAPPER_ARM1_FAT_FOLD_STATS=1
+                            // (logs the [ARM1 FAT-FOLDS x → y] tags
+                            // WITHOUT gating — the diagnostic table for
+                            // the s132 fold-aware-placement CDT retry
+                            // design, the surviving alternative from
+                            // the s130 plan).
+                            let arm1_fat_gate_gating = std::env::var(
+                                "DRAPPER_ARM1_FAT_FOLD_GATE",
+                            )
+                            .as_deref()
+                                == Ok("1");
+                            let arm1_fat_stats = std::env::var(
+                                "DRAPPER_ARM1_FAT_FOLD_STATS",
+                            )
+                            .as_deref()
+                                == Ok("1");
+                            let arm1_fat_gate_active =
+                                cdt_ring_edges > legacy_ring_edges
+                                    && (arm1_fat_gate_gating
+                                        || arm1_fat_stats)
+                                    && overlap_ok
+                                    && !cdt2.is_empty()
+                                    && vertex_resolution_tol() > 0.0;
+                            let arm1_fat_gated =
+                                arm1_fat_gate_active && arm1_fat_gate_gating;
                             // s114 MEASURED-AND-REVERTED: an UNCONDITIONAL
                             // Torus fold gate (folds counted for every
                             // candidate, cf<=lf gating every arm) REGRESSES
@@ -14723,9 +14783,16 @@ pub fn triangulate_surface_consistent(
                             // placement (dropped==0) stays the only fold
                             // gate; band-lattice results satisfy it by
                             // construction (every Steiner used).
-                            let (torus_fold_ok, legacy_emission_folds, cdt_emission_folds) =
-                                if count_emission_folds_needed {
-                                    let count_folds = |flat: &[usize]| -> usize {
+                            // s131: count_folds now returns (total, fat)
+                            // pairs. Arms 4/5 (windmill, equal-rim) keep
+                            // the TOTAL-count gate bit-identically; arm 1
+                            // reads the FAT count. When only arm 1 needs
+                            // the counts, the reported totals stay 0/0
+                            // (bit-identical legacy log format).
+                            let (torus_fold_ok, legacy_emission_folds, cdt_emission_folds,
+                                 arm1_fat_ok, legacy_fat_folds, cdt_fat_folds) =
+                                if count_emission_folds_needed || arm1_fat_gate_active {
+                                    let count_folds = |flat: &[usize]| -> (usize, usize) {
                                         use std::collections::HashMap;
                                         // Resolve 3D for every used vertex.
                                         let mut p3: HashMap<usize, [f64; 3]> =
@@ -14773,7 +14840,14 @@ pub fn triangulate_surface_consistent(
                                                 None
                                             }
                                         };
+                                        // s131: the resolution reference for
+                                        // the FAT discrimination (merge_tol
+                                        // published by the converter; 0.0 in
+                                        // standalone callers — the arm-1 gate
+                                        // self-disables then, see above).
+                                        let fat_tol = vertex_resolution_tol();
                                         let mut folds = 0usize;
+                                        let mut fat_folds = 0usize;
                                         for ts in edge_tris.values() {
                                             if ts.len() != 2 {
                                                 continue;
@@ -14787,20 +14861,127 @@ pub fn triangulate_surface_consistent(
                                                     .clamp(-1.0, 1.0);
                                                 if dot.acos().to_degrees() > 170.0 {
                                                     folds += 1;
+                                                    // s131 FAT discrimination:
+                                                    // apex height of each
+                                                    // triangle over the
+                                                    // shared-edge line (the
+                                                    // census h semantics —
+                                                    // fold_face_probe
+                                                    // point_line_dist). FAT
+                                                    // when BOTH heights reach
+                                                    // the resolution reference
+                                                    // (mirror of the census
+                                                    // SUBTOL rule
+                                                    // h0 < tol && h1 < tol).
+                                                    let (t0, t1) = (ts[0], ts[1]);
+                                                    let v0 = [
+                                                        flat[t0 * 3],
+                                                        flat[t0 * 3 + 1],
+                                                        flat[t0 * 3 + 2],
+                                                    ];
+                                                    let v1 = [
+                                                        flat[t1 * 3],
+                                                        flat[t1 * 3 + 1],
+                                                        flat[t1 * 3 + 2],
+                                                    ];
+                                                    // shared edge = ids present
+                                                    // in both triangles;
+                                                    // apexes = the remainders.
+                                                    let mut sh = [0usize; 2];
+                                                    let mut nsh = 0usize;
+                                                    let mut ap = [0usize; 2];
+                                                    for k in 0..3 {
+                                                        if v1.contains(&v0[k]) {
+                                                            if nsh < 2 {
+                                                                sh[nsh] = v0[k];
+                                                            }
+                                                            nsh += 1;
+                                                        } else {
+                                                            ap[0] = v0[k];
+                                                        }
+                                                    }
+                                                    for k in 0..3 {
+                                                        if !v0.contains(&v1[k]) {
+                                                            ap[1] = v1[k];
+                                                        }
+                                                    }
+                                                    if nsh == 2 {
+                                                        let a = p3[&sh[0]];
+                                                        let b = p3[&sh[1]];
+                                                        let ab = [
+                                                            b[0] - a[0],
+                                                            b[1] - a[1],
+                                                            b[2] - a[2],
+                                                        ];
+                                                        let abl = (ab[0] * ab[0]
+                                                            + ab[1] * ab[1]
+                                                            + ab[2] * ab[2])
+                                                            .sqrt();
+                                                        if abl > 1e-30 {
+                                                            let line_dist = |p: &[f64; 3]| -> f64 {
+                                                                let apx = [
+                                                                    p[0] - a[0],
+                                                                    p[1] - a[1],
+                                                                    p[2] - a[2],
+                                                                ];
+                                                                let cr = [
+                                                                    apx[1] * ab[2]
+                                                                        - apx[2] * ab[1],
+                                                                    apx[2] * ab[0]
+                                                                        - apx[0] * ab[2],
+                                                                    apx[0] * ab[1]
+                                                                        - apx[1] * ab[0],
+                                                                ];
+                                                                (cr[0] * cr[0]
+                                                                    + cr[1] * cr[1]
+                                                                    + cr[2] * cr[2])
+                                                                    .sqrt()
+                                                                    / abl
+                                                            };
+                                                            let h0 = line_dist(&p3[&ap[0]]);
+                                                            let h1 = line_dist(&p3[&ap[1]]);
+                                                            if h0 >= fat_tol && h1 >= fat_tol {
+                                                                fat_folds += 1;
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
-                                        folds
+                                        (folds, fat_folds)
                                     };
-                                    let lf = count_folds(&tris);
-                                    let cf = count_folds(&cdt_flat);
-                                    (cf <= lf, lf, cf)
+                                    let (lf, lf_fat) = count_folds(&tris);
+                                    let (cf, cf_fat) = count_folds(&cdt_flat);
+                                    if count_emission_folds_needed {
+                                        (cf <= lf, lf, cf, cf_fat <= lf_fat, lf_fat, cf_fat)
+                                    } else {
+                                        // arm-1-only counting: totals stay
+                                        // unreported 0/0 (bit-identical
+                                        // legacy log format); the arm-1 FAT
+                                        // gate reads the fat counts.
+                                        (true, 0, 0, cf_fat <= lf_fat, lf_fat, cf_fat)
+                                    }
                                 } else {
-                                    (true, 0, 0)
+                                    (true, 0, 0, true, 0, 0)
                                 };
                             let cdt_improves = !cdt2.is_empty()
                                 && overlap_ok
-                                && (cdt_ring_edges > legacy_ring_edges
+                                && ((cdt_ring_edges > legacy_ring_edges
+                                        // s131: arm-1 FAT-only fold gate
+                                        // (cf_fat <= lf_fat; sub-tol
+                                        // pairs stay ungated — the s114
+                                        // measured regression was the
+                                        // TOTAL-count gate). Opt-in
+                                        // DRAPPER_ARM1_FAT_FOLD_GATE=1;
+                                        // default OFF = bit-exact legacy
+                                        // (measured census regression
+                                        // 2→64 REAL in rejection form —
+                                        // see the s131 block above).
+                                        // gated only when the opt-in
+                                        // experiment is ON (s131:
+                                        // default OFF — measured
+                                        // regression, see above).
+                                        && (!arm1_fat_gated || arm1_fat_ok))
                                     || (crescent_fallback
                                         && cdt_ring_edges == legacy_ring_edges
                                         && cdt_extra_bnd < legacy_extra_bnd)
@@ -14820,7 +15001,7 @@ pub fn triangulate_surface_consistent(
                                         && torus_fold_ok));
                             if cdt_improves {
                                 log::warn!(
-                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris{}, emission folds {} → {})",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges — re-routing through per-face CDT (ring edges {} → {}, extra bnd {} → {}, {} → {} tris{}, emission folds {} → {}{})",
                                 current_face_label(),
                                 n_unused,
                                 legacy_extra_bnd,
@@ -14833,12 +15014,21 @@ pub fn triangulate_surface_consistent(
                                 if torus_windmill { " [TORUS WINDMILL]" } else if cyl_holed_equal_rim { " [CYL EQUAL-RIM]" } else { "" },
                                 legacy_emission_folds,
                                 cdt_emission_folds,
+                                // s131: arm-1 gate visibility — the 0→0
+                                // totals above are the DEFAULT branch when
+                                // only arm 1 needed counting (s130 lesson:
+                                // distinguish "not counted" from "zero").
+                                if arm1_fat_gate_active {
+                                    format!(" [ARM1 FAT-FOLDS {} → {}]", legacy_fat_folds, cdt_fat_folds)
+                                } else {
+                                    String::new()
+                                },
                             );
                                 tris = cdt_flat;
                                 rescued_by_cdt = true;
                             } else {
                                 log::warn!(
-                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}, overlap {:.6} → {:.6}{}) — keeping legacy spike-chain result",
+                                "[f{}] unused-ring-vertex/region-drop rescue: {} ring verts unused, {} non-rim bnd edges, CDT re-route did not improve (ring edges {} → {}, extra bnd {} → {}, overlap {:.6} → {:.6}{}{}) — keeping legacy spike-chain result",
                                 current_face_label(),
                                 n_unused,
                                 legacy_extra_bnd,
@@ -14848,7 +15038,14 @@ pub fn triangulate_surface_consistent(
                                 cdt_extra_bnd,
                                 legacy_overlap,
                                 cdt_overlap,
-                                if overlap_ok { "" } else { " [OVERLAP REJECT]" }
+                                if overlap_ok { "" } else { " [OVERLAP REJECT]" },
+                                // s131: arm-1 FAT-fold rejection visibility
+                                // (gating mode only).
+                                if arm1_fat_gated && !arm1_fat_ok {
+                                    format!(" [ARM1 FAT-FOLD REJECT {} → {}]", legacy_fat_folds, cdt_fat_folds)
+                                } else {
+                                    String::new()
+                                }
                             );
                                 // session-65 diagnostics: dump the failing CDT
                                 // inputs + both triangulations for offline
