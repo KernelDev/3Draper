@@ -1015,6 +1015,46 @@ fn structured_lattice_triangulation(
     if left.len() < 2 || right.len() < 2 {
         lattice_reject!("degenerate arc");
     }
+    // s132: per-end cap class. The s114/s115 band construction (the
+    // k=1 wedge, the m_rows+1/+2 top fans, the closed last wall band)
+    // is the SHARP-TURN contract — both caps degenerate to a single
+    // point (the f44 class). A band split may also deliver FLAT caps
+    // (multi-point neutral bridges at v-min/v-max — the #27977 f7
+    // class: 56-pt flat top AND bottom caps with arc walls, the s114
+    // wedge's [bottom[0]]-only A left the other 55 cap points
+    // unused); those ends take the s83 H/V cap-zip construction
+    // instead (A = flat cap vs B = wall-band + row, the proven
+    // flat-cap path — pre-s115 semantics, open last wall band).
+    // Sharp ends keep the s114/s115 wedge/fans bit-identically (every
+    // currently-accepted band face has len-1 caps — f44/f3 and the
+    // 31361 pair — so the flat branches are strictly new classes:
+    // previously these faces rejected at "point unused" — the wedge
+    // consumed only cap point 0 — so the opt-in cannot worsen any
+    // accepted face; never-worsen by construction).
+    //
+    // MEASURED AND DEFAULTED OFF (s132): opt-in on Spit moves #27977
+    // f7 to a fold-clean windmill emission (arm-1 FAT 1→79 → 1→0,
+    // 531→1175 tris, all 485 Steiners inserted, every s83 guard
+    // green) and KILLS the old macroscopic f(7,7) census pair
+    // (h=0.164/0.155, areas 0.11/0.11) — but the merged census reads
+    // REAL 2→4: (a) a NEW f(7,7) micro-needle (areas 0.0002/0.0000,
+    // apex h0=0.0179 < merge_tol 0.02 — a weld-displacement apex,
+    // same artifact class as the s131 #10220 f28 thick apex; misses
+    // the SUBTOL exemption by 7% against eff_tol 0.0167), (b) a NEW
+    // f(6,6) macro fold (h=0.153/0.169) — f6's own emission is
+    // BIT-IDENTICAL (arm-1 CDT, FAT 3→43) but the instance weld
+    // graph shifted with f7's 2x-denser vertex pool: the weld-coupled
+    // #27977 Torus family (f2/f6/f7/f65/f68) is not locally monotone
+    // — the family must move to structural emissions ALL AT ONCE
+    // (the s133 program: notch/valley/coarse-wall band classes + a
+    // family-wise switch). Default OFF = bit-exact legacy; opt-in
+    // DRAPPER_FLAT_CAP_BAND=1 for the s133 continuation.
+    let flat_caps_on =
+        std::env::var("DRAPPER_FLAT_CAP_BAND").as_deref() == Ok("1");
+    let flat_bottom = flat_caps_on && bottom.len() >= 2;
+    let flat_top = flat_caps_on && top.len() >= 2;
+    let sharp_bottom = band_caps && !flat_bottom;
+    let sharp_top = band_caps && !flat_top;
     if (bottom.len() < 2 || top.len() < 2) && !band_caps {
         lattice_reject!("degenerate arc");
     }
@@ -1086,7 +1126,7 @@ fn structured_lattice_triangulation(
         let mut bounds = Vec::with_capacity(m_rows);
         let mut s = 1usize;
         for j in 0..m_rows {
-            let e = if j == m_rows - 1 && !band_caps {
+            let e = if j == m_rows - 1 && !sharp_top {
                 len - 1
             } else {
                 let mut e = s;
@@ -1113,7 +1153,7 @@ fn structured_lattice_triangulation(
         if j == m_rows + 1 {
             return top.iter().map(|&i| i as u32).collect();
         }
-        if j == m_rows + 2 && band_caps {
+        if j == m_rows + 2 && sharp_top {
             // s115 fan-2 B: the row's last point, then the top cap.
             let mut c: Vec<u32> = Vec::new();
             if let Some(&last) = rows[m_rows - 1].last() {
@@ -1122,7 +1162,7 @@ fn structured_lattice_triangulation(
             c.extend(top.iter().map(|&i| i as u32));
             return c;
         }
-        if j == 1 && band_caps {
+        if j == 1 && sharp_bottom {
             // s114 BAND WEDGE: chain B of the first strip is the right
             // wall band alone (v-ascending, from the turn point side
             // up to the row-0 level) — the left band and row 0 moved
@@ -1150,7 +1190,7 @@ fn structured_lattice_triangulation(
         // k = 1: bottom cap; k = m_rows+1: sub-corners + row M;
         // else anchors at L_{k-1} + row k-1
         if k == 1 {
-            if band_caps {
+            if sharp_bottom {
                 // s114 BAND WEDGE: the sharp-turn bottom cap cannot fan
                 // over the full row band — the wall bands CONTINUE both
                 // walls through the turn point, so fan triangles
@@ -1174,7 +1214,7 @@ fn structured_lattice_triangulation(
             if left.len() < 2 || right.len() < 2 {
                 return None;
             }
-            if band_caps {
+            if sharp_top {
                 // s115 TOP fan-1: with the last wall band CLOSED at the
                 // last row level (seg_bounds band_caps branch), the
                 // wall points ABOVE the last row level moved out of
@@ -1207,7 +1247,7 @@ fn structured_lattice_triangulation(
             c.push(right[right.len() - 2] as u32);
             return Some(c);
         }
-        if k == m_rows + 2 && band_caps {
+        if k == m_rows + 2 && sharp_top {
             // s115 TOP fan-2: the wall-side mini-fan — A = the wall
             // band's closing point + the wall leftover (v-ascending,
             // up to the near-turn point), zipped against B = [last
@@ -1288,12 +1328,12 @@ fn structured_lattice_triangulation(
     //       asc], B = [row M last] + top — zips the straight wall's
     //       top against the row end and the turn; the closing spoke
     //       (row M last ↔ turn) glues the two fans (count 2).
-    let k_top = if band_caps { m_rows + 2 } else { m_rows + 1 };
+    let k_top = if sharp_top { m_rows + 2 } else { m_rows + 1 };
     for k in 1..=k_top {
         let a = match lower_chain(k) {
             // s114: a band's bottom cap is a single turn point — the
             // zipper fans from it (dead_a from the first step)
-            Some(c) if c.len() >= 2 || (band_caps && k == 1 && c.len() == 1) => c,
+            Some(c) if c.len() >= 2 || (sharp_bottom && k == 1 && c.len() == 1) => c,
             _ => lattice_reject!(format!("lower chain degenerate k={}", k)),
         };
         let b = full_row(k);
@@ -1327,7 +1367,23 @@ fn structured_lattice_triangulation(
         }
         // s114: a band's top cap may likewise be a single turn point
         // (dead_b from the first step — A walks, fanning to the point)
-        if b.len() < 2 && !(band_caps && k == m_rows + 1 && b.len() == 1) {
+        // s132: the SAME degenerate-B contract at k=1 — the s114 BAND
+        // WEDGE design (full_row(1)) explicitly degenerates chain B to
+        // the first right-wall point when the right band below row 0
+        // is empty ("f7: the right wall starts above the first row
+        // level — the wedge zips A against that single anchor and the
+        // k=2 strip owns the rest of the wall", the comment verbatim),
+        // but this guard never carried the k=1 exemption — the path
+        // was coded in s114 and unreachable ever since (f44, the s114
+        // test face, has a non-empty right band). Dead-b fan semantics
+        // identical to the top-cap case: A walks, fanning to the
+        // anchor; the wall edges above the anchor are owned by the
+        // k=2+ strips' B-chains.
+        if b.len() < 2
+            && !(band_caps
+                && ((k == m_rows + 1 && b.len() == 1)
+                    || (flat_caps_on && k == 1 && b.len() == 1)))
+        {
             lattice_reject!(format!("upper row degenerate k={}", k));
         }
         let (m, nb) = (a.len(), b.len());
@@ -1438,7 +1494,7 @@ fn structured_lattice_triangulation(
             // passed, so this is a pure orientation repair). The real
             // 3D impact is adjudicated downstream by the torus
             // windmill fold gate.
-            let inv = band_caps && k == 1;
+            let inv = sharp_bottom && k == 1;
             let mut emit = |tt: [u32; 3]| {
                 let mut t = tt;
                 if inv {
@@ -1631,8 +1687,13 @@ fn structured_lattice_triangulation(
         // gate and the final census. Scoped to band_caps ONLY: the
         // H/V lattice keeps the strict guard (bit-exact never-worsen).
         for (ti, t) in tris.iter().enumerate() {
-            if band_caps && (tri_k[ti] == 1 || tri_k[ti] >= m_rows + 1) {
-                continue; // cap strip — rim hairpin, exempt
+            // s132: the hairpin exemption is the SHARP-cap contract;
+            // flat-cap ends (s83-style cap zips) keep the strict H/V
+            // guard, exactly like native H/V lattice faces.
+            if (sharp_bottom && tri_k[ti] == 1)
+                || (sharp_top && tri_k[ti] >= m_rows + 1)
+            {
+                continue; // sharp cap strip — rim hairpin, exempt
             }
             let p = all_2d[t[0] as usize];
             let q = all_2d[t[1] as usize];
@@ -3693,6 +3754,120 @@ mod s82_tests {
              (the s51 concern, answered per-class; got {})",
             cdt_folds
         );
+    }
+
+    /// s132: the FLAT-CAP band class (#27977 f7). A band split that
+    /// delivers MULTI-POINT caps (v-const neutral bridges at v-min /
+    /// v-max) with arc (D-edge) walls. DEFAULT: the s114 wedge
+    /// consumes only cap point 0 and the s83 guard set rejects the
+    /// result ("point unused") → None → bit-exact legacy
+    /// (never-worsen). Opt-in DRAPPER_FLAT_CAP_BAND=1: each flat end
+    /// takes the s83 H/V cap-zip construction; the rescue must
+    /// accept, use every point, emit every rim edge exactly once,
+    /// and hit the Euler count T = 2I + R − 2.
+    #[test]
+    fn test_s132_flat_cap_band_lattice() {
+        // wall functions (arc drift → D-class edges, v-monotone)
+        let lw = |v: f64| -> f64 {
+            1.2 * (v / 1.5) + 0.1 * (std::f64::consts::PI * v / 1.5).sin()
+        };
+        let rw = |v: f64| -> f64 {
+            4.0 - 1.0 * (v / 1.5) - 0.1 * (std::f64::consts::PI * v / 1.5).sin()
+        };
+        // ring: bottom cap → right wall ↑ → top cap → left wall ↓
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for i in 0..41 {
+            ring.push([0.1 * i as f64, 0.0]); // (0,0) → (4,0)
+        }
+        for i in 1..=9 {
+            let v = 1.5 * i as f64 / 9.0;
+            ring.push([rw(v), v]); // right wall, last = (3.0, 1.5)
+        }
+        for i in 0..18 {
+            ring.push([2.9 - 0.1 * i as f64, 1.5]); // top cap → (1.2, 1.5)
+        }
+        for i in 1..=8 {
+            let v = 1.5 - 1.5 * i as f64 / 9.0;
+            ring.push([lw(v), v]); // left wall ↓ (stop before (0,0))
+        }
+        // interior: 7 v-const rows between the walls
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for k in 0..7 {
+            let v = 0.18 + 0.155 * k as f64;
+            let (lo, hi) = (lw(v) + 0.12, rw(v) - 0.12);
+            let n = ((hi - lo) / 0.16).floor() as usize;
+            for j in 0..=n {
+                let u = lo + 0.16 * j as f64;
+                if u < hi - 1e-9 {
+                    interior.push([u, v]);
+                }
+            }
+        }
+        assert!(ring.len() >= 8 && interior.len() >= 20);
+
+        // DEFAULT: must reject (the wedge leaves cap points unused —
+        // or any other guard; either way None = bit-exact legacy).
+        std::env::remove_var("DRAPPER_FLAT_CAP_BAND");
+        let default = super::structural_lattice_rescue_legacy(&ring, &interior);
+        assert!(
+            default.is_none(),
+            "default must stay on the rejecting wedge path \
+             (never-worsen); got {} tris",
+            default.map_or(0, |t| t.len())
+        );
+
+        // OPT-IN: the s83 cap-zip per flat end must accept.
+        std::env::set_var("DRAPPER_FLAT_CAP_BAND", "1");
+        let tris = super::structural_lattice_rescue_legacy(&ring, &interior)
+            .expect("s132 flat-cap band: opt-in must accept");
+        std::env::remove_var("DRAPPER_FLAT_CAP_BAND");
+
+        // every point used
+        let total = ring.len() + interior.len();
+        let mut used = vec![false; total];
+        for t in tris.iter() {
+            for &v in t.iter() {
+                assert!((v as usize) < total, "vertex {} out of range", v);
+                used[v as usize] = true;
+            }
+        }
+        for i in 0..total {
+            assert!(used[i], "point {} unused", i);
+        }
+        // Euler count for a full triangulation of R ring + I interior
+        assert_eq!(
+            tris.len(),
+            2 * interior.len() + ring.len() - 2,
+            "Euler T = 2I + R - 2"
+        );
+        // every rim edge exactly once, non-rim exactly twice
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in tris.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let n = ring.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let cnt = ecount.get(&key).copied().unwrap_or(0);
+            assert_eq!(cnt, 1, "rim edge ({},{}) count {}", i, j, cnt);
+        }
+        for (e, cnt) in ecount.iter() {
+            let is_rim = (0..n).any(|i| {
+                let j = (i + 1) % n;
+                *e == (i.min(j) as u32, i.max(j) as u32)
+            });
+            if !is_rim {
+                assert_eq!(*cnt, 2, "interior edge {:?} count {}", e, cnt);
+            }
+        }
     }
 
 }

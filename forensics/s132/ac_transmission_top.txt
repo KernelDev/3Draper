@@ -1,0 +1,634 @@
+Loading STEP file: test/transmission_top.stp
+STEP file parsed: 63403 entities
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   1          GEAR_SKELETON (BREP#8818)      13344        744         59     180.00        0       10        0        0        0        0          738
+      outlier: edge(829,853) angle=180.00° faces=[13,13] SAME-FACE [sub-tol weld-noise] midpoint=(9.087,-1.981,-0.669)  tris=[828,829,853]/[829,853,854]
+      outlier: edge(1435,1457) angle=180.00° faces=[14,14] SAME-FACE [sub-tol weld-noise] midpoint=(9.137,0.133,1.989)  tris=[1434,1435,1457]/[1435,1457,1458]
+      outlier: edge(285,2430) angle=180.00° faces=[27,27] SAME-FACE [sub-tol weld-noise] midpoint=(1.275,2.997,0.000)  tris=[2430,285,2426]/[2430,285,289]
+      outlier: edge(1457,1479) angle=180.00° faces=[14,14] SAME-FACE [sub-tol weld-noise] midpoint=(9.197,-0.122,1.898)  tris=[1456,1457,1479]/[1457,1479,1480]
+      outlier: edge(611,804) angle=179.93° faces=[13,14] cross-face [sub-tol weld-noise] midpoint=(9.044,2.209,-0.000)  tris=[611,804,2111]/[611,1422,804]
+   2               SHIFTER2 (BREP#3183)       2544         28         17     180.00        0        2        0        0        0        0           28
+      outlier: edge(441,554) angle=180.00° faces=[4,4] SAME-FACE [sub-tol weld-noise] midpoint=(32.521,43.628,-0.144)  tris=[441,496,554]/[441,554,497]
+      outlier: edge(612,671) angle=180.00° faces=[5,5] SAME-FACE [sub-tol weld-noise] midpoint=(31.340,41.653,0.590)  tris=[612,671,672]/[612,671,67]
+      outlier: edge(497,555) angle=90.27° faces=[5,5] SAME-FACE midpoint=(32.535,43.616,0.148)  tris=[497,555,554]/[551,555,497]
+      outlier: edge(77,78) angle=90.27° faces=[4,4] SAME-FACE midpoint=(31.433,44.541,-0.148)  tris=[77,78,921]/[185,78,77]
+      outlier: edge(62,76) angle=90.27° faces=[4,4] SAME-FACE midpoint=(30.181,41.857,-0.148)  tris=[62,919,76]/[62,76,79]
+   3             GEAR_LEVER (BREP#3556)       3612        101         54     180.00        0        1        0        0        0        0          101
+      outlier: edge(866,993) angle=180.00° faces=[13,13] SAME-FACE [sub-tol weld-noise] midpoint=(31.460,45.379,0.126)  tris=[866,992,993]/[866,994,993]
+      outlier: edge(8,9) angle=111.11° faces=[1,2] cross-face midpoint=(30.027,38.373,1.248)  tris=[8,38,9]/[78,9,8]
+      outlier: edge(7,8) angle=110.59° faces=[1,2] cross-face midpoint=(30.551,38.280,1.248)  tris=[7,37,8]/[74,8,7]
+      outlier: edge(310,311) angle=110.14° faces=[1,6] cross-face midpoint=(29.649,32.927,1.185)  tris=[310,54,311]/[303,311,310]
+      outlier: edge(309,310) angle=109.29° faces=[1,6] cross-face midpoint=(29.164,33.012,1.210)  tris=[309,53,310]/[302,310,309]
+   4                   KNOB (BREP#3863)       2842        124         64      90.00        0        0        0        0        0        0          124
+      outlier: edge(1086,1087) angle=90.00° faces=[9,11] cross-face midpoint=(52.665,70.665,0.063)  tris=[92,1087,1086]/[1086,1087,1088]
+      outlier: edge(1086,1147) angle=90.00° faces=[10,11] cross-face midpoint=(52.665,70.665,-0.063)  tris=[93,1086,1147]/[1086,1146,1147]
+      outlier: edge(1087,1088) angle=90.00° faces=[9,11] cross-face midpoint=(52.675,70.657,0.189)  tris=[91,1088,1087]/[1086,1087,1088]
+      outlier: edge(1146,1147) angle=90.00° faces=[10,11] cross-face midpoint=(52.675,70.657,-0.189)  tris=[94,1147,1146]/[1086,1146,1147]
+      outlier: edge(1092,1093) angle=90.00° faces=[9,11] cross-face midpoint=(52.864,70.498,0.764)  tris=[86,1093,1092]/[1086,1092,1093]
+   5           SPRING_COVER (BREP#4240)       2064        516        157      90.00        0        0        0        0        0        0            0
+      outlier: edge(89,90) angle=90.00° faces=[2,4] cross-face midpoint=(38.866,21.886,2.087)  tris=[89,90,47]/[89,90,262]
+      outlier: edge(169,170) angle=90.00° faces=[2,3] cross-face midpoint=(38.686,21.917,-2.907)  tris=[169,170,213]/[169,170,256]
+      outlier: edge(256,257) angle=90.00° faces=[3,5] cross-face midpoint=(38.692,20.901,-2.087)  tris=[170,257,256]/[256,257,385]
+      outlier: edge(93,94) angle=90.00° faces=[2,4] cross-face midpoint=(37.802,22.073,5.255)  tris=[93,94,51]/[93,94,266]
+      outlier: edge(254,255) angle=90.00° faces=[3,5] cross-face midpoint=(38.274,20.975,-3.711)  tris=[168,255,254]/[254,255,383]
+   6          SPRING_SEAT_2 (BREP#4517)       1260        420        202     119.98        0        0        0        0        0        0            0
+      outlier: edge(332,333) angle=119.98° faces=[5,9] cross-face midpoint=(27.563,22.863,6.945)  tris=[263,333,332]/[157,333,332]
+      outlier: edge(231,232) angle=119.98° faces=[4,5] cross-face midpoint=(29.966,22.439,-6.502)  tris=[196,232,231]/[302,232,231]
+      outlier: edge(214,215) angle=119.98° faces=[4,5] cross-face midpoint=(21.273,23.972,-2.730)  tris=[179,215,214]/[285,215,214]
+      outlier: edge(344,345) angle=119.98° faces=[5,9] cross-face midpoint=(21.540,23.925,3.291)  tris=[275,345,344]/[169,345,344]
+      outlier: edge(237,238) angle=119.98° faces=[4,5] cross-face midpoint=(32.910,21.920,-4.330)  tris=[202,238,237]/[308,238,237]
+   7                 SPRING (BREP#6387)       1740        508        343     178.05        0        0        4        0        0        0            0
+      outlier: edge(117,118) angle=178.05° faces=[2,3] cross-face [knife-fin pinch: knife-fin: gap 0.0427/0.0427 hinge 3.729/3.729 apex-d 0.0427] midpoint=(32.638,24.639,-5.481)  tris=[54,118,117]/[56,117,118]
+      outlier: edge(112,113) angle=177.83° faces=[2,3] cross-face [knife-fin pinch: knife-fin: gap 0.0427/0.0427 hinge 3.348/3.348 apex-d 0.0427] midpoint=(32.177,24.719,-4.898)  tris=[1,113,112]/[109,112,113]
+      outlier: edge(118,119) angle=176.17° faces=[2,3] cross-face [knife-fin pinch: knife-fin: gap 0.0427/0.0427 hinge 2.508/2.508 apex-d 0.0427] midpoint=(33.507,24.412,-4.625)  tris=[54,119,118]/[56,118,119]
+      outlier: edge(111,112) angle=175.72° faces=[2,3] cross-face [knife-fin pinch: knife-fin: gap 0.0427/0.0426 hinge 2.252/2.252 apex-d 0.0427] midpoint=(32.955,24.508,-4.131)  tris=[1,112,111]/[109,111,112]
+      outlier: edge(177,468) angle=169.69° faces=[3,3] SAME-FACE midpoint=(25.755,27.196,5.663)  tris=[468,177,178]/[468,177,176]
+   8                   BOOT (BREP#7617)      62672       1340        685     165.48        0        0        0        0        0        0         1340
+      outlier: edge(9937,9938) angle=165.48° faces=[20,20] SAME-FACE midpoint=(22.569,38.511,-4.095)  tris=[9860,9938,9937]/[9937,10013,9938]
+      outlier: edge(9945,9946) angle=165.48° faces=[20,20] SAME-FACE midpoint=(24.569,38.158,-6.608)  tris=[9869,9946,9945]/[9945,10021,9946]
+      outlier: edge(9959,9960) angle=165.48° faces=[20,20] SAME-FACE midpoint=(29.688,37.255,-8.655)  tris=[9883,9960,9959]/[9959,10035,9960]
+      outlier: edge(9946,9947) angle=165.48° faces=[20,20] SAME-FACE midpoint=(24.881,38.103,-6.863)  tris=[9869,9947,9946]/[9946,10022,9947]
+      outlier: edge(9962,9963) angle=165.48° faces=[20,20] SAME-FACE midpoint=(30.887,37.044,-8.626)  tris=[9885,9963,9962]/[9962,10038,9963]
+   9          SHIFT_ROD_END (BREP#8818)      13344        744         57     180.00        0       10        0        0        0        0          738
+      outlier: edge(285,2430) angle=180.00° faces=[27,27] SAME-FACE [sub-tol weld-noise] midpoint=(23.775,16.997,4.000)  tris=[2430,285,2426]/[2430,285,289]
+      outlier: edge(1457,1479) angle=180.00° faces=[14,14] SAME-FACE [sub-tol weld-noise] midpoint=(31.697,13.878,5.898)  tris=[1456,1457,1479]/[1457,1479,1480]
+      outlier: edge(1435,1457) angle=180.00° faces=[14,14] SAME-FACE [sub-tol weld-noise] midpoint=(31.637,14.133,5.989)  tris=[1434,1435,1457]/[1435,1457,1458]
+      outlier: edge(829,853) angle=180.00° faces=[13,13] SAME-FACE [sub-tol weld-noise] midpoint=(31.587,12.019,3.331)  tris=[828,829,853]/[829,853,854]
+      outlier: edge(611,804) angle=179.93° faces=[13,14] cross-face [sub-tol weld-noise] midpoint=(31.544,16.209,4.000)  tris=[611,804,2111]/[611,1422,804]
+  10               FORK_2_H (BREP#9147)       1296        310          0      90.00        0        0        0        0        0        0            0
+  11         SHIFT_ROD_R_L (BREP#10888)       9544       1120        709     180.00        0        2        0        0        0        0          624
+      outlier: edge(1410,1411) angle=180.00° faces=[25,30] cross-face [sub-tol weld-noise] midpoint=(31.152,15.971,-4.000)  tris=[1410,1411,1412]/[1410,1413,1411]
+      outlier: edge(59,651) angle=180.00° faces=[40,40] SAME-FACE [sub-tol weld-noise] midpoint=(24.281,14.000,-1.004)  tris=[651,59,646]/[651,59,64]
+      outlier: edge(1968,1969) angle=133.56° faces=[28,30] cross-face midpoint=(32.866,12.986,-5.723)  tris=[1968,2030,1969]/[2475,1969,1968]
+      outlier: edge(1114,1115) angle=133.56° faces=[23,30] cross-face midpoint=(32.866,15.723,-5.014)  tris=[1114,1178,1115]/[2444,1115,1114]
+      outlier: edge(1877,1878) angle=133.56° faces=[27,32] cross-face midpoint=(35.866,12.986,-5.723)  tris=[1877,1939,1878]/[3023,1878,1877]
+  12          COUNTERSHAFT (BREP#11107)        342          0          0      47.80        0        0        0        0        0        0            0
+  13  CLUSTER_COUNTERSHAFT (BREP#11620)       2023        620          0      90.00        0        0        0        0        0        0            0
+  14             REV_SHAFT (BREP#11839)        362          0          0      47.80        0        0        0        0        0        0            0
+  15               CS_GEAR (BREP#17222)      18272       3760       3340     156.27        0        0        0        0        0        0           36
+      outlier: edge(1101,5318) angle=156.27° faces=[84,84] SAME-FACE midpoint=(0.000,-20.181,5.063)  tris=[5318,1101,5319]/[5318,1101,1100]
+      outlier: edge(1353,5570) angle=156.27° faces=[91,91] SAME-FACE midpoint=(0.000,-21.648,2.312)  tris=[5570,1353,5571]/[5570,1353,1352]
+      outlier: edge(597,4814) angle=156.27° faces=[70,70] SAME-FACE midpoint=(0.000,-14.791,7.951)  tris=[4814,597,4815]/[4814,597,596]
+      outlier: edge(1605,5822) angle=156.27° faces=[98,98] SAME-FACE midpoint=(0.000,-21.951,-0.791)  tris=[5822,1605,5823]/[5822,1605,1604]
+      outlier: edge(1603,1604) angle=142.10° faces=[1,98] cross-face midpoint=(1.500,-21.618,-0.863)  tris=[1603,1604,1605]/[9609,1604,1603]
+  16              SEC_GEAR (BREP#21353)      14692       2860       2504     169.19        0        0        0        0        0        0           56
+      outlier: edge(1896,5020) angle=169.19° faces=[52,53] cross-face midpoint=(13.000,-10.466,-4.750)  tris=[1896,5020,6917]/[1895,1896,5020]
+      outlier: edge(2140,5264) angle=169.19° faces=[45,46] cross-face midpoint=(13.000,-8.565,-2.347)  tris=[2140,5264,6737]/[2139,2140,5264]
+      outlier: edge(2872,3068) angle=169.19° faces=[5,44] cross-face midpoint=(13.000,-11.653,5.435)  tris=[2872,3068,6017]/[2871,2872,3068]
+      outlier: edge(2384,5508) angle=169.19° faces=[25,26] cross-face midpoint=(13.000,-8.120,0.685)  tris=[2384,5508,6300]/[2383,2384,5508]
+      outlier: edge(333,3426) angle=156.82° faces=[59,59] SAME-FACE midpoint=(13.000,-16.368,5.853)  tris=[3426,333,3427]/[7137,3426,333]
+  17              LOW_GEAR (BREP#24538)      11582       2165       1873     168.01        0        0        0        0        0        0           70
+      outlier: edge(1360,3664) angle=168.01° faces=[42,43] cross-face midpoint=(18.500,-10.240,-2.246)  tris=[1360,3664,5217]/[1359,1360,3664]
+      outlier: edge(1596,3900) angle=168.01° faces=[22,23] cross-face midpoint=(18.500,-9.676,0.696)  tris=[1596,3900,4702]/[1595,1596,3900]
+      outlier: edge(2068,2248) angle=168.01° faces=[5,41] cross-face midpoint=(18.500,-13.935,4.379)  tris=[2068,2248,4393]/[2067,2068,2248]
+      outlier: edge(1124,3428) angle=168.01° faces=[49,50] cross-face midpoint=(18.500,-12.564,-4.138)  tris=[1124,3428,5423]/[1123,1124,3428]
+      outlier: edge(793,3064) angle=152.88° faces=[70,70] SAME-FACE midpoint=(18.500,-17.133,-3.586)  tris=[3064,793,3065]/[6091,3064,793]
+  18            REV_GEAR_C (BREP#26907)       7917       1483       1280     166.05        0        0        0        0        0        0           63
+      outlier: edge(652,2248) angle=166.05° faces=[39,40] cross-face midpoint=(31.000,-11.752,-2.316)  tris=[652,2248,3751]/[651,652,2248]
+      outlier: edge(888,2484) angle=166.05° faces=[19,20] cross-face midpoint=(31.000,-10.871,0.789)  tris=[888,2484,3296]/[887,888,2484]
+      outlier: edge(319,320) angle=148.23° faces=[1,52] cross-face midpoint=(33.000,-16.274,-2.338)  tris=[319,320,321]/[4065,320,319]
+      outlier: edge(1027,1028) angle=148.23° faces=[1,12] cross-face midpoint=(33.000,-11.726,2.338)  tris=[1027,1028,1029]/[3103,1028,1027]
+      outlier: edge(1263,1264) angle=148.23° faces=[1,33] cross-face midpoint=(33.000,-14.888,3.138)  tris=[1263,1264,1265]/[3685,1264,1263]
+  19            REV_GEAR_B (BREP#30722)      13426       2624       2305     168.85        0        0        0        0        0        0            9
+      outlier: edge(1896,4776) angle=168.85° faces=[44,45] cross-face midpoint=(29.000,-6.651,9.075)  tris=[1896,4776,6297]/[1895,1896,4776]
+      outlier: edge(1652,4532) angle=168.85° faces=[51,52] cross-face midpoint=(29.000,-7.245,6.224)  tris=[1652,4532,6489]/[1651,1652,4532]
+      outlier: edge(2628,2824) angle=168.85° faces=[5,43] cross-face midpoint=(29.000,-12.946,13.700)  tris=[2628,2824,5529]/[2627,2628,2824]
+      outlier: edge(2140,5020) angle=168.85° faces=[24,25] cross-face midpoint=(29.000,-7.693,11.794)  tris=[2140,5020,5824]/[2139,2140,5020]
+      outlier: edge(577,3440) angle=160.01° faces=[65,65] SAME-FACE midpoint=(29.000,-17.144,8.125)  tris=[3440,577,3441]/[3440,577,576]
+  20         TRANS_HOUSING (BREP#34620)      23828       4781       1035     180.00        0      120        0        0        0        0          227
+      outlier: edge(150,151) angle=180.00° faces=[2,89] cross-face [sub-tol weld-noise] midpoint=(48.093,-7.799,4.500)  tris=[95,151,150]/[142,151,150]
+      outlier: edge(142,150) angle=180.00° faces=[89,89] SAME-FACE [sub-tol weld-noise] midpoint=(48.211,-7.827,4.500)  tris=[142,149,150]/[142,151,150]
+      outlier: edge(142,151) angle=180.00° faces=[89,89] SAME-FACE [sub-tol weld-noise] midpoint=(48.198,-7.826,4.500)  tris=[142,151,150]/[142,151,152]
+      outlier: edge(6338,6539) angle=179.94° faces=[89,89] SAME-FACE [sub-tol weld-noise] midpoint=(48.158,-8.046,4.090)  tris=[6337,6539,6338]/[6338,6339,6539]
+      outlier: edge(6499,6616) angle=179.93° faces=[89,89] SAME-FACE [sub-tol weld-noise] midpoint=(48.158,8.043,4.096)  tris=[6498,6616,6499]/[6499,6500,6616]
+  21             TOP_COVER (BREP#35889)       4050       1360         64     100.46        0        0        0        0        0        0            0
+      outlier: edge(1250,1251) angle=100.46° faces=[33,34] cross-face midpoint=(38.719,20.000,0.452)  tris=[1250,1251,1009]/[1251,1250,1259]
+      outlier: edge(1251,1252) angle=100.28° faces=[33,34] cross-face midpoint=(38.659,20.000,1.254)  tris=[1251,1252,1009]/[1252,1251,1258]
+      outlier: edge(1249,1250) angle=100.26° faces=[33,34] cross-face midpoint=(38.722,20.000,-0.370)  tris=[1249,1250,1009]/[1250,1249,1260]
+      outlier: edge(1246,1247) angle=100.12° faces=[33,34] cross-face midpoint=(38.349,20.000,-2.901)  tris=[1246,1247,1009]/[1247,1246,1262]
+      outlier: edge(8,9) angle=100.02° faces=[1,36] cross-face midpoint=(19.123,18.000,0.627)  tris=[0,9,8]/[9,8,1303]
+  22          PINION_SHAFT (BREP#38878)      10128       2008       1482      90.61        0        0        0        0        0        0            0
+      outlier: edge(3752,3759) angle=90.61° faces=[41,73] cross-face midpoint=(-5.000,0.000,-2.996)  tris=[3759,3752,3765]/[3546,3759,3752]
+      outlier: edge(4080,4089) angle=90.61° faces=[48,73] cross-face midpoint=(-5.000,-0.000,2.996)  tris=[4089,4080,4094]/[3546,4089,4080]
+      outlier: edge(3895,3913) angle=90.59° faces=[48,73] cross-face midpoint=(-5.000,-2.901,0.751)  tris=[3913,3895,4095]/[3546,3913,3895]
+      outlier: edge(3902,3921) angle=90.59° faces=[48,73] cross-face midpoint=(-5.000,2.901,0.751)  tris=[3902,3921,4098]/[3546,3902,3921]
+      outlier: edge(3567,3585) angle=90.59° faces=[41,73] cross-face midpoint=(-5.000,2.901,-0.751)  tris=[3585,3567,3766]/[3546,3585,3567]
+  23            MAIN_SHAFT (BREP#41034)       7803       1872        946      90.03        0        0        0        0        0        0            0
+      outlier: edge(2178,2179) angle=90.03° faces=[19,21] cross-face midpoint=(5.000,1.552,-3.137)  tris=[2178,2179,1464]/[2894,2179,2178]
+      outlier: edge(2620,2621) angle=90.03° faces=[21,27] cross-face midpoint=(5.000,-1.552,3.137)  tris=[2619,2621,2620]/[2620,2621,1433]
+      outlier: edge(2080,2081) angle=90.03° faces=[19,21] cross-face midpoint=(5.000,-1.552,-3.137)  tris=[2080,2081,1453]/[2079,2081,2080]
+      outlier: edge(2526,2527) angle=90.03° faces=[21,27] cross-face midpoint=(5.000,1.552,3.137)  tris=[2525,2527,2526]/[2526,2527,1422]
+      outlier: edge(2140,2141) angle=90.03° faces=[19,21] cross-face midpoint=(5.000,0.165,-3.496)  tris=[2140,2141,1458]/[2139,2141,2140]
+  24              PIN_GEAR (BREP#44840)      13603       2618       2200     168.72        0        0        0        0        0        0           47
+      outlier: edge(572,6808) angle=168.72° faces=[65,65] SAME-FACE midpoint=(1.604,5.201,-2.423)  tris=[572,6806,6808]/[6808,572,6807]
+      outlier: edge(328,6630) angle=168.72° faces=[58,58] SAME-FACE midpoint=(1.604,3.065,-4.850)  tris=[328,6628,6630]/[6630,328,6629]
+      outlier: edge(84,6021) angle=168.72° faces=[31,31] SAME-FACE midpoint=(1.604,-0.044,-5.738)  tris=[84,6019,6021]/[6021,84,6020]
+      outlier: edge(1217,1218) angle=138.28° faces=[1,85] cross-face midpoint=(1.750,3.080,5.924)  tris=[1217,1218,1219]/[7227,1218,1217]
+      outlier: edge(1949,1950) angle=138.28° faces=[1,44] cross-face midpoint=(1.750,-6.302,2.206)  tris=[1949,1950,1951]/[6262,1950,1949]
+  25              LARGE_IB (BREP#45252)       2444        248          0      90.00        0        0        0        0        0        0            0
+  26                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  27                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  28                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  29                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  30                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  31                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  32              LARGE_OB (BREP#45792)       2756        420        214     123.88        0        0        0        0        0        0           70
+      outlier: edge(954,955) angle=123.88° faces=[11,12] cross-face midpoint=(-5.511,-5.925,-3.188)  tris=[921,954,955]/[954,955,389]
+      outlier: edge(449,450) angle=123.88° faces=[9,10] cross-face midpoint=(-5.511,5.925,3.188)  tris=[449,450,354]/[707,449,450]
+      outlier: edge(440,441) angle=123.88° faces=[9,10] cross-face midpoint=(-5.511,1.790,6.486)  tris=[440,441,363]/[698,440,441]
+      outlier: edge(933,934) angle=123.88° faces=[11,12] cross-face midpoint=(-5.511,4.863,-4.650)  tris=[900,933,934]/[933,934,410]
+      outlier: edge(428,429) angle=123.88° faces=[9,10] cross-face midpoint=(-5.511,-4.863,4.650)  tris=[428,429,375]/[686,428,429]
+  33              LARGE_IB (BREP#45252)       2444        248          0      90.00        0        0        0        0        0        0            0
+  34                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  35                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  36                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  37                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  38                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  39                 LARGE (BREP#45328)        315          0          0      23.55        0        0        0        0        0        0            0
+  40              LARGE_OB (BREP#45792)       2756        420        214     123.88        0        0        0        0        0        0           70
+      outlier: edge(449,450) angle=123.88° faces=[9,10] cross-face midpoint=(35.989,5.925,3.188)  tris=[449,450,354]/[707,449,450]
+      outlier: edge(954,955) angle=123.88° faces=[11,12] cross-face midpoint=(35.989,-5.925,-3.188)  tris=[921,954,955]/[954,955,389]
+      outlier: edge(933,934) angle=123.88° faces=[11,12] cross-face midpoint=(35.989,4.863,-4.650)  tris=[900,933,934]/[933,934,410]
+      outlier: edge(440,441) angle=123.88° faces=[9,10] cross-face midpoint=(35.989,1.790,6.486)  tris=[440,441,363]/[698,440,441]
+      outlier: edge(938,939) angle=123.88° faces=[11,12] cross-face midpoint=(35.989,2.364,-6.299)  tris=[905,938,939]/[938,939,405]
+  41           MS_SEC_GEAR (BREP#50977)      17728       3547       3232     162.67        0        0        0        0        0        0           31
+      outlier: edge(1353,5320) angle=162.67° faces=[90,90] SAME-FACE midpoint=(9.000,7.333,-0.758)  tris=[5320,1353,5321]/[9247,5320,1353]
+      outlier: edge(3620,3621) angle=147.68° faces=[1,42] cross-face midpoint=(10.750,-6.062,-3.621)  tris=[3619,3620,3621]/[8272,3621,3620]
+      outlier: edge(1604,1605) angle=147.68° faces=[1,97] cross-face midpoint=(10.750,6.682,2.281)  tris=[1603,1604,1605]/[9373,1605,1604]
+      outlier: edge(2864,2865) angle=147.68° faces=[1,54] cross-face midpoint=(10.750,-5.317,4.646)  tris=[2863,2864,2865]/[8420,2865,2864]
+      outlier: edge(2108,2109) angle=147.68° faces=[1,117] cross-face midpoint=(10.750,2.776,6.492)  tris=[2107,2108,2109]/[9752,2109,2108]
+  42          LOW_REV_GEAR (BREP#57002)      22255       4243       3816     158.94        0        0        0        0        0        0           57
+      outlier: edge(877,5753) angle=158.94° faces=[79,79] SAME-FACE midpoint=(23.000,2.329,-8.733)  tris=[5753,877,5754]/[10812,5753,877]
+      outlier: edge(1137,6013) angle=158.94° faces=[86,86] SAME-FACE midpoint=(23.000,5.175,-7.410)  tris=[6013,1137,6014]/[10972,6013,1137]
+      outlier: edge(617,5493) angle=158.94° faces=[72,72] SAME-FACE midpoint=(23.000,-0.799,-9.003)  tris=[5493,617,5494]/[10652,5493,617]
+      outlier: edge(1916,1917) angle=146.43° faces=[1,148] cross-face midpoint=(25.000,8.557,0.877)  tris=[1915,1916,1917]/[12375,1917,1916]
+      outlier: edge(4256,4257) angle=146.43° faces=[1,24] cross-face midpoint=(25.000,-8.557,-0.877)  tris=[4255,4256,4257]/[9655,4257,4256]
+  43                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  44                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  45                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  46                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  47                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  48                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  49                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  50                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  51         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-4.598,20.465,13.061)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(-4.566,20.455,15.313)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-3.500,19.600,15.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-4.799,19.600,13.410)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-3.500,19.600,12.660)  tris=[139,134,99]/[151,139,134]
+  52         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(11.232,20.465,13.061)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(11.264,20.455,15.313)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(12.330,19.600,15.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(11.031,19.600,13.410)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(12.330,19.600,12.660)  tris=[139,134,99]/[151,139,134]
+  53         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(27.062,20.465,13.061)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(27.094,20.455,15.313)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(28.160,19.600,15.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(26.861,19.600,13.410)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(28.160,19.600,12.660)  tris=[139,134,99]/[151,139,134]
+  54         HEX_CAP_SCREW (BREP#57938)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(42.892,20.465,13.061)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(42.924,20.455,15.313)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(43.990,19.600,15.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(42.691,19.600,13.410)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(43.990,19.600,12.660)  tris=[139,134,99]/[151,139,134]
+  55         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-4.598,20.465,-15.259)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(-4.566,20.455,-13.007)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-3.500,19.600,-12.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-4.799,19.600,-14.910)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-3.500,19.600,-15.660)  tris=[139,134,99]/[151,139,134]
+  56         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(11.232,20.465,-15.259)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(11.264,20.455,-13.007)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(12.330,19.600,-12.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(11.031,19.600,-14.910)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(12.330,19.600,-15.660)  tris=[139,134,99]/[151,139,134]
+  57         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(27.062,20.465,-15.259)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(27.094,20.455,-13.007)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(28.160,19.600,-12.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(26.861,19.600,-14.910)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(28.160,19.600,-15.660)  tris=[139,134,99]/[151,139,134]
+  58         HEX_CAP_SCREW (BREP#57938)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(42.892,20.465,-15.259)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(42.924,20.455,-13.007)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(43.990,19.600,-12.660)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(42.691,19.600,-14.910)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(43.990,19.600,-15.660)  tris=[139,134,99]/[151,139,134]
+  59                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  60                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  61         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-4.598,20.465,-1.099)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(-4.566,20.455,1.153)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-3.500,19.600,1.500)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-4.799,19.600,-0.750)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-3.500,19.600,-1.500)  tris=[139,134,99]/[151,139,134]
+  62         HEX_CAP_SCREW (BREP#57938)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(42.902,20.465,-1.099)  tris=[146,147,148]/[143,148,146]
+      outlier: edge(191,193) angle=116.81° faces=[18,19] cross-face midpoint=(42.934,20.455,1.153)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(44.000,19.600,1.500)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(42.701,19.600,-0.750)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(44.000,19.600,-1.500)  tris=[139,134,99]/[151,139,134]
+  63                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  64                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  65                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  66                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  67                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  68                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  69                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  70                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  71                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  72                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  73                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  74                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  75                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  76                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  77                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  78                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  79                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  80                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  81                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  82                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  83                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  84                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  85                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  86                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  87                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  88                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  89                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  90                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  91                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  92                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  93                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  94                WASHER (BREP#57208)        744        248          0      90.00        0        0        0        0        0        0            0
+  95               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(36.098,5.902,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(36.067,8.153,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(35.000,8.500,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(36.299,6.250,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(35.000,5.500,22.760)  tris=[139,134,99]/[151,139,134]
+  96               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(36.098,-12.215,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(36.067,-9.964,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(35.000,-9.616,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(36.299,-11.866,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(35.000,-12.616,22.760)  tris=[139,134,99]/[151,139,134]
+  97               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(24.098,5.902,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(24.067,8.153,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(23.000,8.500,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(24.299,6.250,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(23.000,5.500,22.760)  tris=[139,134,99]/[151,139,134]
+  98               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(24.098,-12.215,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(24.067,-9.964,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(23.000,-9.616,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(24.299,-11.866,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(23.000,-12.616,22.760)  tris=[139,134,99]/[151,139,134]
+  99               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(12.098,5.902,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(12.067,8.153,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(11.000,8.500,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(12.299,6.250,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(11.000,5.500,22.760)  tris=[139,134,99]/[151,139,134]
+ 100               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(12.098,-12.215,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(12.067,-9.964,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(11.000,-9.616,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(12.299,-11.866,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(11.000,-12.616,22.760)  tris=[139,134,99]/[151,139,134]
+ 101               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-0.402,-12.215,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(-0.433,-9.964,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-1.500,-9.616,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-0.201,-11.866,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-1.500,-12.616,22.760)  tris=[139,134,99]/[151,139,134]
+ 102               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-0.402,-0.161,23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(-0.433,2.090,23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-1.500,2.438,22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-0.201,0.188,22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-1.500,-0.562,22.760)  tris=[139,134,99]/[151,139,134]
+ 103               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(33.902,5.902,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(33.933,8.153,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(35.000,8.500,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(33.701,6.250,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(35.000,5.500,-22.760)  tris=[139,134,99]/[151,139,134]
+ 104               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(33.902,-12.215,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(33.933,-9.964,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(35.000,-9.616,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(33.701,-11.866,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(35.000,-12.616,-22.760)  tris=[139,134,99]/[151,139,134]
+ 105               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(21.902,5.902,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(21.933,8.153,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(23.000,8.500,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(21.701,6.250,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(23.000,5.500,-22.760)  tris=[139,134,99]/[151,139,134]
+ 106               10_MHCS (BREP#58984)        596        115         48     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(21.902,-12.215,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(21.933,-9.964,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(23.000,-9.616,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(21.701,-11.866,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(23.000,-12.616,-22.760)  tris=[139,134,99]/[151,139,134]
+ 107               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(9.902,5.902,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(9.933,8.153,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(11.000,8.500,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(9.701,6.250,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(11.000,5.500,-22.760)  tris=[139,134,99]/[151,139,134]
+ 108               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(9.902,-12.215,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(9.933,-9.964,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(11.000,-9.616,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(9.701,-11.866,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(11.000,-12.616,-22.760)  tris=[139,134,99]/[151,139,134]
+ 109               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-2.598,-12.215,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(-2.567,-9.964,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-1.500,-9.616,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-2.799,-11.866,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-1.500,-12.616,-22.760)  tris=[139,134,99]/[151,139,134]
+ 110               10_MHCS (BREP#58984)        596        115         49     180.00        0        1        0        0        0        0            1
+      outlier: edge(146,148) angle=180.00° faces=[16,19] cross-face [sub-tol weld-noise] midpoint=(-2.598,-0.161,-23.625)  tris=[147,148,146]/[143,148,146]
+      outlier: edge(191,193) angle=116.78° faces=[18,19] cross-face midpoint=(-2.567,2.090,-23.615)  tris=[191,192,193]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(-1.500,2.438,-22.760)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(-2.799,0.188,-22.760)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(-1.500,-0.562,-22.760)  tris=[139,134,99]/[151,139,134]
+ 111               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(34.266,6.052,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(35.734,7.948,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(34.366,8.017,13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(35.634,5.983,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(601,602) angle=134.96° faces=[7,8] cross-face midpoint=(36.192,7.121,13.660)  tris=[491,602,601]/[265,602,601]
+ 112               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(35.734,-10.169,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(34.266,-12.064,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(34.366,-10.099,13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(35.634,-12.133,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(384,385) angle=134.96° faces=[6,7] cross-face midpoint=(33.808,-11.238,13.660)  tris=[326,385,384]/[584,385,384]
+ 113               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(23.734,7.948,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(22.266,6.052,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(22.366,8.017,13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(23.634,5.983,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(391,392) angle=134.96° faces=[6,7] cross-face midpoint=(22.016,7.685,13.660)  tris=[319,392,391]/[419,392,391]
+ 114               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(23.734,-10.169,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(22.266,-12.064,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(23.634,-12.133,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(22.366,-10.099,13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(608,609) angle=134.96° faces=[7,8] cross-face midpoint=(23.984,-11.801,13.660)  tris=[512,609,608]/[258,609,608]
+ 115               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(11.826,6.131,13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(10.174,7.869,13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(10.266,6.052,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(11.634,5.983,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(10.366,8.017,13.660)  tris=[315,396,395]/[431,396,395]
+ 116               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(10.174,-10.248,13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(11.826,-11.985,13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(11.734,-10.169,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(10.366,-10.099,13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(10.266,-12.064,13.660)  tris=[334,377,376]/[560,377,376]
+ 117               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(-0.674,-11.985,13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(-2.326,-10.248,13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(-2.234,-12.064,13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(-0.766,-10.169,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(-0.866,-12.133,13.660)  tris=[524,613,612]/[254,613,612]
+ 118               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(-2.326,1.806,13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(-0.674,0.069,13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(-0.866,-0.079,13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(-0.766,1.886,13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(-2.134,1.955,13.660)  tris=[315,396,395]/[431,396,395]
+ 119               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(34.266,7.948,-13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(35.734,6.052,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(34.366,5.983,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(35.634,8.017,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(601,602) angle=134.96° faces=[7,8] cross-face midpoint=(33.808,7.121,-13.660)  tris=[491,602,601]/[265,602,601]
+ 120               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(34.266,-10.169,-13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(35.734,-12.064,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(35.634,-10.099,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(34.366,-12.133,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(601,602) angle=134.96° faces=[7,8] cross-face midpoint=(33.808,-10.995,-13.660)  tris=[491,602,601]/[265,602,601]
+ 121               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(22.266,7.948,-13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(23.734,6.052,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(23.634,8.017,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(22.366,5.983,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(391,392) angle=134.96° faces=[6,7] cross-face midpoint=(23.984,7.685,-13.660)  tris=[319,392,391]/[419,392,391]
+ 122               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(23.734,-12.064,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(22.266,-10.169,-13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(22.366,-12.133,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(23.634,-10.099,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(608,609) angle=134.96° faces=[7,8] cross-face midpoint=(22.016,-11.801,-13.660)  tris=[512,609,608]/[258,609,608]
+ 123               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(10.174,6.131,-13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(11.826,7.869,-13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(11.634,8.017,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(11.734,6.052,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(10.266,7.948,-13.660)  tris=[467,594,593]/[273,594,593]
+ 124               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(11.826,-10.248,-13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(10.174,-11.985,-13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(10.366,-12.133,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(11.634,-10.099,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(11.734,-12.064,-13.660)  tris=[334,377,376]/[560,377,376]
+ 125               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(-2.326,-11.985,-13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(-0.674,-10.248,-13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(376,377) angle=134.96° faces=[6,7] cross-face midpoint=(-0.766,-12.064,-13.660)  tris=[334,377,376]/[560,377,376]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(-2.134,-12.133,-13.660)  tris=[524,613,612]/[254,613,612]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(-2.234,-10.169,-13.660)  tris=[467,594,593]/[273,594,593]
+ 126               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(-2.326,0.069,-13.660)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(-0.674,1.806,-13.660)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(395,396) angle=134.96° faces=[6,7] cross-face midpoint=(-0.866,1.955,-13.660)  tris=[315,396,395]/[431,396,395]
+      outlier: edge(593,594) angle=134.96° faces=[7,8] cross-face midpoint=(-2.234,1.886,-13.660)  tris=[467,594,593]/[273,594,593]
+      outlier: edge(612,613) angle=134.96° faces=[7,8] cross-face midpoint=(-2.134,-0.079,-13.660)  tris=[524,613,612]/[254,613,612]
+ 127                WASHER (BREP#57208)        744        248        116      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(3.443,-24.032,11.763)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(5.028,-23.823,12.584)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(5.723,-24.003,11.875)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(128,129) angle=90.00° faces=[2,4] cross-face midpoint=(3.620,-23.571,11.545)  tris=[34,129,128]/[128,129,222]
+      outlier: edge(182,183) angle=90.00° faces=[3,4] cross-face midpoint=(5.194,-23.591,11.467)  tris=[26,183,182]/[182,183,214]
+ 128                WASHER (BREP#57208)        744        248        116      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(14.693,-24.032,11.763)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(16.973,-24.003,11.875)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(16.278,-23.823,12.584)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(119,120) angle=90.00° faces=[1,6] cross-face midpoint=(15.403,-23.384,14.314)  tris=[57,119,120]/[119,120,245]
+      outlier: edge(65,66) angle=90.00° faces=[1,5] cross-face midpoint=(16.190,-23.394,14.275)  tris=[3,65,66]/[65,66,191]
+ 129                WASHER (BREP#57208)        744        248        117      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(25.943,-24.032,11.763)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(28.223,-24.003,11.875)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(27.528,-23.823,12.584)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(119,120) angle=90.00° faces=[1,6] cross-face midpoint=(26.653,-23.384,14.314)  tris=[57,119,120]/[119,120,245]
+      outlier: edge(128,129) angle=90.00° faces=[2,4] cross-face midpoint=(26.120,-23.571,11.545)  tris=[34,129,128]/[128,129,222]
+ 130                WASHER (BREP#57208)        744        248        123      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(3.443,-21.608,11.148)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(5.028,-21.400,11.969)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(5.723,-21.580,11.260)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(119,120) angle=90.00° faces=[1,6] cross-face midpoint=(4.153,-20.961,13.699)  tris=[57,119,120]/[119,120,245]
+      outlier: edge(65,66) angle=90.00° faces=[1,5] cross-face midpoint=(4.940,-20.971,13.660)  tris=[3,65,66]/[65,66,191]
+ 131                WASHER (BREP#57208)        744        248        123      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(14.693,-21.608,11.148)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(16.278,-21.400,11.969)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(16.973,-21.580,11.260)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(119,120) angle=90.00° faces=[1,6] cross-face midpoint=(15.403,-20.961,13.699)  tris=[57,119,120]/[119,120,245]
+      outlier: edge(182,183) angle=90.00° faces=[3,4] cross-face midpoint=(16.444,-21.168,10.852)  tris=[26,183,182]/[182,183,214]
+ 132                WASHER (BREP#57208)        744        248        124      90.00        0        0        0        0        0        0            0
+      outlier: edge(35,36) angle=90.00° faces=[1,2] cross-face midpoint=(25.943,-21.608,11.148)  tris=[35,98,36]/[35,36,130]
+      outlier: edge(86,87) angle=90.00° faces=[1,5] cross-face midpoint=(27.528,-21.400,11.969)  tris=[24,86,87]/[86,87,212]
+      outlier: edge(23,24) angle=90.00° faces=[1,3] cross-face midpoint=(28.223,-21.580,11.260)  tris=[23,86,24]/[23,24,180]
+      outlier: edge(182,183) angle=90.00° faces=[3,4] cross-face midpoint=(27.694,-21.168,10.852)  tris=[26,183,182]/[182,183,214]
+      outlier: edge(119,120) angle=90.00° faces=[1,6] cross-face midpoint=(26.653,-20.961,13.699)  tris=[57,119,120]/[119,120,245]
+ 133                WASHER (BREP#57208)        744        248        116      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(4.557,-24.032,-11.763)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(2.972,-23.823,-12.584)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(2.277,-24.003,-11.875)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(159,160) angle=90.00° faces=[3,4] cross-face midpoint=(4.380,-23.571,-11.545)  tris=[3,160,159]/[159,160,191]
+      outlier: edge(151,152) angle=90.00° faces=[2,4] cross-face midpoint=(2.806,-23.591,-11.467)  tris=[57,152,151]/[151,152,245]
+ 134                WASHER (BREP#57208)        744        248        116      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(15.807,-24.032,-11.763)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(14.222,-23.823,-12.584)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(13.527,-24.003,-11.875)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(88,89) angle=90.00° faces=[1,5] cross-face midpoint=(15.097,-23.384,-14.314)  tris=[26,88,89]/[88,89,214]
+      outlier: edge(96,97) angle=90.00° faces=[1,6] cross-face midpoint=(14.310,-23.394,-14.275)  tris=[34,96,97]/[96,97,222]
+ 135                WASHER (BREP#57208)        744        248        117      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(27.057,-24.032,-11.763)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(25.472,-23.823,-12.584)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(24.777,-24.003,-11.875)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(159,160) angle=90.00° faces=[3,4] cross-face midpoint=(26.880,-23.571,-11.545)  tris=[3,160,159]/[159,160,191]
+      outlier: edge(96,97) angle=90.00° faces=[1,6] cross-face midpoint=(25.560,-23.394,-14.275)  tris=[34,96,97]/[96,97,222]
+ 136                WASHER (BREP#57208)        744        248        123      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(4.557,-21.608,-11.148)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(2.972,-21.400,-11.969)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(2.277,-21.580,-11.260)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(159,160) angle=90.00° faces=[3,4] cross-face midpoint=(4.380,-21.148,-10.930)  tris=[3,160,159]/[159,160,191]
+      outlier: edge(88,89) angle=90.00° faces=[1,5] cross-face midpoint=(3.847,-20.961,-13.699)  tris=[26,88,89]/[88,89,214]
+ 137                WASHER (BREP#57208)        744        248        123      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(15.807,-21.608,-11.148)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(14.222,-21.400,-11.969)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(13.527,-21.580,-11.260)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(159,160) angle=90.00° faces=[3,4] cross-face midpoint=(15.630,-21.148,-10.930)  tris=[3,160,159]/[159,160,191]
+      outlier: edge(151,152) angle=90.00° faces=[2,4] cross-face midpoint=(14.056,-21.168,-10.852)  tris=[57,152,151]/[151,152,245]
+ 138                WASHER (BREP#57208)        744        248        124      90.00        0        0        0        0        0        0            0
+      outlier: edge(4,5) angle=90.00° faces=[1,3] cross-face midpoint=(27.057,-21.608,-11.148)  tris=[4,67,5]/[4,5,161]
+      outlier: edge(117,118) angle=90.00° faces=[1,6] cross-face midpoint=(25.472,-21.400,-11.969)  tris=[55,117,118]/[117,118,243]
+      outlier: edge(54,55) angle=90.00° faces=[1,2] cross-face midpoint=(24.777,-21.580,-11.260)  tris=[54,117,55]/[54,55,149]
+      outlier: edge(96,97) angle=90.00° faces=[1,6] cross-face midpoint=(25.560,-20.971,-13.660)  tris=[34,96,97]/[96,97,222]
+      outlier: edge(151,152) angle=90.00° faces=[2,4] cross-face midpoint=(25.306,-21.168,-10.852)  tris=[57,152,151]/[151,152,245]
+ 139              4_5_MHCS (BREP#60858)        596        112         53     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(5.653,-24.803,12.607)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(6.000,-23.712,13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(3.750,-24.031,12.171)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(3.000,-23.712,13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(5.250,-24.031,12.171)  tris=[135,136,80]/[136,140,135]
+ 140              4_5_MHCS (BREP#60858)        596        112         53     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(16.903,-24.803,12.607)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(17.250,-23.712,13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(15.000,-24.031,12.171)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(14.250,-23.712,13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(16.500,-24.031,12.171)  tris=[135,136,80]/[136,140,135]
+ 141              4_5_MHCS (BREP#60858)        596        112         53     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(28.153,-24.803,12.607)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(28.500,-23.712,13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(26.250,-24.031,12.171)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(25.500,-23.712,13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(27.750,-24.031,12.171)  tris=[135,136,80]/[136,140,135]
+ 142              4_5_MHCS (BREP#60858)        596        112         52     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(4.653,-24.278,-14.674)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(5.000,-23.712,-13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(2.750,-23.392,-14.690)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(2.000,-23.712,-13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(4.250,-23.392,-14.690)  tris=[135,136,80]/[136,140,135]
+ 143              4_5_MHCS (BREP#60858)        596        112         52     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(15.903,-24.278,-14.674)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(16.250,-23.712,-13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(14.000,-23.392,-14.690)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(13.250,-23.712,-13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(15.500,-23.392,-14.690)  tris=[135,136,80]/[136,140,135]
+ 144              4_5_MHCS (BREP#60858)        596        112         52     116.82        0        0        0        0        0        0            0
+      outlier: edge(191,193) angle=116.82° faces=[18,19] cross-face midpoint=(27.153,-24.278,-14.674)  tris=[193,191,192]/[143,193,191]
+      outlier: edge(136,137) angle=111.80° faces=[9,14] cross-face midpoint=(27.500,-23.712,-13.430)  tris=[136,137,83]/[137,190,136]
+      outlier: edge(134,135) angle=110.48° faces=[9,10] cross-face midpoint=(25.250,-23.392,-14.690)  tris=[134,135,104]/[135,150,134]
+      outlier: edge(134,139) angle=109.94° faces=[9,11] cross-face midpoint=(24.500,-23.712,-13.430)  tris=[139,134,99]/[151,139,134]
+      outlier: edge(135,136) angle=107.32° faces=[9,15] cross-face midpoint=(26.750,-23.392,-14.690)  tris=[135,136,80]/[136,140,135]
+ 145               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(589,590) angle=134.96° faces=[7,8] cross-face midpoint=(5.660,-19.812,12.131)  tris=[455,590,589]/[277,590,589]
+      outlier: edge(594,595) angle=134.96° faces=[7,8] cross-face midpoint=(5.369,-19.941,11.622)  tris=[470,595,594]/[272,595,594]
+      outlier: edge(616,617) angle=134.96° faces=[7,8] cross-face midpoint=(3.315,-19.782,12.246)  tris=[536,617,616]/[250,617,616]
+      outlier: edge(615,616) angle=134.96° faces=[7,8] cross-face midpoint=(3.340,-19.812,12.131)  tris=[533,616,615]/[251,616,615]
+      outlier: edge(604,605) angle=134.96° faces=[7,8] cross-face midpoint=(4.259,-20.026,11.284)  tris=[500,605,604]/[262,605,604]
+ 146               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(589,590) angle=134.96° faces=[7,8] cross-face midpoint=(16.910,-19.812,12.131)  tris=[455,590,589]/[277,590,589]
+      outlier: edge(594,595) angle=134.96° faces=[7,8] cross-face midpoint=(16.619,-19.941,11.622)  tris=[470,595,594]/[272,595,594]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(16.619,-19.535,13.222)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(391,392) angle=134.96° faces=[6,7] cross-face midpoint=(16.435,-19.496,13.376)  tris=[319,392,391]/[419,392,391]
+      outlier: edge(616,617) angle=134.96° faces=[7,8] cross-face midpoint=(14.565,-19.782,12.246)  tris=[536,617,616]/[250,617,616]
+ 147               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(589,590) angle=134.96° faces=[7,8] cross-face midpoint=(28.160,-19.812,12.131)  tris=[455,590,589]/[277,590,589]
+      outlier: edge(594,595) angle=134.96° faces=[7,8] cross-face midpoint=(27.869,-19.941,11.622)  tris=[470,595,594]/[272,595,594]
+      outlier: edge(393,394) angle=134.96° faces=[6,7] cross-face midpoint=(27.869,-19.535,13.222)  tris=[317,394,393]/[425,394,393]
+      outlier: edge(616,617) angle=134.96° faces=[7,8] cross-face midpoint=(25.815,-19.782,12.246)  tris=[536,617,616]/[250,617,616]
+      outlier: edge(391,392) angle=134.96° faces=[6,7] cross-face midpoint=(27.685,-19.496,13.376)  tris=[319,392,391]/[419,392,391]
+ 148               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(372,373) angle=134.96° faces=[6,7] cross-face midpoint=(2.340,-19.812,-12.131)  tris=[338,373,372]/[548,373,372]
+      outlier: edge(377,378) angle=134.96° faces=[6,7] cross-face midpoint=(2.631,-19.941,-11.622)  tris=[333,378,377]/[563,378,377]
+      outlier: edge(399,400) angle=134.96° faces=[6,7] cross-face midpoint=(4.685,-19.782,-12.246)  tris=[311,400,399]/[443,400,399]
+      outlier: edge(387,388) angle=134.96° faces=[6,7] cross-face midpoint=(3.741,-20.026,-11.284)  tris=[323,388,387]/[407,388,387]
+      outlier: edge(398,399) angle=134.96° faces=[6,7] cross-face midpoint=(4.660,-19.812,-12.131)  tris=[312,399,398]/[440,399,398]
+ 149               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(372,373) angle=134.96° faces=[6,7] cross-face midpoint=(13.590,-19.812,-12.131)  tris=[338,373,372]/[548,373,372]
+      outlier: edge(377,378) angle=134.96° faces=[6,7] cross-face midpoint=(13.881,-19.941,-11.622)  tris=[333,378,377]/[563,378,377]
+      outlier: edge(399,400) angle=134.96° faces=[6,7] cross-face midpoint=(15.935,-19.782,-12.246)  tris=[311,400,399]/[443,400,399]
+      outlier: edge(387,388) angle=134.96° faces=[6,7] cross-face midpoint=(14.991,-20.026,-11.284)  tris=[323,388,387]/[407,388,387]
+      outlier: edge(398,399) angle=134.96° faces=[6,7] cross-face midpoint=(15.910,-19.812,-12.131)  tris=[312,399,398]/[440,399,398]
+ 150               HEX_NUT (BREP#59948)       5806       1387         62     134.96        0        0        0        0        0        0           62
+      outlier: edge(372,373) angle=134.96° faces=[6,7] cross-face midpoint=(24.840,-19.812,-12.131)  tris=[338,373,372]/[548,373,372]
+      outlier: edge(377,378) angle=134.96° faces=[6,7] cross-face midpoint=(25.131,-19.941,-11.622)  tris=[333,378,377]/[563,378,377]
+      outlier: edge(610,611) angle=134.96° faces=[7,8] cross-face midpoint=(25.131,-19.535,-13.222)  tris=[518,611,610]/[256,611,610]
+      outlier: edge(399,400) angle=134.96° faces=[6,7] cross-face midpoint=(27.185,-19.782,-12.246)  tris=[311,400,399]/[443,400,399]
+      outlier: edge(608,609) angle=134.96° faces=[7,8] cross-face midpoint=(25.315,-19.496,-13.376)  tris=[512,609,608]/[258,609,608]
+ 151            SHIFT_FORK (BREP#61422)       1584        532         73      90.04        0        0        0        0        0        0            0
+      outlier: edge(296,297) angle=90.04° faces=[4,5] cross-face midpoint=(13.500,15.899,0.772)  tris=[296,297,230]/[357,296,297]
+      outlier: edge(301,302) angle=90.03° faces=[4,5] cross-face midpoint=(13.500,17.227,2.099)  tris=[301,302,225]/[43,301,302]
+      outlier: edge(317,318) angle=90.03° faces=[4,5] cross-face midpoint=(13.500,15.735,7.319)  tris=[317,318,209]/[62,317,318]
+      outlier: edge(306,307) angle=90.03° faces=[4,5] cross-face midpoint=(13.500,17.744,3.904)  tris=[306,307,220]/[49,306,307]
+      outlier: edge(312,313) angle=90.03° faces=[4,5] cross-face midpoint=(13.500,17.128,6.060)  tris=[312,313,214]/[56,312,313]
+ 152           SPEEDOMETER (BREP#63306)       8955       1244        683     180.00        0      111        0        0        0        0          232
+      outlier: edge(161,162) angle=180.00° faces=[1,7] cross-face [sub-tol weld-noise] midpoint=(45.000,-4.718,-1.509)  tris=[160,162,161]/[161,162,156]
+      outlier: edge(264,265) angle=180.00° faces=[2,6] cross-face [sub-tol weld-noise] midpoint=(40.000,-3.634,2.270)  tris=[264,265,266]/[265,264,263]
+      outlier: edge(295,296) angle=180.00° faces=[2,6] cross-face [sub-tol weld-noise] midpoint=(40.000,-4.849,-0.869)  tris=[294,295,296]/[297,296,295]
+      outlier: edge(129,130) angle=180.00° faces=[1,7] cross-face [sub-tol weld-noise] midpoint=(45.000,-3.132,-3.258)  tris=[128,130,129]/[129,130,131]
+      outlier: edge(142,143) angle=180.00° faces=[1,7] cross-face [sub-tol weld-noise] midpoint=(45.000,-3.869,-2.662)  tris=[142,144,143]/[141,142,143]
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Summary:
+  Total BREPs:            152
+  Interior edges total:   493972
+  Sharp angles (>60°):    90576 (18.34%)
+  Extreme angles (>90°):  31991 (6.48%)
+  Statistical outliers:   6051
+  Surf-exempt (>170°):    0 (tangency/shallow junctions — not bugs)
+  Sub-tol weld-noise:     282 (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)
+  Knife-fin pinch:        4 (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)
+  Coil-turn weld:         0 (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)
+  Junction-sliver:        0 (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)
+  Thin-face:              0 (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)
+
+✓ PASS: No truly extreme angles (>170°) beyond surface-justified exemptions

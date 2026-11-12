@@ -1,0 +1,34 @@
+Loading STEP file: test/compressor-13920_top.stp
+STEP file parsed: 2950 entities
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   1             COMP-13920 (BREP#1889)       7067        605        115     180.00        0       10        0        0        0        0           14
+      outlier: edge(59,1150) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(9.526,0.150,20.960)  tris=[59,1151,1150]/[1203,1150,59]
+      outlier: edge(185,615) angle=180.00° faces=[12,12] SAME-FACE [sub-tol weld-noise] midpoint=(6.045,0.150,14.705)  tris=[615,907,185]/[615,912,185]
+      outlier: edge(44,393) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.474,0.150,20.960)  tris=[393,392,44]/[393,1438,44]
+      outlier: edge(140,833) angle=180.00° faces=[10,10] SAME-FACE [sub-tol weld-noise] midpoint=(11.895,0.114,14.667)  tris=[140,833,834]/[140,833,832]
+      outlier: edge(140,832) angle=180.00° faces=[10,10] SAME-FACE [sub-tol weld-noise] midpoint=(11.879,0.106,14.667)  tris=[140,833,832]/[140,831,832]
+   2        COLLECTOR-13920 (BREP#2860)       9511       2073        918     180.00        0      111        0        0        0        0          178
+      outlier: edge(2780,2928) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.002,12.340,15.640)  tris=[2928,2780,2929]/[2928,2780,2802]
+      outlier: edge(2819,2938) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.420,12.340,15.184)  tris=[2938,2819,2939]/[2938,2819,2826]
+      outlier: edge(2826,2937) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.355,12.340,15.199)  tris=[2937,2826,2938]/[2937,2826,2837]
+      outlier: edge(2833,2935) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.234,12.340,15.254)  tris=[2935,2833,2936]/[2935,2833,2831]
+      outlier: edge(2785,2929) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.012,12.340,15.574)  tris=[2929,2785,2930]/[2929,2785,2780]
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Summary:
+  Total BREPs:            2
+  Interior edges total:   16578
+  Sharp angles (>60°):    2678 (16.15%)
+  Extreme angles (>90°):  1033 (6.23%)
+  Statistical outliers:   192
+  Surf-exempt (>170°):    0 (tangency/shallow junctions — not bugs)
+  Sub-tol weld-noise:     121 (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)
+  Knife-fin pinch:        0 (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)
+  Coil-turn weld:         0 (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)
+  Junction-sliver:        0 (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)
+  Thin-face:              0 (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)
+
+✓ PASS: No truly extreme angles (>170°) beyond surface-justified exemptions
