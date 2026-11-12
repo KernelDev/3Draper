@@ -287,6 +287,13 @@ fn main() {
         // session-121: per-(instance, face) cache of the rim polyline
         // far-loop min distance — the RIM-GAP witness input.
         let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
+        // s132: per-(instance, face) cache of the WORLD-frame rim
+        // polylines (outer + inner) — the RIM-COLLAPSE witness input
+        // (triad-vertex-to-rim distances; the mesh vertices are in
+        // the instance frame, the polylines are transformed by the
+        // same xform the rim-gap path uses).
+        let mut rim_poly_cache: HashMap<u64, Option<Vec<Vec<Point3d>>>> =
+            HashMap::new();
         // session-123 recon: lazy per-BREP vertex → distinct-face-ids map
         // (the HUB witness input for the junction-sliver exemption —
         // built on first use, one pass over triangles + face ids).
@@ -295,6 +302,11 @@ fn main() {
         // (area, boundary perimeter, tri count) for the same-face
         // thin-pair witness (inherently-thin face class).
         let mut face_patch: Option<HashMap<u64, (f64, f64, usize)>> = None;
+        // s132: lazily-built per-BREP vertex → incident-triangle count
+        // (the weld-absorption witness input: a merged vertex that
+        // absorbed a sub-tol duplicate carries the union of both
+        // pre-weld stars — ~2x the regular lattice valence).
+        let mut vert_tri_count: Option<HashMap<u32, usize>> = None;
         let mut hist: HashMap<String, usize> = HashMap::new();
         let mut involved_fids: std::collections::HashSet<u64> = std::collections::HashSet::new();
 
@@ -595,10 +607,26 @@ fn main() {
             // BFS collateral) or the band / turn gap narrower than the
             // tolerance (f28 w=8.9e-3 — merge-doomed by geometry).
             // Kill-switch: DRAPPER_COIL_TURN_EXEMPT=0. Not debt.
-            let (coil, coil_why, coil_star, coil_rim) =
+            let (coil, coil_why, coil_star, coil_rim, coil_triad_on_rim) =
                 if !tangent_exempt && !subtol && !knife && fid0 == fid1
                     && std::env::var("DRAPPER_COIL_TURN_EXEMPT").as_deref() != Ok("0")
                 {
+                    // s132 diagnostics: per-vertex triad-to-rim min
+                    // distances (printed by the TRIAD_WITNESS dump).
+                    let mut coil_triad_rim_dists: Option<Vec<(u32, f64, usize)>> = None;
+                    // s132: build the vertex → incident-triangle count
+                    // map on first use (one pass over the BREP's
+                    // triangles — the weld-absorption diagnostic).
+                    if vert_tri_count.is_none() {
+                        let mut m: HashMap<u32, usize> = HashMap::new();
+                        for tri in mesh.triangles.iter() {
+                            for &v in tri.iter() {
+                                *m.entry(v).or_default() += 1;
+                            }
+                        }
+                        vert_tri_count = Some(m);
+                    }
+                    let vtc = vert_tri_count.as_ref().unwrap();
                     // witness (a) STAR: a cross-face interior edge at one
                     // of the pair's four triad vertices (the welded rail
                     // in the merged mesh at the pair).
@@ -639,20 +667,31 @@ fn main() {
                         *c
                     } else {
                         let v = (|| -> Option<f64> {
-                            let f = face_by_id.get(&fid0)?;
-                            let tf = |p: &Point3d| -> Point3d {
-                                match xform {
-                                    Some(m) => Point3d::new(
-                                        m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
-                                        m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
-                                        m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
-                                    ),
-                                    None => *p,
-                                }
-                            };
+                            let polys = rim_poly_cache.entry(fid0).or_insert_with(
+                                || {
+                                    let f = face_by_id.get(&fid0)?;
+                                    let tf = |p: &Point3d| -> Point3d {
+                                        match xform {
+                                            Some(m) => Point3d::new(
+                                                m[0][0] * p.x + m[0][1] * p.y + m[0][2] * p.z + m[0][3],
+                                                m[1][0] * p.x + m[1][1] * p.y + m[1][2] * p.z + m[1][3],
+                                                m[2][0] * p.x + m[2][1] * p.y + m[2][2] * p.z + m[2][3],
+                                            ),
+                                            None => *p,
+                                        }
+                                    };
+                                    Some(
+                                        f.outer_boundary
+                                            .iter()
+                                            .chain(f.inner_boundaries.iter())
+                                            .map(|poly| poly.iter().map(tf).collect())
+                                            .collect(),
+                                    )
+                                },
+                            );
+                            let polys = polys.as_ref()?;
                             let mut self_min = f64::INFINITY;
-                            for poly in f.outer_boundary.iter().chain(f.inner_boundaries.iter()) {
-                                let w: Vec<Point3d> = poly.iter().map(tf).collect();
+                            for w in polys.iter() {
                                 let n = w.len();
                                 if n < 8 {
                                     continue;
@@ -681,11 +720,85 @@ fn main() {
                         rim_far_cache.insert(fid0, v);
                         v
                     };
+                    // witness (c) s132 RIM-COLLAPSE: the triad
+                    // contains an ORPHAN vertex — ≤ 1 incident
+                    // triangle (the repair cascade dismantled the
+                    // duplicate zone; the pair is a post-repair
+                    // remnant). The rim-distance per-vertex numbers
+                    // are kept as diagnostics (the WITNESS dump) —
+                    // the MEASURED f28 triad sits 0.024–0.050 off the
+                    // rim, so rim proximity is NOT the signal.
+                    let triad_orphan = {
+                        let mut triad: Vec<u32> =
+                            mesh.triangles[t0]
+                                .iter()
+                                .chain(mesh.triangles[t1].iter())
+                                .copied()
+                                .collect();
+                        triad.sort_unstable();
+                        triad.dedup();
+                        // s132 diagnostics: per-vertex min rim
+                        // distance + valence (printed by the WITNESS
+                        // dump — the negative-control evidence).
+                        let polys = rim_poly_cache.get(&fid0);
+                        let eps = eff_tol.unwrap_or(0.0);
+                        let mut dists: Vec<(u32, f64, usize)> = Vec::new();
+                        let mut any_orphan = false;
+                        for &vi in triad.iter() {
+                            let vc = vtc.get(&vi).copied().unwrap_or(0);
+                            if vc <= 1 {
+                                any_orphan = true;
+                            }
+                            let mut best = f64::INFINITY;
+                            if let Some(Some(polys)) = polys {
+                                let p = &mesh.vertices[vi as usize];
+                                for w in polys.iter() {
+                                    let n = w.len();
+                                    if n == 0 {
+                                        continue;
+                                    }
+                                    // consecutive-pair segments (a
+                                    // closed polyline carries its
+                                    // closing duplicate, so the wrap
+                                    // segment is covered too)
+                                    for k in 0..n.saturating_sub(1) {
+                                        let a = &w[k];
+                                        let b = &w[k + 1];
+                                        let abx = b.x - a.x;
+                                        let aby = b.y - a.y;
+                                        let abz = b.z - a.z;
+                                        let apx = p.x - a.x;
+                                        let apy = p.y - a.y;
+                                        let apz = p.z - a.z;
+                                        let ab2 = abx * abx + aby * aby + abz * abz;
+                                        let t = if ab2 > 1e-30 {
+                                            ((apx * abx + apy * aby + apz * abz) / ab2)
+                                                .clamp(0.0, 1.0)
+                                        } else {
+                                            0.0
+                                        };
+                                        let dx = apx - t * abx;
+                                        let dy = apy - t * aby;
+                                        let dz = apz - t * abz;
+                                        let d2 = dx * dx + dy * dy + dz * dz;
+                                        if d2 < best {
+                                            best = d2;
+                                        }
+                                    }
+                                }
+                            }
+                            dists.push((vi, best.sqrt(), vc));
+                        }
+                        let _ = eps;
+                        coil_triad_rim_dists = Some(dists);
+                        any_orphan
+                    };
                     let w = surf_exempt::CoilWitness {
                         star: star.is_some(),
                         star_edge: star.map(|(e, _)| e).unwrap_or((0, 0)),
                         star_faces: star.map(|(_, f)| f).unwrap_or((0, 0)),
                         rim_far,
+                        triad_orphan,
                     };
                     let r = surf_exempt::coil_turn_weld(
                         h0,
@@ -694,9 +807,9 @@ fn main() {
                         surf0.as_ref(),
                         Some(&w),
                     );
-                    (r.0, r.1, star, rim_far)
+                    (r.0, r.1, star, rim_far, coil_triad_rim_dists)
                 } else {
-                    (false, String::new(), None, None)
+                    (false, String::new(), None, None, None)
                 };
             if coil {
                 brep_coil += 1;
@@ -975,12 +1088,13 @@ fn main() {
             // (non-exempt / non-subtol / non-knife / non-coil /
             // non-junction) pair, dump the triad's edges + the coil
             // witness values. Reuses the cascade-computed star /
-            // rim-gap.
+            // rim-gap. s132: coil-EXEMPT same-face pairs also dump
+            // (the weld-zone comparison population).
             if std::env::var("DRAPPER_DUMP_TRIAD_WITNESS").is_ok()
                 && !tangent_exempt
                 && !subtol
                 && !knife
-                && !coil
+                && (!coil || fid0 == fid1)
                 && !junction
             {
                 let mut wit: Vec<String> = Vec::new();
@@ -1023,12 +1137,27 @@ fn main() {
                     Some(g) => format!(" POLY far={:.5}", g),
                     None => " POLY far=n/a".to_string(),
                 };
+                // s132: the triad-on-rim distances (the RIM-COLLAPSE
+                // witness input) — which vertex sits how far from the
+                // owner rim + its incident-triangle count (the
+                // weld-absorption diagnostic).
+                let triad_note = match &coil_triad_on_rim {
+                    Some(dists) => format!(
+                        " TRIAD-RIM [{}]",
+                        dists
+                            .iter()
+                            .map(|(v, d, c)| format!("v{}={:.4}/t{}", v, d, c))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                    None => String::new(),
+                };
                 // POLYLINE / RIM-GAP: printed from the cascade-computed
                 // value (same far-loop rule the exemption uses: index
                 // distance >= n/4, wrap neighbours and the closing
                 // duplicate excluded).
                 println!(
-                    "    WITNESS brep#{} {} real-pair class={} tris=({:?},{:?}) faces=({},{}) types=({},{}) h=({:.4},{:.4}) tol={:.4}: {}{}{}",
+                    "    WITNESS brep#{} {} real-pair class={} tris=({:?},{:?}) faces=({},{}) types=({},{}) h=({:.4},{:.4}) tol={:.4}: {}{}{}{}",
                     inst.brep_id,
                     inst.name,
                     class,
@@ -1043,7 +1172,8 @@ fn main() {
                     eff_tol.unwrap_or(0.0),
                     wit.join(" | "),
                     star_note,
-                    poly_note
+                    poly_note,
+                    triad_note
                 );
             }
             println!(

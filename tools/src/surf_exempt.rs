@@ -655,6 +655,26 @@ pub struct CoilWitness {
     /// (b) the owning face's rim polyline far-loop min distance
     /// (world space; None if the face has no usable polyline)
     pub rim_far: Option<f64>,
+    /// (c) s132 RIM-COLLAPSE: the triad contains an ORPHAN vertex —
+    /// a vertex with ≤ 1 incident triangle (no healthy mesh has one:
+    /// even boundary verts carry a strip of ≥ 2). The s131-п.3
+    /// forensics: the #10220 f(28,28) pair is MERGE-ASSEMBLED from the
+    /// neighbor turn's emission tris (v321/v322/v410 weld onto
+    /// survivors v117/v72/v92, shifts 0.0068–0.0118 < merge_tol) and
+    /// the repair cascade then DISMANTLES the duplicate zone — the
+    /// census triad carries a valence-1 vertex (v2340: exactly 1
+    /// incident triangle — a dangling flap). Together with a firing
+    /// rim-gap (the coil physically returns within eff_tol) this
+    /// witnesses the pair as a post-repair REMNANT of the collapse,
+    /// not emission geometry; the thick apex (0.0847) is the
+    /// weld-displacement artifact. MEASURED separation (s132): the
+    /// REAL #27977 f(65,65) pair — rim-gap fires too — has triad
+    /// valences {16,5,9,4}: NO orphan → stays REAL (the negative
+    /// control); f(7,7): rim apart → stays REAL. The original s131
+    /// note's "all 4 triad verts on the rim" criterion is DISPROVEN
+    /// by measurement (the f28 triad sits 0.024–0.050 off the rim,
+    /// in the collapse-zone INTERIOR).
+    pub triad_orphan: bool,
 }
 
 /// Evaluate the coil-turn-weld exemption. `h0`/`h1` are the apex
@@ -670,8 +690,22 @@ pub fn coil_turn_weld(
     surface: Option<&Surface>,
     w: Option<&CoilWitness>,
 ) -> (bool, String) {
-    // guard 1: thin near-miss by the ruler
-    if h0.max(h1) >= 2.0 * eff_tol {
+    // guard 1: thin near-miss by the ruler — OR (s132) the
+    // RIM-COLLAPSE class: a thick apex that is a WELD-DISPLACEMENT
+    // artifact of the merge-assembled neighbor-turn triangles
+    // (s131-п.3 #10220 f(28,28): h.max=0.0847 vs 2tol=0.04, apex =
+    // the 0.0068–0.0118 weld shifts of the collapsing coil zone).
+    // Exempt only when BOTH halves of the collapse witness fire:
+    // the rim-gap (the coil physically returns within eff_tol at a
+    // far loop position) AND the triad contains an orphan vertex
+    // (≤ 1 incident triangle — the repair cascade dismantled the
+    // duplicate zone; the pair is a post-repair remnant).
+    // Everything else keeps the s121 not-thin rejection verbatim.
+    let thick = h0.max(h1) >= 2.0 * eff_tol;
+    let collapse = w.is_some_and(|w| {
+        w.triad_orphan && matches!(w.rim_far, Some(g) if g < eff_tol)
+    });
+    if thick && !collapse {
         return (
             false,
             format!("not-thin h={:.4}/{:.4} vs 2tol={:.4}", h0, h1, 2.0 * eff_tol),
@@ -700,7 +734,20 @@ pub fn coil_turn_weld(
     }
     match w.rim_far {
         Some(gap) if gap < eff_tol => {
-            (true, format!(" rim-gap {:.5} < tol {:.4}", gap, eff_tol))
+            if thick {
+                (
+                    true,
+                    format!(
+                        " rim-collapse {:.5} < tol {:.4}, orphan apex \
+                         (thick h={:.4} = weld-displacement remnant)",
+                        gap,
+                        eff_tol,
+                        h0.max(h1)
+                    ),
+                )
+            } else {
+                (true, format!(" rim-gap {:.5} < tol {:.4}", gap, eff_tol))
+            }
         }
         Some(gap) => (
             false,
@@ -997,11 +1044,16 @@ mod coil_turn_weld_tests {
     }
 
     fn witness(star: bool, rim: Option<f64>) -> CoilWitness {
+        witness_full(star, rim, false)
+    }
+
+    fn witness_full(star: bool, rim: Option<f64>, triad_orphan: bool) -> CoilWitness {
         CoilWitness {
             star,
             star_edge: (594, 595),
             star_faces: (11, 13),
             rim_far: rim,
+            triad_orphan,
         }
     }
 
@@ -1040,6 +1092,79 @@ mod coil_turn_weld_tests {
             coil_turn_weld(0.0230, 0.0010, 0.0200, Some(&s), Some(&witness(false, Some(0.039))));
         assert!(!ok, "must reject: {}", why);
         assert!(why.contains("rim-gap"), "reason: {}", why);
+    }
+
+    /// s132 RIM-COLLAPSE: the #10220 f(28,28) pair — thick apex
+    /// (0.0847 >= 2tol 0.04, the s131-п.3 weld-displacement artifact)
+    /// but merge-assembled in the coil-collapse zone: the rim-gap
+    /// fires (0.0111 < 0.02) AND the triad carries an orphan vertex
+    /// (v2340: 1 incident triangle — the repair cascade dismantled
+    /// the duplicate zone) → exempt with the collapse reason.
+    #[test]
+    fn accepts_rim_collapse_thick_apex() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(
+            0.0124,
+            0.0847,
+            0.0200,
+            Some(&s),
+            Some(&witness_full(false, Some(0.0111), true)),
+        );
+        assert!(ok, "must accept the collapse witness: {}", why);
+        assert!(why.contains("rim-collapse"), "reason: {}", why);
+        assert!(why.contains("remnant"), "reason: {}", why);
+    }
+
+    /// s132 negative control (the MEASURED #27977 f(65,65) shape):
+    /// thick pair, rim-gap fires, triad valences {16,5,9,4} — NO
+    /// orphan vertex — the s121 not-thin rejection stands verbatim
+    /// (the negative control that keeps Spit REAL at 2).
+    #[test]
+    fn rejects_thick_apex_no_orphan() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(
+            0.1667,
+            0.1732,
+            0.0167,
+            Some(&s),
+            Some(&witness(false, Some(0.0101))),
+        );
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("not-thin"), "reason: {}", why);
+    }
+
+    /// s132 negative control: thick apex, orphan vertex present, but
+    /// the rim stays apart (no collapse zone) — not-thin stands
+    /// (the #27977 f(7,7) shape: far=0.0448 > tol).
+    #[test]
+    fn rejects_thick_apex_rim_apart() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(
+            0.1643,
+            0.1554,
+            0.0167,
+            Some(&s),
+            Some(&witness_full(false, Some(0.0448), true)),
+        );
+        assert!(!ok, "must reject: {}", why);
+        assert!(why.contains("not-thin"), "reason: {}", why);
+    }
+
+    /// s132: a THIN pair with an orphan triad vertex still takes the
+    /// classic rim-gap reason (the collapse note is thick-only).
+    #[test]
+    fn thin_pair_keeps_rim_gap_reason() {
+        let s = ruled_nurbs();
+        let (ok, why) = coil_turn_weld(
+            0.0265,
+            0.0000,
+            0.0179,
+            Some(&s),
+            Some(&witness_full(false, Some(0.0135), true)),
+        );
+        assert!(ok, "should accept: {}", why);
+        assert!(why.contains("rim-gap"), "reason: {}", why);
+        assert!(!why.contains("rim-collapse"), "reason: {}", why);
     }
 
     /// A FAT pair (default-mode #31359 f13 h=0.06/0.27) — the fold is

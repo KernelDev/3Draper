@@ -13,27 +13,27 @@ STEP file parsed: 62645 entities
    2                  GEAR (BREP#16033)       2734        502        262     180.00        0        1        0        0        0        0           45
       outlier: edge(445,540) angle=180.00° faces=[20,20] SAME-FACE [sub-tol weld-noise] midpoint=(0.669,0.019,-0.520)  tris=[445,540,536]/[445,540,537]
       outlier: edge(528,529) angle=169.47° faces=[18,384] cross-face midpoint=(-0.583,-0.331,-0.520)  tris=[15,529,528]/[1147,529,528]
-      outlier: edge(500,501) angle=169.20° faces=[18,246] cross-face midpoint=(0.659,-0.121,-0.520)  tris=[15,501,500]/[859,501,500]
       outlier: edge(604,605) angle=169.20° faces=[20,157] cross-face midpoint=(-0.659,0.121,-0.520)  tris=[46,605,604]/[784,605,604]
-      outlier: edge(572,604) angle=169.12° faces=[20,157] cross-face midpoint=(-0.662,0.104,-0.520)  tris=[46,604,572]/[784,604,572]
+      outlier: edge(500,501) angle=169.20° faces=[18,246] cross-face midpoint=(0.659,-0.121,-0.520)  tris=[15,501,500]/[859,501,500]
+      outlier: edge(484,500) angle=169.12° faces=[18,246] cross-face midpoint=(0.662,-0.104,-0.520)  tris=[15,500,484]/[859,500,484]
    3          SHAFT_SLEEVE (BREP#32629)       5186        708        219     180.00        0        6        0        0        0        0          138
-      outlier: edge(404,406) angle=180.00° faces=[40,40] SAME-FACE [sub-tol weld-noise] midpoint=(-0.660,0.004,-1.545)  tris=[404,406,407]/[404,406,405]
-      outlier: edge(484,485) angle=180.00° faces=[41,386] cross-face [sub-tol weld-noise] midpoint=(-0.516,0.412,-1.545)  tris=[484,475,485]/[485,476,484]
-      outlier: edge(405,406) angle=180.00° faces=[40,155] cross-face [sub-tol weld-noise] midpoint=(-0.660,-0.008,-1.545)  tris=[404,406,405]/[405,406,407]
-      outlier: edge(404,407) angle=180.00° faces=[40,40] SAME-FACE [sub-tol weld-noise] midpoint=(-0.660,-0.008,-1.546)  tris=[403,407,404]/[404,406,407]
       outlier: edge(475,485) angle=180.00° faces=[41,386] cross-face [sub-tol weld-noise] midpoint=(-0.506,0.424,-1.545)  tris=[484,475,485]/[485,475,476]
+      outlier: edge(404,407) angle=180.00° faces=[40,40] SAME-FACE [sub-tol weld-noise] midpoint=(-0.660,-0.008,-1.546)  tris=[403,407,404]/[404,406,407]
+      outlier: edge(405,406) angle=180.00° faces=[40,155] cross-face [sub-tol weld-noise] midpoint=(-0.660,-0.008,-1.545)  tris=[404,406,405]/[405,406,407]
+      outlier: edge(484,485) angle=180.00° faces=[41,386] cross-face [sub-tol weld-noise] midpoint=(-0.516,0.412,-1.545)  tris=[484,475,485]/[485,476,484]
+      outlier: edge(404,406) angle=180.00° faces=[40,40] SAME-FACE [sub-tol weld-noise] midpoint=(-0.660,0.004,-1.545)  tris=[404,406,407]/[404,406,405]
    4               HOUSING (BREP#47598)      72015       9936       4726     180.00        0      402        0        0        0        0         1525
-      outlier: edge(4789,4790) angle=180.00° faces=[32,198] cross-face [sub-tol weld-noise] midpoint=(0.000,-0.490,4.529)  tris=[4789,4790,4306]/[4790,4788,4789]
-      outlier: edge(4720,4741) angle=180.00° faces=[32,32] SAME-FACE [sub-tol weld-noise] midpoint=(0.000,0.335,4.655)  tris=[4720,4741,4740]/[4720,4741,4742]
-      outlier: edge(251,572) angle=180.00° faces=[3,3] SAME-FACE [sub-tol weld-noise] midpoint=(1.503,6.000,2.730)  tris=[572,251,573]/[571,572,251]
-      outlier: edge(251,255) angle=180.00° faces=[3,3] SAME-FACE [sub-tol weld-noise] midpoint=(1.514,6.000,2.762)  tris=[251,253,255]/[251,259,255]
-      outlier: edge(4061,4062) angle=180.00° faces=[32,86] cross-face [sub-tol weld-noise] midpoint=(0.000,-1.224,-0.108)  tris=[4061,4062,4077]/[4062,4060,4061]
+      outlier: edge(21995,22035) angle=180.00° faces=[238,238] SAME-FACE [sub-tol weld-noise] midpoint=(1.383,5.565,2.350)  tris=[21995,22035,22034]/[21995,22035,22036]
+      outlier: edge(4007,4011) angle=180.00° faces=[31,31] SAME-FACE [sub-tol weld-noise] midpoint=(0.000,2.400,-0.335)  tris=[4007,4009,4011]/[4003,4011,4007]
+      outlier: edge(4837,4879) angle=180.00° faces=[32,32] SAME-FACE [sub-tol weld-noise] midpoint=(0.000,-0.965,4.137)  tris=[4837,4879,4878]/[4837,4879,4880]
+      outlier: edge(5035,5036) angle=180.00° faces=[32,176] cross-face [sub-tol weld-noise] midpoint=(0.000,-1.153,-0.105)  tris=[5034,5035,5036]/[5030,5036,5035]
+      outlier: edge(4834,4835) angle=180.00° faces=[32,200] cross-face [sub-tol weld-noise] midpoint=(0.000,-0.827,4.300)  tris=[4834,4835,4245]/[4836,4834,4835]
    5        HOUSING_MIRROR (BREP#62542)      69342       9748       4642     180.00        0      521        0        0        0        0         1467
-      outlier: edge(1053,1054) angle=180.00° faces=[7,226] cross-face [sub-tol weld-noise] midpoint=(0.000,1.248,-0.340)  tris=[1053,1055,1054]/[1058,1053,1054]
-      outlier: edge(16470,16478) angle=180.00° faces=[176,176] SAME-FACE [sub-tol weld-noise] midpoint=(-0.459,-0.958,1.327)  tris=[16470,16478,16474]/[16477,16478,16470]
-      outlier: edge(2231,2232) angle=180.00° faces=[8,198] cross-face [sub-tol weld-noise] midpoint=(0.000,-1.269,3.566)  tris=[2231,2248,2232]/[2229,2232,2231]
-      outlier: edge(2346,2348) angle=180.00° faces=[8,8] SAME-FACE [sub-tol weld-noise] midpoint=(0.000,-1.117,-0.179)  tris=[2346,2348,2347]/[2346,2348,2350]
-      outlier: edge(1041,1343) angle=180.00° faces=[7,7] SAME-FACE [sub-tol weld-noise] midpoint=(0.000,1.196,-0.439)  tris=[1343,1041,1344]/[1342,1343,1041]
+      outlier: edge(1330,1331) angle=180.00° faces=[7,93] cross-face [sub-tol weld-noise] midpoint=(0.000,1.407,-0.340)  tris=[1321,1331,1330]/[1330,1332,1331]
+      outlier: edge(1165,1167) angle=180.00° faces=[7,7] SAME-FACE [sub-tol weld-noise] midpoint=(-0.000,5.261,1.415)  tris=[1165,1167,1166]/[1165,1167,1169]
+      outlier: edge(16807,16811) angle=180.00° faces=[190,190] SAME-FACE [sub-tol weld-noise] midpoint=(-0.437,-0.748,1.312)  tris=[16811,16807,16806]/[16812,16807,16811]
+      outlier: edge(2190,2191) angle=180.00° faces=[8,200] cross-face [sub-tol weld-noise] midpoint=(0.000,-1.112,3.900)  tris=[2190,2192,2191]/[2183,2191,2190]
+      outlier: edge(2141,2142) angle=180.00° faces=[8,202] cross-face [sub-tol weld-noise] midpoint=(0.000,-0.859,4.259)  tris=[2141,2148,2142]/[2137,2142,2141]
 -------------------------------------------------------------------------------------------------------------------------------------------
 
 Summary:

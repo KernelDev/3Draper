@@ -5,17 +5,17 @@ STEP file parsed: 2950 entities
    #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
 ----------------------------------------------------------------------------------------------------------------------------------------------------
    1             COMP-13920 (BREP#1889)       7067        605        115     180.00        0       10        0        0        0        0           14
-      outlier: edge(59,1150) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(9.526,0.150,20.960)  tris=[59,1151,1150]/[1203,1150,59]
-      outlier: edge(185,615) angle=180.00° faces=[12,12] SAME-FACE [sub-tol weld-noise] midpoint=(6.045,0.150,14.705)  tris=[615,907,185]/[615,912,185]
-      outlier: edge(44,393) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.474,0.150,20.960)  tris=[393,392,44]/[393,1438,44]
       outlier: edge(140,833) angle=180.00° faces=[10,10] SAME-FACE [sub-tol weld-noise] midpoint=(11.895,0.114,14.667)  tris=[140,833,834]/[140,833,832]
-      outlier: edge(140,832) angle=180.00° faces=[10,10] SAME-FACE [sub-tol weld-noise] midpoint=(11.879,0.106,14.667)  tris=[140,833,832]/[140,831,832]
+      outlier: edge(44,393) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.474,0.150,20.960)  tris=[393,392,44]/[393,1438,44]
+      outlier: edge(44,323) angle=180.00° faces=[29,29] SAME-FACE [sub-tol weld-noise] midpoint=(8.449,0.102,20.917)  tris=[323,44,43]/[324,323,44]
+      outlier: edge(185,615) angle=180.00° faces=[12,12] SAME-FACE [sub-tol weld-noise] midpoint=(6.045,0.150,14.705)  tris=[615,907,185]/[615,912,185]
+      outlier: edge(59,1044) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(9.551,0.102,20.917)  tris=[59,1044,1086]/[59,1044,60]
    2        COLLECTOR-13920 (BREP#2860)       9511       2073        918     180.00        0      111        0        0        0        0          178
-      outlier: edge(2780,2928) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.002,12.340,15.640)  tris=[2928,2780,2929]/[2928,2780,2802]
+      outlier: edge(2957,2980) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.794,12.340,16.080)  tris=[2957,2980,2958]/[2957,2980,2979]
       outlier: edge(2819,2938) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.420,12.340,15.184)  tris=[2938,2819,2939]/[2938,2819,2826]
-      outlier: edge(2826,2937) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.355,12.340,15.199)  tris=[2937,2826,2938]/[2937,2826,2837]
-      outlier: edge(2833,2935) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.234,12.340,15.254)  tris=[2935,2833,2936]/[2935,2833,2831]
-      outlier: edge(2785,2929) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.012,12.340,15.574)  tris=[2929,2785,2930]/[2929,2785,2780]
+      outlier: edge(2960,2983) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.613,12.340,16.162)  tris=[2960,2983,2961]/[2960,2983,2982]
+      outlier: edge(2802,2927) angle=180.00° faces=[21,21] SAME-FACE [sub-tol weld-noise] midpoint=(14.002,12.340,15.707)  tris=[2927,2802,2928]/[2927,2802,2760]
+      outlier: edge(2951,2974) angle=180.00° faces=[22,22] SAME-FACE [sub-tol weld-noise] midpoint=(14.994,12.340,15.746)  tris=[2951,2974,2952]/[2951,2974,2973]
 -------------------------------------------------------------------------------------------------------------------------------------------
 
 Summary:

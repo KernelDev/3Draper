@@ -429,6 +429,11 @@ fn main() {
                                         star_edge: star.map(|(e, _)| e).unwrap_or((0, 0)),
                                         star_faces: star.map(|(_, f)| f).unwrap_or((0, 0)),
                                         rim_far,
+                                        // s132: the orphan-vertex input is a
+                                        // census-grade witness (fold_face_probe
+                                        // builds the vertex-valence map);
+                                        // angle_check keeps the s121 semantics.
+                                        triad_orphan: false,
                                     };
                                     let (cc, why) = surf_exempt::coil_turn_weld(
                                         h0,
