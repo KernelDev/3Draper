@@ -931,6 +931,187 @@ pub fn thin_face(
     )
 }
 
+/// s134 SEAM-RIM MICROFOLD witness facts (all three required).
+pub struct SeamRimWitness {
+    /// (W1) the MAX triad-vertex distance to the owner face's rim
+    /// polyline (world space; None if the face has no usable rim
+    /// polyline — treated as witness failure).
+    pub triad_on_rim_max: Option<f64>,
+    /// (W2) the pair carries a CROSS-FACE edge: one of its six edges
+    /// is a merged-mesh interior edge shared by TWO DIFFERENT faces
+    /// (the weld seam the fold straddles).
+    pub cross_face_edge: bool,
+    /// (W3) the pair's shared-edge length (the fold axis).
+    pub shared_edge_len: f64,
+}
+
+/// Evaluate the SEAM-RIM MICROFOLD exemption. `h0`/`h1` are the pair's
+/// apex heights over the shared edge; `eff_tol` is the BREP effective
+/// tolerance.
+///
+/// The class (s134 forensics, #27977 f(7,7) needle + winding pair): a
+/// same-face micro-fold whose EVERY triad vertex sits ON the owner
+/// face's rim (within eff_tol) and whose fold axis straddles a
+/// merged-mesh SEAM edge (cross-face) as a short needle edge. The rim
+/// curve discretization at a torus extremum line folds onto itself at
+/// the seam — the pair is woven entirely from rim nodes the emission
+/// never moves (the s133 measured invariance: the pairs survived the
+/// whole family's structural-emission migration bit-identically in
+/// geometry), so no emission change can remove it; the fold is the
+/// rim discretization's, not the triangulation's.
+///
+/// Negative controls (measured, s134): the #31356 f(3,3) REAL pair's
+/// triad sits 0.0235–0.0721 OFF the rim (tol 0.0194) — interior-woven,
+/// guard 2 holds it REAL. The #27977 f(65,65)/f(6,6) macro folds
+/// (0.167/0.169 vs 4×tol=0.0668) fail guard 1, and their pair edges
+/// are all same-face (the cross-face contact is a STAR edge outside
+/// the pair) — guard 3. A macro lattice fold's shared edge is a chord
+/// units long — guard 4.
+pub fn seam_rim_microfold(
+    h0: f64,
+    h1: f64,
+    eff_tol: f64,
+    w: Option<&SeamRimWitness>,
+) -> (bool, String) {
+    // guard 1: micro pair — the thicker apex under 4×eff_tol.
+    // Measured family: #27977 f(7,7) needle h0=0.0179 = 1.07×tol,
+    // winding h=0.0515 = 3.08×tol; the rejected macros sit at 9.2×/
+    // 10.1× (f(65,65)/f(6,6)).
+    if h0.max(h1) >= 4.0 * eff_tol {
+        return (
+            false,
+            format!(
+                "not-micro h={:.4}/{:.4} vs 4tol={:.4}",
+                h0,
+                h1,
+                4.0 * eff_tol
+            ),
+        );
+    }
+    let Some(w) = w else {
+        return (false, "no-witness".to_string());
+    };
+    // guard 2: the WHOLE triad on the owner's rim — every vertex
+    // within 1.5×eff_tol of the rim polyline (the pair is rim-woven;
+    // the emission's interior lattice never enters it; a rim node
+    // may sit up to ~1×tol off the ideal curve after weld shifts —
+    // measured: the winding pair's v1873 at 0.0170 = 1.02×tol).
+    // Negative control: #31356 f(3,3) triad at 0.0235–0.0721 =
+    // 3.7×tol — interior-woven, held REAL with a 2.5× margin.
+    let Some(dmax) = w.triad_on_rim_max else {
+        return (false, "no-rim-poly".to_string());
+    };
+    if dmax >= 1.5 * eff_tol {
+        return (
+            false,
+            format!(
+                "triad-off-rim d={:.4} vs 1.5tol={:.4}",
+                dmax,
+                1.5 * eff_tol
+            ),
+        );
+    }
+    // guard 3: the pair carries a cross-face (seam) edge — the fold
+    // straddles the weld zone between two faces.
+    if !w.cross_face_edge {
+        return (false, "no-cross-face-edge".to_string());
+    }
+    // guard 4: needle fold axis — the shared edge under 2.5×eff_tol
+    // (measured: needle 0.0225 = 1.35×tol, winding 0.0354 = 2.12×tol).
+    if !(w.shared_edge_len < 2.5 * eff_tol) {
+        return (
+            false,
+            format!(
+                "shared-edge {:.4} vs 2.5tol={:.4}",
+                w.shared_edge_len,
+                2.5 * eff_tol
+            ),
+        );
+    }
+    (
+        true,
+        format!(
+            " seam-rim d={:.4}<1.5tol edge={:.4}<2.5tol cross-face",
+            dmax, w.shared_edge_len
+        ),
+    )
+}
+
+#[cfg(test)]
+mod seam_rim_tests {
+    use super::*;
+
+    fn witness(dmax: f64, cross: bool, edge: f64) -> SeamRimWitness {
+        SeamRimWitness {
+            triad_on_rim_max: Some(dmax),
+            cross_face_edge: cross,
+            shared_edge_len: edge,
+        }
+    }
+
+    /// The #27977 f(7,7) micro-needle (measured s134): h=0.0179/0.0004,
+    /// tol=0.0167, triad all on rim (dmax=0.0000), cross-face edge
+    /// e(1866,1845) f=(7,27), shared edge 0.0225 — exempt.
+    #[test]
+    fn accepts_27977_needle() {
+        let w = witness(0.0000, true, 0.0225);
+        let (ok, why) = seam_rim_microfold(0.0179, 0.0004, 0.0167, Some(&w));
+        assert!(ok, "why={why}");
+        assert!(why.contains("seam-rim"));
+    }
+
+    /// The #27977 f(7,7) winding pair (measured s134): h=0.0515/0.0158
+    /// = 3.08×tol, triad on rim (max 0.0170), cross-face edge
+    /// e(1872,1895) f=(7,27), shared edge 0.0354 = 2.12×tol — exempt.
+    #[test]
+    fn accepts_27977_winding() {
+        let w = witness(0.0170, true, 0.0354);
+        let (ok, why) = seam_rim_microfold(0.0515, 0.0158, 0.0167, Some(&w));
+        assert!(ok, "why={why}");
+    }
+
+    /// Negative control #31356 f(3,3) (measured): interior-woven triad
+    /// (rim distances 0.0235–0.0721 = 3.7×tol vs tol 0.0194) — stays
+    /// REAL.
+    #[test]
+    fn rejects_31356_interior_triad() {
+        let w = witness(0.0721, true, 0.02);
+        let (ok, why) = seam_rim_microfold(0.0194, 0.0011, 0.0194, Some(&w));
+        assert!(!ok);
+        assert!(why.contains("triad-off-rim"));
+    }
+
+    /// Negative control — the killed #27977 macro folds: h at 9–10×tol
+    /// — guard 1 holds them REAL even if every other half fired.
+    #[test]
+    fn rejects_macro_height() {
+        let w = witness(0.0000, true, 0.03);
+        let (ok, why) = seam_rim_microfold(0.1667, 0.1732, 0.0167, Some(&w));
+        assert!(!ok);
+        assert!(why.contains("not-micro"));
+    }
+
+    /// Negative control — a rim-woven micro pair whose fold axis is a
+    /// long chord (a lattice fold, not a seam needle): guard 4.
+    #[test]
+    fn rejects_long_shared_edge() {
+        let w = witness(0.0001, true, 0.2500);
+        let (ok, why) = seam_rim_microfold(0.02, 0.01, 0.0167, Some(&w));
+        assert!(!ok);
+        assert!(why.contains("shared-edge"));
+    }
+
+    /// Negative control — a rim-woven micro pair with NO cross-face
+    /// edge (an interior fold of one face's own lattice): guard 3.
+    #[test]
+    fn rejects_same_face_only() {
+        let w = witness(0.0001, false, 0.02);
+        let (ok, why) = seam_rim_microfold(0.02, 0.01, 0.0167, Some(&w));
+        assert!(!ok);
+        assert!(why.contains("no-cross-face-edge"));
+    }
+}
+
 #[cfg(test)]
 mod junction_sliver_tests {
     use super::*;

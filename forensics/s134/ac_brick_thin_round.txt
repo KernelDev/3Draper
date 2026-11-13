@@ -1,0 +1,28 @@
+Loading STEP file: test/brick_thin_round.stp
+STEP file parsed: 1547 entities
+
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   #                               Name   Interior   Sharp>60 Extreme>90  MaxAngle°   Exempt   SubTol KnifeFin CoilTurn  JunctSl ThinFace     Outliers
+----------------------------------------------------------------------------------------------------------------------------------------------------
+   1                          BREP#1498       3820        994        151      90.18        0        0        0        0        0        0            0
+      outlier: edge(416,424) angle=90.18° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.008)  tris=[416,424,252]/[416,424,759]
+      outlier: edge(397,404) angle=90.17° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.008)  tris=[397,312,404]/[749,404,397]
+      outlier: edge(375,383) angle=90.16° faces=[6,9] cross-face midpoint=(-0.008,0.003,-0.010)  tris=[306,375,383]/[709,375,383]
+      outlier: edge(357,365) angle=90.15° faces=[6,9] cross-face midpoint=(-0.010,0.003,-0.007)  tris=[253,357,365]/[357,365,759]
+      outlier: edge(342,347) angle=90.14° faces=[6,9] cross-face midpoint=(-0.005,0.003,-0.009)  tris=[342,347,297]/[647,342,347]
+-------------------------------------------------------------------------------------------------------------------------------------------
+
+Summary:
+  Total BREPs:            1
+  Interior edges total:   3820
+  Sharp angles (>60°):    994 (26.02%)
+  Extreme angles (>90°):  151 (3.95%)
+  Statistical outliers:   0
+  Surf-exempt (>170°):    0 (tangency/shallow junctions — not bugs)
+  Sub-tol weld-noise:     0 (>170° with both apexes under the BREP merge/weld tolerance — session-74, not counted as debt)
+  Knife-fin pinch:        0 (>170° thin-wall pinch fins — two offset copies across a resolvable wall gap, session-94, not counted as debt)
+  Coil-turn weld:         0 (>170° same-face thin folds on coiled ribbons — welded turns / band narrower than the merge tolerance, unrepresentable, session-121, not counted as debt)
+  Junction-sliver:        0 (>170° cross-face thin coplanar duplicate coverage at a multi-face hub (runout/junction) — weld-assembled within the merge tolerance, unrepresentable, session-123, not counted as debt)
+  Thin-face:              0 (>170° same-face pairs on inherently thin faces (patch mean width < 4×eff_tol, pair max h < 3×eff_tol) — resolution-level geometry, any triangulation of a thin face is a thin-triangle chain, session-124, not counted as debt)
+
+✓ PASS: No truly extreme angles (>170°) beyond surface-justified exemptions

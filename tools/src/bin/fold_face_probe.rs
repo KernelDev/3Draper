@@ -284,6 +284,7 @@ fn main() {
         let mut brep_coil = 0usize;
         let mut brep_junction = 0usize;
         let mut brep_thinface = 0usize;
+        let mut brep_seamrim = 0usize;
         // session-121: per-(instance, face) cache of the rim polyline
         // far-loop min distance — the RIM-GAP witness input.
         let mut rim_far_cache: HashMap<u64, Option<f64>> = HashMap::new();
@@ -1084,6 +1085,149 @@ fn main() {
                 brep_thinface += 1;
             }
             let thinface_str = if thinface { " THIN-FACE" } else { "" };
+            // s134: SEAM-RIM MICROFOLD exemption — a same-face micro
+            // fold whose whole triad sits ON the owner's rim and whose
+            // needle fold axis straddles a merged-mesh SEAM (cross-
+            // face) edge. The #27977 f(7,7) needle + winding pair (the
+            // s133-measured emission invariants: both survived the
+            // family's structural-emission migration with identical
+            // geometry — every triad vertex is a rim node the emission
+            // never moves; the fold lives in the rim discretization at
+            // the torus extremum seam). Kill-switch:
+            // DRAPPER_SEAM_RIM_EXEMPT=0. Not debt.
+            let seamrim_candidate = !tangent_exempt
+                && !subtol
+                && !knife
+                && !coil
+                && !junction
+                && !thinface
+                && fid0 == fid1
+                && std::env::var("DRAPPER_SEAM_RIM_EXEMPT").as_deref() != Ok("0");
+            let (seamrim, seamrim_why) = if seamrim_candidate {
+                // (W2) cross-face edge among the pair's six edges
+                // (reuse the witness-dump walk: interior edges with
+                // two different owner faces).
+                let mut cross_face = false;
+                for ti in [t0, t1] {
+                    let tri = &mesh.triangles[ti];
+                    for (v0, v1) in
+                        [(tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])]
+                    {
+                        let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                        let Some(et) = edge_to_tris.get(&key) else {
+                            continue;
+                        };
+                        if et.len() != 2 {
+                            continue;
+                        }
+                        let fa = fids
+                            .and_then(|ids| ids.get(et[0].0).copied())
+                            .unwrap_or(0);
+                        let fb = fids
+                            .and_then(|ids| ids.get(et[1].0).copied())
+                            .unwrap_or(0);
+                        if fa != fb {
+                            cross_face = true;
+                        }
+                    }
+                }
+                // (W3) the fold axis length (the pair's shared edge).
+                let shared_len = {
+                    let p = &mesh.vertices[edge.0 as usize];
+                    let q = &mesh.vertices[edge.1 as usize];
+                    ((p.x - q.x).powi(2)
+                        + (p.y - q.y).powi(2)
+                        + (p.z - q.z).powi(2))
+                    .sqrt()
+                };
+                // (W1) max triad-on-rim distance (computed for every
+                // same-face candidate in the coil block above).
+                let triad_max = coil_triad_on_rim.as_ref().map(|dists| {
+                    dists
+                        .iter()
+                        .map(|&(_, d, _)| d)
+                        .fold(f64::NEG_INFINITY, f64::max)
+                });
+                let w = surf_exempt::SeamRimWitness {
+                    triad_on_rim_max: triad_max,
+                    cross_face_edge: cross_face,
+                    shared_edge_len: shared_len,
+                };
+                surf_exempt::seam_rim_microfold(
+                    h0,
+                    h1,
+                    eff_tol.unwrap_or(0.0),
+                    Some(&w),
+                )
+            } else {
+                (false, String::new())
+            };
+            // s134 recon (read-only, env-gated): the seam-rim witness
+            // facts BEFORE the verdict — which guard rejects a
+            // candidate (the s121 lesson-1 method).
+            if seamrim_candidate
+                && std::env::var("DRAPPER_DUMP_SEAMRIM").is_ok()
+            {
+                println!(
+                    "    SEAMRIM brep#{} {} faces=({},{}) class={} ang={:.2} h=({:.4},{:.4}) tol={:.4} triad_max={:?} cross_face={} shared_edge={:.4} -> exempt={} why={}",
+                    inst.brep_id,
+                    inst.name,
+                    fid0,
+                    fid1,
+                    class,
+                    ang,
+                    h0,
+                    h1,
+                    eff_tol.unwrap_or(0.0),
+                    coil_triad_on_rim
+                        .as_ref()
+                        .map(|d| d
+                            .iter()
+                            .map(|&(_, dd, _)| dd)
+                            .fold(f64::NEG_INFINITY, f64::max)),
+                    {
+                        let mut cf = false;
+                        for ti in [t0, t1] {
+                            let tri = &mesh.triangles[ti];
+                            for (v0, v1) in [
+                                (tri[0], tri[1]),
+                                (tri[1], tri[2]),
+                                (tri[2], tri[0]),
+                            ] {
+                                let key = if v0 < v1 { (v0, v1) } else { (v1, v0) };
+                                if let Some(et) = edge_to_tris.get(&key) {
+                                    if et.len() == 2 {
+                                        let fa = fids
+                                            .and_then(|ids| ids.get(et[0].0).copied())
+                                            .unwrap_or(0);
+                                        let fb = fids
+                                            .and_then(|ids| ids.get(et[1].0).copied())
+                                            .unwrap_or(0);
+                                        if fa != fb {
+                                            cf = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        cf
+                    },
+                    {
+                        let p = &mesh.vertices[edge.0 as usize];
+                        let q = &mesh.vertices[edge.1 as usize];
+                        ((p.x - q.x).powi(2)
+                            + (p.y - q.y).powi(2)
+                            + (p.z - q.z).powi(2))
+                        .sqrt()
+                    },
+                    seamrim,
+                    seamrim_why
+                );
+            }
+            if seamrim {
+                brep_seamrim += 1;
+            }
+            let seamrim_str = if seamrim { " SEAM-RIM" } else { "" };
             // session-121 recon (read-only, env-gated): for each REAL
             // (non-exempt / non-subtol / non-knife / non-coil /
             // non-junction) pair, dump the triad's edges + the coil
@@ -1177,14 +1321,14 @@ fn main() {
                 );
             }
             println!(
-                "[{}{}{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{}{}{} mid=({:.2},{:.2},{:.2})",
+                "[{}{}{}{}{}{}{}]{} brep_idx={} {} BREP#{} ang={:.2} faces=({},{}) types=({},{}) step=({},{}) tris=({:?},{:?}) areas=({:.4},{:.4}) h=({:.4},{:.4}) {} {}{}{}{}{}{}{}{} mid=({:.2},{:.2},{:.2})",
                 class,
                 sliver_class,
                 subtol_str,
                 knife_str,
                 coil_str,
                 junction_str,
-                thinface_str,
+                format!("{}{}", thinface_str, seamrim_str),
                 exempt_str,
                 i,
                 inst.name,
@@ -1209,6 +1353,7 @@ fn main() {
                 if coil { &coil_why } else { "" },
                 if junction { &junction_why } else { "" },
                 if thinface { &thinface_why } else { "" },
+                if seamrim { &seamrim_why } else { "" },
                 params_note,
                 (a.x + b.x) / 2.0,
                 (a.y + b.y) / 2.0,
@@ -1288,7 +1433,7 @@ fn main() {
                 }
             }
             println!(
-                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} junction-sliver, {} thin-face, {} real){}",
+                "--- brep_idx={} {} BREP#{}: {} pairs >170° ({} tangent-exempt, {} sub-tol weld-noise, {} knife-fin pinch, {} coil-turn weld, {} junction-sliver, {} thin-face, {} seam-rim microfold, {} real){}",
                 i,
                 inst.name,
                 inst.brep_id,
@@ -1299,13 +1444,15 @@ fn main() {
                 brep_coil,
                 brep_junction,
                 brep_thinface,
+                brep_seamrim,
                 brep_pairs
                     - brep_exempt
                     - brep_subtol
                     - brep_knife
                     - brep_coil
                     - brep_junction
-                    - brep_thinface,
+                    - brep_thinface
+                    - brep_seamrim,
                 eff_tol
                     .map(|t| format!(" eff_tol={:.4}", t))
                     .unwrap_or_default()

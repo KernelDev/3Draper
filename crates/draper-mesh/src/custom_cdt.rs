@@ -1156,6 +1156,34 @@ fn notch_band_decompose(
             nreject!(format!("interior point {} on a chord", i));
         }
     }
+    // s134 diag: slab layout provenance — where the chords landed and
+    // how the interior split across slabs (the coarse-unwrap pass-1
+    // inputs differ from the refined pass-2 ones; zero behavior).
+    if dbg {
+        let vmid = 0.5 * (vmin + vmax);
+        let (ul, ur) = (
+            chain_u_at_v(all_2d, &l_right, vmid),
+            chain_u_at_v(all_2d, &r_left, vmid),
+        );
+        eprintln!(
+            "[s133-notch layout {}] cap={} land_l={} (u={:.4}) land_r={} (u={:.4}) p_c=(u={:.4},v={:.4}) p_b=(u={:.4},v={:.4}) ul_mid={:.4} ur_mid={:.4} ints L={}/M={}/R={}",
+            crate::parametric_domain::current_face_label(),
+            cap.len(),
+            land_l,
+            all_2d[cap[land_l]][0],
+            land_r,
+            all_2d[cap[land_r]][0],
+            all_2d[p_c][0],
+            all_2d[p_c][1],
+            all_2d[p_b][0],
+            all_2d[p_b][1],
+            ul,
+            ur,
+            int_l.len(),
+            int_m.len(),
+            int_r.len()
+        );
+    }
     // ── 7. sub-rings (CCW; chords shared by adjacent slabs) ────────
     let l_ring: Vec<usize> = cap[0..=land_l]
         .iter()
@@ -1286,6 +1314,28 @@ fn notch_band_decompose(
         ) {
             Some(t) => t,
             None => {
+                // s134 diag: dump the rejected slab input (ring + ints,
+                // 2D) for offline analysis of the coarse-unwrap pass-1
+                // rejects. Zero behavior impact.
+                if let Ok(dir) = std::env::var("DRAPPER_SLAB_DUMP") {
+                    use std::io::Write;
+                    let _ = std::fs::create_dir_all(&dir);
+                    let lbl = crate::parametric_domain::current_face_label();
+                    let path = format!(
+                        "{}/{}_slab{}_ring{}_int{}.txt",
+                        dir,
+                        lbl,
+                        name,
+                        ring_pts.len(),
+                        ints.len()
+                    );
+                    if let Ok(mut f) = std::fs::File::create(&path) {
+                        let _ = writeln!(f, "n_boundary {}", ring_pts.len());
+                        for p in sub_pts.iter() {
+                            let _ = writeln!(f, "p {} {}", p[0], p[1]);
+                        }
+                    }
+                }
                 if dbg {
                     eprintln!("[s133-notch] slab {} SUB-REJECT", name);
                 }
@@ -1486,11 +1536,19 @@ fn structured_lattice_triangulation_inner(
             return None;
         }};
     }
-    if n_boundary < 8 || n_interior < if sub_pass { 1 } else { 8 } {
+    if n_boundary < if sub_pass { 4 } else { 8 }
+        || n_interior < if sub_pass { 1 } else { 8 }
+    {
         // s133: sub-slab relaxation — a notch-decomposition slab is a
         // NARROW region (f6-M carries a single lattice column, 6
         // points over 3 rows); the top-level floor stays (a full face
         // with a handful of interior points is not this class).
+        // s134: the sub-slab ring floor drops 8→4 (the polygon
+        // minimum) — the pass-1 coarse-unwrap f65 valley M slab is a
+        // plain 6-point trapezoid (2 cap pts + the 4-pt valley floor)
+        // around a 7-pt single lattice column; its denser pass-2 twin
+        // (empty-M prism) accepted, and every guard below (rows,
+        // zipper, edge census, area, winding) still applies in full.
         lattice_reject!("tiny input");
     }
     // ── 1. interior row detection (v-const clusters) ───────────────
@@ -2129,14 +2187,22 @@ fn structured_lattice_triangulation_inner(
         if b.len() < 2
             && !(band_caps
                 && ((k == m_rows + 1 && b.len() == 1)
-                    || (flat_caps_on && k == 1 && b.len() == 1)
-                    // s133 sub-slab: a narrow notch slab's rows may
-                    // carry a SINGLE lattice point (the chords confined
-                    // to inter-column gaps leave one column inside) —
-                    // every strip's B degenerates to that point and the
-                    // dead-b fan (A walks, fanning to it) is the correct
-                    // strip coverage.
-                    || (sub_pass && b.len() == 1)))
+                    || (flat_caps_on && k == 1 && b.len() == 1)))
+            // s133 sub-slab: a narrow notch slab's rows may carry a
+            // SINGLE lattice point (the chords confined to inter-column
+            // gaps leave one column inside) — every strip's B
+            // degenerates to that point and the dead-b fan (A walks,
+            // fanning to it) is the correct strip coverage.
+            // s134: lifted OUT of the band_caps conjunction — a narrow
+            // slab is often a plain RECTANGLE (all H/V rim edges, no
+            // diagonals), which routes through the s83 4-corner split
+            // where band_caps = false; the exemption is a property of
+            // the SUB-SLAB (1-point rows), not of the split flavor.
+            // Measured: the pass-1 coarse-unwrap f6 M slab (17 rows ×
+            // 1 column, band_caps=false) rejected here while its
+            // denser pass-2 twin (2 columns) accepted — the only
+            // difference between the two emissions of the same face.
+            && !(sub_pass && b.len() == 1)
         {
             lattice_reject!(format!("upper row degenerate k={}", k));
         }
@@ -3744,6 +3810,14 @@ mod tests {
 mod s82_tests {
     use super::*;
 
+    /// s134: the family-switch tests mutate the process environment
+    /// (DRAPPER_TORUS_FAMILY_STRUCT / DRAPPER_FLAT_CAP_BAND) — cargo
+    /// test runs them on parallel threads, and a remove_var from one
+    /// test between another's set_var and its call flips the verdict
+    /// (measured: notch + valley + s134 all "must accept" flakies).
+    /// Every env-mutating test takes this lock for its whole body.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// s82 regression: the f26 (Nurbs 4x10 fillet) class — a thin band
     /// domain whose rim arcs are near-collinear point runs. The stale
     /// `tri` local in lawson_flip paired dead vertices with live
@@ -4605,6 +4679,7 @@ mod s82_tests {
 
         // DEFAULT: must reject (the wedge leaves cap points unused —
         // or any other guard; either way None = bit-exact legacy).
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DRAPPER_FLAT_CAP_BAND");
         let default = super::structural_lattice_rescue_legacy(&ring, &interior);
         assert!(
@@ -4725,6 +4800,7 @@ mod s82_tests {
 
         // DEFAULT: the 4-block ring rejects the 2-block split and the
         // notch class is family-gated → None = bit-exact legacy.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
         let default = super::structural_lattice_rescue_legacy(&ring, &interior);
         assert!(
@@ -4853,6 +4929,7 @@ mod s82_tests {
         }
         let total = ring.len() + interior.len();
 
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
         let default = super::structural_lattice_rescue_legacy(&ring, &interior);
         assert!(
@@ -4864,6 +4941,107 @@ mod s82_tests {
         std::env::set_var("DRAPPER_TORUS_FAMILY_STRUCT", "1");
         let tris = super::structural_lattice_rescue_legacy(&ring, &interior)
             .expect("s133 valley band: family switch must accept");
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+
+        let mut used = vec![false; total];
+        for t in tris.iter() {
+            for &v in t.iter() {
+                assert!((v as usize) < total, "vertex {} out of range", v);
+                used[v as usize] = true;
+            }
+        }
+        for i in 0..total {
+            assert!(used[i], "point {} unused", i);
+        }
+        assert_eq!(
+            tris.len(),
+            2 * interior.len() + ring.len() - 2,
+            "Euler T = 2I + R - 2"
+        );
+        use std::collections::HashMap;
+        let mut ecount: HashMap<(u32, u32), usize> = HashMap::new();
+        for t in tris.iter() {
+            for k in 0..3 {
+                let x = t[k];
+                let y = t[(k + 1) % 3];
+                if x != y {
+                    *ecount.entry((x.min(y), y.max(x))).or_default() += 1;
+                }
+            }
+        }
+        let n = ring.len();
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let key = (i.min(j) as u32, i.max(j) as u32);
+            let cnt = ecount.get(&key).copied().unwrap_or(0);
+            assert_eq!(cnt, 1, "rim edge ({},{}) count {}", i, j, cnt);
+        }
+    }
+
+    /// s134 COARSE NARROW VALLEY class (#27977 f65 pass-1): the
+    /// valley floor is a 2-point chain straddling ONE lattice column,
+    /// so the M slab is a plain 7-point TRAPEZOID (all H/V rim edges —
+    /// the s83 4-corner split, band_caps=false) around a single-column
+    /// 6-row lattice. Covers BOTH s134 relaxations: the sub-slab ring
+    /// floor 8→4 (the 7-pt ring) and the dead-b exemption lifted out
+    /// of the band_caps conjunction (1-point rows in a 4-corner slab
+    /// previously rejected "upper row degenerate k=1" — the measured
+    /// pass-1 f6-M/f65-M rejects behind the surviving REAL pairs).
+    #[test]
+    fn test_s134_coarse_narrow_valley_lattice() {
+        // ring CCW: cap 0..10 (0.25 steps) → right wall ↑ → top-right
+        // → right flank ↓ (2 diagonal segments) → valley floor (ONE
+        // edge, p_b→p_c straddling column 5) → left flank ↑ → top-left
+        // → left wall ↓
+        let mut ring: Vec<[f64; 2]> = Vec::new();
+        for i in 0..41 {
+            ring.push([0.25 * i as f64, 0.0]);
+        }
+        for v in 1..=5 {
+            ring.push([10.0, v as f64]);
+        }
+        for u in [9.0, 8.0, 7.0] {
+            ring.push([u, 5.0]);
+        }
+        // diagonal flanks (D-class: du≈dv)
+        ring.push([6.2, 4.25]);
+        ring.push([5.4, 3.5]); // p_b — right valley-floor end
+        ring.push([4.6, 3.5]); // p_c — left valley-floor end
+        ring.push([3.8, 4.25]);
+        ring.push([3.0, 5.0]);
+        for u in [2.0, 1.0, 0.0] {
+            ring.push([u, 5.0]);
+        }
+        for v in [4.0, 3.0, 2.0, 1.0] {
+            ring.push([0.0, v]);
+        }
+        // interior lattice: 6 full rows BELOW the valley floor (3.5),
+        // 9 columns; the decomposition must route columns 1..4 to L,
+        // column 5 (single) to the trapezoid M, columns 6..9 to R
+        let mut interior: Vec<[f64; 2]> = Vec::new();
+        for v in [0.5, 1.0, 1.5, 2.0, 2.5, 3.0] {
+            for u in 1..=9 {
+                interior.push([u as f64, v]);
+            }
+        }
+        let total = ring.len() + interior.len();
+        assert!(ring.len() >= 8 && interior.len() >= 20);
+
+        // DEFAULT: family-gated → None = bit-exact legacy.
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
+        let default = super::structural_lattice_rescue_legacy(&ring, &interior);
+        assert!(
+            default.is_none(),
+            "default must reject the coarse narrow valley (never-worsen); got {} tris",
+            default.map_or(0, |t| t.len())
+        );
+
+        // FAMILY SWITCH: the notch decomposition must accept — the M
+        // slab through the 4-corner split with 1-point rows.
+        std::env::set_var("DRAPPER_TORUS_FAMILY_STRUCT", "1");
+        let tris = super::structural_lattice_rescue_legacy(&ring, &interior)
+            .expect("s134 coarse narrow valley: family switch must accept");
         std::env::remove_var("DRAPPER_TORUS_FAMILY_STRUCT");
 
         let mut used = vec![false; total];

@@ -18206,6 +18206,22 @@ fn refine_mesh_chord_error_uv(
             mesh.vertices.len(),
             mesh.triangles.len()
         );
+        // s134 diag: dump the ENTER state (pre-refine emission mesh) so
+        // pair-triangle provenance (emission vs Step-6 insert) can be
+        // decided offline. Zero behavior impact: diagnostics only.
+        if let Ok(dir) = std::env::var("DRAPPER_DUMP_REFINE_ITERS") {
+            let _ = std::fs::create_dir_all(&dir);
+            let lbl = current_face_label();
+            let base = format!("{}/{}_enter_t{}", dir, lbl, mesh.triangles.len());
+            let mut obj = String::with_capacity(1 << 18);
+            for v in &mesh.vertices {
+                obj.push_str(&format!("v {:.9} {:.9} {:.9}\n", v.x, v.y, v.z));
+            }
+            for t in &mesh.triangles {
+                obj.push_str(&format!("f {} {} {}\n", t[0] + 1, t[1] + 1, t[2] + 1));
+            }
+            let _ = std::fs::write(format!("{}.obj", base), obj);
+        }
     }
     let mut refine_pos_map: HashMap<[u64; 3], u32> = HashMap::new();
     if refine_dedup_on {
